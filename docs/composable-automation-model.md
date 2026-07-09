@@ -118,6 +118,104 @@ precise:
 | Slot | `SlotDefinition` plus runtime occupancy records | Draft slot definition and live DUT/workpiece occupancy must be separated. |
 | SiteLayout | `SiteLayout` | A spatial projection over topology targets, not the source of truth for topology. |
 
+## Industry Crosswalk For The Composable Model
+
+The short user vocabulary is intentionally product-friendly. The architecture
+behind it should align with common industrial automation patterns so that the
+model remains useful when projects grow from a single station into lines,
+robotic cells, fixture arrays, carrier handling, inspection, MES integration,
+and future 3D/digital-twin views.
+
+| Product concept | Industry analogue | OpenLineOps model rule |
+| --- | --- | --- |
+| `AutomationProject` | Engineering project, deployable package, digital-twin container | The project is the opened workspace and package boundary. It owns identity, applications, draft state, references, and published snapshots, but it does not own live runtime state. |
+| `Application` | IEC 61499 application, ISA-95 operations scenario, deployment profile | An application selects topology, layout, process versions, block catalog versions, configuration snapshot, and launch defaults. It is the runnable scenario inside a project. |
+| `System` | ISA-88 unit/equipment module, PackML machine/unit, OPC UA machinery object | `System` is a UI/workbench facade. Persist it as an `EquipmentNode` plus `AutomationModule` instances, capability contracts, runtime-unit policy, and provider bindings. |
+| `Driver` | Device driver, instrument plugin, OPC UA server, vendor adapter, simulator | A driver is never the process model. Split it into installable package, capability provider, project binding, device instance, and runtime health. |
+| `Group` | Fixture nest, work-center group, tray lane, equipment group, carrier area | Use `SlotGroup` for material/workpiece grouping and `EquipmentNode(LogicalGroup)` for structural grouping. Do not use one generic group for both. |
+| `Slot` | ISA-95 material location, fixture nest, tray cell, buffer position, DUT endpoint | A slot is a stable design-time endpoint. Runtime occupancy, movement, barcode, measurement, and result facts are separate traceable records. |
+| `SiteLayout` | HMI layout, AutomationML geometry view, digital-twin spatial projection | Layout elements reference topology targets by id. Moving or deleting a visual element cannot rename or delete equipment, modules, groups, or slots. |
+| `BlocklyBlockDefinition` | IEC 61499 function block, PLCopen motion block, test-step template | A visual block is a versioned authoring contract. It targets capabilities and project targets, then generates governed PythonScript or typed automation actions. |
+| `CapabilityContract` | PLCopen-style function block contract, PackML command/status interface, OPC UA method model | Every hardware-touching flow step should request a versioned capability with schema, timeout, cancellation, safety, interlock, and trace metadata. |
+
+This crosswalk leads to one central rule: OpenLineOps can present simple
+building blocks in Electron, but the persisted backend model is a typed graph.
+The graph separates physical structure, executable behavior, provider routing,
+material locations, spatial layout, runtime state, and trace evidence.
+
+## Building Block Assembly Rules
+
+The project explorer can render a friendly tree, but the tree is only a
+navigation projection. The canonical composition rules are:
+
+- `AutomationProject` owns `ProjectApplication` and publication history.
+- `ProjectApplication` references one active topology, one default layout, one
+  or more process definitions, block catalog versions, and launch defaults.
+- `AutomationTopology` owns equipment nodes, modules, capabilities, bindings,
+  slot groups, slot definitions, ports, and connections.
+- `EquipmentNode` provides structural addressability; `AutomationModule`
+  provides reusable behavior and capability declarations.
+- `CapabilityContract` is the handshake between Blockly/process authoring,
+  PythonScript, runtime dispatch, drivers, simulators, and plugins.
+- `DriverBinding` resolves a capability requirement to a provider route inside
+  a project scope. Bindings are frozen into published snapshots.
+- `SlotDefinition` describes where work can happen; `RuntimeSlotOccupancy`
+  records what material is there and when it moved.
+- `SiteLayoutElement` references topology targets. Layout is never allowed to
+  be the only place a system, group, slot, or device exists.
+- `ProcessDefinition` and Blockly blocks express automation intent. They do
+  not instantiate driver SDK classes or mutate topology drafts.
+- `PublishedProjectSnapshot` freezes the runnable graph before Runtime starts.
+  Runtime and Traceability reference snapshot ids rather than mutable drafts.
+
+### The Role Of `System`
+
+`System` should remain a first-class user word, but not a monolithic aggregate.
+In real automation projects the same visible system may include a station
+structure, motion module, light module, IO module, fixture module, simulator,
+driver bindings, PackML-like runtime state, layout shape, and trace records.
+Putting all of that into one `System` object would couple project editing,
+hardware integration, runtime control, visualization, and history.
+
+Use this split instead:
+
+| Workflow | User sees | Persisted model |
+| --- | --- | --- |
+| Project explorer | System | `EquipmentNode` plus child nodes and attached modules. |
+| Module designer | System capability | `AutomationModule` with required/provided `CapabilityContract` ids. |
+| Driver setup | System driver | `DriverBinding` scoped to node, module, group, slot, or application. |
+| Runtime monitor | System state | `RuntimeUnit` projected from published snapshot and runtime events. |
+| Site layout | System shape | `SiteLayoutElement` targeting a node or module id. |
+| Trace history | System evidence | `TraceRecord` referencing project, application, snapshot, topology target, command, slot, and provider ids. |
+
+The UI can still let users add a "system". The command should create a coherent
+set of typed objects: a node, optional module instances, capability contracts,
+recommended slots/groups, default layout elements, and optional provider
+binding placeholders.
+
+## Suggested Authoring Experience
+
+The workbench should expose composition as a progressive workflow:
+
+1. Create or open an `AutomationProject`.
+2. Add an `Application` for a station, cell, line, product family, or
+   simulation profile.
+3. Add systems as topology nodes and module instances, not as scripts.
+4. Attach drivers or simulators by resolving capability contracts.
+5. Create groups and slots for fixtures, DUTs, trays, buffers, carriers, and
+   logical work items.
+6. Draw the top-down `SiteLayout` by placing references to existing nodes,
+   modules, groups, slots, zones, paths, and operator panels.
+7. Build a flow with Blockly blocks such as move axis, write output, rotate
+   motor, clamp fixture, scan barcode, inspect image, wait, branch, and upload
+   result.
+8. Let custom blocks declare their block shape and generated PythonScript, but
+   require hardware actions to go through runtime capability commands.
+9. Publish a snapshot that validates every target, capability, driver binding,
+   block version, generated source hash, timeout, interlock, and trace field.
+10. Run from the snapshot and trace back to project/application/topology/layout,
+    group, slot, block, script, driver, provider, and operator identities.
+
 ## Composable Building Block Layers
 
 OpenLineOps should use four composable block layers.
