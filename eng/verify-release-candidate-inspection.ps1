@@ -446,3 +446,4 @@ Assert-InspectionFails `
     -ExpectedPattern "Metadata checksum for release-provenance\.json"
 
 Write-Host "Release candidate inspection verification passed."
+exit 0
