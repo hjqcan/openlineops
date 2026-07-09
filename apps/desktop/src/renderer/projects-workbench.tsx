@@ -29,7 +29,9 @@ import {
 import { TopologyDesigner } from './topology-designer';
 
 interface ProjectsWorkbenchProps {
+  activeWorkspace: AutomationProjectWorkspaceResponse | null;
   isBackendHealthy: boolean;
+  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
 
@@ -44,13 +46,14 @@ interface ProjectDraft {
 const recentProjectsStorageKey = 'openlineops.recentProjectPaths.v1';
 
 export function ProjectsWorkbench({
+  activeWorkspace,
   isBackendHealthy,
+  onWorkspaceChanged,
   onMessage
 }: ProjectsWorkbenchProps): React.ReactElement {
   const [draft, setDraft] = useState<ProjectDraft>(() => createProjectDraft());
   const [openPath, setOpenPath] = useState('');
   const [projects, setProjects] = useState<AutomationProjectSummaryResponse[]>([]);
-  const [activeWorkspace, setActiveWorkspace] = useState<AutomationProjectWorkspaceResponse | null>(null);
   const [recentProjects, setRecentProjects] = useState<string[]>(() => readRecentProjects());
   const [busy, setBusy] = useState(false);
 
@@ -100,7 +103,7 @@ export function ProjectsWorkbench({
         return;
       }
 
-      setActiveWorkspace(response.body);
+      onWorkspaceChanged(response.body);
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body.project.projectPath);
       onMessage(`Project created ${response.body.project.projectId}`);
@@ -108,7 +111,7 @@ export function ProjectsWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [draft, onMessage, refreshProjects, rememberProject]);
+  }, [draft, onMessage, onWorkspaceChanged, refreshProjects, rememberProject]);
 
   const openWorkspace = useCallback(async (projectPath = openPath) => {
     const normalizedPath = projectPath.trim();
@@ -125,7 +128,7 @@ export function ProjectsWorkbench({
         return;
       }
 
-      setActiveWorkspace(response.body);
+      onWorkspaceChanged(response.body);
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body.project.projectPath);
       onMessage(`Project opened ${response.body.project.projectId}`);
@@ -133,7 +136,7 @@ export function ProjectsWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [onMessage, openPath, refreshProjects, rememberProject]);
+  }, [onMessage, onWorkspaceChanged, openPath, refreshProjects, rememberProject]);
 
   const saveManifest = useCallback(async () => {
     if (!activeWorkspace) {
@@ -148,13 +151,13 @@ export function ProjectsWorkbench({
         return;
       }
 
-      setActiveWorkspace(response.body);
+      onWorkspaceChanged(response.body);
       rememberProject(response.body.project.projectPath);
       onMessage(`Manifest saved ${response.body.manifestPath}`);
     } finally {
       setBusy(false);
     }
-  }, [activeWorkspace, onMessage, rememberProject]);
+  }, [activeWorkspace, onMessage, onWorkspaceChanged, rememberProject]);
 
   const chooseCreateDirectory = useCallback(async () => {
     const result = await desktop.selectDirectory({
@@ -319,7 +322,7 @@ export function ProjectsWorkbench({
             <TopologyDesigner
               activeWorkspace={activeWorkspace}
               isBackendHealthy={isBackendHealthy}
-              onWorkspaceChanged={setActiveWorkspace}
+              onWorkspaceChanged={onWorkspaceChanged}
               onMessage={onMessage}
             />
             <ProjectSnapshots snapshots={activeSnapshots} />

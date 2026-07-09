@@ -22,7 +22,15 @@ import {
   Zap
 } from 'lucide-react';
 import type { BackendStatus, DesktopConfig } from '../shared/desktop-api';
-import type { PlatformResponse, RuntimeAlarm, RuntimeSessionRunResponse, RuntimeStationStatus, RuntimeTimelineEntry, TraceRecordSummary } from './contracts';
+import type {
+  AutomationProjectWorkspaceResponse,
+  PlatformResponse,
+  RuntimeAlarm,
+  RuntimeSessionRunResponse,
+  RuntimeStationStatus,
+  RuntimeTimelineEntry,
+  TraceRecordSummary
+} from './contracts';
 import { desktop } from './desktop-bridge';
 import {
   acknowledgeAlarm,
@@ -78,6 +86,7 @@ function App(): React.ReactElement {
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
   const [lastRun, setLastRun] = useState<RuntimeSessionRunResponse | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<AutomationProjectWorkspaceResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('Ready');
 
@@ -269,6 +278,7 @@ function App(): React.ReactElement {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="Processes" />}>
           <ProcessWorkbench
+            activeWorkspace={activeWorkspace}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             onMessage={setMessage}
           />
@@ -279,7 +289,9 @@ function App(): React.ReactElement {
     if (activeNav === 'projects') {
       return (
         <ProjectsWorkbench
+          activeWorkspace={activeWorkspace}
           isBackendHealthy={backendStatus?.health === 'Healthy'}
+          onWorkspaceChanged={setActiveWorkspace}
           onMessage={setMessage}
         />
       );
@@ -322,7 +334,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeNav, alarms, backendStatus?.health, latestStation, stations, timeline, traceRows]);
+  }, [acknowledge, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, stations, timeline, traceRows]);
 
   return (
     <main className="app-shell">

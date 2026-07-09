@@ -174,9 +174,15 @@ async function main() {
     + ' && document.body.innerText.includes("Automation Blocks")'
     + ' && document.body.innerText.includes("Transitions")'
     + ' && document.body.innerText.includes("Block Catalog")'
+    + ' && document.querySelector("[data-testid=\\"project-target-panel\\"]")?.textContent?.includes("X Axis")'
     + ' && Boolean(document.querySelector("[data-testid=\\"blockly-workspace\\"]")))()',
     15000,
     'process workbench to render');
+  await clickByTestId('apply-project-target-module-0');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Project target applied X Axis"))()',
+    15000,
+    'project topology target to apply to the PythonScript node');
   await clickByTestId('register-blockly-block');
   await waitForExpression(
     '(() => document.body.innerText.includes("Fixture Action")'
@@ -227,6 +233,12 @@ async function main() {
     30000,
     'Blockly PythonScript process definition to save');
   const savedDefinition = await getLatestDesktopProcessDefinition();
+  const savedPythonNode = savedDefinition.nodes
+    ?.find(node => node.nodeId === 'normalize' && node.kind === 'PythonScript');
+  if (!savedPythonNode?.inputPayload?.includes('.module.axis.x')
+    || !savedPythonNode?.blocklyWorkspaceJson?.includes('.module.axis.x')) {
+    throw new Error(`Project target payload was not persisted on PythonScript node: ${JSON.stringify(savedPythonNode)}`);
+  }
   const countedTransition = savedDefinition.transitions
     ?.find(transition => transition.transitionId === 'decision-1-to-normalize-retry');
   if (countedTransition?.loopPolicy !== 'Counted' || countedTransition?.maxTraversals !== 2) {

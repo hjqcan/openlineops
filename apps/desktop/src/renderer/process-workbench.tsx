@@ -10,6 +10,8 @@ import {
   GitBranch,
   History,
   ListChecks,
+  MapPin,
+  Network,
   Play,
   Plus,
   RotateCcw,
@@ -19,6 +21,8 @@ import {
   Workflow
 } from 'lucide-react';
 import type {
+  AutomationProjectWorkspaceResponse,
+  AutomationTopologyResponse,
   CreateProcessDefinitionRequest,
   CreateProcessNodeRequest,
   ProcessBlocklyBlockDefinition,
@@ -32,6 +36,7 @@ import type {
 } from './contracts';
 import {
   createProcessDefinition,
+  getAutomationTopology,
   getProcessDefinition,
   listProcessBlocklyBlocks,
   listProcessBlocklyBlockVersions,
@@ -48,6 +53,7 @@ type ScriptEditorMode = 'Blockly' | 'ManualCode';
 type TransitionLoopPolicy = 'None' | 'Counted';
 
 interface ProcessWorkbenchProps {
+  activeWorkspace: AutomationProjectWorkspaceResponse | null;
   isBackendHealthy: boolean;
   onMessage(message: string): void;
 }
@@ -91,6 +97,18 @@ interface RuntimeLaunchDraft {
   fixtureId: string;
   deviceId: string;
   actorId: string;
+}
+
+interface ProjectTargetOption {
+  testId: string;
+  targetKind: string;
+  targetId: string;
+  label: string;
+  detail: string;
+  capabilityId: string;
+  commandName: string;
+  providerKey: string;
+  inputPayload: string;
 }
 
 interface CustomBlocklyBlockDraft {
@@ -321,6 +339,7 @@ const fallbackBlocklyBlockCatalog: ProcessBlocklyBlockDefinition[] = [
 ];
 
 export function ProcessWorkbench({
+  activeWorkspace,
   isBackendHealthy,
   onMessage
 }: ProcessWorkbenchProps): React.ReactElement {
@@ -338,8 +357,10 @@ export function ProcessWorkbench({
   const [selectedBlockHistoryType, setSelectedBlockHistoryType] = useState('');
   const [blockHistory, setBlockHistory] = useState<ProcessBlocklyBlockDefinition[]>([]);
   const [blockHistoryBusy, setBlockHistoryBusy] = useState(false);
+  const [projectTopology, setProjectTopology] = useState<AutomationTopologyResponse | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const activeApplication = activeWorkspace?.project.applications[0] ?? null;
   const selectedNode = useMemo(
     () => draft.nodes.find(node => node.nodeId === draft.selectedNodeId) ?? draft.nodes[0] ?? null,
     [draft.nodes, draft.selectedNodeId]);
@@ -360,6 +381,9 @@ export function ProcessWorkbench({
       .filter(block => !block.isBuiltIn)
       .sort((left, right) => left.displayName.localeCompare(right.displayName)),
     [blockCatalog]);
+  const projectTargets = useMemo(
+    () => createProjectTargetOptions(activeWorkspace, activeApplication, projectTopology),
+    [activeApplication, activeWorkspace, projectTopology]);
 
   const loadDefinitions = useCallback(async () => {
     if (!isBackendHealthy) {
@@ -380,6 +404,16 @@ export function ProcessWorkbench({
     setBlockCatalog(rows.length > 0 ? rows : fallbackBlocklyBlockCatalog);
   }, [isBackendHealthy]);
 
+  const loadProjectTopology = useCallback(async () => {
+    if (!isBackendHealthy || !activeApplication?.topologyId) {
+      setProjectTopology(null);
+      return;
+    }
+
+    const response = await getAutomationTopology(activeApplication.topologyId);
+    setProjectTopology(response.ok && response.body ? response.body : null);
+  }, [activeApplication?.topologyId, isBackendHealthy]);
+
   useEffect(() => {
     loadDefinitions().catch(error => onMessage(`Process list failed: ${String(error)}`));
   }, [loadDefinitions, onMessage]);
@@ -387,6 +421,10 @@ export function ProcessWorkbench({
   useEffect(() => {
     loadBlocklyBlocks().catch(error => onMessage(`Blockly block list failed: ${String(error)}`));
   }, [loadBlocklyBlocks, onMessage]);
+
+  useEffect(() => {
+    loadProjectTopology().catch(error => onMessage(`Project topology failed: ${String(error)}`));
+  }, [loadProjectTopology, onMessage]);
 
   useEffect(() => {
     if (customBlocks.length === 0) {
@@ -587,6 +625,11 @@ export function ProcessWorkbench({
         : node)
     }));
   }, [mutateDraft, selectedNode]);
+
+  const applyProjectTarget = useCallback((target: ProjectTargetOption) => {
+    updateSelectedNode(current => applyProjectTargetToNode(current, target));
+    onMessage(`Project target applied ${target.label}`);
+  }, [onMessage, updateSelectedNode]);
 
   const updateTransition = useCallback((
     transitionId: string,
@@ -854,6 +897,18 @@ export function ProcessWorkbench({
           ) : null}
         </div>
 
+        <ProjectTargetPanel
+          activeWorkspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
+          topology={projectTopology}
+          targets={projectTargets}
+          selectedNode={selectedNode}
+          busy={busy}
+          isBackendHealthy={isBackendHealthy}
+          onRefresh={loadProjectTopology}
+          onApplyTarget={applyProjectTarget}
+        />
+
         <ProcessBlocklyBlockCatalogPanel
           blockCatalog={blockCatalog}
           customBlocks={customBlocks}
@@ -1036,6 +1091,7 @@ function NodeKindFields({
           <span>Required Capability</span>
           <input
             value={node.requiredCapability}
+            data-testid="process-node-required-capability"
             onChange={event => onUpdateNode(current => ({
               ...current,
               requiredCapability: event.target.value
@@ -1046,6 +1102,7 @@ function NodeKindFields({
           <span>Command Name</span>
           <input
             value={node.commandName}
+            data-testid="process-node-command-name"
             onChange={event => onUpdateNode(current => ({
               ...current,
               commandName: event.target.value
@@ -1068,6 +1125,7 @@ function NodeKindFields({
           <span>Input Payload</span>
           <input
             value={node.inputPayload}
+            data-testid="process-node-input-payload"
             onChange={event => onUpdateNode(current => ({
               ...current,
               inputPayload: event.target.value
@@ -1274,6 +1332,78 @@ function BlocklyWorkspaceEditor({
         <strong>Automation Blocks</strong>
         <span>Motion, I/O, wait, and result blocks generate PythonScript source.</span>
       </div>
+    </div>
+  );
+}
+
+function ProjectTargetPanel({
+  activeWorkspace,
+  activeApplicationId,
+  topology,
+  targets,
+  selectedNode,
+  busy,
+  isBackendHealthy,
+  onRefresh,
+  onApplyTarget
+}: {
+  activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
+  topology: AutomationTopologyResponse | null;
+  targets: ProjectTargetOption[];
+  selectedNode: ProcessNodeDraft | null;
+  busy: boolean;
+  isBackendHealthy: boolean;
+  onRefresh(): void;
+  onApplyTarget(target: ProjectTargetOption): void;
+}): React.ReactElement {
+  const canApply = selectedNode?.kind === 'Command' || selectedNode?.kind === 'PythonScript';
+
+  return (
+    <div className="project-target-panel" data-testid="project-target-panel">
+      <div className="project-target-header">
+        <div>
+          <Network size={16} />
+          <strong>Project Targets</strong>
+        </div>
+        <button
+          type="button"
+          className="button ghost"
+          onClick={onRefresh}
+          disabled={!isBackendHealthy || !activeApplicationId}
+        >
+          <RotateCcw size={14} />
+          Refresh
+        </button>
+      </div>
+      <div className="project-target-context">
+        <span>{activeWorkspace?.project.displayName ?? 'No project open'}</span>
+        <small>{activeApplicationId ?? 'No application selected'}</small>
+        <small>{topology?.topologyId ?? 'No topology linked'}</small>
+      </div>
+      {targets.length === 0 ? (
+        <div className="project-target-empty">No topology targets available.</div>
+      ) : (
+        <div className="project-target-list">
+          {targets.slice(0, 8).map(target => (
+            <button
+              type="button"
+              key={`${target.targetKind}-${target.targetId}`}
+              className="project-target-row"
+              onClick={() => onApplyTarget(target)}
+              disabled={!canApply || busy}
+              data-testid={`apply-project-target-${target.testId}`}
+            >
+              <MapPin size={14} />
+              <span>
+                <strong>{target.label}</strong>
+                <small>{target.detail}</small>
+              </span>
+              <em>{target.capabilityId || target.targetKind}</em>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1712,6 +1842,139 @@ function RuntimeLaunchPanel({
       ) : null}
     </div>
   );
+}
+
+function createProjectTargetOptions(
+  workspace: AutomationProjectWorkspaceResponse | null,
+  application: AutomationProjectWorkspaceResponse['project']['applications'][number] | null,
+  topology: AutomationTopologyResponse | null
+): ProjectTargetOption[] {
+  if (!workspace || !application || !topology) {
+    return [];
+  }
+
+  const capabilitiesById = new Map(topology.capabilities.map(capability => [capability.capabilityId, capability]));
+  const bindingsByCapabilityId = new Map(topology.driverBindings.map(binding => [binding.capabilityId, binding]));
+  const createOption = (
+    testId: string,
+    targetKind: string,
+    targetId: string,
+    label: string,
+    detail: string,
+    capabilityId = ''
+  ): ProjectTargetOption => {
+    const capability = capabilityId ? capabilitiesById.get(capabilityId) : null;
+    const binding = capabilityId ? bindingsByCapabilityId.get(capabilityId) : null;
+    const commandName = capability?.commandName ?? '';
+    const providerKey = binding?.providerKey ?? '';
+
+    return {
+      testId,
+      targetKind,
+      targetId,
+      label,
+      detail,
+      capabilityId,
+      commandName,
+      providerKey,
+      inputPayload: JSON.stringify({
+        projectId: workspace.project.projectId,
+        applicationId: application.applicationId,
+        topologyId: topology.topologyId,
+        targetKind,
+        targetId,
+        targetLabel: label,
+        capabilityId: capabilityId || null,
+        commandName: commandName || null,
+        providerKey: providerKey || null
+      })
+    };
+  };
+
+  const moduleTargets = topology.modules.map((module, index) => createOption(
+    `module-${index}`,
+    'AutomationModule',
+    module.moduleId,
+    module.displayName,
+    `${module.moduleKind} on ${module.nodeId}`,
+    module.providedCapabilityIds[0] ?? module.requiredCapabilityIds[0] ?? ''));
+
+  const slotGroupTargets = topology.slotGroups.map((group, index) => createOption(
+    `slot-group-${index}`,
+    'SlotGroup',
+    group.slotGroupId,
+    group.displayName,
+    `${group.kind}, ${group.slotIds.length}/${group.capacity} slots`));
+
+  const slotTargets = topology.slots.map((slot, index) => createOption(
+    `slot-${index}`,
+    'Slot',
+    slot.slotId,
+    slot.displayName,
+    `${slot.address}, ${slot.materialKind}`));
+
+  const capabilityTargets = topology.capabilities.map((capability, index) => createOption(
+    `capability-${index}`,
+    'CapabilityContract',
+    capability.capabilityId,
+    capability.commandName,
+    `${capability.safetyClass}, ${capability.timeoutSeconds}s`,
+    capability.capabilityId));
+
+  return [
+    ...moduleTargets,
+    ...slotGroupTargets,
+    ...slotTargets,
+    ...capabilityTargets
+  ];
+}
+
+function applyProjectTargetToNode(
+  node: ProcessNodeDraft,
+  target: ProjectTargetOption
+): ProcessNodeDraft {
+  if (node.kind === 'Command') {
+    return {
+      ...node,
+      displayName: target.commandName ? `Execute ${target.label}` : node.displayName,
+      requiredCapability: target.capabilityId || node.requiredCapability,
+      commandName: target.commandName || node.commandName,
+      inputPayload: target.inputPayload
+    };
+  }
+
+  if (node.kind === 'PythonScript') {
+    return {
+      ...node,
+      inputPayload: target.inputPayload,
+      blocklyWorkspaceJson: setWorkspaceInputPayload(node.blocklyWorkspaceJson, target.inputPayload)
+    };
+  }
+
+  return node;
+}
+
+function setWorkspaceInputPayload(workspaceJson: string, inputPayload: string): string {
+  try {
+    const parsed = JSON.parse(workspaceJson) as {
+      blocks?: {
+        blocks?: WorkspaceBlockState[];
+      };
+    };
+    const resultBlock = findWorkspaceBlock(parsed.blocks?.blocks ?? [], openLineOpsResultBlockType);
+    if (!resultBlock) {
+      return workspaceJson;
+    }
+
+    resultBlock.fields = {
+      ...resultBlock.fields,
+      INPUT_PAYLOAD: inputPayload
+    };
+
+    return JSON.stringify(parsed);
+  } catch {
+    return workspaceJson;
+  }
 }
 
 function createDraft(
