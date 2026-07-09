@@ -8,6 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 
+const electronExecutable = require('electron');
 const electronPackageJson = require.resolve('electron/package.json');
 const electronRoot = path.dirname(electronPackageJson);
 const electronDist = path.join(electronRoot, 'dist');
@@ -66,6 +67,11 @@ async function writePackageNotes() {
 
 async function main() {
   await assertDirectory(electronDist, 'Electron runtime');
+  const electronExecutableStat = await fs.stat(electronExecutable).catch(() => null);
+  if (!electronExecutableStat?.isFile()) {
+    throw new Error(`Electron runtime executable was not found: ${electronExecutable}`);
+  }
+
   await assertDirectory(path.join(projectRoot, 'dist'), 'Renderer build');
   await assertDirectory(path.join(projectRoot, 'dist-electron'), 'Electron main/preload build');
 
