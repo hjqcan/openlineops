@@ -39,6 +39,28 @@ PythonScript integration, publishing, runtime, and traceability.
 | Blockly | A custom block requires a block definition, a language-specific code generator, and a toolbox reference; blocks generate executable text. | Custom automation blocks are versioned contracts that generate PythonScript code or typed automation actions. |
 | OpenTAP | Test automation platforms commonly separate test steps, instruments, DUTs, result listeners, and plugins. | Test execution concepts should integrate through capability-backed process nodes and trace records, not collapse equipment, DUT, and step logic into one object. |
 
+### Public Source Map
+
+These public references are used as design anchors, not as implementation
+dependencies:
+
+- NI TestStand overview:
+  https://www.ni.com/en/shop/electronic-test-instrumentation/application-software-for-electronic-test-and-instrumentation-category/what-is-teststand
+- OpenTAP:
+  https://opentap.io/
+- Blockly custom blocks:
+  https://docs.blockly.com/guides/create-custom-blocks/overview/
+- Eclipse 4diac and IEC 61499:
+  https://eclipse.dev/4diac/
+- OPC UA ISA-95 common object model:
+  https://reference.opcfoundation.org/specs/OPC-10030/4
+- OPC UA for Machinery basic building blocks:
+  https://reference.opcfoundation.org/specs/OPC-40001-1
+- PLCopen Motion Control:
+  https://www.plcopen.org/technical-activities/motion-control
+- Asset Administration Shell specifications:
+  https://industrialdigitaltwin.org/en/content-hub/aasspecifications
+
 ### Local Reference Lessons
 
 The local reference code shows useful domain signals:

@@ -406,6 +406,184 @@ export interface OpenAutomationProjectWorkspaceRequest {
   projectPath: string;
 }
 
+export interface CreateAutomationTopologyRequest {
+  topologyId: string;
+  displayName: string;
+}
+
+export interface AddEquipmentNodeRequest {
+  nodeId: string;
+  parentNodeId: string | null;
+  kind: string;
+  displayName: string;
+}
+
+export interface AddCapabilityContractRequest {
+  capabilityId: string;
+  commandName: string;
+  version: string;
+  inputSchema: string | null;
+  outputSchema: string | null;
+  timeoutSeconds: number;
+  safetyClass: string;
+}
+
+export interface AddAutomationModuleRequest {
+  moduleId: string;
+  nodeId: string;
+  moduleKind: string;
+  displayName: string;
+  requiredCapabilityIds: string[];
+  providedCapabilityIds: string[];
+}
+
+export interface AddDriverBindingRequest {
+  bindingId: string;
+  capabilityId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
+export interface AddSlotGroupRequest {
+  slotGroupId: string;
+  parentNodeId: string;
+  displayName: string;
+  kind: string;
+  capacity: number;
+}
+
+export interface AddSlotDefinitionRequest {
+  slotGroupId: string;
+  slotId: string;
+  parentNodeId: string;
+  address: string;
+  displayName: string;
+  materialKind: string;
+  isEnabled: boolean;
+}
+
+export interface CreateSiteLayoutRequest {
+  layoutId: string;
+  topologyId: string;
+  displayName: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  units: string;
+}
+
+export interface AddSiteLayoutElementRequest {
+  elementId: string;
+  kind: string;
+  targetKind: string;
+  targetId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDegrees: number;
+  layerId: string;
+  label: string;
+}
+
+export interface LinkProjectTopologyRequest {
+  topologyId: string;
+}
+
+export interface AutomationTopologySummaryResponse {
+  topologyId: string;
+  displayName: string;
+  nodeCount: number;
+  moduleCount: number;
+  slotCount: number;
+}
+
+export interface AutomationTopologyResponse {
+  topologyId: string;
+  displayName: string;
+  createdAtUtc: string;
+  nodes: EquipmentNodeResponse[];
+  modules: AutomationModuleResponse[];
+  capabilities: CapabilityContractResponse[];
+  driverBindings: DriverBindingRouteResponse[];
+  slotGroups: SlotGroupResponse[];
+  slots: SlotDefinitionResponse[];
+}
+
+export interface EquipmentNodeResponse {
+  nodeId: string;
+  parentNodeId: string | null;
+  kind: string;
+  displayName: string;
+}
+
+export interface AutomationModuleResponse {
+  moduleId: string;
+  nodeId: string;
+  moduleKind: string;
+  displayName: string;
+  requiredCapabilityIds: string[];
+  providedCapabilityIds: string[];
+}
+
+export interface CapabilityContractResponse {
+  capabilityId: string;
+  commandName: string;
+  version: string;
+  inputSchema: string | null;
+  outputSchema: string | null;
+  timeoutSeconds: number;
+  safetyClass: string;
+}
+
+export interface DriverBindingRouteResponse {
+  bindingId: string;
+  capabilityId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
+export interface SlotGroupResponse {
+  slotGroupId: string;
+  parentNodeId: string;
+  displayName: string;
+  kind: string;
+  capacity: number;
+  slotIds: string[];
+}
+
+export interface SlotDefinitionResponse {
+  slotId: string;
+  parentNodeId: string;
+  address: string;
+  displayName: string;
+  materialKind: string;
+  isEnabled: boolean;
+}
+
+export interface SiteLayoutResponse {
+  layoutId: string;
+  topologyId: string;
+  displayName: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  units: string;
+  elements: SiteLayoutElementResponse[];
+}
+
+export interface SiteLayoutElementResponse {
+  elementId: string;
+  kind: string;
+  targetKind: string;
+  targetId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDegrees: number;
+  layerId: string;
+  label: string;
+}
+
 export interface CreateWorkspaceRequest {
   workspaceId: string;
   displayName: string;

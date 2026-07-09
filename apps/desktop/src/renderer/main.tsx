@@ -7,6 +7,7 @@ import {
   CirclePlay,
   Database,
   FileSearch,
+  FolderKanban,
   Gauge,
   GitBranch,
   HeartPulse,
@@ -37,6 +38,7 @@ import {
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
 import { PluginsWorkbench } from './plugins-workbench';
+import { ProjectsWorkbench } from './projects-workbench';
 import { TraceWorkbench } from './trace-workbench';
 import './styles.css';
 
@@ -47,6 +49,7 @@ const ProcessWorkbench = React.lazy(async () => {
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'projects', label: 'Projects', icon: FolderKanban },
   { id: 'engineering', label: 'Engineering', icon: MonitorCog },
   { id: 'processes', label: 'Processes', icon: GitBranch },
   { id: 'devices', label: 'Devices', icon: PlugZap },
@@ -79,6 +82,10 @@ function App(): React.ReactElement {
   const [message, setMessage] = useState('Ready');
 
   const latestStation = stations[0] ?? null;
+  const activeNavLabel = navItems.find(item => item.id === activeNav)?.label ?? 'Dashboard';
+  const activeTitle = activeNav === 'dashboard'
+    ? 'Station Runtime Dashboard'
+    : `${activeNavLabel} Workbench`;
 
   const refresh = useCallback(async () => {
     const [desktopConfig, status] = await Promise.all([
@@ -269,6 +276,15 @@ function App(): React.ReactElement {
       );
     }
 
+    if (activeNav === 'projects') {
+      return (
+        <ProjectsWorkbench
+          isBackendHealthy={backendStatus?.health === 'Healthy'}
+          onMessage={setMessage}
+        />
+      );
+    }
+
     if (activeNav === 'engineering') {
       return (
         <EngineeringWorkbench
@@ -342,7 +358,7 @@ function App(): React.ReactElement {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <h1>Station Runtime Dashboard</h1>
+            <h1>{activeTitle}</h1>
             <p>{message}</p>
           </div>
           <div className="top-actions">
@@ -541,6 +557,7 @@ function WorkbenchLoading({ label }: { label: string }): React.ReactElement {
 
 const secondaryCopy: Record<NavId, string> = {
   dashboard: '',
+  projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
   engineering: 'Workspace and project selection will use backend engineering contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',
   devices: 'Device configuration is read from backend APIs and never from local databases.',

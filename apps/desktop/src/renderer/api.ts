@@ -2,13 +2,25 @@ import * as signalR from '@microsoft/signalr';
 import type { ApiResponse } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
 import type {
+  AddAutomationModuleRequest,
+  AddCapabilityContractRequest,
+  AddDriverBindingRequest,
+  AddEquipmentNodeRequest,
+  AddSiteLayoutElementRequest,
+  AddSlotDefinitionRequest,
+  AddSlotGroupRequest,
   AutomationProjectSummaryResponse,
+  AutomationProjectResponse,
+  AutomationTopologyResponse,
+  AutomationTopologySummaryResponse,
   AutomationProjectWorkspaceResponse,
+  CreateAutomationTopologyRequest,
   CreateAutomationProjectWorkspaceRequest,
   CreateDeviceDefinitionRequest,
   CreateEngineeringProjectRequest,
   CreateProcessDefinitionRequest,
   CreateRecipeRequest,
+  CreateSiteLayoutRequest,
   CreateStationProfileRequest,
   CreateWorkspaceRequest,
   DeviceDefinitionResponse,
@@ -20,6 +32,7 @@ import type {
   HealthResponse,
   PlatformResponse,
   ExternalPluginProcessEventResponse,
+  LinkProjectTopologyRequest,
   OpenAutomationProjectWorkspaceRequest,
   ProcessDefinitionResponse,
   ProcessDefinitionSummary,
@@ -30,6 +43,7 @@ import type {
   PublishConfigurationSnapshotRequest,
   RecipeResponse,
   RegisterDeviceInstanceRequest,
+  SiteLayoutResponse,
   RuntimeAlarm,
   RuntimeAlarmsResponse,
   RuntimeSessionRunResponse,
@@ -90,6 +104,142 @@ export async function saveAutomationProjectManifest(
     `/api/automation-projects/${encodeURIComponent(projectId)}/manifest`,
     {
       method: 'PUT'
+    });
+}
+
+export async function linkProjectTopology(
+  projectId: string,
+  applicationId: string,
+  request: LinkProjectTopologyRequest
+): Promise<ApiResponse<AutomationProjectResponse>> {
+  return desktop.apiRequest<AutomationProjectResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/applications/${encodeURIComponent(applicationId)}/topology`,
+    {
+      method: 'PUT',
+      body: request
+    });
+}
+
+export async function listAutomationTopologies(): Promise<AutomationTopologySummaryResponse[]> {
+  const response = await desktop.apiRequest<AutomationTopologySummaryResponse[]>('/api/automation-topologies');
+  return response.body ?? [];
+}
+
+export async function getAutomationTopology(
+  topologyId: string
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}`);
+}
+
+export async function createAutomationTopology(
+  request: CreateAutomationTopologyRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    '/api/automation-topologies',
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addEquipmentNode(
+  topologyId: string,
+  request: AddEquipmentNodeRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/nodes`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addCapabilityContract(
+  topologyId: string,
+  request: AddCapabilityContractRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/capabilities`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addAutomationModule(
+  topologyId: string,
+  request: AddAutomationModuleRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/modules`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addDriverBinding(
+  topologyId: string,
+  request: AddDriverBindingRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/driver-bindings`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addSlotGroup(
+  topologyId: string,
+  request: AddSlotGroupRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/slot-groups`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addSlotDefinition(
+  topologyId: string,
+  request: AddSlotDefinitionRequest
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `/api/automation-topologies/${encodeURIComponent(topologyId)}/slots`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function getSiteLayout(layoutId: string): Promise<ApiResponse<SiteLayoutResponse>> {
+  return desktop.apiRequest<SiteLayoutResponse>(
+    `/api/site-layouts/${encodeURIComponent(layoutId)}`);
+}
+
+export async function createSiteLayout(
+  request: CreateSiteLayoutRequest
+): Promise<ApiResponse<SiteLayoutResponse>> {
+  return desktop.apiRequest<SiteLayoutResponse>(
+    '/api/site-layouts',
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function addSiteLayoutElement(
+  layoutId: string,
+  request: AddSiteLayoutElementRequest
+): Promise<ApiResponse<SiteLayoutResponse>> {
+  return desktop.apiRequest<SiteLayoutResponse>(
+    `/api/site-layouts/${encodeURIComponent(layoutId)}/elements`,
+    {
+      method: 'POST',
+      body: request
     });
 }
 

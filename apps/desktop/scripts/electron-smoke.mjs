@@ -72,6 +72,63 @@ async function main() {
     30000,
     'SignalR connection');
 
+  const smokeProjectPath = path.join(
+    repoRoot,
+    'artifacts',
+    'desktop-smoke-projects',
+    `project-${Date.now().toString(36)}`);
+  await clickByTestId('nav-projects');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Automation Projects")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"project-workspace-panel\\"]")))()',
+    30000,
+    'projects workbench to render');
+  await setInputByTestId('project-path-input', smokeProjectPath);
+  await clickByTestId('create-project-workspace');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Project created project-")'
+    + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Project Explorer")'
+    + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Default Application"))()',
+    30000,
+    'automation project workspace to create from desktop');
+  await clickByTestId('save-project-manifest');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Manifest saved")'
+    + ' && document.body.innerText.includes("openlineops.project.json"))()',
+    30000,
+    'automation project manifest to save from desktop');
+  await setInputByTestId('open-project-path-input', smokeProjectPath);
+  await clickByTestId('open-project-workspace');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Project opened project-")'
+    + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Automation Project"))()',
+    30000,
+    'automation project workspace to reopen from desktop');
+  await clickByTestId('seed-project-topology');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Topology seeded project-")'
+    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes(".topology.main")'
+    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes("Modules")'
+    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes("Left Nest Slot 1")'
+    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("Station 1"))()',
+    45000,
+    'project topology and site layout to seed from desktop');
+  await setInputByTestId('open-project-path-input', smokeProjectPath);
+  await clickByTestId('open-project-workspace');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Project opened project-")'
+    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes(".topology.main")'
+    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("L1"))()',
+    30000,
+    'automation project topology link to persist through manifest reopen');
+
+  await clickByTestId('nav-dashboard');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Station Runtime Dashboard")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"run-simulation\\"]")))()',
+    15000,
+    'dashboard to render before simulated runtime session');
+
   await evaluate('Math.random = () => 0.1');
   await clickByTestId('run-simulation');
 
