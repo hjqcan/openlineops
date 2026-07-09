@@ -1517,11 +1517,17 @@ Delivered on 2026-07-09 (CI release artifact inspection evidence slice):
 - The report records inspection status, bundle root, release version, artifact kinds, dependency counts, metadata checksum entry count, publication evidence publishability, final preflight cases, and failures.
 - Added the inspection diagnostics directory to the GitHub Actions release artifact upload and to workflow/readiness self-checks.
 
+Delivered on 2026-07-09 (GitHub Actions repository verification slice):
+
+- Verified the public repository `main` workflow after repository initialization with GitHub Actions run `29011973592`.
+- The run completed successfully for commit `2d08e4e83393033ca8862309f1101aef460602a1` on the `windows-latest` hosted runner.
+- The executed job proved restore, format, build, .NET tests, PythonScript component build, package vulnerability check, open-source metadata verification, third-party license metadata verification, release staging, release manifest verification, release candidate inspection, publication readiness with `-AllowPendingExternal`, publication evidence verification, final publication preflight verification, CI release artifact bundle inspection, Electron desktop smoke, desktop audit, and release artifact upload.
+- The Electron smoke step succeeded on GitHub-hosted Windows CI after the public repository was created, covering the remaining CI proof required for the current open-source release milestone.
+
 Remaining Milestone 8 work:
 
 - Decide whether MIT remains the final license before publishing the public repository.
 - Provision a real code-signing certificate and produce a signed production Electron installer or portable artifact that passes the strict publication readiness signature gate.
-- Prove the Electron smoke test on GitHub-hosted Windows CI after the public repository is created.
 
 ## Testing Strategy
 
@@ -1576,9 +1582,9 @@ Do not decide final storage solely from UI convenience. Runtime traceability and
 
 ## Immediate Next Development Tasks
 
-1. Prove the GitHub Actions workflow after GitHub repository initialization.
-2. Prove the optional PostgreSQL integration tests on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1`.
-3. Prove the optional RabbitMQ/EventBus readiness integration test on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_RABBITMQ_INTEGRATION=1`.
+1. Prove the optional PostgreSQL integration tests on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1`.
+2. Prove the optional RabbitMQ/EventBus readiness integration test on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_RABBITMQ_INTEGRATION=1`.
+3. Finalize the public release inputs: license confirmation, production code-signing certificate, signed desktop artifact, and strict publishable evidence generation.
 
 ## Current Verification Commands
 
@@ -1723,7 +1729,7 @@ Current result on 2026-07-09:
 - Release manifest verify command: passed against the current `artifacts/release` directory, including all 6 required artifact kinds and checksum-file parity.
 - Release candidate inspection script: passed against `artifacts/release`, including provenance metadata verification, dependency inventory metadata verification, metadata checksum verification, release-note coverage, safe zip entry path checks, source archive sensitive-file checks, expected zip entries for all 6 artifact kinds, source archive `THIRD-PARTY-NOTICES.md` coverage, and desktop archive entry-point checks.
 - Release candidate inspection verification script: passed with a positive fixture plus unsafe-path, sensitive-source, bad-provenance, missing-provenance, missing-dependency-inventory, bad-dependency-inventory, missing-metadata-checksums, and bad-metadata-checksums negative fixtures.
-- Publication evidence script: passed and generated `output/publication-evidence/publication-evidence.json` plus `.md`, while recording pending external items for final MIT confirmation, GitHub-hosted Windows CI proof, and the unsigned desktop release archive.
+- Publication evidence script: passed and generated `output/publication-evidence/publication-evidence.json` plus `.md`, while recording pending external items for final MIT confirmation and the unsigned desktop release archive when external proof arguments are not supplied.
 - Publication evidence verification script: passed with default evidence, confirmed MIT/GitHub proof, invalid GitHub Actions URL, and `-RequirePublishable` cases.
 - Publication evidence child work-directory isolation: passed by rerunning evidence generation and evidence verification after isolating child gate temporary folders.
 - Final publication preflight verification script: passed with missing license confirmation, invalid GitHub Actions URL, missing signing selector, and valid `-PlanOnly` command-chain cases.
@@ -1733,8 +1739,9 @@ Current result on 2026-07-09:
 - CI workflow Python.NET runner setup: added `actions/setup-python@v6` with Python 3.12 and a Windows runner `PYTHONNET_PYDLL` discovery step that prefers the version-specific Python runtime DLL, such as `python312.dll`, so Python script validation and runtime tests can execute on GitHub-hosted Windows agents.
 - CI release artifact bundle inspection script: passed against the local CI-equivalent bundle shape, including release candidate inspection, dependency inventory metadata, metadata checksums, publication evidence, evidence verification diagnostics, final publication preflight diagnostics, required artifact kind parity, and generated `ci-release-artifact-inspection.json` plus `.md` diagnostics.
 - CI release artifact bundle inspection with `-RequirePublishable`: failed as expected on the current unsigned/non-final bundle while still writing a failed inspection report under `output/ci-release-artifact-inspection-require-publishable`.
-- CI workflow release artifact upload wiring: inspected locally with `actions/upload-artifact@v7`, missing-file failure, 14-day retention, and compression disabled for already-zipped release payloads; actual artifact upload execution remains pending until the workflow runs on GitHub Actions.
-- CI workflow publication readiness gate wiring: inspected locally after adding the `Verify publication readiness` step with `-AllowPendingExternal`; actual CI execution remains pending until the workflow runs on GitHub Actions.
+- GitHub Actions public repository workflow proof: passed on run `29011973592` for commit `2d08e4e83393033ca8862309f1101aef460602a1`, including restore, format, build, .NET tests, PythonScript component build, release staging, release candidate inspection, publication evidence verification, final publication preflight verification, CI release artifact bundle inspection, Electron desktop smoke, desktop audit, and artifact upload.
+- CI workflow release artifact upload execution: passed on GitHub Actions run `29011973592` with `actions/upload-artifact@v7`, missing-file failure, 14-day retention, compression disabled for already-zipped release payloads, and uploaded `artifacts/release` plus diagnostics.
+- CI workflow publication readiness gate execution: passed on GitHub Actions run `29011973592` with `eng/verify-publication-readiness.ps1 -AllowPendingExternal`, preserving the unsigned desktop archive as the remaining external publication warning.
 - Publication readiness gate with `-AllowPendingExternal`: passed while warning about the remaining external publication blocker: the unsigned desktop release archive.
 - Strict publication readiness gate: failed as intended on the unsigned desktop release archive, so the gate will block public release until a signed desktop release archive is finalized.
 - Desktop `node --check scripts/package-win-unpacked.mjs`: passed.

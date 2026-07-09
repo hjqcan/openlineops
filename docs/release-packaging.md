@@ -219,9 +219,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/write-publication-eviden
 
 The script writes `output/publication-evidence/publication-evidence.json` and
 `output/publication-evidence/publication-evidence.md`. In local development it
-passes while recording pending external items, including final MIT
-confirmation, the missing successful GitHub-hosted Windows CI run URL, and
-unsigned desktop package evidence. Child gates receive
+passes while recording pending external items when final proof arguments are
+not supplied, including final MIT confirmation, GitHub-hosted Windows CI proof,
+and unsigned desktop package evidence. Child gates receive
 evidence-run-specific work directories under the evidence output root, so
 parallel local evidence runs do not share temporary release inspection or
 readiness folders. For the final release assertion, provide the external proof
