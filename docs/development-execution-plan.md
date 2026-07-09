@@ -1414,13 +1414,13 @@ Delivered on 2026-07-09 (open-source metadata verification slice):
 
 Delivered on 2026-07-09 (third-party license metadata verification slice):
 
-- Added `eng/verify-third-party-license-metadata.ps1` to inspect NuGet restore assets plus local package `.nuspec` metadata and the Electron desktop `package-lock.json`.
+- Added `eng/verify-third-party-license-metadata.ps1` to inspect `OpenLineOps.sln` NuGet restore assets plus local package `.nuspec` metadata and the Electron desktop `package-lock.json`.
 - The verification fails when dependency license metadata is missing and blocks license values that require release review, including GPL, LGPL, AGPL, and SSPL patterns.
 - Wired the third-party license metadata gate into GitHub Actions, publication readiness checks, README verification commands, release packaging documentation, and release candidate source-archive inspection.
 
 Delivered on 2026-07-09 (third-party notice generation slice):
 
-- Added generated root `THIRD-PARTY-NOTICES.md` from NuGet restore metadata and the Electron desktop package lock.
+- Added generated root `THIRD-PARTY-NOTICES.md` from `OpenLineOps.sln` NuGet restore metadata and the Electron desktop package lock.
 - Extended `eng/verify-third-party-license-metadata.ps1` with `-UpdateNotice` so dependency changes can regenerate the notice, while default verification fails if the committed notice is missing or stale.
 - Wired the generated notice into publication readiness checks, release packaging documentation, README guidance, and release candidate source-archive inspection.
 
@@ -1713,9 +1713,9 @@ Current result on 2026-07-09:
 - Release manifest command smoke: `--help` passed with the repeatable `--require-kind <kind>` option and `--verify` mode documented in command usage.
 - `tests/OpenLineOps.ReleaseManifest.Tests` tests: passed, 8 total, including artifact kind inference, repeatable `--require-kind` validation, generated release verification, tampered artifact hash detection, and CLI verify-mode execution.
 - Open-source metadata verification script: passed, including root MIT license text, README license wording, default .NET package metadata, and Electron desktop package MIT license metadata.
-- Third-party license metadata verification script: passed, covering 130 NuGet packages, 259 NPM packages, and 16 unique license values from local restore and lockfile metadata.
-- Third-party notice generation with `-UpdateNotice`: passed and generated root `THIRD-PARTY-NOTICES.md`; default verification then passed with the notice synchronized to current restore and lockfile metadata.
-- Release dependency inventory generation and verification: passed from the third-party license metadata verifier with 130 NuGet packages, 259 NPM packages, and 16 unique license values; generated `release-dependency-inventory.json` is verified by release candidate inspection and hashed in release provenance.
+- Third-party license metadata verification script: passed, covering 117 NuGet packages, 259 NPM packages, and 16 unique license values from `OpenLineOps.sln` restore and lockfile metadata.
+- Third-party notice generation with `-UpdateNotice`: passed and generated root `THIRD-PARTY-NOTICES.md`; default verification then passed with the notice synchronized to solution restore and lockfile metadata.
+- Release dependency inventory generation and verification: passed from the third-party license metadata verifier with 117 NuGet packages, 259 NPM packages, and 16 unique license values; generated `release-dependency-inventory.json` is verified by release candidate inspection and hashed in release provenance.
 - Release metadata checksum generation and verification: passed with `release-metadata-checksums.sha256` covering manifest, artifact checksums, release notes, dependency inventory, and provenance metadata.
 - Release artifact kind gate script: passed with source plus 5 binary/development artifact kinds and generated schema version 2 manifest under `artifacts/release-gate`.
 - Release staging script: passed with source archive, Release `dotnet publish` outputs for API, plugin host, script worker, sample plugin, desktop production build output, optional desktop signing hook left disabled, 6 zip artifacts, schema version 2 manifest, checksums, release notes, dependency inventory, provenance metadata, and metadata checksums under `artifacts/release`.

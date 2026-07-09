@@ -1,4 +1,6 @@
 param(
+    [string] $SolutionPath = "OpenLineOps.sln",
+
     [string[]] $NuGetAssetRoots = @("src", "modules", "shared", "tools", "samples", "tests"),
 
     [string] $DesktopPackageLock = "apps/desktop/package-lock.json",
@@ -133,6 +135,68 @@ function Sort-OrdinalStrings {
     return $items.ToArray()
 }
 
+function Get-SolutionProjectPaths {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $resolvedSolutionPath = Resolve-RepoPath $Path
+    if (-not (Test-Path -LiteralPath $resolvedSolutionPath -PathType Leaf)) {
+        Add-Failure "Missing .NET solution file: $Path"
+        return @()
+    }
+
+    $solutionDirectory = Split-Path -Parent $resolvedSolutionPath
+    $projectPaths = [System.Collections.Generic.List[string]]::new()
+    $projectPattern = 'Project\("[^"]+"\)\s*=\s*"[^"]+",\s*"([^"]+\.csproj)",'
+    foreach ($line in Get-Content -LiteralPath $resolvedSolutionPath) {
+        $match = [regex]::Match($line, $projectPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if (-not $match.Success) {
+            continue
+        }
+
+        $projectRelativePath = $match.Groups[1].Value
+        $projectFullPath = [System.IO.Path]::GetFullPath((Join-Path $solutionDirectory $projectRelativePath))
+        if (-not (Test-Path -LiteralPath $projectFullPath -PathType Leaf)) {
+            Add-Failure "Solution project is missing: $projectRelativePath"
+            continue
+        }
+
+        $projectPaths.Add($projectFullPath)
+    }
+
+    return @(Sort-OrdinalStrings -Values $projectPaths.ToArray())
+}
+
+function Get-NuGetAssetFiles {
+    if (-not [string]::IsNullOrWhiteSpace($SolutionPath)) {
+        $assetFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($projectPath in @(Get-SolutionProjectPaths -Path $SolutionPath)) {
+            $assetPath = Join-Path (Split-Path -Parent $projectPath) "obj\project.assets.json"
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                Add-Failure "Missing NuGet restore assets for solution project: $projectPath. Run dotnet restore $SolutionPath."
+                continue
+            }
+
+            $assetFiles.Add((Get-Item -LiteralPath $assetPath))
+        }
+
+        return $assetFiles.ToArray()
+    }
+
+    $assetFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($root in $NuGetAssetRoots) {
+        $resolvedRoot = Resolve-RepoPath $root
+        if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+            continue
+        }
+
+        foreach ($assetFile in @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter "project.assets.json" -File -ErrorAction SilentlyContinue)) {
+            $assetFiles.Add($assetFile)
+        }
+    }
+
+    return $assetFiles.ToArray()
+}
+
 function Escape-MarkdownTableCell {
     param([AllowNull()][string] $Value)
 
@@ -183,7 +247,13 @@ function Get-ThirdPartyNoticeContent {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("# Third-Party Notices") | Out-Null
     $lines.Add("") | Out-Null
-    $lines.Add("This file is generated from local NuGet restore metadata and the Electron desktop package lock.") | Out-Null
+    if ([string]::IsNullOrWhiteSpace($SolutionPath)) {
+        $lines.Add("This file is generated from local NuGet restore metadata and the Electron desktop package lock.") | Out-Null
+    }
+    else {
+        $lines.Add("This file is generated from ``$SolutionPath`` NuGet restore metadata and the Electron desktop package lock.") | Out-Null
+    }
+
     $lines.Add('Run `powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1 -UpdateNotice` after dependency changes.') | Out-Null
     $lines.Add("") | Out-Null
     $lines.Add("Counts: NuGet $($nugetPackages.Count), NPM $($npmPackages.Count), unique license values $licenseCount.") | Out-Null
@@ -453,51 +523,43 @@ function Update-Or-Test-Notice {
 function Get-NuGetPackages {
     $packages = @{}
 
-    foreach ($root in $NuGetAssetRoots) {
-        $resolvedRoot = Resolve-RepoPath $root
-        if (-not (Test-Path -LiteralPath $resolvedRoot -PathType Container)) {
+    foreach ($assetFile in @(Get-NuGetAssetFiles)) {
+        $assets = Get-Content -LiteralPath $assetFile.FullName -Raw | ConvertFrom-Json
+        $packagesPath = $assets.project.restore.packagesPath
+        if ([string]::IsNullOrWhiteSpace($packagesPath)) {
             continue
         }
 
-        $assetFiles = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter "project.assets.json" -File -ErrorAction SilentlyContinue)
-        foreach ($assetFile in $assetFiles) {
-            $assets = Get-Content -LiteralPath $assetFile.FullName -Raw | ConvertFrom-Json
-            $packagesPath = $assets.project.restore.packagesPath
-            if ([string]::IsNullOrWhiteSpace($packagesPath)) {
+        foreach ($library in @($assets.libraries.PSObject.Properties)) {
+            if ($library.Value.type -ne "package") {
                 continue
             }
 
-            foreach ($library in @($assets.libraries.PSObject.Properties)) {
-                if ($library.Value.type -ne "package") {
-                    continue
-                }
+            $parts = $library.Name.Split("/")
+            if ($parts.Length -ne 2) {
+                continue
+            }
 
-                $parts = $library.Name.Split("/")
-                if ($parts.Length -ne 2) {
-                    continue
-                }
+            $id = $parts[0]
+            $version = $parts[1]
+            $key = "$id@$version"
+            if ($packages.ContainsKey($key)) {
+                continue
+            }
 
-                $id = $parts[0]
-                $version = $parts[1]
-                $key = "$id@$version"
-                if ($packages.ContainsKey($key)) {
-                    continue
-                }
+            $nuspecName = @($library.Value.files | Where-Object { $_ -like "*.nuspec" } | Select-Object -First 1)
+            $nuspecPath = $null
+            if ($nuspecName.Count -gt 0) {
+                $nuspecPath = Join-Path $packagesPath (Join-Path $library.Value.path $nuspecName[0])
+            }
 
-                $nuspecName = @($library.Value.files | Where-Object { $_ -like "*.nuspec" } | Select-Object -First 1)
-                $nuspecPath = $null
-                if ($nuspecName.Count -gt 0) {
-                    $nuspecPath = Join-Path $packagesPath (Join-Path $library.Value.path $nuspecName[0])
-                }
-
-                $packages[$key] = [pscustomobject]@{
-                    Name = $id
-                    Version = $version
-                    NuspecPath = $nuspecPath
-                    License = ""
-                    LicenseSource = ""
-                    Ecosystem = "nuget"
-                }
+            $packages[$key] = [pscustomobject]@{
+                Name = $id
+                Version = $version
+                NuspecPath = $nuspecPath
+                License = ""
+                LicenseSource = ""
+                Ecosystem = "nuget"
             }
         }
     }

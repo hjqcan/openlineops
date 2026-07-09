@@ -257,12 +257,12 @@ Third-party dependency license metadata is covered by:
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1
 ```
 
-This check reads NuGet `project.assets.json` files plus local package `.nuspec`
-metadata, reads the desktop `package-lock.json` through Node.js, fails on
-missing license metadata, and blocks dependency license values that require
-release review such as GPL, LGPL, AGPL, or SSPL. It also verifies that
-`THIRD-PARTY-NOTICES.md` matches the current restored NuGet assets and desktop
-package lock.
+This check reads NuGet `project.assets.json` files for projects listed in
+`OpenLineOps.sln` plus local package `.nuspec` metadata, reads the desktop
+`package-lock.json` through Node.js, fails on missing license metadata, and
+blocks dependency license values that require release review such as GPL, LGPL,
+AGPL, or SSPL. It also verifies that `THIRD-PARTY-NOTICES.md` matches the
+solution restore assets and desktop package lock.
 
 After dependency changes, regenerate the notice with:
 

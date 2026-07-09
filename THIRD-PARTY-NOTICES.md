@@ -1,9 +1,9 @@
 # Third-Party Notices
 
-This file is generated from local NuGet restore metadata and the Electron desktop package lock.
+This file is generated from `OpenLineOps.sln` NuGet restore metadata and the Electron desktop package lock.
 Run `powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1 -UpdateNotice` after dependency changes.
 
-Counts: NuGet 130, NPM 259, unique license values 16.
+Counts: NuGet 117, NPM 259, unique license values 16.
 
 ## Review Policy
 
@@ -13,15 +13,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 
 | Package | Version | License | Metadata Source |
 | --- | --- | --- | --- |
-| BouncyCastle.Cryptography | 2.6.2 | MIT | nuget:license:expression |
 | Consul | 1.7.14.9 | Apache-2.0 | nuget:license:expression |
-| Docker.DotNet.Enhanced | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.Handler.Abstractions | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.LegacyHttp | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.NPipe | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.NativeHttp | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.Unix | 4.2.0 | MIT | nuget:license:expression |
-| Docker.DotNet.Enhanced.X509 | 4.2.0 | MIT | nuget:license:expression |
 | DotNetCore.CAP | 10.0.1 | MIT | nuget:license:expression |
 | DotNetCore.CAP.Dashboard | 10.0.1 | MIT | nuget:license:expression |
 | DotNetCore.CAP.InMemoryStorage | 10.0.1 | MIT | nuget:license:expression |
@@ -117,9 +109,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | SQLitePCLRaw.config.e_sqlite3 | 3.0.3 | Apache-2.0 | nuget:license:expression |
 | SQLitePCLRaw.core | 3.0.3 | Apache-2.0 | nuget:license:expression |
 | SQLitePCLRaw.provider.e_sqlite3 | 3.0.3 | Apache-2.0 | nuget:license:expression |
-| SSH.NET | 2025.1.0 | MIT | nuget:license:expression |
 | Savorboard.CAP.InMemoryMessageQueue | 10.0.0 | LICENSE | nuget:license:file |
-| SharpZipLib | 1.4.2 | MIT | nuget:license:expression |
 | SourceGear.sqlite3 | 3.50.4.5 | LICENSE.txt | nuget:license:file |
 | System.CodeDom | 6.0.0 | MIT | nuget:license:expression |
 | System.Composition | 9.0.0 | MIT | nuget:license:expression |
@@ -130,9 +120,6 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | System.Composition.TypedParts | 9.0.0 | MIT | nuget:license:expression |
 | System.Diagnostics.EventLog | 10.0.9 | MIT | nuget:license:expression |
 | System.Threading.RateLimiting | 8.0.0 | MIT | nuget:license:expression |
-| Testcontainers | 4.12.0 | MIT | nuget:license:expression |
-| Testcontainers.PostgreSql | 4.12.0 | MIT | nuget:license:expression |
-| Testcontainers.RabbitMq | 4.12.0 | MIT | nuget:license:expression |
 | coverlet.collector | 6.0.4 | MIT | nuget:license:expression |
 | pythonnet | 3.0.5 | LICENSE | nuget:license:file |
 | xunit | 2.9.3 | Apache-2.0 | nuget:license:expression |
