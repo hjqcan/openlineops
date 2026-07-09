@@ -33,7 +33,11 @@ public sealed record EngineeringTraceSearchQuery(
     string? Judgement = null,
     DateTimeOffset? CompletedFromUtc = null,
     DateTimeOffset? CompletedToUtc = null,
-    PagedRequest? Paging = null);
+    PagedRequest? Paging = null,
+    string? ProjectId = null,
+    string? ApplicationId = null,
+    string? ProjectSnapshotId = null,
+    string? TopologyId = null);
 
 public sealed record StationTraceDashboardReadModel(
     string StationId,
@@ -52,6 +56,10 @@ public sealed record StationTraceDashboardReadModel(
 public sealed record StationRecentTraceReadModel(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string? FixtureId,
@@ -71,6 +79,10 @@ public sealed record EngineeringTraceSearchReadModel(
 public sealed record EngineeringTraceSearchRowReadModel(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string StationId,
@@ -91,6 +103,7 @@ public sealed record EngineeringTraceSearchFacetsReadModel(
     IReadOnlyCollection<TraceFacetCountReadModel> Judgements,
     IReadOnlyCollection<TraceFacetCountReadModel> Stations,
     IReadOnlyCollection<TraceFacetCountReadModel> Devices,
-    IReadOnlyCollection<TraceFacetCountReadModel> ProcessVersions);
+    IReadOnlyCollection<TraceFacetCountReadModel> ProcessVersions,
+    IReadOnlyCollection<TraceFacetCountReadModel> ProjectSnapshots);
 
 public sealed record TraceFacetCountReadModel(string Value, long Count);

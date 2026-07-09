@@ -59,6 +59,10 @@ public sealed class TraceReadModelsController : ControllerBase
         [FromQuery] string? recipeSnapshotId,
         [FromQuery] string? deviceId,
         [FromQuery] string? judgement,
+        [FromQuery] string? projectId,
+        [FromQuery] string? applicationId,
+        [FromQuery] string? projectSnapshotId,
+        [FromQuery] string? topologyId,
         [FromQuery] DateTimeOffset? completedFromUtc,
         [FromQuery] DateTimeOffset? completedToUtc,
         [FromQuery] int pageNumber = 1,
@@ -80,7 +84,11 @@ public sealed class TraceReadModelsController : ControllerBase
                     judgement,
                     completedFromUtc,
                     completedToUtc,
-                    new PagedRequest(pageNumber, pageSize)),
+                    new PagedRequest(pageNumber, pageSize),
+                    projectId,
+                    applicationId,
+                    projectSnapshotId,
+                    topologyId),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -111,6 +119,10 @@ public sealed class TraceReadModelsController : ControllerBase
         return new StationRecentTraceResponse(
             trace.TraceRecordId,
             trace.RuntimeSessionId,
+            trace.ProjectId,
+            trace.ApplicationId,
+            trace.ProjectSnapshotId,
+            trace.TopologyId,
             trace.SerialNumber,
             trace.BatchId,
             trace.FixtureId,
@@ -141,6 +153,10 @@ public sealed class TraceReadModelsController : ControllerBase
         return new EngineeringTraceSearchRowResponse(
             row.TraceRecordId,
             row.RuntimeSessionId,
+            row.ProjectId,
+            row.ApplicationId,
+            row.ProjectSnapshotId,
+            row.TopologyId,
             row.SerialNumber,
             row.BatchId,
             row.StationId,
@@ -165,7 +181,8 @@ public sealed class TraceReadModelsController : ControllerBase
             facets.Judgements.Select(ToResponse).ToArray(),
             facets.Stations.Select(ToResponse).ToArray(),
             facets.Devices.Select(ToResponse).ToArray(),
-            facets.ProcessVersions.Select(ToResponse).ToArray());
+            facets.ProcessVersions.Select(ToResponse).ToArray(),
+            facets.ProjectSnapshots.Select(ToResponse).ToArray());
     }
 
     private static TraceFacetCountResponse ToResponse(TraceFacetCountReadModel facet)

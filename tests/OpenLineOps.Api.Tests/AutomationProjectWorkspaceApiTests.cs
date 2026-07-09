@@ -441,6 +441,18 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.Equal(topologyId, sessionBody.RootElement.GetProperty("topologyId").GetString());
         Assert.Equal($"SN-{suffix}", sessionBody.RootElement.GetProperty("serialNumber").GetString());
         Assert.Equal("api-test", sessionBody.RootElement.GetProperty("actorId").GetString());
+
+        using var queryTraceResponse = await _client.GetAsync(
+            $"/api/traceability/read-models/engineering-search?projectSnapshotId={Uri.EscapeDataString(snapshotId)}");
+        using var traceBody = await ReadJsonAsync(queryTraceResponse);
+        var traceRow = Assert.Single(traceBody.RootElement.GetProperty("results").GetProperty("items").EnumerateArray());
+
+        Assert.Equal(HttpStatusCode.OK, queryTraceResponse.StatusCode);
+        Assert.Equal(sessionId, traceRow.GetProperty("runtimeSessionId").GetGuid());
+        Assert.Equal(projectId, traceRow.GetProperty("projectId").GetString());
+        Assert.Equal(applicationId, traceRow.GetProperty("applicationId").GetString());
+        Assert.Equal(snapshotId, traceRow.GetProperty("projectSnapshotId").GetString());
+        Assert.Equal(topologyId, traceRow.GetProperty("topologyId").GetString());
     }
 
     [Fact]

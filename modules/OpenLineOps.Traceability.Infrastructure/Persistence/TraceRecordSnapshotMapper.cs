@@ -10,6 +10,10 @@ internal static class TraceRecordSnapshotMapper
         return new PersistedTraceRecord(
             traceRecord.Id.Value,
             traceRecord.RuntimeSessionId.Value,
+            traceRecord.ProjectId,
+            traceRecord.ApplicationId,
+            traceRecord.ProjectSnapshotId,
+            traceRecord.TopologyId,
             traceRecord.SerialNumber,
             traceRecord.BatchId,
             traceRecord.StationId.Value,
@@ -50,7 +54,11 @@ internal static class TraceRecordSnapshotMapper
             new ActorId(snapshot.RecordedBy),
             snapshot.Measurements.Select(ToAggregate),
             snapshot.Artifacts.Select(ToAggregate),
-            snapshot.AuditEntries.Select(ToAggregate));
+            snapshot.AuditEntries.Select(ToAggregate),
+            snapshot.ProjectId,
+            snapshot.ApplicationId,
+            snapshot.ProjectSnapshotId,
+            snapshot.TopologyId);
     }
 
     private static PersistedMeasurementRecord ToSnapshot(MeasurementRecord measurement)
@@ -146,6 +154,10 @@ internal static class TraceRecordSnapshotMapper
 internal sealed record PersistedTraceRecord(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string StationId,

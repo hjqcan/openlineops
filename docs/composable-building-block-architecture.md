@@ -50,20 +50,51 @@ dependencies:
   https://opentap.io/
 - Blockly custom blocks:
   https://docs.blockly.com/guides/create-custom-blocks/overview/
+- Blockly code generation:
+  https://docs.blockly.com/guides/create-custom-blocks/code-generation/overview/
 - Eclipse 4diac and IEC 61499:
   https://eclipse.dev/4diac/
 - OPC UA ISA-95 common object model:
   https://reference.opcfoundation.org/specs/OPC-10030/4
 - OPC UA for Machinery basic building blocks:
   https://reference.opcfoundation.org/specs/OPC-40001-1
+- OPC UA PackML common object model:
+  https://reference.opcfoundation.org/specs/OPC-30050/4.2
+- AutomationML specifications:
+  https://www.automationml.org/about-automationml/specifications/
 - PLCopen Motion Control:
   https://www.plcopen.org/technical-activities/motion-control
 - Asset Administration Shell specifications:
   https://industrialdigitaltwin.org/en/content-hub/aasspecifications
 
-### Local Reference Lessons
+### Industry Research Synthesis
 
-The local reference code shows useful domain signals:
+The public sources point to the same architecture direction: keep the user
+experience simple, but keep the persisted model typed, versioned, and explicit.
+The following decisions are the translation layer from industry practice into
+OpenLineOps.
+
+| Industry signal | Design consequence for OpenLineOps |
+| --- | --- |
+| OPC UA ISA-95 separates role-based equipment, physical assets, material, and personnel models. | Do not put equipment, slot occupancy, operator action, and trace result in one object. `EquipmentNode`, `SlotDefinition`, `RuntimeSlotOccupancy`, operator audit, and trace facts stay separate. |
+| ISA-95 equipment levels include work centers, work cells, storage zones, and storage units. | `EquipmentNode` should support site, area, line, cell, station, unit, fixture, buffer, transport, external system, and logical group kinds instead of only "system". |
+| OPC UA for Machinery uses reusable basic building blocks, namespace/version metadata, identification/nameplate information, component discovery, monitoring, and machinery item state. | `AutomationModule`, `ModuleTemplate`, `CapabilityContract`, and `DriverPackage` need stable identity, semantic versioning, discoverable metadata, health, and state projections. |
+| PackML standardizes modes, states, command tags, status tags, administrative tags, interlocks, alarms, and stop reasons. | Runtime units should expose normalized lifecycle state and command semantics even when providers are PLCs, robot controllers, plugins, simulators, or Python-backed adapters. |
+| IEC 61499 and Eclipse 4diac separate application logic from device/resource mapping. | Blockly/process graphs express automation intent. Publishing maps that intent to topology targets, capability contracts, and provider routes. |
+| PLCopen Motion Control standardizes motion function blocks and state machines for single-axis and multi-axis control. | Motion-oriented Blockly blocks should target contracts such as `motion.axis.move`, `motion.axis.home`, `motion.axis.stop`, and coordinated motion contracts, not vendor SDK method names. |
+| AutomationML/IEC 62714 models object-oriented plant engineering data and separates topology, geometry, kinematics, communication, and logic references. | `SiteLayout` is a spatial projection with coordinate systems, units, layers, and target references. It must not become the source of topology identity. |
+| Asset Administration Shell defines metamodel, API, security, and AASX package ideas for asset information exchange. | Project packages should be manifest-driven and extension-friendly, with room for module metadata, documentation, simulation files, CAD/3D files, provider descriptors, and security metadata. |
+| Blockly custom blocks require a block definition, code generator, and toolbox reference. | User-defined blocks must be versioned artifacts. They generate deterministic PythonScript or typed automation actions and carry target, capability, timeout, safety, and trace metadata. |
+| NI TestStand-style systems run sequences and steps that call code modules. | OpenLineOps should not be only a sequence runner. The primary model is project, topology, visual layout, capability binding, Blockly-authored behavior, runtime session, and traceability. |
+
+This synthesis deliberately avoids making OpenLineOps an implementation of any
+single standard. Standards provide vocabulary and proven boundaries; OpenLineOps
+uses them to define a practical open-source product model for automation test
+line projects.
+
+### Product Domain Lessons
+
+Automation project workbenches need to preserve these domain signals:
 
 - A project is the primary opened asset, but flow execution, UI refresh,
   breakpoints, module output variables, and loop/branch control are mixed in

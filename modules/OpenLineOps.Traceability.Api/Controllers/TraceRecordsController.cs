@@ -65,6 +65,10 @@ public sealed class TraceRecordsController : ControllerBase
         [FromQuery] string? batchId,
         [FromQuery] string? stationId,
         [FromQuery] string? fixtureId,
+        [FromQuery] string? projectId,
+        [FromQuery] string? applicationId,
+        [FromQuery] string? projectSnapshotId,
+        [FromQuery] string? topologyId,
         [FromQuery] DateTimeOffset? completedFromUtc,
         [FromQuery] DateTimeOffset? completedToUtc,
         [FromQuery] int pageNumber = 1,
@@ -80,7 +84,11 @@ public sealed class TraceRecordsController : ControllerBase
                     fixtureId,
                     completedFromUtc,
                     completedToUtc,
-                    new PagedRequest(pageNumber, pageSize)),
+                    new PagedRequest(pageNumber, pageSize),
+                    projectId: projectId,
+                    applicationId: applicationId,
+                    projectSnapshotId: projectSnapshotId,
+                    topologyId: topologyId),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -152,7 +160,11 @@ public sealed class TraceRecordsController : ControllerBase
             request.RecordedBy,
             request.Measurements?.Select(ToApplicationRequest).ToArray(),
             request.Artifacts?.Select(ToApplicationRequest).ToArray(),
-            request.AuditEntries?.Select(ToApplicationRequest).ToArray());
+            request.AuditEntries?.Select(ToApplicationRequest).ToArray(),
+            request.ProjectId,
+            request.ApplicationId,
+            request.ProjectSnapshotId,
+            request.TopologyId);
     }
 
     private static CreateApplicationMeasurementRecordRequest ToApplicationRequest(
@@ -201,6 +213,10 @@ public sealed class TraceRecordsController : ControllerBase
         return new TraceRecordResponse(
             details.TraceRecordId,
             details.RuntimeSessionId,
+            details.ProjectId,
+            details.ApplicationId,
+            details.ProjectSnapshotId,
+            details.TopologyId,
             details.SerialNumber,
             details.BatchId,
             details.StationId,
@@ -224,6 +240,10 @@ public sealed class TraceRecordsController : ControllerBase
         return new TraceRecordSummaryResponse(
             summary.TraceRecordId,
             summary.RuntimeSessionId,
+            summary.ProjectId,
+            summary.ApplicationId,
+            summary.ProjectSnapshotId,
+            summary.TopologyId,
             summary.SerialNumber,
             summary.BatchId,
             summary.StationId,

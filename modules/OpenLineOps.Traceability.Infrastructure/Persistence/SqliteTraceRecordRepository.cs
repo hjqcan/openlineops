@@ -45,6 +45,10 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                 trace_id,
                 document_json,
                 runtime_session_id,
+                project_id,
+                application_id,
+                project_snapshot_id,
+                topology_id,
                 serial_number,
                 batch_id,
                 station_id,
@@ -63,6 +67,10 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                 $trace_id,
                 $document_json,
                 $runtime_session_id,
+                $project_id,
+                $application_id,
+                $project_snapshot_id,
+                $topology_id,
                 $serial_number,
                 $batch_id,
                 $station_id,
@@ -80,6 +88,10 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             ON CONFLICT(trace_id) DO UPDATE SET
                 document_json = excluded.document_json,
                 runtime_session_id = excluded.runtime_session_id,
+                project_id = excluded.project_id,
+                application_id = excluded.application_id,
+                project_snapshot_id = excluded.project_snapshot_id,
+                topology_id = excluded.topology_id,
                 serial_number = excluded.serial_number,
                 batch_id = excluded.batch_id,
                 station_id = excluded.station_id,
@@ -98,6 +110,10 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         command.Parameters.AddWithValue("$trace_id", traceRecord.Id.Value.ToString("D"));
         command.Parameters.AddWithValue("$document_json", documentJson);
         command.Parameters.AddWithValue("$runtime_session_id", traceRecord.RuntimeSessionId.Value.ToString("D"));
+        AddOptionalParameter(command, "$project_id", traceRecord.ProjectId);
+        AddOptionalParameter(command, "$application_id", traceRecord.ApplicationId);
+        AddOptionalParameter(command, "$project_snapshot_id", traceRecord.ProjectSnapshotId);
+        AddOptionalParameter(command, "$topology_id", traceRecord.TopologyId);
         command.Parameters.AddWithValue("$serial_number", traceRecord.SerialNumber);
         AddOptionalParameter(command, "$batch_id", traceRecord.BatchId);
         command.Parameters.AddWithValue("$station_id", traceRecord.StationId.Value);
@@ -237,6 +253,10 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                     trace_id TEXT NOT NULL PRIMARY KEY,
                     document_json TEXT NOT NULL,
                     runtime_session_id TEXT NOT NULL,
+                    project_id TEXT NULL,
+                    application_id TEXT NULL,
+                    project_snapshot_id TEXT NULL,
+                    topology_id TEXT NULL,
                     serial_number TEXT NOT NULL,
                     batch_id TEXT NULL,
                     station_id TEXT NOT NULL,
@@ -279,6 +299,18 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                 """;
 
             await command.ExecuteNonQueryAsync(cancellationToken);
+            await EnsureColumnAsync(connection, "project_id", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(connection, "application_id", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(connection, "project_snapshot_id", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(connection, "topology_id", "TEXT NULL", cancellationToken);
+            await EnsureIndexAsync(
+                connection,
+                "CREATE INDEX IF NOT EXISTS ix_trace_records_project_completed ON trace_records(project_id, completed_at_utc, trace_id);",
+                cancellationToken);
+            await EnsureIndexAsync(
+                connection,
+                "CREATE INDEX IF NOT EXISTS ix_trace_records_project_snapshot_completed ON trace_records(project_snapshot_id, completed_at_utc, trace_id);",
+                cancellationToken);
             Volatile.Write(ref _schemaCreated, 1);
         }
         finally
@@ -290,6 +322,48 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
     private SqliteConnection CreateConnection()
     {
         return new SqliteConnection(_connectionString);
+    }
+
+    private static async ValueTask EnsureColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string definition,
+        CancellationToken cancellationToken)
+    {
+        var exists = false;
+        await using (var tableInfoCommand = connection.CreateCommand())
+        {
+            tableInfoCommand.CommandText = "PRAGMA table_info(trace_records);";
+
+            await using var reader = await tableInfoCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+
+        if (exists)
+        {
+            return;
+        }
+
+        await using var alterCommand = connection.CreateCommand();
+        alterCommand.CommandText = $"ALTER TABLE trace_records ADD COLUMN {columnName} {definition};";
+        await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async ValueTask EnsureIndexAsync(
+        SqliteConnection connection,
+        string createIndexSql,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = createIndexSql;
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private void EnsureDatabaseDirectory()
@@ -375,6 +449,29 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         if (query.Judgement is not null)
         {
             filters.Add(new QueryFilter("judgement = $judgement", "$judgement", query.Judgement));
+        }
+
+        if (query.ProjectId is not null)
+        {
+            filters.Add(new QueryFilter("project_id = $project_id", "$project_id", query.ProjectId));
+        }
+
+        if (query.ApplicationId is not null)
+        {
+            filters.Add(new QueryFilter("application_id = $application_id", "$application_id", query.ApplicationId));
+        }
+
+        if (query.ProjectSnapshotId is not null)
+        {
+            filters.Add(new QueryFilter(
+                "project_snapshot_id = $project_snapshot_id",
+                "$project_snapshot_id",
+                query.ProjectSnapshotId));
+        }
+
+        if (query.TopologyId is not null)
+        {
+            filters.Add(new QueryFilter("topology_id = $topology_id", "$topology_id", query.TopologyId));
         }
 
         if (query.CompletedFromUtc is not null)

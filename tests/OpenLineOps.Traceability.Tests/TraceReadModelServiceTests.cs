@@ -41,9 +41,9 @@ public sealed class TraceReadModelServiceTests
     {
         var repository = new InMemoryTraceRecordRepository();
         var service = new TraceReadModelService(repository);
-        var first = CreateTrace("00000000-0000-0000-0000-000000000201", "SMX-ENG-1", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(1), processVersionId: "process-a@1.0.0");
-        var second = CreateTrace("00000000-0000-0000-0000-000000000202", "SMX-ENG-2", "station-b", ResultJudgement.Failed, BaseTimeUtc.AddMinutes(2), processVersionId: "process-a@1.0.0", failedMeasurements: 1);
-        var ignored = CreateTrace("00000000-0000-0000-0000-000000000203", "SMX-ENG-3", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(3), processVersionId: "process-b@1.0.0");
+        var first = CreateTrace("00000000-0000-0000-0000-000000000201", "SMX-ENG-1", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(1), processVersionId: "process-a@1.0.0", projectSnapshotId: "snapshot-read-model");
+        var second = CreateTrace("00000000-0000-0000-0000-000000000202", "SMX-ENG-2", "station-b", ResultJudgement.Failed, BaseTimeUtc.AddMinutes(2), processVersionId: "process-a@1.0.0", failedMeasurements: 1, projectSnapshotId: "snapshot-read-model");
+        var ignored = CreateTrace("00000000-0000-0000-0000-000000000203", "SMX-ENG-3", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(3), processVersionId: "process-a@1.0.0", projectSnapshotId: "snapshot-other");
 
         await repository.SaveAsync(first);
         await repository.SaveAsync(second);
@@ -51,14 +51,18 @@ public sealed class TraceReadModelServiceTests
 
         var result = await service.SearchForEngineeringAsync(new EngineeringTraceSearchQuery(
             ProcessVersionId: "process-a@1.0.0",
+            ProjectSnapshotId: "snapshot-read-model",
             Paging: new PagedRequest(1, 10)));
 
         Assert.True(result.IsSuccess, result.Error.Message);
         Assert.Equal(2, result.Value.Results.TotalCount);
         Assert.Equal(["SMX-ENG-1", "SMX-ENG-2"], result.Value.Results.Items.Select(row => row.SerialNumber));
         Assert.Equal(2, Assert.Single(result.Value.Facets.ProcessVersions).Count);
+        Assert.Equal("snapshot-read-model", Assert.Single(result.Value.Facets.ProjectSnapshots).Value);
         Assert.Equal(["Failed", "Passed"], result.Value.Facets.Judgements.Select(facet => facet.Value).Order());
-        Assert.Equal(1, result.Value.Results.Items.Single(row => row.SerialNumber == "SMX-ENG-2").FailedMeasurementCount);
+        var failedRow = result.Value.Results.Items.Single(row => row.SerialNumber == "SMX-ENG-2");
+        Assert.Equal(1, failedRow.FailedMeasurementCount);
+        Assert.Equal("snapshot-read-model", failedRow.ProjectSnapshotId);
     }
 
     private static TraceRecord CreateTrace(
@@ -68,7 +72,8 @@ public sealed class TraceReadModelServiceTests
         ResultJudgement judgement,
         DateTimeOffset completedAtUtc,
         string processVersionId = "process-a@1.0.0",
-        int failedMeasurements = 0)
+        int failedMeasurements = 0,
+        string projectSnapshotId = "snapshot-dashboard")
     {
         var traceRecord = TraceRecord.CreateCompleted(
             new TraceRecordId(Guid.Parse(traceRecordId)),
@@ -85,7 +90,11 @@ public sealed class TraceReadModelServiceTests
             judgement,
             BaseTimeUtc,
             completedAtUtc,
-            new ActorId("operator-read-model"));
+            new ActorId("operator-read-model"),
+            projectId: "project-read-model",
+            applicationId: "application-read-model",
+            projectSnapshotId: projectSnapshotId,
+            topologyId: "topology-read-model");
 
         traceRecord.AddMeasurement(new MeasurementRecord(
             MeasurementRecordId.New(),

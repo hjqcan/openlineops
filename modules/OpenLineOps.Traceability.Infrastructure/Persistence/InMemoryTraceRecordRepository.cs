@@ -76,6 +76,10 @@ public sealed class InMemoryTraceRecordRepository : ITraceRecordRepository
             && MatchesOptional(record.RecipeSnapshotId.Value, query.RecipeSnapshotId)
             && MatchesOptional(record.DeviceId.Value, query.DeviceId)
             && MatchesOptional(record.Judgement.ToString(), query.Judgement)
+            && MatchesOptional(record.ProjectId, query.ProjectId)
+            && MatchesOptional(record.ApplicationId, query.ApplicationId)
+            && MatchesOptional(record.ProjectSnapshotId, query.ProjectSnapshotId)
+            && MatchesOptional(record.TopologyId, query.TopologyId)
             && (query.CompletedFromUtc is null || record.CompletedAtUtc >= query.CompletedFromUtc)
             && (query.CompletedToUtc is null || record.CompletedAtUtc <= query.CompletedToUtc);
     }

@@ -19,7 +19,11 @@ public sealed record TraceRecordQuery
         string? configurationSnapshotId = null,
         string? recipeSnapshotId = null,
         string? deviceId = null,
-        string? judgement = null)
+        string? judgement = null,
+        string? projectId = null,
+        string? applicationId = null,
+        string? projectSnapshotId = null,
+        string? topologyId = null)
     {
         SerialNumber = NormalizeOptional(serialNumber);
         BatchId = NormalizeOptional(batchId);
@@ -34,6 +38,10 @@ public sealed record TraceRecordQuery
         RecipeSnapshotId = NormalizeOptional(recipeSnapshotId);
         DeviceId = NormalizeOptional(deviceId);
         Judgement = NormalizeOptional(judgement);
+        ProjectId = NormalizeOptional(projectId);
+        ApplicationId = NormalizeOptional(applicationId);
+        ProjectSnapshotId = NormalizeOptional(projectSnapshotId);
+        TopologyId = NormalizeOptional(topologyId);
     }
 
     public string? SerialNumber { get; }
@@ -61,6 +69,14 @@ public sealed record TraceRecordQuery
     public string? DeviceId { get; }
 
     public string? Judgement { get; }
+
+    public string? ProjectId { get; }
+
+    public string? ApplicationId { get; }
+
+    public string? ProjectSnapshotId { get; }
+
+    public string? TopologyId { get; }
 
     private static string? NormalizeOptional(string? value)
     {

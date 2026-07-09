@@ -107,6 +107,10 @@ export interface StartRuntimeNodeRequest {
 export interface TraceRecordSummary {
   traceRecordId: string;
   runtimeSessionId: string;
+  projectId: string | null;
+  applicationId: string | null;
+  projectSnapshotId: string | null;
+  topologyId: string | null;
   serialNumber: string;
   batchId: string | null;
   stationId: string;
@@ -130,6 +134,10 @@ export interface TraceRecordQueryResponse {
 export interface TraceRecordResponse {
   traceRecordId: string;
   runtimeSessionId: string;
+  projectId: string | null;
+  applicationId: string | null;
+  projectSnapshotId: string | null;
+  topologyId: string | null;
   serialNumber: string;
   batchId: string | null;
   stationId: string;
@@ -197,6 +205,10 @@ export interface EngineeringTraceSearchQuery {
   recipeSnapshotId?: string;
   deviceId?: string;
   judgement?: string;
+  projectId?: string;
+  applicationId?: string;
+  projectSnapshotId?: string;
+  topologyId?: string;
   completedFromUtc?: string;
   completedToUtc?: string;
   pageNumber?: number;
@@ -220,6 +232,10 @@ export interface PagedEngineeringTraceSearchRowsResponse {
 export interface EngineeringTraceSearchRowResponse {
   traceRecordId: string;
   runtimeSessionId: string;
+  projectId: string | null;
+  applicationId: string | null;
+  projectSnapshotId: string | null;
+  topologyId: string | null;
   serialNumber: string;
   batchId: string | null;
   stationId: string;
@@ -242,6 +258,7 @@ export interface EngineeringTraceSearchFacetsResponse {
   stations: TraceFacetCountResponse[];
   devices: TraceFacetCountResponse[];
   processVersions: TraceFacetCountResponse[];
+  projectSnapshots: TraceFacetCountResponse[];
 }
 
 export interface TraceFacetCountResponse {

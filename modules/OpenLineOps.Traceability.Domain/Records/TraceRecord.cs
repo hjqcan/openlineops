@@ -26,7 +26,11 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
         ResultJudgement judgement,
         DateTimeOffset startedAtUtc,
         DateTimeOffset completedAtUtc,
-        ActorId recordedBy)
+        ActorId recordedBy,
+        string? projectId = null,
+        string? applicationId = null,
+        string? projectSnapshotId = null,
+        string? topologyId = null)
         : base(id)
     {
         if (completedAtUtc < startedAtUtc)
@@ -48,6 +52,10 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
         StartedAtUtc = startedAtUtc;
         CompletedAtUtc = completedAtUtc;
         RecordedBy = recordedBy;
+        ProjectId = TraceabilityIdGuard.OptionalText(projectId);
+        ApplicationId = TraceabilityIdGuard.OptionalText(applicationId);
+        ProjectSnapshotId = TraceabilityIdGuard.OptionalText(projectSnapshotId);
+        TopologyId = TraceabilityIdGuard.OptionalText(topologyId);
     }
 
     public RuntimeSessionId RuntimeSessionId { get; }
@@ -78,6 +86,14 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
 
     public ActorId RecordedBy { get; }
 
+    public string? ProjectId { get; }
+
+    public string? ApplicationId { get; }
+
+    public string? ProjectSnapshotId { get; }
+
+    public string? TopologyId { get; }
+
     public IReadOnlyCollection<MeasurementRecord> Measurements => _measurements.AsReadOnly();
 
     public IReadOnlyCollection<ArtifactRecord> Artifacts => _artifacts.AsReadOnly();
@@ -99,7 +115,11 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
         ResultJudgement judgement,
         DateTimeOffset startedAtUtc,
         DateTimeOffset completedAtUtc,
-        ActorId recordedBy)
+        ActorId recordedBy,
+        string? projectId = null,
+        string? applicationId = null,
+        string? projectSnapshotId = null,
+        string? topologyId = null)
     {
         var record = new TraceRecord(
             id,
@@ -116,7 +136,11 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
             judgement,
             startedAtUtc,
             completedAtUtc,
-            recordedBy);
+            recordedBy,
+            projectId,
+            applicationId,
+            projectSnapshotId,
+            topologyId);
 
         record.RaiseDomainEvent(new TraceRecordCreatedDomainEvent(id, runtimeSessionId, completedAtUtc));
 
@@ -141,7 +165,11 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
         ActorId recordedBy,
         IEnumerable<MeasurementRecord> measurements,
         IEnumerable<ArtifactRecord> artifacts,
-        IEnumerable<AuditEntry> auditEntries)
+        IEnumerable<AuditEntry> auditEntries,
+        string? projectId = null,
+        string? applicationId = null,
+        string? projectSnapshotId = null,
+        string? topologyId = null)
     {
         ArgumentNullException.ThrowIfNull(measurements);
         ArgumentNullException.ThrowIfNull(artifacts);
@@ -162,7 +190,11 @@ public sealed class TraceRecord : AggregateRoot<TraceRecordId>
             judgement,
             startedAtUtc,
             completedAtUtc,
-            recordedBy);
+            recordedBy,
+            projectId,
+            applicationId,
+            projectSnapshotId,
+            topologyId);
 
         foreach (var measurement in measurements)
         {

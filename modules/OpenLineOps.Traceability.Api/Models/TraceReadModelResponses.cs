@@ -17,6 +17,10 @@ public sealed record StationTraceDashboardResponse(
 public sealed record StationRecentTraceResponse(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string? FixtureId,
@@ -43,6 +47,10 @@ public sealed record PagedEngineeringTraceSearchRowsResponse(
 public sealed record EngineeringTraceSearchRowResponse(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string StationId,
@@ -63,6 +71,7 @@ public sealed record EngineeringTraceSearchFacetsResponse(
     IReadOnlyCollection<TraceFacetCountResponse> Judgements,
     IReadOnlyCollection<TraceFacetCountResponse> Stations,
     IReadOnlyCollection<TraceFacetCountResponse> Devices,
-    IReadOnlyCollection<TraceFacetCountResponse> ProcessVersions);
+    IReadOnlyCollection<TraceFacetCountResponse> ProcessVersions,
+    IReadOnlyCollection<TraceFacetCountResponse> ProjectSnapshots);
 
 public sealed record TraceFacetCountResponse(string Value, long Count);

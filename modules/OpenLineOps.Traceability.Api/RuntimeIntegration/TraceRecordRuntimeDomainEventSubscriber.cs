@@ -97,7 +97,11 @@ public sealed class TraceRecordRuntimeDomainEventSubscriber : IRuntimeDomainEven
                     Action: "RuntimeSession.Completed",
                     Detail: "Trace record generated from runtime session completion event.",
                     OccurredAtUtc: completedAtUtc)
-            ]);
+            ],
+            ProjectId: session.TraceMetadata.ProjectId,
+            ApplicationId: session.TraceMetadata.ApplicationId,
+            ProjectSnapshotId: session.TraceMetadata.ProjectSnapshotId,
+            TopologyId: session.TraceMetadata.TopologyId);
     }
 
     private static CreateMeasurementRecordRequest ToMeasurementRecordRequest(

@@ -18,7 +18,11 @@ public sealed record CreateTraceRecordRequest(
     string? RecordedBy,
     IReadOnlyCollection<CreateMeasurementRecordRequest>? Measurements,
     IReadOnlyCollection<CreateArtifactRecordRequest>? Artifacts,
-    IReadOnlyCollection<CreateAuditEntryRequest>? AuditEntries);
+    IReadOnlyCollection<CreateAuditEntryRequest>? AuditEntries,
+    string? ProjectId = null,
+    string? ApplicationId = null,
+    string? ProjectSnapshotId = null,
+    string? TopologyId = null);
 
 public sealed record CreateMeasurementRecordRequest(
     Guid? MeasurementRecordId,

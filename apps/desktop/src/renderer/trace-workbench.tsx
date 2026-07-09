@@ -35,6 +35,8 @@ interface TraceFilters {
   deviceId: string;
   judgement: string;
   processVersionId: string;
+  projectId: string;
+  projectSnapshotId: string;
 }
 
 const emptySearch: EngineeringTraceSearchResponse = {
@@ -49,7 +51,8 @@ const emptySearch: EngineeringTraceSearchResponse = {
     judgements: [],
     stations: [],
     devices: [],
-    processVersions: []
+    processVersions: [],
+    projectSnapshots: []
   },
   areFacetsTruncated: false
 };
@@ -84,6 +87,8 @@ export function TraceWorkbench({
         deviceId: filters.deviceId,
         judgement: filters.judgement,
         processVersionId: filters.processVersionId,
+        projectId: filters.projectId,
+        projectSnapshotId: filters.projectSnapshotId,
         pageNumber: 1,
         pageSize: 25
       });
@@ -214,6 +219,7 @@ export function TraceWorkbench({
           <FacetGroup title="Station" facets={searchResult.facets.stations} />
           <FacetGroup title="Device" facets={searchResult.facets.devices} />
           <FacetGroup title="Process Version" facets={searchResult.facets.processVersions} />
+          <FacetGroup title="Project Snapshot" facets={searchResult.facets.projectSnapshots} />
         </div>
       </div>
     </section>
@@ -243,6 +249,8 @@ function TraceFilterForm({
       <TraceTextField label="Device" value={filters.deviceId} onChange={value => update('deviceId', value)} />
       <TraceTextField label="Judgement" value={filters.judgement} onChange={value => update('judgement', value)} />
       <TraceTextField label="Process Version" value={filters.processVersionId} onChange={value => update('processVersionId', value)} />
+      <TraceTextField label="Project" value={filters.projectId} onChange={value => update('projectId', value)} />
+      <TraceTextField label="Project Snapshot" value={filters.projectSnapshotId} onChange={value => update('projectSnapshotId', value)} />
     </div>
   );
 }
@@ -277,6 +285,7 @@ function TraceResults({
     <div className="trace-results">
       <div className="trace-result-head">
         <span>Serial</span>
+        <span>Snapshot</span>
         <span>Station</span>
         <span>Judgement</span>
         <span>Measurements</span>
@@ -292,6 +301,7 @@ function TraceResults({
           data-testid="trace-result-row"
         >
           <strong>{row.serialNumber}</strong>
+          <span>{row.projectSnapshotId ?? 'n/a'}</span>
           <span>{row.stationId}</span>
           <TraceJudgement value={row.judgement} />
           <span>{row.failedMeasurementCount}/{row.measurementCount}</span>
@@ -325,6 +335,14 @@ function TraceDetails({
       <dl>
         <dt>Station</dt>
         <dd>{details.stationId}</dd>
+        <dt>Project</dt>
+        <dd>{details.projectId ?? 'n/a'}</dd>
+        <dt>Application</dt>
+        <dd>{details.applicationId ?? 'n/a'}</dd>
+        <dt>Snapshot</dt>
+        <dd>{details.projectSnapshotId ?? 'n/a'}</dd>
+        <dt>Topology</dt>
+        <dd>{details.topologyId ?? 'n/a'}</dd>
         <dt>Device</dt>
         <dd>{details.deviceId}</dd>
         <dt>Process</dt>
@@ -436,7 +454,9 @@ function createEmptyFilters(): TraceFilters {
     stationId: '',
     deviceId: '',
     judgement: '',
-    processVersionId: ''
+    processVersionId: '',
+    projectId: '',
+    projectSnapshotId: ''
   };
 }
 

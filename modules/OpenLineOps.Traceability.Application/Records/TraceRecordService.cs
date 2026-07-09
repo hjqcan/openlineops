@@ -76,7 +76,11 @@ public sealed class TraceRecordService : ITraceRecordService
                 judgement.Value,
                 request.StartedAtUtc,
                 request.CompletedAtUtc,
-                new ActorId(request.RecordedBy!));
+                new ActorId(request.RecordedBy!),
+                projectId: request.ProjectId,
+                applicationId: request.ApplicationId,
+                projectSnapshotId: request.ProjectSnapshotId,
+                topologyId: request.TopologyId);
 
             foreach (var measurementRequest in request.Measurements ?? [])
             {

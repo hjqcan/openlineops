@@ -50,6 +50,10 @@ public sealed class PostgresTraceRecordRepository :
                 trace_id,
                 document_json,
                 runtime_session_id,
+                project_id,
+                application_id,
+                project_snapshot_id,
+                topology_id,
                 serial_number,
                 batch_id,
                 station_id,
@@ -68,6 +72,10 @@ public sealed class PostgresTraceRecordRepository :
                 @trace_id,
                 @document_json::jsonb,
                 @runtime_session_id,
+                @project_id,
+                @application_id,
+                @project_snapshot_id,
+                @topology_id,
                 @serial_number,
                 @batch_id,
                 @station_id,
@@ -85,6 +93,10 @@ public sealed class PostgresTraceRecordRepository :
             ON CONFLICT (trace_id) DO UPDATE SET
                 document_json = EXCLUDED.document_json,
                 runtime_session_id = EXCLUDED.runtime_session_id,
+                project_id = EXCLUDED.project_id,
+                application_id = EXCLUDED.application_id,
+                project_snapshot_id = EXCLUDED.project_snapshot_id,
+                topology_id = EXCLUDED.topology_id,
                 serial_number = EXCLUDED.serial_number,
                 batch_id = EXCLUDED.batch_id,
                 station_id = EXCLUDED.station_id,
@@ -103,6 +115,10 @@ public sealed class PostgresTraceRecordRepository :
         command.Parameters.AddWithValue("trace_id", traceRecord.Id.Value.ToString("D"));
         command.Parameters.AddWithValue("document_json", documentJson);
         command.Parameters.AddWithValue("runtime_session_id", traceRecord.RuntimeSessionId.Value.ToString("D"));
+        AddOptionalParameter(command, "project_id", traceRecord.ProjectId);
+        AddOptionalParameter(command, "application_id", traceRecord.ApplicationId);
+        AddOptionalParameter(command, "project_snapshot_id", traceRecord.ProjectSnapshotId);
+        AddOptionalParameter(command, "topology_id", traceRecord.TopologyId);
         command.Parameters.AddWithValue("serial_number", traceRecord.SerialNumber);
         AddOptionalParameter(command, "batch_id", traceRecord.BatchId);
         command.Parameters.AddWithValue("station_id", traceRecord.StationId.Value);
@@ -243,6 +259,10 @@ public sealed class PostgresTraceRecordRepository :
                     trace_id text NOT NULL PRIMARY KEY,
                     document_json jsonb NOT NULL,
                     runtime_session_id text NOT NULL,
+                    project_id text NULL,
+                    application_id text NULL,
+                    project_snapshot_id text NULL,
+                    topology_id text NULL,
                     serial_number text NOT NULL,
                     batch_id text NULL,
                     station_id text NOT NULL,
@@ -259,6 +279,11 @@ public sealed class PostgresTraceRecordRepository :
                     updated_at_utc timestamptz NOT NULL
                 );
 
+                ALTER TABLE trace_records ADD COLUMN IF NOT EXISTS project_id text NULL;
+                ALTER TABLE trace_records ADD COLUMN IF NOT EXISTS application_id text NULL;
+                ALTER TABLE trace_records ADD COLUMN IF NOT EXISTS project_snapshot_id text NULL;
+                ALTER TABLE trace_records ADD COLUMN IF NOT EXISTS topology_id text NULL;
+
                 CREATE INDEX IF NOT EXISTS ix_trace_records_serial_completed
                     ON trace_records(serial_number, completed_at_utc, trace_id);
 
@@ -273,6 +298,12 @@ public sealed class PostgresTraceRecordRepository :
 
                 CREATE INDEX IF NOT EXISTS ix_trace_records_runtime_session
                     ON trace_records(runtime_session_id);
+
+                CREATE INDEX IF NOT EXISTS ix_trace_records_project_completed
+                    ON trace_records(project_id, completed_at_utc, trace_id);
+
+                CREATE INDEX IF NOT EXISTS ix_trace_records_project_snapshot_completed
+                    ON trace_records(project_snapshot_id, completed_at_utc, trace_id);
 
                 CREATE INDEX IF NOT EXISTS ix_trace_records_process_completed
                     ON trace_records(process_version_id, completed_at_utc, trace_id);
@@ -357,6 +388,29 @@ public sealed class PostgresTraceRecordRepository :
         if (query.Judgement is not null)
         {
             filters.Add(new QueryFilter("judgement = @judgement", "judgement", query.Judgement));
+        }
+
+        if (query.ProjectId is not null)
+        {
+            filters.Add(new QueryFilter("project_id = @project_id", "project_id", query.ProjectId));
+        }
+
+        if (query.ApplicationId is not null)
+        {
+            filters.Add(new QueryFilter("application_id = @application_id", "application_id", query.ApplicationId));
+        }
+
+        if (query.ProjectSnapshotId is not null)
+        {
+            filters.Add(new QueryFilter(
+                "project_snapshot_id = @project_snapshot_id",
+                "project_snapshot_id",
+                query.ProjectSnapshotId));
+        }
+
+        if (query.TopologyId is not null)
+        {
+            filters.Add(new QueryFilter("topology_id = @topology_id", "topology_id", query.TopologyId));
         }
 
         if (query.CompletedFromUtc is not null)

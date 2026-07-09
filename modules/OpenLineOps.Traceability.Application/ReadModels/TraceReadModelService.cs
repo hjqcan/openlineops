@@ -121,7 +121,11 @@ public sealed class TraceReadModelService : ITraceReadModelService
             configurationSnapshotId: query.ConfigurationSnapshotId,
             recipeSnapshotId: query.RecipeSnapshotId,
             deviceId: query.DeviceId,
-            judgement: query.Judgement);
+            judgement: query.Judgement,
+            projectId: query.ProjectId,
+            applicationId: query.ApplicationId,
+            projectSnapshotId: query.ProjectSnapshotId,
+            topologyId: query.TopologyId);
     }
 
     private static StationRecentTraceReadModel ToStationRecentTrace(TraceRecord traceRecord)
@@ -129,6 +133,10 @@ public sealed class TraceReadModelService : ITraceReadModelService
         return new StationRecentTraceReadModel(
             traceRecord.Id.Value,
             traceRecord.RuntimeSessionId.Value,
+            traceRecord.ProjectId,
+            traceRecord.ApplicationId,
+            traceRecord.ProjectSnapshotId,
+            traceRecord.TopologyId,
             traceRecord.SerialNumber,
             traceRecord.BatchId,
             traceRecord.FixtureId,
@@ -146,6 +154,10 @@ public sealed class TraceReadModelService : ITraceReadModelService
         return new EngineeringTraceSearchRowReadModel(
             traceRecord.Id.Value,
             traceRecord.RuntimeSessionId.Value,
+            traceRecord.ProjectId,
+            traceRecord.ApplicationId,
+            traceRecord.ProjectSnapshotId,
+            traceRecord.TopologyId,
             traceRecord.SerialNumber,
             traceRecord.BatchId,
             traceRecord.StationId.Value,
@@ -170,7 +182,8 @@ public sealed class TraceReadModelService : ITraceReadModelService
             CountBy(traceRecords, record => record.Judgement.ToString()),
             CountBy(traceRecords, record => record.StationId.Value),
             CountBy(traceRecords, record => record.DeviceId.Value),
-            CountBy(traceRecords, record => record.ProcessVersionId.Value));
+            CountBy(traceRecords, record => record.ProcessVersionId.Value),
+            CountByOptional(traceRecords, record => record.ProjectSnapshotId));
     }
 
     private static TraceFacetCountReadModel[] CountBy(
@@ -179,6 +192,21 @@ public sealed class TraceReadModelService : ITraceReadModelService
     {
         return traceRecords
             .GroupBy(selector, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => new TraceFacetCountReadModel(group.Key, group.Count()))
+            .ToArray();
+    }
+
+    private static TraceFacetCountReadModel[] CountByOptional(
+        IEnumerable<TraceRecord> traceRecords,
+        Func<TraceRecord, string?> selector)
+    {
+        return traceRecords
+            .Select(selector)
+            .Where(value => value is not null)
+            .Select(value => value!)
+            .GroupBy(value => value, StringComparer.Ordinal)
             .OrderByDescending(group => group.Count())
             .ThenBy(group => group.Key, StringComparer.Ordinal)
             .Select(group => new TraceFacetCountReadModel(group.Key, group.Count()))

@@ -9,6 +9,10 @@ internal static class TraceRecordMapper
         return new TraceRecordDetails(
             traceRecord.Id.Value,
             traceRecord.RuntimeSessionId.Value,
+            traceRecord.ProjectId,
+            traceRecord.ApplicationId,
+            traceRecord.ProjectSnapshotId,
+            traceRecord.TopologyId,
             traceRecord.SerialNumber,
             traceRecord.BatchId,
             traceRecord.StationId.Value,
@@ -32,6 +36,10 @@ internal static class TraceRecordMapper
         return new TraceRecordSummary(
             traceRecord.Id.Value,
             traceRecord.RuntimeSessionId.Value,
+            traceRecord.ProjectId,
+            traceRecord.ApplicationId,
+            traceRecord.ProjectSnapshotId,
+            traceRecord.TopologyId,
             traceRecord.SerialNumber,
             traceRecord.BatchId,
             traceRecord.StationId.Value,

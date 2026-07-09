@@ -3,6 +3,10 @@ namespace OpenLineOps.Traceability.Application.Records;
 public sealed record TraceRecordDetails(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string StationId,
@@ -23,6 +27,10 @@ public sealed record TraceRecordDetails(
 public sealed record TraceRecordSummary(
     Guid TraceRecordId,
     Guid RuntimeSessionId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId,
     string SerialNumber,
     string? BatchId,
     string StationId,

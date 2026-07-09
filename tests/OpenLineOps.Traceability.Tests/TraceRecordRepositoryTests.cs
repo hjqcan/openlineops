@@ -36,7 +36,10 @@ public sealed class TraceRecordRepositoryTests
     {
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteTraceRecordRepository(database.ConnectionString);
-        var trace = TraceRecordTests.CreateTrace("SMX-1001", BaseTimeUtc.AddMinutes(5));
+        var trace = CreateTraceWithId(
+            "00000000-0000-0000-0000-000000000031",
+            "SMX-1001",
+            BaseTimeUtc.AddMinutes(5));
         trace.AddMeasurement(new MeasurementRecord(
             MeasurementRecordId.New(),
             "height",
@@ -72,6 +75,10 @@ public sealed class TraceRecordRepositoryTests
         Assert.NotNull(restored);
         Assert.Equal(trace.Id, restored.Id);
         Assert.Equal(trace.RuntimeSessionId, restored.RuntimeSessionId);
+        Assert.Equal("project-trace-a", restored.ProjectId);
+        Assert.Equal("application-trace-a", restored.ApplicationId);
+        Assert.Equal("project-snapshot-trace-a", restored.ProjectSnapshotId);
+        Assert.Equal("topology-trace-a", restored.TopologyId);
         Assert.Equal("config-snapshot-a", restored.ConfigurationSnapshotId.Value);
         Assert.Equal("station-a", restored.StationId.Value);
         Assert.Equal("process-packaging@2026.06.29", restored.ProcessVersionId.Value);
@@ -101,27 +108,31 @@ public sealed class TraceRecordRepositoryTests
             BaseTimeUtc.AddMinutes(2),
             processVersionId: "process-packaging@match",
             deviceId: "device-match",
-            judgement: ResultJudgement.Failed);
+            judgement: ResultJudgement.Failed,
+            projectSnapshotId: "snapshot-match");
         var wrongProcess = CreateTraceWithId(
             "00000000-0000-0000-0000-000000000022",
             "SMX-3002",
             BaseTimeUtc.AddMinutes(3),
             processVersionId: "process-packaging@other",
             deviceId: "device-match",
-            judgement: ResultJudgement.Failed);
+            judgement: ResultJudgement.Failed,
+            projectSnapshotId: "snapshot-match");
         var wrongDevice = CreateTraceWithId(
             "00000000-0000-0000-0000-000000000023",
             "SMX-3003",
             BaseTimeUtc.AddMinutes(4),
             processVersionId: "process-packaging@match",
             deviceId: "device-other",
-            judgement: ResultJudgement.Failed);
+            judgement: ResultJudgement.Failed,
+            projectSnapshotId: "snapshot-match");
         var wrongJudgement = CreateTraceWithId(
             "00000000-0000-0000-0000-000000000024",
             "SMX-3004",
             BaseTimeUtc.AddMinutes(5),
             processVersionId: "process-packaging@match",
-            deviceId: "device-match");
+            deviceId: "device-match",
+            projectSnapshotId: "snapshot-other");
 
         await repository.SaveAsync(wrongJudgement);
         await repository.SaveAsync(wrongDevice);
@@ -132,6 +143,7 @@ public sealed class TraceRecordRepositoryTests
             processVersionId: "process-packaging@match",
             deviceId: "device-match",
             judgement: "Failed",
+            projectSnapshotId: "snapshot-match",
             paging: new PagedRequest(1, 10)));
 
         var stored = Assert.Single(result.Items);
@@ -179,7 +191,8 @@ public sealed class TraceRecordRepositoryTests
         DateTimeOffset completedAtUtc,
         string processVersionId = "process-packaging@2026.06.29",
         string deviceId = "vision-camera-a",
-        ResultJudgement judgement = ResultJudgement.Passed)
+        ResultJudgement judgement = ResultJudgement.Passed,
+        string projectSnapshotId = "project-snapshot-trace-a")
     {
         return TraceRecord.CreateCompleted(
             new TraceRecordId(Guid.Parse(traceId)),
@@ -196,7 +209,11 @@ public sealed class TraceRecordRepositoryTests
             judgement,
             BaseTimeUtc,
             completedAtUtc,
-            new ActorId("operator-a"));
+            new ActorId("operator-a"),
+            projectId: "project-trace-a",
+            applicationId: "application-trace-a",
+            projectSnapshotId: projectSnapshotId,
+            topologyId: "topology-trace-a");
     }
 
     private sealed class TemporarySqliteDatabase : IDisposable
