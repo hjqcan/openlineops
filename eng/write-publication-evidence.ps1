@@ -426,3 +426,4 @@ if ($RequirePublishable -and -not $publishable) {
 }
 
 Write-Host "Publication evidence checks passed."
+exit 0

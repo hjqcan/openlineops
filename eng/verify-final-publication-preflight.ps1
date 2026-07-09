@@ -228,3 +228,4 @@ Write-Host "Final publication preflight evidence written."
 Write-Host "Markdown: $markdownPath"
 Write-Host "JSON: $jsonPath"
 Write-Host "Final publication preflight verification passed."
+exit 0

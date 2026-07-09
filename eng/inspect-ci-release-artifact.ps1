@@ -488,3 +488,5 @@ Write-Host "Bundle: $ResolvedBundleRoot"
 if ($RequirePublishable) {
     Write-Host "Publishable requirement: enforced"
 }
+
+exit 0

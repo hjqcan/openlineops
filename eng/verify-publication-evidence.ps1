@@ -250,3 +250,4 @@ else {
 }
 
 Write-Host "Publication evidence verification passed."
+exit 0
