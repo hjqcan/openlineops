@@ -35,6 +35,13 @@ public sealed record PublishProjectSnapshotRequest(
     IReadOnlyCollection<ProjectTargetReferenceRequest>? TargetReferences,
     IReadOnlyCollection<string>? BlockVersionIds);
 
+public sealed record StartProjectSnapshotRuntimeSessionRequest(
+    string? SerialNumber = null,
+    string? BatchId = null,
+    string? FixtureId = null,
+    string? DeviceId = null,
+    string? ActorId = null);
+
 public sealed record SnapshotCapabilityBindingRequest(
     string? CapabilityId,
     string? BindingId,
@@ -124,3 +131,12 @@ public sealed record SnapshotCapabilityBindingResponse(
 public sealed record ProjectTargetReferenceResponse(
     string Kind,
     string TargetId);
+
+public sealed record StartedProjectSnapshotRuntimeSessionResponse(
+    string SnapshotId,
+    Guid SessionId,
+    string ConfigurationSnapshotId,
+    string Status,
+    int CompletedSteps,
+    int CommandCount,
+    int IncidentCount);

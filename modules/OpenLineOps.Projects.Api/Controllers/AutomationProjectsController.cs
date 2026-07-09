@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Application.Runtime;
 using OpenLineOps.Projects.Api.Models;
 using OpenLineOps.Projects.Application.Projects;
 using ApiAddApplicationRequest = OpenLineOps.Projects.Api.Models.AddProjectApplicationRequest;
@@ -18,6 +19,7 @@ using AppLinkTopologyRequest = OpenLineOps.Projects.Application.Projects.LinkPro
 using AppPublishSnapshotRequest = OpenLineOps.Projects.Application.Projects.PublishProjectSnapshotRequest;
 using AppSnapshotCapabilityBindingRequest = OpenLineOps.Projects.Application.Projects.SnapshotCapabilityBindingRequest;
 using AppTargetReferenceRequest = OpenLineOps.Projects.Application.Projects.ProjectTargetReferenceRequest;
+using AppStartProcessRuntimeSessionRequest = OpenLineOps.Processes.Application.Runtime.StartProcessRuntimeSessionRequest;
 
 namespace OpenLineOps.Projects.Api.Controllers;
 
@@ -27,10 +29,14 @@ namespace OpenLineOps.Projects.Api.Controllers;
 public sealed class AutomationProjectsController : ControllerBase
 {
     private readonly IAutomationProjectService _projectService;
+    private readonly IProcessRuntimeSessionLauncher _runtimeSessionLauncher;
 
-    public AutomationProjectsController(IAutomationProjectService projectService)
+    public AutomationProjectsController(
+        IAutomationProjectService projectService,
+        IProcessRuntimeSessionLauncher runtimeSessionLauncher)
     {
         _projectService = projectService;
+        _runtimeSessionLauncher = runtimeSessionLauncher;
     }
 
     [HttpPost]
@@ -196,6 +202,74 @@ public sealed class AutomationProjectsController : ControllerBase
         return Created($"/api/automation-projects/{response.ProjectId}/snapshots/{request.SnapshotId}", response);
     }
 
+    [HttpPost("{projectId}/snapshots/{snapshotId}/runtime-sessions")]
+    [ProducesResponseType<StartedProjectSnapshotRuntimeSessionResponse>(StatusCodes.Status201Created)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<StartedProjectSnapshotRuntimeSessionResponse>> StartSnapshotRuntimeSessionAsync(
+        string projectId,
+        string snapshotId,
+        StartProjectSnapshotRuntimeSessionRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var projectResult = await _projectService
+            .GetByIdAsync(projectId, cancellationToken)
+            .ConfigureAwait(false);
+        if (projectResult.IsFailure)
+        {
+            return ToProblem(projectResult.Error);
+        }
+
+        var snapshot = projectResult.Value.Snapshots
+            .SingleOrDefault(candidate => string.Equals(
+                candidate.SnapshotId,
+                snapshotId,
+                StringComparison.Ordinal));
+        if (snapshot is null)
+        {
+            return ToProblem(ApplicationError.NotFound(
+                "Projects.ProjectSnapshotNotFound",
+                $"Project snapshot {snapshotId} was not found in automation project {projectId}."));
+        }
+
+        var startRequest = request!;
+        var startResult = await _runtimeSessionLauncher
+            .StartAsync(
+                snapshot.ProcessDefinitionId,
+                new AppStartProcessRuntimeSessionRequest(
+                    snapshot.ConfigurationSnapshotId,
+                    startRequest.SerialNumber,
+                    startRequest.BatchId,
+                    startRequest.FixtureId,
+                    startRequest.DeviceId,
+                    startRequest.ActorId),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (startResult.IsFailure)
+        {
+            return ToProblem(startResult.Error);
+        }
+
+        var response = new StartedProjectSnapshotRuntimeSessionResponse(
+            snapshot.SnapshotId,
+            startResult.Value.SessionId,
+            startResult.Value.ConfigurationSnapshotId,
+            startResult.Value.Status,
+            startResult.Value.CompletedSteps,
+            startResult.Value.CommandCount,
+            startResult.Value.IncidentCount);
+
+        return Created($"/api/runtime/sessions/{response.SessionId}", response);
+    }
+
     private static AppPublishSnapshotRequest ToApplicationRequest(ApiPublishSnapshotRequest request)
     {
         return new AppPublishSnapshotRequest(
@@ -354,6 +428,17 @@ public sealed class AutomationProjectsController : ControllerBase
         if (request.BlockVersionIds is null)
         {
             errors[nameof(request.BlockVersionIds)] = ["BlockVersionIds collection is required."];
+        }
+
+        return errors;
+    }
+
+    private static Dictionary<string, string[]> Validate(StartProjectSnapshotRuntimeSessionRequest? request)
+    {
+        var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        if (request is null)
+        {
+            errors[nameof(request)] = ["Request body is required."];
         }
 
         return errors;

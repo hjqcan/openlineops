@@ -282,9 +282,10 @@ async function main() {
   await waitForExpression(
     '(() => document.body.innerText.includes("Started ")'
     + ' && document.body.innerText.includes("Completed")'
+    + ` && document.querySelector("[data-testid=\\"runtime-start-result\\"]")?.textContent?.includes(${JSON.stringify(projectSnapshotId)})`
     + ' && document.body.innerText.includes("commands"))()',
     45000,
-    'published process runtime session to complete');
+    'published project snapshot runtime session to complete');
   await clickByTestId('nav-engineering');
   await waitForExpression(
     '(() => document.body.innerText.includes("Engineering Configuration")'

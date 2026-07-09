@@ -378,6 +378,24 @@ export interface ProjectTargetReferenceRequest {
   targetId: string;
 }
 
+export interface StartProjectSnapshotRuntimeSessionRequest {
+  serialNumber?: string | null;
+  batchId?: string | null;
+  fixtureId?: string | null;
+  deviceId?: string | null;
+  actorId?: string | null;
+}
+
+export interface StartedProjectSnapshotRuntimeSessionResponse {
+  snapshotId: string;
+  sessionId: string;
+  configurationSnapshotId: string;
+  status: string;
+  completedSteps: number;
+  commandCount: number;
+  incidentCount: number;
+}
+
 export interface AutomationProjectWorkspaceResponse {
   project: AutomationProjectResponse;
   manifestPath: string;
@@ -786,6 +804,7 @@ export interface StartProcessRuntimeSessionRequest {
 
 export interface StartedProcessRuntimeSessionResponse {
   sessionId: string;
+  snapshotId?: string;
   configurationSnapshotId: string;
   status: string;
   completedSteps: number;

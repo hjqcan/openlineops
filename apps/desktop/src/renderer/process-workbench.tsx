@@ -47,6 +47,7 @@ import {
   publishProcessDefinition,
   registerProcessBlocklyBlock,
   saveAutomationProjectManifest,
+  startProjectSnapshotRuntimeSession,
   startProcessRuntimeSession,
   validateProcessDefinition
 } from './api';
@@ -568,15 +569,28 @@ export function ProcessWorkbench({
   }, [blockCatalog, onMessage]);
 
   const startPublishedRuntimeSession = useCallback(async () => {
-    if (!selectedDefinition) {
+    const projectSnapshotId = lastProjectSnapshot?.snapshotId
+      ?? activeWorkspace?.project.activeSnapshotId
+      ?? null;
+
+    if (projectSnapshotId && !activeWorkspace) {
+      return;
+    }
+
+    if (!projectSnapshotId && !selectedDefinition) {
       return;
     }
 
     setBusy(true);
     try {
-      const response = await startProcessRuntimeSession(
-        selectedDefinition.processDefinitionId,
-        toStartRuntimeSessionRequest(launchDraft));
+      const response = projectSnapshotId && activeWorkspace
+        ? await startProjectSnapshotRuntimeSession(
+          activeWorkspace.project.projectId,
+          projectSnapshotId,
+          toStartProjectSnapshotRuntimeSessionRequest(launchDraft))
+        : await startProcessRuntimeSession(
+          selectedDefinition!.processDefinitionId,
+          toStartRuntimeSessionRequest(launchDraft));
       if (!response.ok || !response.body) {
         onMessage(`Runtime start failed: ${response.status} ${response.text}`);
         return;
@@ -587,7 +601,7 @@ export function ProcessWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [launchDraft, onMessage, selectedDefinition]);
+  }, [activeWorkspace, lastProjectSnapshot?.snapshotId, launchDraft, onMessage, selectedDefinition]);
 
   const publishCurrentProjectSnapshot = useCallback(async () => {
     if (!activeWorkspace || !activeApplication || !activeApplication.topologyId || !selectedDefinition || !projectTopology) {
@@ -1844,6 +1858,9 @@ function RuntimeLaunchPanel({
   onStart(): void;
 }): React.ReactElement {
   const isPublished = selectedDefinition?.status === 'Published';
+  const launchSnapshotId = lastProjectSnapshot?.snapshotId
+    ?? activeWorkspace?.project.activeSnapshotId
+    ?? null;
   const canPublishProjectSnapshot = isBackendHealthy
     && activeWorkspace !== null
     && activeApplicationId !== null
@@ -1852,8 +1869,7 @@ function RuntimeLaunchPanel({
     && launchDraft.configurationSnapshotId.trim().length > 0
     && !busy;
   const canStart = isBackendHealthy
-    && isPublished
-    && launchDraft.configurationSnapshotId.trim().length > 0
+    && (launchSnapshotId !== null || (isPublished && launchDraft.configurationSnapshotId.trim().length > 0))
     && !busy;
 
   return (
@@ -1885,7 +1901,7 @@ function RuntimeLaunchPanel({
           <GitBranch size={15} />
           Publish Snapshot
         </button>
-        <span>{activeWorkspace?.project.activeSnapshotId ?? lastProjectSnapshot?.snapshotId ?? 'No project snapshot'}</span>
+        <span>{launchSnapshotId ?? 'No project snapshot'}</span>
       </div>
       <label>
         <span>Configuration Snapshot ID</span>
@@ -1958,9 +1974,12 @@ function RuntimeLaunchPanel({
         </div>
       ) : null}
       {lastStartedSession ? (
-        <div className="runtime-start-result">
+        <div className="runtime-start-result" data-testid="runtime-start-result">
           <strong>{lastStartedSession.status}</strong>
           <span>{lastStartedSession.sessionId}</span>
+          {lastStartedSession.snapshotId ? (
+            <small>{lastStartedSession.snapshotId}</small>
+          ) : null}
           <small>
             {lastStartedSession.completedSteps} steps,
             {' '}
@@ -2312,6 +2331,22 @@ function toCreateRequest(
 function toStartRuntimeSessionRequest(draft: RuntimeLaunchDraft): StartProcessRuntimeSessionRequest {
   return {
     configurationSnapshotId: draft.configurationSnapshotId,
+    serialNumber: toOptionalString(draft.serialNumber),
+    batchId: toOptionalString(draft.batchId),
+    fixtureId: toOptionalString(draft.fixtureId),
+    deviceId: toOptionalString(draft.deviceId),
+    actorId: toOptionalString(draft.actorId)
+  };
+}
+
+function toStartProjectSnapshotRuntimeSessionRequest(draft: RuntimeLaunchDraft): {
+  serialNumber: string | null;
+  batchId: string | null;
+  fixtureId: string | null;
+  deviceId: string | null;
+  actorId: string | null;
+} {
+  return {
     serialNumber: toOptionalString(draft.serialNumber),
     batchId: toOptionalString(draft.batchId),
     fixtureId: toOptionalString(draft.fixtureId),

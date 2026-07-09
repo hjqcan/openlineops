@@ -53,7 +53,9 @@ import type {
   RuntimeTimelineEntry,
   RuntimeTimelineResponse,
   RegisterProcessBlocklyBlockDefinitionRequest,
+  StartedProjectSnapshotRuntimeSessionResponse,
   StartedProcessRuntimeSessionResponse,
+  StartProjectSnapshotRuntimeSessionRequest,
   StartProcessRuntimeSessionRequest,
   StartRuntimeSessionRequest,
   StationProfileResponse,
@@ -139,6 +141,19 @@ export async function publishProjectSnapshot(
 ): Promise<ApiResponse<AutomationProjectResponse>> {
   return desktop.apiRequest<AutomationProjectResponse>(
     `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function startProjectSnapshotRuntimeSession(
+  projectId: string,
+  snapshotId: string,
+  request: StartProjectSnapshotRuntimeSessionRequest
+): Promise<ApiResponse<StartedProjectSnapshotRuntimeSessionResponse>> {
+  return desktop.apiRequest<StartedProjectSnapshotRuntimeSessionResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/runtime-sessions`,
     {
       method: 'POST',
       body: request

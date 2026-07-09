@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
   </ItemGroup>
