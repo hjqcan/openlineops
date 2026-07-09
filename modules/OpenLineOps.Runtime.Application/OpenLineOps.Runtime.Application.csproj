@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Domain.Abstractions\OpenLineOps.Domain.Abstractions.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

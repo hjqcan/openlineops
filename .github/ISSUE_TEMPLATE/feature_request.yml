@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a product or platform capability.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What production-line or engineering workflow problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the desired behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engineering configuration
+        - Device integration
+        - Process orchestration
+        - Runtime monitoring
+        - Traceability
+        - Plugins
+        - Desktop
+        - Build and release
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria

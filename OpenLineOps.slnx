@@ -1,0 +1,78 @@
+<Solution>
+  <Folder Name="/modules/">
+    <Project Path="modules/OpenLineOps.Devices.Api/OpenLineOps.Devices.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Devices.Application/OpenLineOps.Devices.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Devices.Domain/OpenLineOps.Devices.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Devices.Infrastructure/OpenLineOps.Devices.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Engineering.Api/OpenLineOps.Engineering.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Engineering.Application/OpenLineOps.Engineering.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Engineering.Domain/OpenLineOps.Engineering.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Engineering.Infrastructure/OpenLineOps.Engineering.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Processes.Api/OpenLineOps.Processes.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Processes.Application/OpenLineOps.Processes.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Processes.Domain/OpenLineOps.Processes.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Processes.Infrastructure/OpenLineOps.Processes.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Api/OpenLineOps.Operations.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Application.Contract/OpenLineOps.Operations.Application.Contract.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Application/OpenLineOps.Operations.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Domain.Shared/OpenLineOps.Operations.Domain.Shared.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Domain/OpenLineOps.Operations.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Infra.CrossCutting.IoC/OpenLineOps.Operations.Infra.CrossCutting.IoC.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Infra.Data/OpenLineOps.Operations.Infra.Data.csproj" />
+    <Project Path="modules/OpenLineOps.Plugins.Api/OpenLineOps.Plugins.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Plugins.Application/OpenLineOps.Plugins.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Plugins.Infrastructure/OpenLineOps.Plugins.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Runtime.Api/OpenLineOps.Runtime.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Runtime.Application/OpenLineOps.Runtime.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Runtime.Domain/OpenLineOps.Runtime.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Runtime.Infrastructure/OpenLineOps.Runtime.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Traceability.Api/OpenLineOps.Traceability.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Traceability.Application/OpenLineOps.Traceability.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Traceability.Domain/OpenLineOps.Traceability.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Traceability.Infrastructure/OpenLineOps.Traceability.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/samples/" />
+  <Folder Name="/samples/bounded-contexts/">
+    <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Application/OpenLineOps.SampleInspection.Application.csproj" />
+    <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Domain/OpenLineOps.SampleInspection.Domain.csproj" />
+    <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Infrastructure/OpenLineOps.SampleInspection.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/samples/plugins/">
+    <Project Path="samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" />
+  </Folder>
+  <Folder Name="/shared/">
+    <Project Path="shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.Domain.Abstractions/OpenLineOps.Domain.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.EventBus/OpenLineOps.EventBus.csproj" />
+    <Project Path="shared/OpenLineOps.Infrastructure.Data.Core/OpenLineOps.Infrastructure.Data.Core.csproj" />
+    <Project Path="shared/OpenLineOps.Plugin.Abstractions/OpenLineOps.Plugin.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.Runtime.Contracts/OpenLineOps.Runtime.Contracts.csproj" />
+    <Project Path="shared/OpenLineOps.StateMachine.Core/OpenLineOps.StateMachine.Core.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/OpenLineOps.Api/OpenLineOps.Api.csproj" />
+    <Project Path="src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" />
+    <Project Path="src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OpenLineOps.Api.Tests/OpenLineOps.Api.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.BoundedContext.Scaffolder.Tests/OpenLineOps.BoundedContext.Scaffolder.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Devices.Tests/OpenLineOps.Devices.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Domain.Abstractions.Tests/OpenLineOps.Domain.Abstractions.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Engineering.Tests/OpenLineOps.Engineering.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.EventBus.Tests/OpenLineOps.EventBus.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Infrastructure.Data.Core.Tests/OpenLineOps.Infrastructure.Data.Core.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Operations.Tests/OpenLineOps.Operations.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Plugins.Tests/OpenLineOps.Plugins.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Processes.Tests/OpenLineOps.Processes.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.ReleaseManifest.Tests/OpenLineOps.ReleaseManifest.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Runtime.Tests/OpenLineOps.Runtime.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.SampleInspection.Tests/OpenLineOps.SampleInspection.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Traceability.Tests/OpenLineOps.Traceability.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/OpenLineOps.BoundedContext.Scaffolder/OpenLineOps.BoundedContext.Scaffolder.csproj" />
+    <Project Path="tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj" />
+  </Folder>
+</Solution>

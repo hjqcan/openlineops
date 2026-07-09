@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="RabbitMQ.Client" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="Testcontainers.RabbitMq" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Application\OpenLineOps.Engineering.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Domain\OpenLineOps.Engineering.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Infrastructure\OpenLineOps.Engineering.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Application.Contract\OpenLineOps.Operations.Application.Contract.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Application\OpenLineOps.Operations.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Domain.Shared\OpenLineOps.Operations.Domain.Shared.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Domain\OpenLineOps.Operations.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Infra.CrossCutting.IoC\OpenLineOps.Operations.Infra.CrossCutting.IoC.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Infra.Data\OpenLineOps.Operations.Infra.Data.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Domain\OpenLineOps.Processes.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Infrastructure\OpenLineOps.Processes.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Application\OpenLineOps.Traceability.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Domain\OpenLineOps.Traceability.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Infrastructure\OpenLineOps.Traceability.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.EventBus\OpenLineOps.EventBus.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Infrastructure.Data.Core\OpenLineOps.Infrastructure.Data.Core.csproj" />
+  </ItemGroup>
+
+</Project>

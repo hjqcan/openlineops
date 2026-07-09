@@ -1,0 +1,24 @@
+{
+  "id": "openlineops.samples.loopback-device",
+  "name": "Loopback Device Sample",
+  "version": "0.1.0",
+  "kind": "DeviceDriver",
+  "entryAssembly": "OpenLineOps.SamplePlugins.LoopbackDevice.dll",
+  "entryType": "OpenLineOps.SamplePlugins.LoopbackDevice.LoopbackDevicePlugin",
+  "contractVersion": "1.0.0",
+  "minimumPlatformVersion": "1.0.0",
+  "capabilities": [
+    "device.loopback"
+  ],
+  "deviceCommands": [
+    {
+      "id": "loopback.echo",
+      "capability": "device.loopback",
+      "commandName": "Echo",
+      "inputSchema": "text/plain",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 5000,
+      "maxRetries": 0
+    }
+  ]
+}

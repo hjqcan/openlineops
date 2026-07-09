@@ -1,0 +1,38 @@
+# Build output
+bin/
+obj/
+TestResults/
+coverage/
+*.trx
+*.coverage
+
+# .NET user files
+*.user
+*.suo
+*.rsuser
+*.userosscache
+*.sln.docstates
+
+# Desktop dependencies and output
+node_modules/
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# Local runtime data
+/data/
+/logs/
+/artifacts/
+/output/
+/src/OpenLineOps.Api/data/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE folders
+.vs/
+.vscode/
+.idea/

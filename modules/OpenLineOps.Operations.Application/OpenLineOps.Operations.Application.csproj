@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../OpenLineOps.Operations.Application.Contract/OpenLineOps.Operations.Application.Contract.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Domain/OpenLineOps.Operations.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Domain.Shared/OpenLineOps.Operations.Domain.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

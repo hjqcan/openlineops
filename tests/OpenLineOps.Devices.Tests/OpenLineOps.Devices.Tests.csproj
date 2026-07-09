@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Application\OpenLineOps.Devices.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Domain\OpenLineOps.Devices.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Infrastructure\OpenLineOps.Devices.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Application\OpenLineOps.Engineering.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Domain\OpenLineOps.Engineering.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Infrastructure\OpenLineOps.Engineering.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

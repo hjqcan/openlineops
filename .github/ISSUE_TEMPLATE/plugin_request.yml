@@ -1,0 +1,30 @@
+name: Plugin request
+description: Request or discuss a plugin capability.
+title: "[Plugin]: "
+labels:
+  - plugin
+body:
+  - type: input
+    id: plugin-kind
+    attributes:
+      label: Plugin kind
+      description: DeviceDriver, ProcessNode, DataSink, ReportExporter, Integration, or UserInterface.
+    validations:
+      required: true
+  - type: textarea
+    id: capability
+    attributes:
+      label: Capability
+      description: Describe the capability id, command names, payloads, and expected outputs.
+    validations:
+      required: true
+  - type: textarea
+    id: runtime
+    attributes:
+      label: Runtime and isolation needs
+      description: External process, container, least-privilege identity, vendor SDK, device connection, or file access needs.
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Traceability impact
+      description: Measurements, artifacts, audit entries, or result judgement requirements.

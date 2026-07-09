@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\lib\pythonscript\PythonScript\PythonScript.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Domain.Abstractions\OpenLineOps.Domain.Abstractions.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

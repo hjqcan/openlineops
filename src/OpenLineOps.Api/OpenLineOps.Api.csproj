@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.OpenApi" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="RabbitMQ.Client" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.EventBus\OpenLineOps.EventBus.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Api\OpenLineOps.Devices.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Api\OpenLineOps.Engineering.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Api\OpenLineOps.Operations.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Api\OpenLineOps.Plugins.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Api\OpenLineOps.Processes.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Api\OpenLineOps.Runtime.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Api\OpenLineOps.Traceability.Api.csproj" />
+  </ItemGroup>
+
+</Project>

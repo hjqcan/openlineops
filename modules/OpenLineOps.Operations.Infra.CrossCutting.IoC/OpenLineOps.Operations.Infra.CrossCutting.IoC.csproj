@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../OpenLineOps.Operations.Application.Contract/OpenLineOps.Operations.Application.Contract.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Application/OpenLineOps.Operations.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Domain/OpenLineOps.Operations.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Infra.Data/OpenLineOps.Operations.Infra.Data.csproj" />
+  </ItemGroup>
+
+</Project>

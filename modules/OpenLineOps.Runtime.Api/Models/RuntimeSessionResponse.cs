@@ -1,0 +1,22 @@
+namespace OpenLineOps.Runtime.Api.Models;
+
+public sealed record RuntimeSessionResponse(
+    Guid SessionId,
+    string StationId,
+    string ProcessDefinitionId,
+    string ProcessVersionId,
+    string ConfigurationSnapshotId,
+    string RecipeSnapshotId,
+    string? SerialNumber,
+    string? BatchId,
+    string? FixtureId,
+    string? DeviceId,
+    string? ActorId,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset LastTransitionAtUtc,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    IReadOnlyCollection<RuntimeStepResponse> Steps,
+    IReadOnlyCollection<RuntimeCommandResponse> Commands,
+    IReadOnlyCollection<RuntimeIncidentResponse> Incidents);

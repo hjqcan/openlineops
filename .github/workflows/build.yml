@@ -1,0 +1,174 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify CI workflow actions
+        shell: powershell
+        run: ./eng/verify-ci-workflow-actions.ps1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Configure Python.NET runtime
+        shell: powershell
+        run: |
+          $pythonPrefix = python -c "import sys; print(sys.base_prefix)"
+          $expectedPythonDllName = python -c "import sys; print(f'python{sys.version_info.major}{sys.version_info.minor}.dll')"
+          $pythonDll = Get-ChildItem -LiteralPath $pythonPrefix -Filter $expectedPythonDllName -File |
+            Select-Object -First 1
+          if ($null -eq $pythonDll) {
+            $pythonDll = Get-ChildItem -LiteralPath $pythonPrefix -Filter "python*.dll" -File |
+              Where-Object { $_.Name -match '^python\d+\.dll$' } |
+              Sort-Object -Property Name -Descending |
+              Select-Object -First 1
+          }
+
+          if ($null -eq $pythonDll) {
+            throw "Could not find a version-specific python runtime DLL under $pythonPrefix"
+          }
+
+          "PYTHONNET_PYDLL=$($pythonDll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PYTHONNET_PYDLL=$($pythonDll.FullName)"
+
+      - name: Restore .NET
+        run: dotnet restore OpenLineOps.sln
+
+      - name: Verify whitespace
+        run: dotnet format OpenLineOps.sln whitespace --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --verbosity minimal
+
+      - name: Verify style warnings
+        run: dotnet format OpenLineOps.sln style --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --severity warn --verbosity minimal
+
+      - name: Build .NET
+        run: dotnet build OpenLineOps.sln --no-restore -v minimal
+
+      - name: Build PythonScript component
+        run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal
+
+      - name: Test .NET
+        run: dotnet test OpenLineOps.sln --no-build -v minimal
+
+      - name: Check .NET package vulnerabilities
+        run: dotnet list OpenLineOps.sln package --vulnerable --include-transitive
+
+      - name: Verify open-source metadata
+        shell: powershell
+        run: ./eng/verify-open-source-metadata.ps1
+
+      - name: Verify third-party license metadata
+        shell: powershell
+        run: ./eng/verify-third-party-license-metadata.ps1
+
+      - name: Smoke test release manifest tool
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --help
+
+      - name: Build sample plugin
+        run: dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj -v minimal
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Typecheck desktop
+        working-directory: apps/desktop
+        run: npm run typecheck
+
+      - name: Build desktop
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Stage release artifacts
+        shell: powershell
+        run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
+
+      - name: Verify staged release manifest
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+
+      - name: Inspect release candidate
+        shell: powershell
+        run: ./eng/inspect-release-candidate.ps1
+
+      - name: Verify release candidate inspection
+        shell: powershell
+        run: ./eng/verify-release-candidate-inspection.ps1
+
+      - name: Verify desktop signing readiness
+        shell: powershell
+        run: ./eng/verify-desktop-signing-readiness.ps1
+
+      - name: Verify publication metadata finalization
+        shell: powershell
+        run: ./eng/verify-publication-metadata-finalization.ps1
+
+      - name: Verify publication readiness
+        shell: powershell
+        run: ./eng/verify-publication-readiness.ps1 -AllowPendingExternal
+
+      - name: Write publication evidence
+        shell: powershell
+        run: ./eng/write-publication-evidence.ps1
+
+      - name: Verify publication evidence
+        shell: powershell
+        run: ./eng/verify-publication-evidence.ps1
+
+      - name: Verify final publication preflight
+        shell: powershell
+        run: ./eng/verify-final-publication-preflight.ps1
+
+      - name: Inspect CI release artifact bundle
+        shell: powershell
+        run: ./eng/inspect-ci-release-artifact.ps1
+
+      - name: Smoke test desktop
+        working-directory: apps/desktop
+        run: npm run smoke:e2e
+
+      - name: Check desktop package vulnerabilities
+        working-directory: apps/desktop
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-release-${{ github.run_number }}
+          path: |
+            artifacts/release
+            output/publication-evidence
+            output/publication-evidence-verification
+            output/final-publication-preflight
+            output/ci-release-artifact-inspection
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

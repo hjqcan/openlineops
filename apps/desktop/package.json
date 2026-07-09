@@ -1,0 +1,38 @@
+{
+  "name": "@openlineops/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenLineOps Electron desktop shell.",
+  "author": "OpenLineOps contributors",
+  "license": "MIT",
+  "main": "dist-electron/main/main.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "package:win": "npm run build && npm run package:win:ci",
+    "package:win:ci": "node scripts/package-win-unpacked.mjs",
+    "smoke:e2e": "npm run build && node scripts/electron-smoke.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^10.0.0",
+    "blockly": "^13.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^42.5.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}
