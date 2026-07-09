@@ -253,6 +253,31 @@ async function main() {
   const publishedDefinition = await getPublishedDesktopProcessDefinition();
   const configurationSnapshotId = await createPublishedEngineeringSnapshot(publishedDefinition);
   await setInputByTestId('process-runtime-snapshot-id', configurationSnapshotId);
+  await clickByTestId('publish-project-snapshot');
+  const projectSnapshotId = await waitForExpression(
+    '(() => {'
+    + ' const result = document.querySelector("[data-testid=\\"project-snapshot-result\\"]");'
+    + ' const snapshotId = result?.querySelector("strong")?.textContent?.trim() ?? "";'
+    + ` return snapshotId.startsWith("project-snapshot-") && result?.textContent?.includes(${JSON.stringify(configurationSnapshotId)})`
+    + '   ? snapshotId'
+    + '   : "";'
+    + '})()',
+    45000,
+    'project snapshot to publish from process runtime panel');
+  const projectWithSnapshot = await getAutomationProjectByPath(smokeProjectPath);
+  const publishedProjectSnapshot = projectWithSnapshot.snapshots
+    ?.find(snapshot => snapshot.snapshotId === projectSnapshotId);
+  if (projectWithSnapshot.activeSnapshotId !== projectSnapshotId || !publishedProjectSnapshot) {
+    throw new Error(`Project snapshot was not activated: ${JSON.stringify(projectWithSnapshot)}`);
+  }
+  if (publishedProjectSnapshot.processDefinitionId !== publishedDefinition.processDefinitionId
+    || publishedProjectSnapshot.processVersionId !== publishedDefinition.versionId
+    || publishedProjectSnapshot.configurationSnapshotId !== configurationSnapshotId
+    || !publishedProjectSnapshot.targetReferences?.some(target => target.targetId.includes('.module.axis.x'))
+    || !publishedProjectSnapshot.capabilityBindings?.some(binding => binding.providerKey === 'simulator.axis.x')
+    || !publishedProjectSnapshot.blockVersionIds?.some(blockVersionId => blockVersionId.startsWith('openlineops_move_axis@'))) {
+    throw new Error(`Project snapshot payload was incomplete: ${JSON.stringify(publishedProjectSnapshot)}`);
+  }
   await clickByTestId('start-published-process-session');
   await waitForExpression(
     '(() => document.body.innerText.includes("Started ")'
@@ -428,6 +453,24 @@ async function getLatestDesktopProcessDefinition(predicate = () => true) {
   if (detailResponse.status !== 200) {
     throw new Error(
       `Process detail lookup failed: expected 200, got ${detailResponse.status}. ${detailResponse.text}`);
+  }
+
+  return detailResponse.body;
+}
+
+async function getAutomationProjectByPath(projectPath) {
+  const response = await apiRequest('/api/automation-projects');
+  const project = response.body
+    ?.find(item => item.projectPath === projectPath);
+  if (!project) {
+    throw new Error(`Automation project not found for path ${projectPath}: ${JSON.stringify(response.body)}`);
+  }
+
+  const detailResponse = await apiRequest(
+    `/api/automation-projects/${encodeURIComponent(project.projectId)}`);
+  if (detailResponse.status !== 200) {
+    throw new Error(
+      `Automation project lookup failed: expected 200, got ${detailResponse.status}. ${detailResponse.text}`);
   }
 
   return detailResponse.body;

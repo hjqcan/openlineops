@@ -2499,6 +2499,22 @@ button {
   white-space: nowrap;
 }
 
+.project-snapshot-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.project-snapshot-actions span {
+  overflow: hidden;
+  color: #687a90;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .runtime-launch-box label {
   display: grid;
   gap: 6px;
@@ -2527,11 +2543,24 @@ button {
   background: #effaf8;
 }
 
+.project-snapshot-result {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #b7d7e3;
+  border-radius: 8px;
+  background: #effaf8;
+}
+
+.project-snapshot-result strong,
 .runtime-start-result strong {
   color: #0d756f;
   font-size: 12px;
 }
 
+.project-snapshot-result span,
+.project-snapshot-result small,
 .runtime-start-result span,
 .runtime-start-result small {
   overflow: hidden;

@@ -147,6 +147,148 @@ The result is a project package with six independent but linked axes:
    later.
 6. Flow and runtime: what the line should do and how that intent is executed.
 
+## Industry-Derived Composition Taxonomy
+
+The public standards and industrial automation platforms point to the same
+architectural conclusion: a visual automation workbench should feel like
+building with blocks, but the backend cannot store "blocks" as one generic
+object type. The block model must separate physical structure, control
+capability, material handling, spatial representation, executable behavior, and
+runtime state.
+
+OpenLineOps should therefore use a typed composition grammar. The grammar is
+simple enough for Electron and Blockly, but precise enough for DDD aggregates,
+published snapshots, provider compatibility checks, and traceability.
+
+### Composition Dimensions
+
+| Dimension | Industry anchor | User-facing block | Domain object | Main invariant |
+| --- | --- | --- | --- | --- |
+| Plant structure | ISA-95, AutomationML | Site, line, cell, station, unit | `EquipmentNode` | A node has stable identity, allowed parent/child kinds, and no runtime state in the draft. |
+| Machine/module model | ISA-88, OPC UA for Machinery, MTP | System, module, service package | `AutomationModule`, `ModuleTemplate` | A module declares capabilities and ports; replaceability is judged by contracts. |
+| Control capability | PLCopen Motion, PackML, robotics models | Axis move, IO write, scan, clamp, inspect | `CapabilityContract` | A flow requests a capability, not a vendor SDK method. |
+| Provider binding | Test automation plugins, device drivers, external services | Driver, simulator, plugin, adapter | `CapabilityProvider`, `DriverBinding`, `DeviceInstance` | Publish resolves every required capability to a compatible provider route. |
+| Material handling | ISA-95 material model, production traceability | Slot, group, tray, fixture, carrier | `SlotGroup`, `SlotDefinition`, `RuntimeSlotOccupancy` | Slot definition is design-time; occupancy and movement are runtime facts. |
+| Spatial projection | AutomationML geometry, future digital twin models | SiteLayout, zone, top-down element, 3D transform | `SiteLayout`, `SiteLayoutElement` | Layout references topology targets and never becomes the source of topology identity. |
+| Behavior authoring | IEC 61499, Blockly, process/test sequencers | Visual flow block, custom block, Python block | `ProcessDefinition`, `BlocklyBlockDefinition` | Blocks generate typed automation intent or governed PythonScript calls. |
+| Runtime lifecycle | PackML, runtime state machines | Start, run, pause, stop, reset, recover | `RuntimeSession`, `RuntimeUnit`, `RuntimeCommand` | Runtime starts from an immutable snapshot and owns live state. |
+| Evidence and history | Test result systems, audit, traceability | Trace, artifact, alarm, operation record | `TraceRecord`, `ArtifactRecord`, `AuditEntry` | Historical facts reference immutable project, topology, process, block, and slot ids. |
+
+### Composition Grammar
+
+The persisted model should accept the following relationships and reject
+implicit shortcuts:
+
+```text
+AutomationProject
+  owns ProjectApplication*
+  publishes PublishedProjectSnapshot*
+
+ProjectApplication
+  selects AutomationTopology
+  selects SiteLayout
+  references ProcessDefinition*
+  references BlockCatalogVersion*
+  references EngineeringConfigurationSnapshot?
+
+AutomationTopology
+  contains EquipmentNode*
+  contains AutomationModule*
+  contains CapabilityContract*
+  contains DriverBinding*
+  contains SlotGroup*
+  contains SlotDefinition*
+  contains Port*
+  contains Connection*
+
+AutomationModule
+  attaches-to EquipmentNode
+  requires CapabilityContract*
+  provides CapabilityContract*
+  exposes Port*
+  may-be-instantiated-from ModuleTemplate
+
+DriverBinding
+  binds CapabilityContract
+  to CapabilityProvider
+  scoped-to EquipmentNode | AutomationModule | SlotGroup | SlotDefinition | ProjectApplication
+
+SiteLayoutElement
+  references EquipmentNode | AutomationModule | SlotGroup | SlotDefinition | Connection | Zone
+
+BlocklyBlockDefinition
+  requires CapabilityContract?
+  selects target kind policy
+  emits PythonScript source and/or typed automation action
+
+ProcessDefinition
+  references BlocklyBlockDefinition*
+  references project target ids
+  publishes ProcessVersion
+
+PublishedProjectSnapshot
+  freezes application, topology, layout, process versions, block versions,
+  generated source hashes, capability contracts, driver bindings, and
+  configuration snapshot references
+```
+
+### Editor Vocabulary Versus Domain Vocabulary
+
+The Electron UI can keep the vocabulary short. The backend must resolve the
+same word to the correct bounded-context object.
+
+| UI word | Editor meaning | Domain resolution |
+| --- | --- | --- |
+| Project | The folder/package currently open in the workbench. | `AutomationProject` aggregate in Projects. |
+| Application | A runnable scenario, station family, product family, simulation profile, or deployment profile. | `ProjectApplication` entity that selects topology, layout, process versions, and run defaults. |
+| System | A visual grouping that engineers recognize: station system, motion system, light system, vision system, MES system. | Usually `EquipmentNode` plus `AutomationModule`; at runtime it is projected as `RuntimeUnit`. |
+| Driver | The installed adapter used to talk to hardware, simulator, external service, or command plugin. | `DriverPackage`, `CapabilityProvider`, `DeviceInstance`, and `DriverBinding`. |
+| Group | A set of slots or a logical set of equipment that is operated together. | `SlotGroup` for material/process grouping; `EquipmentNode(LogicalGroup)` for structural grouping. |
+| Slot | A stable endpoint where a DUT, carrier, fixture nest, tray position, buffer position, or work item can be placed. | `SlotDefinition` in topology; `RuntimeSlotOccupancy` in runtime and traceability. |
+| SiteLayout | The top-down visual model now and optional 3D scene later. | `SiteLayout` aggregate with elements referencing topology targets. |
+
+### Why This Is More Than A Tree
+
+A flat tree is useful for a project explorer, but it should be treated as a
+navigation projection only. Several real automation relationships are not
+tree-shaped:
+
+- One driver package can provide capabilities for multiple modules.
+- One module can require multiple providers when it combines motion, IO, and
+  measurement.
+- One slot group can span a fixture region in the layout and still resolve to
+  individual slots at runtime.
+- One process can target a station, a module, a slot group, and a slot in the
+  same flow.
+- One layout can show a subset of topology targets, or multiple views over the
+  same topology.
+- One published snapshot must freeze versions from multiple contexts.
+
+Therefore, the canonical storage shape is a typed graph with aggregate-owned
+collections. The UI can render explorer trees, canvases, palettes, and Blockly
+toolboxes from that graph.
+
+### Standard-Informed Modeling Decisions
+
+- Use ISA-95-style separation to keep equipment, material, personnel/operator
+  context, and operations evidence distinct.
+- Use ISA-88 and PackML language for runtime units, modes, commands, stop
+  reasons, interlocks, alarms, and lifecycle transitions.
+- Use IEC 61499-style separation between application logic and deployment
+  mapping: Blockly describes intent, publishing maps intent to project targets
+  and providers.
+- Use PLCopen-like capability contracts for motion so blocks express `home`,
+  `move`, `jog`, `stop`, `halt`, and coordinated move semantics instead of
+  device-specific method names.
+- Use MTP-like packaging ideas for module templates and providers: services,
+  configuration, HMI contributions, diagnostics, and compatibility metadata.
+- Use AutomationML/AAS-style identifiers and references so future CAD import,
+  3D layout, module metadata, file packaging, documentation, and digital-twin
+  exchange do not require changing topology identity.
+- Use Blockly's block definition plus generator model, but add industrial
+  metadata: target selector, capability, safety class, timeout policy,
+  cancellation behavior, source hash, and trace fields.
+
 ## Industry-Aligned Assembly Model
 
 The composable model should be presented to users as building blocks, but the

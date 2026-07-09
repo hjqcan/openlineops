@@ -30,6 +30,7 @@ import type {
   ProcessDefinitionSummary,
   ProcessGraphValidationReport,
   ProcessNodeResponse,
+  PublishedProjectSnapshotResponse,
   RegisterProcessBlocklyBlockDefinitionRequest,
   StartedProcessRuntimeSessionResponse,
   StartProcessRuntimeSessionRequest
@@ -38,11 +39,14 @@ import {
   createProcessDefinition,
   getAutomationTopology,
   getProcessDefinition,
+  linkProjectProcessDefinition,
   listProcessBlocklyBlocks,
   listProcessBlocklyBlockVersions,
   listProcessDefinitions,
+  publishProjectSnapshot,
   publishProcessDefinition,
   registerProcessBlocklyBlock,
+  saveAutomationProjectManifest,
   startProcessRuntimeSession,
   validateProcessDefinition
 } from './api';
@@ -55,6 +59,7 @@ type TransitionLoopPolicy = 'None' | 'Counted';
 interface ProcessWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   isBackendHealthy: boolean;
+  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
 
@@ -341,6 +346,7 @@ const fallbackBlocklyBlockCatalog: ProcessBlocklyBlockDefinition[] = [
 export function ProcessWorkbench({
   activeWorkspace,
   isBackendHealthy,
+  onWorkspaceChanged,
   onMessage
 }: ProcessWorkbenchProps): React.ReactElement {
   const [definitions, setDefinitions] = useState<ProcessDefinitionSummary[]>([]);
@@ -358,6 +364,7 @@ export function ProcessWorkbench({
   const [blockHistory, setBlockHistory] = useState<ProcessBlocklyBlockDefinition[]>([]);
   const [blockHistoryBusy, setBlockHistoryBusy] = useState(false);
   const [projectTopology, setProjectTopology] = useState<AutomationTopologyResponse | null>(null);
+  const [lastProjectSnapshot, setLastProjectSnapshot] = useState<PublishedProjectSnapshotResponse | null>(null);
   const [busy, setBusy] = useState(false);
 
   const activeApplication = activeWorkspace?.project.applications[0] ?? null;
@@ -473,6 +480,7 @@ export function ProcessWorkbench({
     setSelectedDefinition(null);
     setValidationReport(null);
     setLastStartedSession(null);
+    setLastProjectSnapshot(null);
   }, []);
 
   const resetDraft = useCallback(() => {
@@ -481,6 +489,7 @@ export function ProcessWorkbench({
     setValidationReport(null);
     setLaunchDraft(createRuntimeLaunchDraft());
     setLastStartedSession(null);
+    setLastProjectSnapshot(null);
   }, [blockCatalog]);
 
   const saveDraft = useCallback(async () => {
@@ -496,6 +505,7 @@ export function ProcessWorkbench({
       }
 
       setSelectedDefinition(response.body);
+      setLastProjectSnapshot(null);
       onMessage(`Saved ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
@@ -529,6 +539,7 @@ export function ProcessWorkbench({
       setSelectedDefinition(response.body);
       setDraft(fromProcessDefinition(response.body, blockCatalog));
       setLastStartedSession(null);
+      setLastProjectSnapshot(null);
       onMessage(`Published ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
@@ -549,6 +560,7 @@ export function ProcessWorkbench({
       setSelectedDefinition(response.body);
       setDraft(fromProcessDefinition(response.body, blockCatalog));
       setLastStartedSession(null);
+      setLastProjectSnapshot(null);
       onMessage(`${response.body.processDefinitionId} loaded`);
     } finally {
       setBusy(false);
@@ -576,6 +588,82 @@ export function ProcessWorkbench({
       setBusy(false);
     }
   }, [launchDraft, onMessage, selectedDefinition]);
+
+  const publishCurrentProjectSnapshot = useCallback(async () => {
+    if (!activeWorkspace || !activeApplication || !activeApplication.topologyId || !selectedDefinition || !projectTopology) {
+      onMessage('Open a project with topology and publish a process before publishing a project snapshot');
+      return;
+    }
+
+    if (selectedDefinition.status !== 'Published') {
+      onMessage('Publish the process definition before publishing a project snapshot');
+      return;
+    }
+
+    if (!launchDraft.configurationSnapshotId.trim()) {
+      onMessage('Configuration snapshot id is required before publishing a project snapshot');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const linkResponse = await linkProjectProcessDefinition(
+        activeWorkspace.project.projectId,
+        activeApplication.applicationId,
+        selectedDefinition.processDefinitionId);
+      if (!linkResponse.ok || !linkResponse.body) {
+        onMessage(`Project process link failed: ${linkResponse.status} ${linkResponse.text}`);
+        return;
+      }
+
+      const snapshotId = `project-snapshot-${Date.now().toString(36)}`;
+      const publishResponse = await publishProjectSnapshot(activeWorkspace.project.projectId, {
+        snapshotId,
+        applicationId: activeApplication.applicationId,
+        topologyId: activeApplication.topologyId,
+        processDefinitionId: selectedDefinition.processDefinitionId,
+        processVersionId: selectedDefinition.versionId,
+        configurationSnapshotId: launchDraft.configurationSnapshotId.trim(),
+        capabilityBindings: projectTopology.driverBindings.map(binding => ({
+          capabilityId: binding.capabilityId,
+          bindingId: binding.bindingId,
+          providerKind: binding.providerKind,
+          providerKey: binding.providerKey
+        })),
+        targetReferences: createProjectSnapshotTargetReferences(projectTopology),
+        blockVersionIds: blockCatalog.map(block => `${block.blockType}@${block.version}`)
+      });
+      if (!publishResponse.ok || !publishResponse.body) {
+        onMessage(`Project snapshot publish failed: ${publishResponse.status} ${publishResponse.text}`);
+        return;
+      }
+
+      const savedWorkspace = await saveAutomationProjectManifest(activeWorkspace.project.projectId);
+      if (!savedWorkspace.ok || !savedWorkspace.body) {
+        onMessage(`Project manifest save failed: ${savedWorkspace.status} ${savedWorkspace.text}`);
+        return;
+      }
+
+      const snapshot = publishResponse.body.snapshots
+        .find(item => item.snapshotId === snapshotId)
+        ?? publishResponse.body.snapshots.at(-1)
+        ?? null;
+      setLastProjectSnapshot(snapshot);
+      onWorkspaceChanged(savedWorkspace.body);
+      onMessage(`Project snapshot published ${snapshotId}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    activeApplication,
+    activeWorkspace,
+    blockCatalog,
+    launchDraft.configurationSnapshotId,
+    onMessage,
+    onWorkspaceChanged,
+    projectTopology,
+    selectedDefinition
+  ]);
 
   const updateDraftField = useCallback(<TKey extends keyof ProcessDraft>(
     key: TKey,
@@ -925,12 +1013,17 @@ export function ProcessWorkbench({
         />
 
         <RuntimeLaunchPanel
+          activeWorkspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
+          topology={projectTopology}
           isBackendHealthy={isBackendHealthy}
           busy={busy}
           selectedDefinition={selectedDefinition}
           launchDraft={launchDraft}
           lastStartedSession={lastStartedSession}
+          lastProjectSnapshot={lastProjectSnapshot}
           onChange={setLaunchDraft}
+          onPublishProjectSnapshot={publishCurrentProjectSnapshot}
           onStart={startPublishedRuntimeSession}
         />
       </div>
@@ -1724,23 +1817,40 @@ function TransitionEditor({
 }
 
 function RuntimeLaunchPanel({
+  activeWorkspace,
+  activeApplicationId,
+  topology,
   isBackendHealthy,
   busy,
   selectedDefinition,
   launchDraft,
   lastStartedSession,
+  lastProjectSnapshot,
   onChange,
+  onPublishProjectSnapshot,
   onStart
 }: {
+  activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
+  topology: AutomationTopologyResponse | null;
   isBackendHealthy: boolean;
   busy: boolean;
   selectedDefinition: ProcessDefinitionResponse | null;
   launchDraft: RuntimeLaunchDraft;
   lastStartedSession: StartedProcessRuntimeSessionResponse | null;
+  lastProjectSnapshot: PublishedProjectSnapshotResponse | null;
   onChange(updater: (current: RuntimeLaunchDraft) => RuntimeLaunchDraft): void;
+  onPublishProjectSnapshot(): void;
   onStart(): void;
 }): React.ReactElement {
   const isPublished = selectedDefinition?.status === 'Published';
+  const canPublishProjectSnapshot = isBackendHealthy
+    && activeWorkspace !== null
+    && activeApplicationId !== null
+    && topology !== null
+    && isPublished
+    && launchDraft.configurationSnapshotId.trim().length > 0
+    && !busy;
   const canStart = isBackendHealthy
     && isPublished
     && launchDraft.configurationSnapshotId.trim().length > 0
@@ -1763,6 +1873,19 @@ function RuntimeLaunchPanel({
           <Play size={15} />
           Start
         </button>
+      </div>
+      <div className="project-snapshot-actions">
+        <button
+          type="button"
+          className="button"
+          disabled={!canPublishProjectSnapshot}
+          onClick={onPublishProjectSnapshot}
+          data-testid="publish-project-snapshot"
+        >
+          <GitBranch size={15} />
+          Publish Snapshot
+        </button>
+        <span>{activeWorkspace?.project.activeSnapshotId ?? lastProjectSnapshot?.snapshotId ?? 'No project snapshot'}</span>
       </div>
       <label>
         <span>Configuration Snapshot ID</span>
@@ -1827,6 +1950,13 @@ function RuntimeLaunchPanel({
           }))}
         />
       </label>
+      {lastProjectSnapshot ? (
+        <div className="project-snapshot-result" data-testid="project-snapshot-result">
+          <strong>{lastProjectSnapshot.snapshotId}</strong>
+          <span>{lastProjectSnapshot.processVersionId}</span>
+          <small>{lastProjectSnapshot.configurationSnapshotId}</small>
+        </div>
+      ) : null}
       {lastStartedSession ? (
         <div className="runtime-start-result">
           <strong>{lastStartedSession.status}</strong>
@@ -1926,6 +2056,17 @@ function createProjectTargetOptions(
     ...slotGroupTargets,
     ...slotTargets,
     ...capabilityTargets
+  ];
+}
+
+function createProjectSnapshotTargetReferences(
+  topology: AutomationTopologyResponse
+): Array<{ kind: string; targetId: string }> {
+  return [
+    ...topology.nodes.map(node => ({ kind: 'EquipmentNode', targetId: node.nodeId })),
+    ...topology.modules.map(module => ({ kind: 'AutomationModule', targetId: module.moduleId })),
+    ...topology.slotGroups.map(group => ({ kind: 'SlotGroup', targetId: group.slotGroupId })),
+    ...topology.slots.map(slot => ({ kind: 'Slot', targetId: slot.slotId }))
   ];
 }
 

@@ -354,6 +354,30 @@ export interface ProjectTargetReferenceResponse {
   targetId: string;
 }
 
+export interface PublishProjectSnapshotRequest {
+  snapshotId: string;
+  applicationId: string;
+  topologyId: string;
+  processDefinitionId: string;
+  processVersionId: string;
+  configurationSnapshotId: string;
+  capabilityBindings: SnapshotCapabilityBindingRequest[];
+  targetReferences: ProjectTargetReferenceRequest[];
+  blockVersionIds: string[];
+}
+
+export interface SnapshotCapabilityBindingRequest {
+  capabilityId: string;
+  bindingId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
+export interface ProjectTargetReferenceRequest {
+  kind: string;
+  targetId: string;
+}
+
 export interface AutomationProjectWorkspaceResponse {
   project: AutomationProjectResponse;
   manifestPath: string;

@@ -41,6 +41,7 @@ import type {
   PluginLifecycleRecordResponse,
   PluginManagementOverviewResponse,
   PublishConfigurationSnapshotRequest,
+  PublishProjectSnapshotRequest,
   RecipeResponse,
   RegisterDeviceInstanceRequest,
   SiteLayoutResponse,
@@ -116,6 +117,30 @@ export async function linkProjectTopology(
     `/api/automation-projects/${encodeURIComponent(projectId)}/applications/${encodeURIComponent(applicationId)}/topology`,
     {
       method: 'PUT',
+      body: request
+    });
+}
+
+export async function linkProjectProcessDefinition(
+  projectId: string,
+  applicationId: string,
+  processDefinitionId: string
+): Promise<ApiResponse<AutomationProjectResponse>> {
+  return desktop.apiRequest<AutomationProjectResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/applications/${encodeURIComponent(applicationId)}/process-definitions/${encodeURIComponent(processDefinitionId)}`,
+    {
+      method: 'PUT'
+    });
+}
+
+export async function publishProjectSnapshot(
+  projectId: string,
+  request: PublishProjectSnapshotRequest
+): Promise<ApiResponse<AutomationProjectResponse>> {
+  return desktop.apiRequest<AutomationProjectResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots`,
+    {
+      method: 'POST',
       body: request
     });
 }

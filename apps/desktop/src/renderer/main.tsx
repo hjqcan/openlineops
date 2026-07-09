@@ -280,6 +280,7 @@ function App(): React.ReactElement {
           <ProcessWorkbench
             activeWorkspace={activeWorkspace}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
+            onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
           />
         </React.Suspense>
