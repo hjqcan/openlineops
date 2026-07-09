@@ -59,7 +59,11 @@ internal static class RuntimeSessionSnapshotMapper
             traceMetadata.BatchId,
             traceMetadata.FixtureId,
             traceMetadata.DeviceId,
-            traceMetadata.ActorId);
+            traceMetadata.ActorId,
+            traceMetadata.ProjectId,
+            traceMetadata.ApplicationId,
+            traceMetadata.ProjectSnapshotId,
+            traceMetadata.TopologyId);
     }
 
     private static PersistedRuntimeStep ToSnapshot(RuntimeStep step)
@@ -149,7 +153,11 @@ internal static class RuntimeSessionSnapshotMapper
                 traceMetadata.BatchId,
                 traceMetadata.FixtureId,
                 traceMetadata.DeviceId,
-                traceMetadata.ActorId);
+                traceMetadata.ActorId,
+                traceMetadata.ProjectId,
+                traceMetadata.ApplicationId,
+                traceMetadata.ProjectSnapshotId,
+                traceMetadata.TopologyId);
     }
 
     private static TEnum ParseEnum<TEnum>(string value, string fieldName)
@@ -187,7 +195,11 @@ internal sealed record PersistedRuntimeTraceMetadata(
     string? BatchId,
     string? FixtureId,
     string? DeviceId,
-    string? ActorId);
+    string? ActorId,
+    string? ProjectId,
+    string? ApplicationId,
+    string? ProjectSnapshotId,
+    string? TopologyId);
 
 internal sealed record PersistedRuntimeStep(
     Guid StepId,

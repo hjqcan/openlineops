@@ -134,6 +134,9 @@ public sealed record ProjectTargetReferenceResponse(
 
 public sealed record StartedProjectSnapshotRuntimeSessionResponse(
     string SnapshotId,
+    string ProjectId,
+    string ApplicationId,
+    string TopologyId,
     Guid SessionId,
     string ConfigurationSnapshotId,
     string Status,

@@ -388,6 +388,9 @@ export interface StartProjectSnapshotRuntimeSessionRequest {
 
 export interface StartedProjectSnapshotRuntimeSessionResponse {
   snapshotId: string;
+  projectId: string;
+  applicationId: string;
+  topologyId: string;
   sessionId: string;
   configurationSnapshotId: string;
   status: string;

@@ -110,7 +110,11 @@ public sealed class ProcessRuntimeSessionLauncher : IProcessRuntimeSessionLaunch
                     request.BatchId,
                     request.FixtureId,
                     request.DeviceId,
-                    request.ActorId));
+                    request.ActorId,
+                    request.ProjectId,
+                    request.ApplicationId,
+                    request.ProjectSnapshotId,
+                    request.TopologyId));
 
             var runResult = await _sessionRunner
                 .RunAsync(startRequest, cancellationToken)

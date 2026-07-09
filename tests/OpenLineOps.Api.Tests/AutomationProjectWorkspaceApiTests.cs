@@ -422,6 +422,9 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.Equal(HttpStatusCode.Created, publishSnapshotResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, startResponse.StatusCode);
         Assert.Equal(snapshotId, startBody.RootElement.GetProperty("snapshotId").GetString());
+        Assert.Equal(projectId, startBody.RootElement.GetProperty("projectId").GetString());
+        Assert.Equal(applicationId, startBody.RootElement.GetProperty("applicationId").GetString());
+        Assert.Equal(topologyId, startBody.RootElement.GetProperty("topologyId").GetString());
         Assert.Equal(configurationSnapshotId, startBody.RootElement.GetProperty("configurationSnapshotId").GetString());
         Assert.Equal("Completed", startBody.RootElement.GetProperty("status").GetString());
         Assert.Equal(1, startBody.RootElement.GetProperty("completedSteps").GetInt32());
@@ -432,6 +435,10 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.Equal(HttpStatusCode.OK, querySessionResponse.StatusCode);
         Assert.Equal(processDefinitionId, sessionBody.RootElement.GetProperty("processDefinitionId").GetString());
         Assert.Equal(configurationSnapshotId, sessionBody.RootElement.GetProperty("configurationSnapshotId").GetString());
+        Assert.Equal(projectId, sessionBody.RootElement.GetProperty("projectId").GetString());
+        Assert.Equal(applicationId, sessionBody.RootElement.GetProperty("applicationId").GetString());
+        Assert.Equal(snapshotId, sessionBody.RootElement.GetProperty("projectSnapshotId").GetString());
+        Assert.Equal(topologyId, sessionBody.RootElement.GetProperty("topologyId").GetString());
         Assert.Equal($"SN-{suffix}", sessionBody.RootElement.GetProperty("serialNumber").GetString());
         Assert.Equal("api-test", sessionBody.RootElement.GetProperty("actorId").GetString());
     }

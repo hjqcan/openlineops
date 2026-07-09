@@ -249,7 +249,11 @@ public sealed class AutomationProjectsController : ControllerBase
                     startRequest.BatchId,
                     startRequest.FixtureId,
                     startRequest.DeviceId,
-                    startRequest.ActorId),
+                    startRequest.ActorId,
+                    snapshot.ProjectId,
+                    snapshot.ApplicationId,
+                    snapshot.SnapshotId,
+                    snapshot.TopologyId),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -260,6 +264,9 @@ public sealed class AutomationProjectsController : ControllerBase
 
         var response = new StartedProjectSnapshotRuntimeSessionResponse(
             snapshot.SnapshotId,
+            snapshot.ProjectId,
+            snapshot.ApplicationId,
+            snapshot.TopologyId,
             startResult.Value.SessionId,
             startResult.Value.ConfigurationSnapshotId,
             startResult.Value.Status,

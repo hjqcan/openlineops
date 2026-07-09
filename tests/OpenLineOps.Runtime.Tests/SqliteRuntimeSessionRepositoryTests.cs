@@ -82,7 +82,11 @@ public sealed class SqliteRuntimeSessionRepositoryTests
                 "BATCH-TRACE",
                 "FIXTURE-TRACE",
                 "DEVICE-TRACE",
-                "OPERATOR-TRACE"));
+                "OPERATOR-TRACE",
+                "PROJECT-TRACE",
+                "APPLICATION-TRACE",
+                "PROJECT-SNAPSHOT-TRACE",
+                "TOPOLOGY-TRACE"));
 
         await repository.SaveAsync(session);
 
@@ -95,6 +99,10 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         Assert.Equal("FIXTURE-TRACE", restored.TraceMetadata.FixtureId);
         Assert.Equal("DEVICE-TRACE", restored.TraceMetadata.DeviceId);
         Assert.Equal("OPERATOR-TRACE", restored.TraceMetadata.ActorId);
+        Assert.Equal("PROJECT-TRACE", restored.TraceMetadata.ProjectId);
+        Assert.Equal("APPLICATION-TRACE", restored.TraceMetadata.ApplicationId);
+        Assert.Equal("PROJECT-SNAPSHOT-TRACE", restored.TraceMetadata.ProjectSnapshotId);
+        Assert.Equal("TOPOLOGY-TRACE", restored.TraceMetadata.TopologyId);
     }
 
     [Fact]

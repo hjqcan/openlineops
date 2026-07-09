@@ -9,13 +9,21 @@ public sealed record RuntimeSessionTraceMetadata
         string? batchId,
         string? fixtureId,
         string? deviceId,
-        string? actorId)
+        string? actorId,
+        string? projectId = null,
+        string? applicationId = null,
+        string? projectSnapshotId = null,
+        string? topologyId = null)
     {
         SerialNumber = NormalizeOptional(serialNumber);
         BatchId = NormalizeOptional(batchId);
         FixtureId = NormalizeOptional(fixtureId);
         DeviceId = NormalizeOptional(deviceId);
         ActorId = NormalizeOptional(actorId);
+        ProjectId = NormalizeOptional(projectId);
+        ApplicationId = NormalizeOptional(applicationId);
+        ProjectSnapshotId = NormalizeOptional(projectSnapshotId);
+        TopologyId = NormalizeOptional(topologyId);
     }
 
     public string? SerialNumber { get; }
@@ -27,6 +35,14 @@ public sealed record RuntimeSessionTraceMetadata
     public string? DeviceId { get; }
 
     public string? ActorId { get; }
+
+    public string? ProjectId { get; }
+
+    public string? ApplicationId { get; }
+
+    public string? ProjectSnapshotId { get; }
+
+    public string? TopologyId { get; }
 
     public bool CanCreateTraceRecord =>
         SerialNumber is not null
