@@ -7,7 +7,9 @@ using OpenLineOps.Operations.Api.DependencyInjection;
 using OpenLineOps.Operations.Infra.CrossCutting.IoC.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
 using OpenLineOps.Processes.Api.DependencyInjection;
+using OpenLineOps.Projects.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.DependencyInjection;
+using OpenLineOps.Topology.Api.DependencyInjection;
 using OpenLineOps.Traceability.Api.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,7 +22,11 @@ builder.Services
     .AddOpenLineOpsEngineeringApi()
     .AddOpenLineOpsOperationsApi()
     .AddOpenLineOpsPluginsApi()
+    .AddOpenLineOpsProjectsApi()
+    .AddOpenLineOpsTopologyApi()
     .AddOpenLineOpsTraceabilityApi();
+builder.Services.AddOpenLineOpsProjectsModule();
+builder.Services.AddOpenLineOpsTopologyModule();
 builder.Services.AddOpenLineOpsRuntimeModule(builder.Configuration);
 builder.Services.AddOpenLineOpsProcessesModule(builder.Configuration);
 builder.Services.AddOpenLineOpsEngineeringModule(builder.Configuration);

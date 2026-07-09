@@ -1,9 +1,16 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import type { ApiRequestOptions, ApiResponse, BackendStatus, DesktopConfig } from '../shared/desktop-api.js';
+import type {
+  ApiRequestOptions,
+  ApiResponse,
+  BackendStatus,
+  DesktopConfig,
+  SelectDirectoryOptions,
+  SelectDirectoryResult
+} from '../shared/desktop-api.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -101,6 +108,30 @@ ipcMain.handle('backend:stop', async () => {
   }
 
   return getBackendStatus();
+});
+ipcMain.handle('desktop:select-directory', async (
+  _event,
+  options?: SelectDirectoryOptions
+): Promise<SelectDirectoryResult> => {
+  const properties: Array<'openDirectory' | 'createDirectory'> = ['openDirectory'];
+  if (options?.createDirectory) {
+    properties.push('createDirectory');
+  }
+
+  const dialogOptions = {
+    title: options?.title ?? 'Select project folder',
+    defaultPath: options?.defaultPath,
+    buttonLabel: options?.buttonLabel ?? 'Select',
+    properties
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+
+  return {
+    canceled: result.canceled,
+    path: result.filePaths[0] ?? null
+  };
 });
 ipcMain.handle('api:request', async (_event, requestPath: string, options?: ApiRequestOptions) =>
   apiRequest(requestPath, options));

@@ -8,6 +8,10 @@
     <Project Path="modules/OpenLineOps.Engineering.Application/OpenLineOps.Engineering.Application.csproj" />
     <Project Path="modules/OpenLineOps.Engineering.Domain/OpenLineOps.Engineering.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Engineering.Infrastructure/OpenLineOps.Engineering.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Projects.Api/OpenLineOps.Projects.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Projects.Application/OpenLineOps.Projects.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Projects.Domain/OpenLineOps.Projects.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Projects.Infrastructure/OpenLineOps.Projects.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Processes.Api/OpenLineOps.Processes.Api.csproj" />
     <Project Path="modules/OpenLineOps.Processes.Application/OpenLineOps.Processes.Application.csproj" />
     <Project Path="modules/OpenLineOps.Processes.Domain/OpenLineOps.Processes.Domain.csproj" />
@@ -26,6 +30,10 @@
     <Project Path="modules/OpenLineOps.Runtime.Application/OpenLineOps.Runtime.Application.csproj" />
     <Project Path="modules/OpenLineOps.Runtime.Domain/OpenLineOps.Runtime.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Runtime.Infrastructure/OpenLineOps.Runtime.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Topology.Api/OpenLineOps.Topology.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Topology.Application/OpenLineOps.Topology.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Topology.Domain/OpenLineOps.Topology.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Topology.Infrastructure/OpenLineOps.Topology.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Traceability.Api/OpenLineOps.Traceability.Api.csproj" />
     <Project Path="modules/OpenLineOps.Traceability.Application/OpenLineOps.Traceability.Application.csproj" />
     <Project Path="modules/OpenLineOps.Traceability.Domain/OpenLineOps.Traceability.Domain.csproj" />
@@ -66,9 +74,11 @@
     <Project Path="tests/OpenLineOps.Operations.Tests/OpenLineOps.Operations.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Plugins.Tests/OpenLineOps.Plugins.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Processes.Tests/OpenLineOps.Processes.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ReleaseManifest.Tests/OpenLineOps.ReleaseManifest.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runtime.Tests/OpenLineOps.Runtime.Tests.csproj" />
     <Project Path="tests/OpenLineOps.SampleInspection.Tests/OpenLineOps.SampleInspection.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Topology.Tests/OpenLineOps.Topology.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Traceability.Tests/OpenLineOps.Traceability.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">

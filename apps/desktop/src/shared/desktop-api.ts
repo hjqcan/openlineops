@@ -29,10 +29,23 @@ export interface ApiResponse<T = unknown> {
   text: string;
 }
 
+export interface SelectDirectoryOptions {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+  createDirectory?: boolean;
+}
+
+export interface SelectDirectoryResult {
+  canceled: boolean;
+  path: string | null;
+}
+
 export interface OpenLineOpsDesktopApi {
   getConfig(): Promise<DesktopConfig>;
   getBackendStatus(): Promise<BackendStatus>;
   startBackend(): Promise<BackendStatus>;
   stopBackend(): Promise<BackendStatus>;
+  selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

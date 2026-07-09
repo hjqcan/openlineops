@@ -304,6 +304,108 @@ export interface ConfigurationSnapshotResponse {
   deviceBindings: DeviceBindingResponse[];
 }
 
+export interface AutomationProjectSummaryResponse {
+  projectId: string;
+  displayName: string;
+  projectPath: string;
+  activeSnapshotId: string | null;
+}
+
+export interface AutomationProjectResponse {
+  projectId: string;
+  displayName: string;
+  projectPath: string;
+  createdAtUtc: string;
+  activeSnapshotId: string | null;
+  applications: ProjectApplicationResponse[];
+  snapshots: PublishedProjectSnapshotResponse[];
+}
+
+export interface ProjectApplicationResponse {
+  applicationId: string;
+  displayName: string;
+  topologyId: string | null;
+  processDefinitionIds: string[];
+}
+
+export interface PublishedProjectSnapshotResponse {
+  snapshotId: string;
+  projectId: string;
+  applicationId: string;
+  topologyId: string;
+  processDefinitionId: string;
+  processVersionId: string;
+  configurationSnapshotId: string;
+  publishedAtUtc: string;
+  capabilityBindings: SnapshotCapabilityBindingResponse[];
+  targetReferences: ProjectTargetReferenceResponse[];
+  blockVersionIds: string[];
+}
+
+export interface SnapshotCapabilityBindingResponse {
+  capabilityId: string;
+  bindingId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
+export interface ProjectTargetReferenceResponse {
+  kind: string;
+  targetId: string;
+}
+
+export interface AutomationProjectWorkspaceResponse {
+  project: AutomationProjectResponse;
+  manifestPath: string;
+  manifest: AutomationProjectManifestResponse;
+}
+
+export interface AutomationProjectManifestResponse {
+  formatVersion: number;
+  product: string;
+  projectId: string;
+  displayName: string;
+  projectPath: string;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  activeSnapshotId: string | null;
+  applications: ProjectApplicationManifestResponse[];
+  snapshots: PublishedProjectSnapshotManifestResponse[];
+}
+
+export interface ProjectApplicationManifestResponse {
+  applicationId: string;
+  displayName: string;
+  topologyId: string | null;
+  processDefinitionIds: string[];
+}
+
+export interface PublishedProjectSnapshotManifestResponse {
+  snapshotId: string;
+  projectId: string;
+  applicationId: string;
+  topologyId: string;
+  processDefinitionId: string;
+  processVersionId: string;
+  configurationSnapshotId: string;
+  publishedAtUtc: string;
+  capabilityBindings: SnapshotCapabilityBindingResponse[];
+  targetReferences: ProjectTargetReferenceResponse[];
+  blockVersionIds: string[];
+}
+
+export interface CreateAutomationProjectWorkspaceRequest {
+  projectId: string;
+  displayName: string;
+  projectPath: string;
+  defaultApplicationId: string | null;
+  defaultApplicationName: string | null;
+}
+
+export interface OpenAutomationProjectWorkspaceRequest {
+  projectPath: string;
+}
+
 export interface CreateWorkspaceRequest {
   workspaceId: string;
   displayName: string;

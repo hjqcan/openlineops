@@ -16,6 +16,7 @@ an accepted ADR to change history. Add a new ADR that supersedes the old one.
 | [0004](0004-define-explicit-plugin-contract-and-lifecycle.md) | Define Explicit Plugin Contract And Lifecycle | Accepted | 2026-06-29 |
 | [0005](0005-use-bounded-context-openapi-groups-and-v1-api-policy.md) | Use Bounded Context OpenAPI Groups And V1 API Policy | Accepted | 2026-06-29 |
 | [0006](0006-use-strongly-typed-domain-identifiers.md) | Use Strongly Typed Domain Identifiers | Accepted | 2026-06-30 |
+| [0007](0007-make-automation-project-workspace-primary-product-shell.md) | Make Automation Project Workspace The Primary Product Shell | Accepted | 2026-07-09 |
 
 ## Status Values
 

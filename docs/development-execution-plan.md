@@ -4,7 +4,9 @@ Last updated: 2026-07-09
 
 ## Product Positioning
 
-OpenLineOps is positioned as a next-generation extensible runtime platform for automated test production lines. It covers engineering configuration, device integration, process orchestration, runtime monitoring, data traceability, and plugin-based delivery.
+OpenLineOps is positioned as a next-generation extensible automation project workspace and runtime platform for automated test production lines. It should let users create or open automation projects, compose applications, automation topology, equipment nodes, modules, capability contracts, driver bindings, slot groups, and slots, edit a visual site layout, author execution flows with Blockly, execute flexible PythonScript logic through the .NET runtime boundary, monitor runs, and trace results.
+
+The product should feel closer to a project-oriented desktop workbench than to a single sequence editor. The primary user asset is an automation project. Engineering configuration, device integration, process orchestration, runtime monitoring, traceability, and plugin delivery all serve that project lifecycle.
 
 OpenLineOps is a ground-up product and platform implementation. Public design, code, documentation, and release artifacts should describe OpenLineOps as an original open-source project.
 
@@ -43,6 +45,42 @@ Current target layout:
 - `tests`: unit, integration, contract, and host-level tests.
 
 ## Bounded Contexts
+
+### Automation Project Workspace
+
+Purpose: provide the user-facing project shell for creating, opening, composing, publishing, and running automation projects.
+
+Initial aggregates and models:
+
+- `AutomationProject`: root project asset with manifest, settings, draft status, and publication history.
+- `ProjectApplication`: logical application or automation scenario inside a project.
+- `AutomationTopology`: structural model of equipment nodes, modules, ports, connections, slots, groups, and bindings.
+- `EquipmentNode`: addressable site, area, line, cell, station, unit, fixture, module, buffer, transport, device mount, external system, or logical subsystem node.
+- `AutomationModule`: reusable behavior-bearing component attached to a topology node.
+- `CapabilityContract`: versioned command/function contract exposed by simulator, plugin, device, process, or external service providers.
+- `DriverBinding`: project-local binding between a required capability and a concrete provider.
+- `SlotDefinition`: stable material endpoint for DUT, carrier, nest, fixture position, tray position, or logical work item.
+- `SlotGroup`: controlled material grouping such as fixture nest, tester bank, tray row, buffer lane, or robot pick group.
+- `SiteLayout`: top-down visual layout model with future 3D extension points.
+- `PublishedProjectSnapshot`: immutable handoff artifact for runtime launch.
+
+Main use cases:
+
+- Create, open, list, rename, archive, and package automation projects.
+- Compose applications, topology nodes, modules, capability contracts, driver bindings, slot groups, and slots inside a project.
+- Edit the site layout with stable references to equipment nodes, modules, slot groups, slots, connections, and zones.
+- Bind project capability requirements to device instances, plugin commands, simulator routes, process command providers, or external systems.
+- Associate process definitions and Blockly/PythonScript flows with selected project targets.
+- Publish an immutable project snapshot that freezes layout, bindings, process versions, block versions, generated Python source hashes, and engineering configuration.
+- Start runtime sessions from a published project snapshot.
+
+Acceptance criteria:
+
+- Electron has a project-first entry experience with new project, open project, and recent projects.
+- A runtime session can be traced back to project id, project snapshot id, application, equipment node, module, slot group, slot, process version, capability binding, and operator/system identity.
+- Draft project edits cannot change an already published runtime snapshot.
+- The first layout implementation is two-dimensional but stores semantics in a way that does not block future 3D rendering.
+- Blockly remains the default process authoring mode; manual Python code is available for advanced editing.
 
 ### Workspace And Project Configuration
 
@@ -905,6 +943,8 @@ Key constraints:
 - Electron should not read backend databases directly.
 - Desktop startup should manage backend process lifecycle explicitly.
 - API base URL, logs, and local data path must be configurable.
+- The desktop shell should be project-first: start with new/open/recent projects, keep an active project context, and scope workbenches to that project.
+- A site layout editor should provide a top-down canvas for applications, equipment nodes, modules, slot groups, slots, devices, connections, and labelled zones, with future 3D rendering kept outside the domain model.
 - Flow editing defaults to Blockly for script authoring and allows manual Python code editing for advanced users.
 - Python script validation and execution must use the in-repository `lib/pythonscript` component unless a future ADR explicitly replaces that integration.
 
@@ -1529,6 +1569,73 @@ Remaining Milestone 8 work:
 - Decide whether MIT remains the final license before publishing the public repository.
 - Provision a real code-signing certificate and produce a signed production Electron installer or portable artifact that passes the strict publication readiness signature gate.
 
+### Milestone 9: Automation Project Workspace And Site Layout
+
+Status: in progress.
+
+Goal: make the product's primary workflow match the project-oriented automation workbench model.
+
+Deliverables:
+
+- `docs/automation-project-workspace.md` target architecture guide.
+- `docs/composable-automation-model.md` detailed building block model.
+- ADR for making Automation Project Workspace the primary product shell.
+- Projects bounded context with Domain/Application/Infrastructure/API split.
+- `AutomationProject` aggregate with project manifest, lifecycle, and strong typed ids.
+- Topology model for project applications, equipment nodes, automation modules, capability contracts, driver bindings, slot groups, and slots.
+- `SiteLayout` draft model with top-down coordinates, layers, layout elements, target references, and future 3D metadata extension points.
+- Project publication workflow that creates immutable `PublishedProjectSnapshot` records.
+- API endpoints for project create/list/open/update, composition updates, layout updates, and publish.
+- In-memory and SQLite persistence adapters for local desktop development.
+- Host-level API tests and domain behavior tests for project lifecycle, composition invariants, layout validation, and snapshot immutability.
+- Electron start window for new/open/recent projects.
+- Project explorer sidebar scoped to the active project.
+- First top-down site layout editor for equipment nodes, modules, slot groups, slots, devices, labels, and zones.
+- Runtime launch update so the UI starts sessions from a published project snapshot instead of manually assembled ids.
+- Traceability update so traces include project snapshot, topology, layout, equipment node, module, slot group, and slot references.
+
+Delivered on 2026-07-09 (automation project workspace domain skeleton slice):
+
+- Added the source-neutral composable automation model that maps project, application, system, driver, group, slot, and site layout language into DDD concepts.
+- Added `modules/OpenLineOps.Projects.Domain` with `AutomationProject`, `ProjectApplication`, `PublishedProjectSnapshot`, project-local strong typed ids, snapshot publication validation, and a domain event for snapshot publication.
+- Added `modules/OpenLineOps.Topology.Domain` with `AutomationTopology`, `EquipmentNode`, `AutomationModule`, `CapabilityContract`, `DriverBinding`, `SlotGroup`, `SlotDefinition`, and `SiteLayout`.
+- Added topology invariants for root node uniqueness, parent existence, allowed node child kinds, declared capability references, capability binding uniqueness, slot address uniqueness, and slot group capacity.
+- Added project invariants for duplicate application rejection, linked topology/process checks, required capability bindings, required runtime targets, active snapshot assignment, and snapshot publication domain-event emission.
+- Added `tests/OpenLineOps.Projects.Tests` and `tests/OpenLineOps.Topology.Tests` behavior coverage for the first project/topology model.
+
+Delivered on 2026-07-09 (automation project workspace application foundation slice):
+
+- Added `modules/OpenLineOps.Projects.Application` with project workspace use cases for create/list/get automation project, add application, link topology, link process definition, and publish project snapshot.
+- Added `modules/OpenLineOps.Projects.Infrastructure` with an in-memory automation project repository behind the application repository port.
+- Added `modules/OpenLineOps.Topology.Application` with topology composition use cases for equipment nodes, capabilities, modules, driver bindings, slot groups, slots, site layout creation, and layout element placement.
+- Added `modules/OpenLineOps.Topology.Infrastructure` with in-memory topology and site layout repositories behind application repository ports.
+- Added application-layer behavior coverage proving project snapshot publication can be driven through the service layer and topology layout elements can only reference existing topology targets.
+
+Delivered on 2026-07-09 (automation project workspace API foundation slice):
+
+- Added `modules/OpenLineOps.Projects.Api` with host-routed HTTP endpoints for automation project create/list/get, application creation, topology linking, process-definition linking, and project snapshot publication.
+- Added `modules/OpenLineOps.Topology.Api` with host-routed HTTP endpoints for automation topology create/list/get, equipment node, capability, module, driver binding, slot group, slot, site layout, and layout element composition.
+- Registered the Projects and Topology API modules in the ASP.NET Core host and solution files so Electron can call the same backend boundary as other workbenches.
+- Added host-level API coverage proving the first project workspace can be composed through HTTP, including topology blocks, layout target validation, project application linking, and snapshot publication.
+
+Delivered on 2026-07-09 (automation project workspace manifest slice):
+
+- Added a versioned `openlineops.project.json` project-folder manifest model for project id, display name, project path, applications, linked topology/process ids, active snapshot id, and published snapshot metadata.
+- Added controlled domain restore factories for `AutomationProject`, `ProjectApplication`, and `PublishedProjectSnapshot` so infrastructure can rehydrate project aggregates without raising new domain events.
+- Added `AutomationProjectWorkspaceService` with create/open/save manifest use cases and a file-system manifest store that writes manifests through a temporary file replacement.
+- Added `/api/automation-project-workspaces`, `/api/automation-project-workspaces/open`, and `PUT /api/automation-projects/{projectId}/manifest` so Electron can create, open, and save project folders through the backend boundary.
+- Added application-service and host-level API tests proving project manifests round-trip through a fresh repository and through the ASP.NET Core host.
+
+Exit criteria:
+
+- A user can create or open an automation project from Electron.
+- A user can define at least one application, equipment node, automation module, slot group, slot, capability contract, and driver binding inside that project.
+- A user can place those elements on a top-down layout and persist the layout.
+- A user can connect a Blockly/PythonScript process to a project target.
+- A user can publish the project and start a runtime session from the published project snapshot.
+- Trace output identifies the project snapshot and target equipment node, slot group, or slot used by the run.
+- Existing Process, Device, Runtime, and Traceability tests remain green.
+
 ## Testing Strategy
 
 Testing layers:
@@ -1554,6 +1661,9 @@ Use HTTP APIs for configuration, traceability, and management. Use SignalR for l
 Initial API groups:
 
 - `/api/platform`
+- `/api/automation-projects`
+- `/api/automation-topologies`
+- `/api/site-layouts`
 - `/api/workspaces`
 - `/api/projects`
 - `/api/recipes`
@@ -1582,9 +1692,11 @@ Do not decide final storage solely from UI convenience. Runtime traceability and
 
 ## Immediate Next Development Tasks
 
-1. Prove the optional PostgreSQL integration tests on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1`.
-2. Prove the optional RabbitMQ/EventBus readiness integration test on a machine with Docker CLI available by setting `OPENLINEOPS_RUN_RABBITMQ_INTEGRATION=1`.
-3. Finalize the public release inputs: license confirmation, production code-signing certificate, signed desktop artifact, and strict publishable evidence generation.
+1. Add local desktop persistence for automation projects and topology drafts, starting with SQLite repository adapters behind the existing application ports.
+2. Define the first project folder/package manifest so Electron can create and open project directories consistently.
+3. Move Electron toward the new/open/recent project shell, active project context, and project explorer.
+4. Connect the process editor to project targets so Blockly/PythonScript nodes can reference equipment nodes, modules, slot groups, slots, and capability contracts.
+5. Add runtime launch from published project snapshots and enrich trace records with project, topology, layout, slot, and capability binding references.
 
 ## Current Verification Commands
 

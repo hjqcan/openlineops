@@ -5,7 +5,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace PythonScript
 {
     /// <summary>
-    /// 将 C# 三元表达式转换为 Python 语法的重写器。
+    /// 将 C# 三元表达式转换为 Python 语法的转换器。
     /// </summary>
     internal sealed class TernaryExpressionRewriter : CSharpSyntaxRewriter
     {

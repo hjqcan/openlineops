@@ -1,8 +1,8 @@
 # OpenLineOps
 
-OpenLineOps is a next-generation extensible runtime platform for automated test production lines.
+OpenLineOps is a next-generation automation project workspace and extensible runtime platform for automated test production lines.
 
-It covers engineering configuration, device integration, process orchestration, runtime monitoring, data traceability, and plugin-based delivery. OpenLineOps is a ground-up original open-source platform.
+It is designed to let users create and open automation projects, compose applications, automation topology, equipment nodes, modules, capability contracts, driver bindings, slot groups, and slots, edit a visual site layout, author execution flows with Blockly, run flexible PythonScript logic through the .NET runtime boundary, monitor production runs, and trace results. OpenLineOps is a ground-up original open-source platform.
 
 ## Current Status
 
@@ -14,6 +14,7 @@ This project is in early platform development.
 - Persistence: in-memory and SQLite for local development, PostgreSQL adapters for deployment mode, and reusable `OpenLineOps.Infrastructure.Data.Core` package adoption through the `OpenLineOps.SampleInspection` template and Devices `EfSqlite` provider.
 - Runtime: simulated execution, process definitions, desktop engineering snapshot workflow, device management, operations alarm lifecycle with Runtime incident bridge, traceability search, published-process launch from desktop, monitoring, trace generation, plugin lifecycle foundations, and API-backed plugin management from desktop.
 - Python scripting: Process node metadata, official Blockly workspace editing, built-in, manifest-generated, and persisted/versioned user-registered automation blocks, desktop version browsing and restore controls, Python template generation, source hashing, snapshot persistence, publish-time syntax validation, trusted in-process execution, configurable process-isolated worker execution, and runtime dispatch of Blockly-generated automation plans over the in-repository `lib/pythonscript` component are in place.
+- Project workspace: the target architecture now treats the automation project as the primary desktop asset, and the first Projects/Topology domain, application-service, in-memory infrastructure, project-folder manifest, and HTTP API foundation is in place for project applications, equipment nodes, automation modules, capability contracts, driver bindings, slot groups, slots, site layout drafts, layout target validation, manifest-backed create/open/save workflows, and immutable project snapshot publication.
 - Open source packaging: initial documentation, contribution workflow, CI workflow, CI workflow action reference verification, CI release artifact bundle inspection evidence, sample plugin, bounded-context living template, module scaffolding command, release manifest tooling, artifact kind gates, local release staging script, third-party notice generation, release dependency inventory metadata, release metadata checksums, release provenance metadata, release candidate inspection verification, publication evidence reporting and verification, final publication preflight, unsigned desktop unpacked package staging, optional desktop signing pipeline, manifest/checksum verification, publication readiness gate with strict signed-desktop enforcement, publication metadata finalization script, and CI release artifact upload.
 
 ## Repository Map
@@ -140,6 +141,9 @@ npm audit --audit-level=high --registry=https://registry.npmjs.org
 ## Documentation
 
 - Development plan: `docs/development-execution-plan.md`
+- Automation project workspace: `docs/automation-project-workspace.md`
+- Composable automation model: `docs/composable-automation-model.md`
+- Composable building block architecture: `docs/composable-building-block-architecture.md`
 - ADR index: `docs/adr/README.md`
 - Plugin authoring: `docs/plugin-authoring.md`
 - Bounded-context scaffolding: `docs/bounded-context-scaffolding.md`

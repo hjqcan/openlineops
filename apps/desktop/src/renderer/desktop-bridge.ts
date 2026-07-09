@@ -35,6 +35,10 @@ const fallbackDesktopApi: OpenLineOpsDesktopApi = {
     lastExitCode: null,
     recentLogs: []
   }),
+  selectDirectory: async () => ({
+    canceled: true,
+    path: null
+  }),
   apiRequest: async () => ({
     ok: false,
     status: 503,

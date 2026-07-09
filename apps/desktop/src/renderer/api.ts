@@ -2,6 +2,9 @@ import * as signalR from '@microsoft/signalr';
 import type { ApiResponse } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
 import type {
+  AutomationProjectSummaryResponse,
+  AutomationProjectWorkspaceResponse,
+  CreateAutomationProjectWorkspaceRequest,
   CreateDeviceDefinitionRequest,
   CreateEngineeringProjectRequest,
   CreateProcessDefinitionRequest,
@@ -17,6 +20,7 @@ import type {
   HealthResponse,
   PlatformResponse,
   ExternalPluginProcessEventResponse,
+  OpenAutomationProjectWorkspaceRequest,
   ProcessDefinitionResponse,
   ProcessDefinitionSummary,
   ProcessGraphValidationReport,
@@ -50,6 +54,43 @@ export async function getPlatform(): Promise<ApiResponse<PlatformResponse>> {
 
 export async function getHealth(): Promise<ApiResponse<HealthResponse>> {
   return desktop.apiRequest<HealthResponse>('/health/live');
+}
+
+export async function listAutomationProjects(): Promise<AutomationProjectSummaryResponse[]> {
+  const response = await desktop.apiRequest<AutomationProjectSummaryResponse[]>('/api/automation-projects');
+  return response.body ?? [];
+}
+
+export async function createAutomationProjectWorkspace(
+  request: CreateAutomationProjectWorkspaceRequest
+): Promise<ApiResponse<AutomationProjectWorkspaceResponse>> {
+  return desktop.apiRequest<AutomationProjectWorkspaceResponse>(
+    '/api/automation-project-workspaces',
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function openAutomationProjectWorkspace(
+  request: OpenAutomationProjectWorkspaceRequest
+): Promise<ApiResponse<AutomationProjectWorkspaceResponse>> {
+  return desktop.apiRequest<AutomationProjectWorkspaceResponse>(
+    '/api/automation-project-workspaces/open',
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function saveAutomationProjectManifest(
+  projectId: string
+): Promise<ApiResponse<AutomationProjectWorkspaceResponse>> {
+  return desktop.apiRequest<AutomationProjectWorkspaceResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/manifest`,
+    {
+      method: 'PUT'
+    });
 }
 
 export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
