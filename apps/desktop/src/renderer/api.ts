@@ -7,6 +7,7 @@ import type {
   AddDriverBindingRequest,
   AddEquipmentNodeRequest,
   AddSiteLayoutElementRequest,
+  AddProjectApplicationRequest,
   AddSlotDefinitionRequest,
   AddSlotGroupRequest,
   AutomationProjectSummaryResponse,
@@ -62,6 +63,7 @@ import type {
   TraceRecordExportPackageResponse,
   TraceRecordQueryResponse,
   TraceRecordResponse,
+  UpdateSiteLayoutElementGeometryRequest,
   WorkspaceResponse
 } from './contracts';
 
@@ -107,6 +109,18 @@ export async function saveAutomationProjectManifest(
     `/api/automation-projects/${encodeURIComponent(projectId)}/manifest`,
     {
       method: 'PUT'
+    });
+}
+
+export async function addProjectApplication(
+  projectId: string,
+  request: AddProjectApplicationRequest
+): Promise<ApiResponse<AutomationProjectResponse>> {
+  return desktop.apiRequest<AutomationProjectResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/applications`,
+    {
+      method: 'POST',
+      body: request
     });
 }
 
@@ -160,23 +174,33 @@ export async function startProjectSnapshotRuntimeSession(
     });
 }
 
-export async function listAutomationTopologies(): Promise<AutomationTopologySummaryResponse[]> {
-  const response = await desktop.apiRequest<AutomationTopologySummaryResponse[]>('/api/automation-topologies');
+export interface ProjectApplicationApiScope {
+  projectId: string;
+  applicationId: string;
+}
+
+export async function listAutomationTopologies(
+  scope?: ProjectApplicationApiScope
+): Promise<AutomationTopologySummaryResponse[]> {
+  const response = await desktop.apiRequest<AutomationTopologySummaryResponse[]>(
+    topologyCollectionPath(scope));
   return response.body ?? [];
 }
 
 export async function getAutomationTopology(
-  topologyId: string
+  topologyId: string,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}`);
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}`);
 }
 
 export async function createAutomationTopology(
-  request: CreateAutomationTopologyRequest
+  request: CreateAutomationTopologyRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    '/api/automation-topologies',
+    topologyCollectionPath(scope),
     {
       method: 'POST',
       body: request
@@ -185,10 +209,11 @@ export async function createAutomationTopology(
 
 export async function addEquipmentNode(
   topologyId: string,
-  request: AddEquipmentNodeRequest
+  request: AddEquipmentNodeRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/nodes`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/nodes`,
     {
       method: 'POST',
       body: request
@@ -197,10 +222,11 @@ export async function addEquipmentNode(
 
 export async function addCapabilityContract(
   topologyId: string,
-  request: AddCapabilityContractRequest
+  request: AddCapabilityContractRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/capabilities`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/capabilities`,
     {
       method: 'POST',
       body: request
@@ -209,10 +235,11 @@ export async function addCapabilityContract(
 
 export async function addAutomationModule(
   topologyId: string,
-  request: AddAutomationModuleRequest
+  request: AddAutomationModuleRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/modules`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/modules`,
     {
       method: 'POST',
       body: request
@@ -221,10 +248,11 @@ export async function addAutomationModule(
 
 export async function addDriverBinding(
   topologyId: string,
-  request: AddDriverBindingRequest
+  request: AddDriverBindingRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/driver-bindings`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/driver-bindings`,
     {
       method: 'POST',
       body: request
@@ -233,10 +261,11 @@ export async function addDriverBinding(
 
 export async function addSlotGroup(
   topologyId: string,
-  request: AddSlotGroupRequest
+  request: AddSlotGroupRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/slot-groups`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups`,
     {
       method: 'POST',
       body: request
@@ -245,26 +274,31 @@ export async function addSlotGroup(
 
 export async function addSlotDefinition(
   topologyId: string,
-  request: AddSlotDefinitionRequest
+  request: AddSlotDefinitionRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `/api/automation-topologies/${encodeURIComponent(topologyId)}/slots`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots`,
     {
       method: 'POST',
       body: request
     });
 }
 
-export async function getSiteLayout(layoutId: string): Promise<ApiResponse<SiteLayoutResponse>> {
+export async function getSiteLayout(
+  layoutId: string,
+  scope?: ProjectApplicationApiScope
+): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
-    `/api/site-layouts/${encodeURIComponent(layoutId)}`);
+    `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}`);
 }
 
 export async function createSiteLayout(
-  request: CreateSiteLayoutRequest
+  request: CreateSiteLayoutRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
-    '/api/site-layouts',
+    siteLayoutCollectionPath(scope),
     {
       method: 'POST',
       body: request
@@ -273,14 +307,45 @@ export async function createSiteLayout(
 
 export async function addSiteLayoutElement(
   layoutId: string,
-  request: AddSiteLayoutElementRequest
+  request: AddSiteLayoutElementRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
-    `/api/site-layouts/${encodeURIComponent(layoutId)}/elements`,
+    `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements`,
     {
       method: 'POST',
       body: request
     });
+}
+
+export async function updateSiteLayoutElementGeometry(
+  layoutId: string,
+  elementId: string,
+  request: UpdateSiteLayoutElementGeometryRequest,
+  scope?: ProjectApplicationApiScope
+): Promise<ApiResponse<SiteLayoutResponse>> {
+  return desktop.apiRequest<SiteLayoutResponse>(
+    `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements/${encodeURIComponent(elementId)}/geometry`,
+    {
+      method: 'PUT',
+      body: request
+    });
+}
+
+function topologyCollectionPath(scope?: ProjectApplicationApiScope): string {
+  return scope
+    ? `${projectApplicationPath(scope)}/topologies`
+    : '/api/automation-topologies';
+}
+
+function siteLayoutCollectionPath(scope?: ProjectApplicationApiScope): string {
+  return scope
+    ? `${projectApplicationPath(scope)}/layouts`
+    : '/api/site-layouts';
+}
+
+function projectApplicationPath(scope: ProjectApplicationApiScope): string {
+  return `/api/automation-projects/${encodeURIComponent(scope.projectId)}/applications/${encodeURIComponent(scope.applicationId)}`;
 }
 
 export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
@@ -532,8 +597,10 @@ export async function listPluginEvents(
   return response.body ?? [];
 }
 
-export async function listProcessDefinitions(): Promise<ProcessDefinitionSummary[]> {
-  const response = await desktop.apiRequest<ProcessDefinitionSummary[]>('/api/process-definitions');
+export async function listProcessDefinitions(
+  scope?: ProjectApplicationApiScope
+): Promise<ProcessDefinitionSummary[]> {
+  const response = await desktop.apiRequest<ProcessDefinitionSummary[]>(processCollectionPath(scope));
   return response.body ?? [];
 }
 
@@ -562,39 +629,62 @@ export async function registerProcessBlocklyBlock(
 }
 
 export async function createProcessDefinition(
-  request: CreateProcessDefinitionRequest
+  request: CreateProcessDefinitionRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
-    '/api/process-definitions',
+    processCollectionPath(scope),
     {
       method: 'POST',
       body: request
     });
 }
 
-export async function getProcessDefinition(
-  processDefinitionId: string
+export async function updateProcessDefinition(
+  processDefinitionId: string,
+  request: CreateProcessDefinitionRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
-    `/api/process-definitions/${encodeURIComponent(processDefinitionId)}`);
+    `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}`,
+    {
+      method: 'PUT',
+      body: request
+    });
+}
+
+export async function getProcessDefinition(
+  processDefinitionId: string,
+  scope?: ProjectApplicationApiScope
+): Promise<ApiResponse<ProcessDefinitionResponse>> {
+  return desktop.apiRequest<ProcessDefinitionResponse>(
+    `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}`);
 }
 
 export async function publishProcessDefinition(
-  processDefinitionId: string
+  processDefinitionId: string,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
-    `/api/process-definitions/${encodeURIComponent(processDefinitionId)}/publish`,
+    `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}/publish`,
     {
       method: 'POST'
     });
 }
 
 export async function validateProcessDefinition(
-  processDefinitionId: string
+  processDefinitionId: string,
+  scope?: ProjectApplicationApiScope
 ): Promise<ProcessGraphValidationReport | null> {
   const response = await desktop.apiRequest<ProcessGraphValidationReport>(
-    `/api/process-definitions/${encodeURIComponent(processDefinitionId)}/validation`);
+    `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}/validation`);
   return response.body;
+}
+
+function processCollectionPath(scope?: ProjectApplicationApiScope): string {
+  return scope
+    ? `${projectApplicationPath(scope)}/processes`
+    : '/api/process-definitions';
 }
 
 export async function startProcessRuntimeSession(

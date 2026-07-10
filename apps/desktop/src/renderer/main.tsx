@@ -3,32 +3,38 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity,
   AlertTriangle,
+  Blocks,
   CheckCircle2,
   CirclePlay,
+  Code2,
   Database,
   FileSearch,
   FolderKanban,
-  Gauge,
   GitBranch,
-  HeartPulse,
+  Gauge,
+  Layers3,
   LayoutDashboard,
   MonitorCog,
   Package,
+  PanelBottom,
+  Play,
   PlugZap,
   RefreshCw,
-  Server,
   Settings,
   Square,
+  X,
   Zap
 } from 'lucide-react';
 import type { BackendStatus, DesktopConfig } from '../shared/desktop-api';
 import type {
   AutomationProjectWorkspaceResponse,
   PlatformResponse,
+  PublishedProjectSnapshotResponse,
   RuntimeAlarm,
   RuntimeSessionRunResponse,
   RuntimeStationStatus,
   RuntimeTimelineEntry,
+  StartedProjectSnapshotRuntimeSessionResponse,
   TraceRecordSummary
 } from './contracts';
 import { desktop } from './desktop-bridge';
@@ -41,6 +47,7 @@ import {
   getStationStatuses,
   getTimeline,
   getTraceRecords,
+  startProjectSnapshotRuntimeSession,
   startDemoRuntimeSession
 } from './api';
 import { DevicesWorkbench } from './devices-workbench';
@@ -56,13 +63,13 @@ const ProcessWorkbench = React.lazy(async () => {
 });
 
 const navItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'projects', label: 'Projects', icon: FolderKanban },
-  { id: 'engineering', label: 'Engineering', icon: MonitorCog },
-  { id: 'processes', label: 'Processes', icon: GitBranch },
+  { id: 'projects', label: 'Explorer', icon: FolderKanban },
+  { id: 'processes', label: 'Flow Designer', icon: Blocks },
+  { id: 'engineering', label: 'Configuration', icon: MonitorCog },
   { id: 'devices', label: 'Devices', icon: PlugZap },
-  { id: 'trace', label: 'Trace', icon: FileSearch },
-  { id: 'plugins', label: 'Plugins', icon: Package }
+  { id: 'dashboard', label: 'Run and Monitor', icon: Play },
+  { id: 'trace', label: 'Traceability', icon: FileSearch },
+  { id: 'plugins', label: 'Extensions', icon: Package }
 ] as const;
 
 type NavId = (typeof navItems)[number]['id'];
@@ -75,7 +82,8 @@ declare global {
 }
 
 function App(): React.ReactElement {
-  const [activeNav, setActiveNav] = useState<NavId>('dashboard');
+  const [activeNav, setActiveNav] = useState<NavId>('projects');
+  const [workspaceMode, setWorkspaceMode] = useState<'edit' | 'run'>('edit');
   const [config, setConfig] = useState<DesktopConfig | null>(null);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [platform, setPlatform] = useState<PlatformResponse | null>(null);
@@ -86,15 +94,30 @@ function App(): React.ReactElement {
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
   const [lastRun, setLastRun] = useState<RuntimeSessionRunResponse | null>(null);
+  const [lastProjectRun, setLastProjectRun] =
+    useState<StartedProjectSnapshotRuntimeSessionResponse | null>(null);
   const [activeWorkspace, setActiveWorkspace] = useState<AutomationProjectWorkspaceResponse | null>(null);
+  const [activeApplicationId, setActiveApplicationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('Ready');
 
+  const activeApplication = useMemo(
+    () => activeWorkspace?.project.applications.find(
+      application => application.applicationId === activeApplicationId)
+      ?? activeWorkspace?.project.applications[0]
+      ?? null,
+    [activeApplicationId, activeWorkspace]);
+  const activeApplicationSnapshot = useMemo(
+    () => selectApplicationSnapshot(activeWorkspace, activeApplication?.applicationId ?? null),
+    [activeApplication?.applicationId, activeWorkspace]);
+
   const latestStation = stations[0] ?? null;
-  const activeNavLabel = navItems.find(item => item.id === activeNav)?.label ?? 'Dashboard';
+  const activeNavLabel = navItems.find(item => item.id === activeNav)?.label ?? 'Explorer';
   const activeTitle = activeNav === 'dashboard'
     ? 'Station Runtime Dashboard'
-    : `${activeNavLabel} Workbench`;
+    : activeNav === 'projects'
+      ? activeWorkspace?.project.displayName ?? 'Automation Projects'
+      : activeNavLabel;
 
   const refresh = useCallback(async () => {
     const [desktopConfig, status] = await Promise.all([
@@ -139,6 +162,15 @@ function App(): React.ReactElement {
   useEffect(() => {
     refresh().catch(error => setMessage(`Refresh failed: ${String(error)}`));
   }, [refresh]);
+
+  useEffect(() => {
+    setActiveApplicationId(current => {
+      const applications = activeWorkspace?.project.applications ?? [];
+      return applications.some(application => application.applicationId === current)
+        ? current
+        : applications[0]?.applicationId ?? null;
+    });
+  }, [activeWorkspace]);
 
   useEffect(() => {
     if (!config?.apiBaseUrl) {
@@ -260,6 +292,93 @@ function App(): React.ReactElement {
     }
   }, []);
 
+  const selectWorkspace = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
+    setActiveWorkspace(workspace);
+    setWorkspaceMode('edit');
+    setActiveNav('projects');
+    setLastProjectRun(null);
+  }, []);
+
+  const closeWorkspace = useCallback(() => {
+    setActiveWorkspace(null);
+    setActiveApplicationId(null);
+    setWorkspaceMode('edit');
+    setActiveNav('projects');
+    setLastProjectRun(null);
+    setMessage('Project closed. Select a project to continue.');
+  }, []);
+
+  const changeWorkspaceMode = useCallback((mode: 'edit' | 'run') => {
+    if (mode === 'run' && !activeWorkspace) {
+      setMessage('Open a project before entering Run mode.');
+      setActiveNav('projects');
+      return;
+    }
+
+    setWorkspaceMode(mode);
+    setActiveNav(mode === 'run' ? 'dashboard' : activeNav === 'dashboard' ? 'projects' : activeNav);
+  }, [activeNav, activeWorkspace]);
+
+  const runActiveProject = useCallback(async () => {
+    if (!activeWorkspace) {
+      setMessage('Open a project before running.');
+      setActiveNav('projects');
+      return;
+    }
+
+    const snapshotId = activeApplicationSnapshot?.snapshotId ?? null;
+    if (!snapshotId) {
+      setMessage('Publish a project snapshot before running.');
+      setActiveNav('processes');
+      return;
+    }
+
+    if (backendStatus?.health !== 'Healthy') {
+      setMessage('Start the runtime backend before running the project.');
+      return;
+    }
+
+    setBusy(true);
+    setMessage(`Starting published snapshot ${snapshotId}`);
+    try {
+      const response = await startProjectSnapshotRuntimeSession(
+        activeWorkspace.project.projectId,
+        snapshotId,
+        {
+          serialNumber: null,
+          batchId: null,
+          fixtureId: null,
+          deviceId: null,
+          actorId: 'openlineops-ide'
+        });
+      if (!response.ok || !response.body) {
+        setMessage(`Project run failed: ${response.status} ${response.text}`);
+        return;
+      }
+
+      setLastProjectRun(response.body);
+      setWorkspaceMode('run');
+      setActiveNav('dashboard');
+      setMessage(`Project run ${response.body.status}: ${response.body.sessionId}`);
+      await refresh();
+    } catch (error) {
+      setMessage(`Project run failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, refresh]);
+
+  const selectApplication = useCallback((applicationId: string) => {
+    if (!applicationId) {
+      return;
+    }
+
+    setActiveApplicationId(applicationId);
+    setLastProjectRun(null);
+    setWorkspaceMode('edit');
+    setMessage(`Application selected ${applicationId}`);
+  }, []);
+
   const visiblePanel = useMemo(() => {
     if (activeNav === 'dashboard') {
       return (
@@ -279,6 +398,7 @@ function App(): React.ReactElement {
         <React.Suspense fallback={<WorkbenchLoading label="Processes" />}>
           <ProcessWorkbench
             activeWorkspace={activeWorkspace}
+            activeApplicationId={activeApplication?.applicationId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
@@ -291,8 +411,10 @@ function App(): React.ReactElement {
       return (
         <ProjectsWorkbench
           activeWorkspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
+          onActiveApplicationChanged={selectApplication}
           isBackendHealthy={backendStatus?.health === 'Healthy'}
-          onWorkspaceChanged={setActiveWorkspace}
+          onWorkspaceChanged={selectWorkspace}
           onMessage={setMessage}
         />
       );
@@ -301,6 +423,8 @@ function App(): React.ReactElement {
     if (activeNav === 'engineering') {
       return (
         <EngineeringWorkbench
+          activeWorkspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
           isBackendHealthy={backendStatus?.health === 'Healthy'}
           onMessage={setMessage}
         />
@@ -335,28 +459,111 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, stations, timeline, traceRows]);
+  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, selectApplication, selectWorkspace, stations, timeline, traceRows]);
 
   return (
-    <main className="app-shell">
-      <aside className="rail">
-        <div className="brand">
-          <span className="brand-mark">OL</span>
-          <span>OpenLineOps</span>
+    <main
+      className={`ide-shell ${activeWorkspace ? 'project-open' : 'start-only'}`}
+      data-testid="automation-ide-shell"
+    >
+      <header className="ide-titlebar">
+        <div className="ide-breadcrumb">
+          <strong>OpenLineOps</strong>
+          <span>/</span>
+          <span>{activeWorkspace?.project.displayName ?? 'Start Center'}</span>
+          {activeWorkspace ? (
+            <>
+              <span>/</span>
+              <select
+                className="ide-application-selector"
+                value={activeApplication?.applicationId ?? ''}
+                onChange={event => selectApplication(event.target.value)}
+                aria-label="Active application"
+                data-testid="active-application-selector"
+              >
+                {activeWorkspace.project.applications.map(application => (
+                  <option key={application.applicationId} value={application.applicationId}>
+                    {application.displayName}
+                  </option>
+                ))}
+              </select>
+              <span>/</span>
+              <b>{activeNavLabel}</b>
+            </>
+          ) : null}
         </div>
+
+        <div className="ide-mode-switch" role="group" aria-label="Workspace mode">
+          <button
+            type="button"
+            className={workspaceMode === 'edit' ? 'active' : ''}
+            onClick={() => changeWorkspaceMode('edit')}
+            data-testid="mode-edit"
+          >
+            <Code2 size={14} />
+            Edit
+          </button>
+          <button
+            type="button"
+            className={workspaceMode === 'run' ? 'active' : ''}
+            onClick={() => changeWorkspaceMode('run')}
+            disabled={!activeWorkspace}
+            data-testid="mode-run"
+          >
+            <Play size={14} />
+            Run
+          </button>
+        </div>
+
+        <div className="ide-title-actions">
+          <span className={`ide-health-dot ${backendStatus?.health === 'Healthy' ? 'good' : 'warn'}`} />
+          <span className="ide-health-label">Runtime {backendStatus?.health ?? 'Unknown'}</span>
+          <button type="button" className="ide-tool-button" onClick={refresh} disabled={busy} title="Refresh runtime" data-testid="refresh-backend">
+            <RefreshCw size={15} />
+          </button>
+          {backendStatus?.pid ? (
+            <button type="button" className="ide-tool-button danger" onClick={stopBackend} disabled={busy} title="Stop runtime" data-testid="stop-backend">
+              <Square size={13} />
+            </button>
+          ) : (
+            <button type="button" className="ide-tool-button" onClick={startBackend} disabled={busy} title="Start runtime" data-testid="start-backend">
+              <CirclePlay size={15} />
+            </button>
+          )}
+          <button
+            type="button"
+            className="ide-run-button"
+            onClick={runActiveProject}
+            disabled={busy || !activeWorkspace || !activeApplicationSnapshot || backendStatus?.health !== 'Healthy'}
+            title={activeApplicationSnapshot ? 'Run selected application snapshot' : 'Publish a snapshot for the selected application before running'}
+            data-testid="run-active-project"
+          >
+            <Play size={14} />
+            Run Project
+          </button>
+        </div>
+      </header>
+
+      <aside className="ide-activity-bar" aria-label="Primary tools">
+        <div className="brand-mark" title="OpenLineOps Automation IDE">OL</div>
         <nav className="nav-list">
           {navItems.map(item => {
             const Icon = item.icon;
+            const disabled = !activeWorkspace && item.id !== 'projects';
             return (
               <button
                 type="button"
                 className={activeNav === item.id ? 'nav-item active' : 'nav-item'}
                 key={item.id}
-                onClick={() => setActiveNav(item.id)}
+                onClick={() => {
+                  setActiveNav(item.id);
+                  setWorkspaceMode(item.id === 'dashboard' ? 'run' : 'edit');
+                }}
                 title={item.label}
+                disabled={disabled}
                 data-testid={`nav-${item.id}`}
               >
-                <Icon size={17} />
+                <Icon size={20} />
                 <span>{item.label}</span>
               </button>
             );
@@ -364,55 +571,242 @@ function App(): React.ReactElement {
         </nav>
         <div className="rail-footer">
           <StatusPill label={hubState} tone={hubState === 'Connected' ? 'good' : 'warn'} />
-          <span className="small-path">{config?.logPath ?? 'logs pending'}</span>
         </div>
       </aside>
 
-      <section className="workspace">
-        <header className="topbar">
+      {activeWorkspace ? (
+        <ProjectExplorer
+          workspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
+          activeNav={activeNav}
+          onNavigate={nav => {
+            setActiveNav(nav);
+            setWorkspaceMode(nav === 'dashboard' ? 'run' : 'edit');
+          }}
+          onSelectApplication={selectApplication}
+          onClose={closeWorkspace}
+        />
+      ) : null}
+
+      <section className="ide-editor-area">
+        <div className="ide-editor-tabs">
+          <div className="ide-editor-tab active">
+            {activeNav === 'processes' ? <Blocks size={14} /> : activeNav === 'dashboard' ? <Play size={14} /> : <FileSearch size={14} />}
+            <span>{activeTitle}</span>
+            {activeWorkspace ? <small>{activeWorkspace.project.projectId}</small> : null}
+          </div>
+        </div>
+
+        <div className="ide-editor-toolbar">
           <div>
-            <h1>{activeTitle}</h1>
-            <p>{message}</p>
+            <strong>{activeTitle}</strong>
+            <span>{message}</span>
           </div>
-          <div className="top-actions">
-            <StatusMetric icon={Server} label="API" value={backendStatus?.health ?? 'Unknown'} tone={backendStatus?.health === 'Healthy' ? 'good' : 'warn'} />
-            <StatusMetric icon={HeartPulse} label="Health" value={healthStatus} tone={healthStatus === 'Healthy' ? 'good' : 'warn'} />
-            <button type="button" className="button ghost" onClick={refresh} disabled={busy} title="Refresh" data-testid="refresh-backend">
-              <RefreshCw size={16} />
-              Refresh
-            </button>
-            <button type="button" className="button" onClick={startBackend} disabled={busy} title="Start backend" data-testid="start-backend">
-              <CirclePlay size={16} />
-              Start
-            </button>
-            <button type="button" className="button danger" onClick={stopBackend} disabled={busy} title="Stop backend" data-testid="stop-backend">
-              <Square size={15} />
-              Stop
-            </button>
+          {activeNav === 'dashboard' ? (
+            <div className="ide-editor-toolbar-actions">
+              <button
+                type="button"
+                className="button"
+                onClick={runSimulation}
+                disabled={busy || backendStatus?.health !== 'Healthy'}
+                title="Run simulated station session"
+                data-testid="run-simulation"
+              >
+                <Zap size={15} />
+                Run Simulation
+              </button>
+              <span>Latest: {lastProjectRun?.sessionId ?? lastRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="ide-editor-surface">
+          {visiblePanel}
+        </div>
+
+        <div className={`ide-bottom-panel ${workspaceMode === 'run' ? 'expanded' : ''}`}>
+          <div className="ide-bottom-panel-title">
+            <PanelBottom size={14} />
+            <strong>{workspaceMode === 'run' ? 'Runtime Output' : 'Problems · Output · Terminal'}</strong>
+            <span>{message}</span>
           </div>
-        </header>
-
-        <section className="system-strip">
-          <InfoCell label="API base URL" value={config?.apiBaseUrl ?? 'http://localhost:5135'} />
-          <InfoCell label="Backend PID" value={backendStatus?.pid?.toString() ?? 'not running'} />
-          <InfoCell label="Platform" value={platform ? `${platform.service} ${platform.version}` : 'pending'} />
-          <InfoCell label="Environment" value={platform?.environment ?? 'unknown'} />
-        </section>
-
-        <section className="command-row">
-          <button type="button" className="button primary" onClick={runSimulation} disabled={busy || backendStatus?.health !== 'Healthy'} title="Run simulated station session" data-testid="run-simulation">
-            <Zap size={16} />
-            Run Simulation
-          </button>
-          <span className="command-note">
-            Latest session: {lastRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}
-          </span>
-        </section>
-
-        {visiblePanel}
+          {workspaceMode === 'run' ? (
+            <div className="ide-runtime-summary">
+              <InfoCell label="Session" value={lastProjectRun?.sessionId ?? lastRun?.sessionId ?? 'waiting'} />
+              <InfoCell label="Status" value={lastProjectRun?.status ?? lastRun?.status ?? 'Idle'} />
+              <InfoCell label="Timeline" value={`${timeline.length} events`} />
+              <InfoCell label="Alarms" value={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
+            </div>
+          ) : null}
+        </div>
       </section>
+
+      <footer className="ide-statusbar">
+        <span><Layers3 size={12} /> {activeWorkspace?.project.projectId ?? 'No project open'}{activeApplication ? ` / ${activeApplication.applicationId}` : ''}</span>
+        <span>{activeApplicationSnapshot ? `Snapshot ${activeApplicationSnapshot.snapshotId}` : 'Draft workspace'}</span>
+        <span>{platform ? `${platform.serviceName} ${platform.version}` : 'OpenLineOps.Api'}</span>
+        <span>{platform?.environment ?? 'local'} · PID {backendStatus?.pid ?? '—'} · {healthStatus}</span>
+      </footer>
     </main>
   );
+}
+
+function ProjectExplorer({
+  workspace,
+  activeApplicationId,
+  activeNav,
+  onNavigate,
+  onSelectApplication,
+  onClose
+}: {
+  workspace: AutomationProjectWorkspaceResponse;
+  activeApplicationId: string | null;
+  activeNav: NavId;
+  onNavigate(nav: NavId): void;
+  onSelectApplication(applicationId: string): void;
+  onClose(): void;
+}): React.ReactElement {
+  const application = workspace.project.applications.find(
+    candidate => candidate.applicationId === activeApplicationId)
+    ?? workspace.project.applications[0]
+    ?? null;
+  const applicationSnapshot = selectApplicationSnapshot(
+    workspace,
+    application?.applicationId ?? null);
+  const explorerItems: Array<{
+    nav: NavId;
+    label: string;
+    detail: string;
+    icon: React.ComponentType<{ size?: number }>;
+  }> = [
+    { nav: 'projects', label: 'Systems & Layout', detail: application?.topologyId ?? 'not configured', icon: LayoutDashboard },
+    { nav: 'processes', label: 'Flows & Scripts', detail: `${application?.processDefinitionIds.length ?? 0} linked`, icon: Blocks },
+    { nav: 'engineering', label: 'Configuration', detail: 'recipes · stations', icon: MonitorCog },
+    { nav: 'devices', label: 'Devices & Drivers', detail: 'capability providers', icon: PlugZap }
+  ];
+  const operationsItems: Array<{
+    nav: NavId;
+    label: string;
+    detail: string;
+    icon: React.ComponentType<{ size?: number }>;
+  }> = [
+    { nav: 'dashboard', label: 'Run & Monitor', detail: applicationSnapshot?.snapshotId ?? 'publish required', icon: Play },
+    { nav: 'trace', label: 'Trace Evidence', detail: 'sessions · results', icon: FileSearch },
+    { nav: 'plugins', label: 'Extensions', detail: 'blocks · drivers', icon: Package }
+  ];
+
+  const renderItem = (item: (typeof explorerItems)[number]): React.ReactElement => {
+    const Icon = item.icon;
+    return (
+      <button
+        type="button"
+        className={activeNav === item.nav ? 'ide-explorer-item active' : 'ide-explorer-item'}
+        key={item.nav}
+        onClick={() => onNavigate(item.nav)}
+      >
+        <Icon size={15} />
+        <span>
+          <strong>{item.label}</strong>
+          <small>{item.detail}</small>
+        </span>
+      </button>
+    );
+  };
+
+  return (
+    <aside className="ide-explorer" aria-label="Project explorer">
+      <div className="ide-explorer-heading">
+        <span>PROJECT</span>
+        <button type="button" onClick={onClose} title="Close project" data-testid="close-project-workspace">
+          <X size={14} />
+        </button>
+      </div>
+
+      <button
+        type="button"
+        className={activeNav === 'projects' ? 'ide-project-root active' : 'ide-project-root'}
+        onClick={() => onNavigate('projects')}
+      >
+        <FolderKanban size={16} />
+        <span>
+          <strong>{workspace.project.displayName}</strong>
+          <small>{workspace.project.projectId}</small>
+        </span>
+      </button>
+
+      <div className="ide-explorer-branch">
+        <div className="ide-explorer-group-title">
+          <span>APPLICATION</span>
+          <small>{workspace.project.applications.length}</small>
+        </div>
+        {workspace.project.applications.length > 0 ? (
+          <div className="ide-application-list">
+            {workspace.project.applications.map(candidate => (
+              <button
+                type="button"
+                className={candidate.applicationId === application?.applicationId
+                  ? 'ide-application-row active'
+                  : 'ide-application-row'}
+                key={candidate.applicationId}
+                onClick={() => onSelectApplication(candidate.applicationId)}
+                data-testid={`select-application-${candidate.applicationId}`}
+              >
+                <span className="ide-tree-line" />
+                <Blocks size={14} />
+                <span>
+                  <strong>{candidate.displayName}</strong>
+                  <small>{candidate.applicationId}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="ide-explorer-empty">No application configured</p>
+        )}
+        <div className="ide-explorer-items">
+          {explorerItems.map(renderItem)}
+        </div>
+      </div>
+
+      <div className="ide-explorer-branch">
+        <div className="ide-explorer-group-title">
+          <span>OPERATIONS</span>
+          <small>{workspace.project.snapshots.length} snapshots</small>
+        </div>
+        <div className="ide-explorer-items">
+          {operationsItems.map(renderItem)}
+        </div>
+      </div>
+
+      <div className="ide-explorer-manifest">
+        <FileSearch size={14} />
+        <span>
+          <strong>openlineops.project.json</strong>
+          <small>{workspace.project.projectPath}</small>
+        </span>
+      </div>
+    </aside>
+  );
+}
+
+function selectApplicationSnapshot(
+  workspace: AutomationProjectWorkspaceResponse | null,
+  applicationId: string | null
+): PublishedProjectSnapshotResponse | null {
+  if (!workspace || !applicationId) {
+    return null;
+  }
+
+  const applicationSnapshots = workspace.project.snapshots
+    .filter(snapshot => snapshot.applicationId === applicationId);
+  const activeSnapshot = applicationSnapshots.find(
+    snapshot => snapshot.snapshotId === workspace.project.activeSnapshotId);
+
+  return activeSnapshot
+    ?? applicationSnapshots
+      .slice()
+      .sort((left, right) => right.publishedAtUtc.localeCompare(left.publishedAtUtc))[0]
+    ?? null;
 }
 
 interface DashboardViewProps {
@@ -577,26 +971,6 @@ const secondaryCopy: Record<NavId, string> = {
   trace: 'Trace query uses the traceability endpoints and runtime-linked read models.',
   plugins: 'Plugin management will stay aligned to manifest and host lifecycle contracts.'
 };
-
-function StatusMetric({
-  icon: Icon,
-  label,
-  value,
-  tone
-}: {
-  icon: React.ComponentType<{ size?: number }>;
-  label: string;
-  value: string;
-  tone: 'good' | 'warn' | 'bad';
-}): React.ReactElement {
-  return (
-    <div className={`status-metric ${tone}`}>
-      <Icon size={16} />
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
 
 function InfoCell({ label, value }: { label: string; value: string }): React.ReactElement {
   return (

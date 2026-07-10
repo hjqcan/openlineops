@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Boxes,
@@ -23,7 +23,8 @@ import type {
   AutomationTopologyResponse,
   ProjectApplicationResponse,
   SiteLayoutElementResponse,
-  SiteLayoutResponse
+  SiteLayoutResponse,
+  UpdateSiteLayoutElementGeometryRequest
 } from './contracts';
 import {
   addAutomationModule,
@@ -39,11 +40,13 @@ import {
   getSiteLayout,
   linkProjectTopology,
   listAutomationTopologies,
-  saveAutomationProjectManifest
+  saveAutomationProjectManifest,
+  updateSiteLayoutElementGeometry
 } from './api';
 
 interface TopologyDesignerProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
   isBackendHealthy: boolean;
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
@@ -63,6 +66,7 @@ interface SeedTopologyModel {
 
 export function TopologyDesigner({
   activeWorkspace,
+  activeApplicationId,
   isBackendHealthy,
   onWorkspaceChanged,
   onMessage
@@ -71,11 +75,29 @@ export function TopologyDesigner({
   const [layout, setLayout] = useState<SiteLayoutResponse | null>(null);
   const [topologyCount, setTopologyCount] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [layoutSaving, setLayoutSaving] = useState(false);
+  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
 
-  const activeApplication = activeWorkspace?.project.applications[0] ?? null;
+  const activeApplication = activeWorkspace?.project.applications.find(
+    application => application.applicationId === activeApplicationId)
+    ?? activeWorkspace?.project.applications[0]
+    ?? null;
+  const apiScope = useMemo(
+    () => activeWorkspace && activeApplication
+      ? {
+        projectId: activeWorkspace.project.projectId,
+        applicationId: activeApplication.applicationId
+      }
+      : undefined,
+    [activeApplication, activeWorkspace]);
   const canCallBackend = isBackendHealthy && !busy;
   const canSeed = canCallBackend && activeWorkspace !== null && activeApplication !== null && !activeApplication.topologyId;
   const canRefresh = canCallBackend && activeWorkspace !== null;
+  const selectedElement = useMemo(
+    () => layout?.elements.find(element => element.elementId === selectedElementId)
+      ?? layout?.elements[0]
+      ?? null,
+    [layout, selectedElementId]);
   const facts = useMemo(
     () => topology
       ? [
@@ -95,7 +117,7 @@ export function TopologyDesigner({
       return;
     }
 
-    const summaries = await listAutomationTopologies();
+    const summaries = await listAutomationTopologies(apiScope);
     setTopologyCount(summaries.length);
 
     if (!activeWorkspace || !activeApplication?.topologyId) {
@@ -104,16 +126,22 @@ export function TopologyDesigner({
       return;
     }
 
-    const topologyResponse = await getAutomationTopology(activeApplication.topologyId);
+    const topologyResponse = await getAutomationTopology(activeApplication.topologyId, apiScope);
     setTopology(topologyResponse.ok && topologyResponse.body ? topologyResponse.body : null);
 
-    const layoutResponse = await getSiteLayout(createLayoutId(activeWorkspace.project.projectId));
+    const layoutResponse = await getSiteLayout(createLayoutId(activeWorkspace.project.projectId), apiScope);
     setLayout(layoutResponse.ok && layoutResponse.body ? layoutResponse.body : null);
-  }, [activeApplication?.topologyId, activeWorkspace, isBackendHealthy]);
+  }, [activeApplication?.topologyId, activeWorkspace, apiScope, isBackendHealthy]);
 
   useEffect(() => {
     refresh().catch(error => onMessage(`Topology refresh failed: ${String(error)}`));
   }, [onMessage, refresh]);
+
+  useEffect(() => {
+    setSelectedElementId(current => layout?.elements.some(element => element.elementId === current)
+      ? current
+      : layout?.elements[0]?.elementId ?? null);
+  }, [layout]);
 
   const seedTopology = useCallback(async () => {
     if (!activeWorkspace || !activeApplication) {
@@ -128,33 +156,43 @@ export function TopologyDesigner({
         createAutomationTopology({
           topologyId: model.topologyId,
           displayName: `${activeWorkspace.project.displayName} Main Topology`
-        }),
+        }, apiScope),
         'Create topology');
 
       for (const node of model.nodes) {
-        nextTopology = await requireBody(addEquipmentNode(model.topologyId, node), `Add node ${node.nodeId}`);
+        nextTopology = await requireBody(
+          addEquipmentNode(model.topologyId, node, apiScope),
+          `Add node ${node.nodeId}`);
       }
 
       for (const capability of model.capabilities) {
         nextTopology = await requireBody(
-          addCapabilityContract(model.topologyId, capability),
+          addCapabilityContract(model.topologyId, capability, apiScope),
           `Add capability ${capability.capabilityId}`);
       }
 
       for (const module of model.modules) {
-        nextTopology = await requireBody(addAutomationModule(model.topologyId, module), `Add module ${module.moduleId}`);
+        nextTopology = await requireBody(
+          addAutomationModule(model.topologyId, module, apiScope),
+          `Add module ${module.moduleId}`);
       }
 
       for (const binding of model.bindings) {
-        nextTopology = await requireBody(addDriverBinding(model.topologyId, binding), `Bind driver ${binding.bindingId}`);
+        nextTopology = await requireBody(
+          addDriverBinding(model.topologyId, binding, apiScope),
+          `Bind driver ${binding.bindingId}`);
       }
 
       for (const group of model.slotGroups) {
-        nextTopology = await requireBody(addSlotGroup(model.topologyId, group), `Add group ${group.slotGroupId}`);
+        nextTopology = await requireBody(
+          addSlotGroup(model.topologyId, group, apiScope),
+          `Add group ${group.slotGroupId}`);
       }
 
       for (const slot of model.slots) {
-        nextTopology = await requireBody(addSlotDefinition(model.topologyId, slot), `Add slot ${slot.slotId}`);
+        nextTopology = await requireBody(
+          addSlotDefinition(model.topologyId, slot, apiScope),
+          `Add slot ${slot.slotId}`);
       }
 
       let nextLayout = await requireBody(
@@ -165,12 +203,12 @@ export function TopologyDesigner({
           canvasWidth: 1200,
           canvasHeight: 680,
           units: 'px'
-        }),
+        }, apiScope),
         'Create layout');
 
       for (const element of model.layoutElements) {
         nextLayout = await requireBody(
-          addSiteLayoutElement(model.layoutId, element),
+          addSiteLayoutElement(model.layoutId, element, apiScope),
           `Place layout element ${element.elementId}`);
       }
 
@@ -196,7 +234,48 @@ export function TopologyDesigner({
     } finally {
       setBusy(false);
     }
-  }, [activeApplication, activeWorkspace, onMessage, onWorkspaceChanged]);
+  }, [activeApplication, activeWorkspace, apiScope, onMessage, onWorkspaceChanged]);
+
+  const previewLayoutGeometry = useCallback((
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest
+  ) => {
+    setLayout(current => updateLayoutGeometry(current, elementId, geometry));
+  }, []);
+
+  const commitLayoutGeometry = useCallback(async (
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ) => {
+    if (!layout || !apiScope || !isBackendHealthy || layoutSaving) {
+      return;
+    }
+
+    setLayoutSaving(true);
+    setLayout(current => updateLayoutGeometry(current, elementId, geometry));
+    try {
+      const response = await updateSiteLayoutElementGeometry(
+        layout.layoutId,
+        elementId,
+        normalizeGeometry(geometry),
+        apiScope);
+      if (!response.ok || !response.body) {
+        setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
+        onMessage(`Layout update failed: ${response.status} ${response.text}`);
+        return;
+      }
+
+      setLayout(response.body);
+      setSelectedElementId(elementId);
+      onMessage(`Layout geometry saved ${elementId}`);
+    } catch (error) {
+      setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
+      onMessage(`Layout update failed: ${String(error)}`);
+    } finally {
+      setLayoutSaving(false);
+    }
+  }, [apiScope, isBackendHealthy, layout, layoutSaving, onMessage]);
 
   return (
     <section className="topology-designer" data-testid="project-topology-designer">
@@ -235,7 +314,14 @@ export function TopologyDesigner({
             <TopologyFacts rows={facts} />
             <TopologyCollections topology={topology} />
           </div>
-          <SiteLayoutCanvas layout={layout} />
+          <SiteLayoutCanvas
+            layout={layout}
+            selectedElement={selectedElement}
+            disabled={!isBackendHealthy || layoutSaving}
+            onSelect={setSelectedElementId}
+            onPreviewGeometry={previewLayoutGeometry}
+            onCommitGeometry={commitLayoutGeometry}
+          />
         </div>
       )}
     </section>
@@ -342,9 +428,23 @@ function CollectionBlock({
 }
 
 function SiteLayoutCanvas({
-  layout
+  layout,
+  selectedElement,
+  disabled,
+  onSelect,
+  onPreviewGeometry,
+  onCommitGeometry
 }: {
   layout: SiteLayoutResponse | null;
+  selectedElement: SiteLayoutElementResponse | null;
+  disabled: boolean;
+  onSelect(elementId: string): void;
+  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onCommitGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ): void;
 }): React.ReactElement {
   return (
     <div className="site-layout-shell">
@@ -352,44 +452,333 @@ function SiteLayoutCanvas({
         <div>
           <Map size={15} />
           <strong>Top-down Layout</strong>
+          <em>{selectedElement ? selectedElement.label : 'Select an element'}</em>
         </div>
         <span>{layout ? `${layout.canvasWidth}x${layout.canvasHeight} ${layout.units}` : 'draft'}</span>
       </div>
       <div className="site-layout-canvas" data-testid="site-layout-canvas">
         {layout ? layout.elements.map(element => (
-          <LayoutElement key={element.elementId} element={element} layout={layout} />
+          <LayoutElement
+            key={element.elementId}
+            element={element}
+            layout={layout}
+            selected={element.elementId === selectedElement?.elementId}
+            disabled={disabled}
+            onSelect={onSelect}
+            onPreviewGeometry={onPreviewGeometry}
+            onCommitGeometry={onCommitGeometry}
+          />
         )) : (
           <div className="site-layout-placeholder">
             <Route size={24} />
             <span>No layout elements</span>
           </div>
         )}
+        {layout ? (
+          <div className="site-layout-canvas-hint">
+            Drag to move · Arrow keys nudge · Shift moves 10 {layout.units}
+          </div>
+        ) : null}
       </div>
+      <LayoutGeometryInspector
+        layout={layout}
+        element={selectedElement}
+        disabled={disabled}
+        onCommit={onCommitGeometry}
+      />
     </div>
   );
 }
 
+interface ElementDragState {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  canvasWidthPx: number;
+  canvasHeightPx: number;
+  previousGeometry: UpdateSiteLayoutElementGeometryRequest;
+  latestGeometry: UpdateSiteLayoutElementGeometryRequest;
+  moved: boolean;
+}
+
 function LayoutElement({
   element,
-  layout
+  layout,
+  selected,
+  disabled,
+  onSelect,
+  onPreviewGeometry,
+  onCommitGeometry
 }: {
   element: SiteLayoutElementResponse;
   layout: SiteLayoutResponse;
+  selected: boolean;
+  disabled: boolean;
+  onSelect(elementId: string): void;
+  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onCommitGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ): void;
 }): React.ReactElement {
+  const dragState = useRef<ElementDragState | null>(null);
+  const [dragging, setDragging] = useState(false);
   const style = {
     left: `${Math.max(0, (element.x / layout.canvasWidth) * 100)}%`,
     top: `${Math.max(0, (element.y / layout.canvasHeight) * 100)}%`,
-    width: `${Math.max(4, (element.width / layout.canvasWidth) * 100)}%`,
-    height: `${Math.max(4, (element.height / layout.canvasHeight) * 100)}%`,
+    width: `${Math.max(2, (element.width / layout.canvasWidth) * 100)}%`,
+    height: `${Math.max(2, (element.height / layout.canvasHeight) * 100)}%`,
     transform: `rotate(${element.rotationDegrees}deg)`
   };
 
+  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    if (disabled || event.button !== 0) {
+      return;
+    }
+
+    const canvas = event.currentTarget.parentElement;
+    const bounds = canvas?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const geometry = toGeometry(element);
+    dragState.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      canvasWidthPx: bounds.width,
+      canvasHeightPx: bounds.height,
+      previousGeometry: geometry,
+      latestGeometry: geometry,
+      moved: false
+    };
+    setDragging(true);
+    onSelect(element.elementId);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = ((event.clientX - drag.startClientX) / drag.canvasWidthPx) * layout.canvasWidth;
+    const deltaY = ((event.clientY - drag.startClientY) / drag.canvasHeightPx) * layout.canvasHeight;
+    const nextGeometry = clampGeometry(
+      {
+        ...drag.previousGeometry,
+        x: drag.previousGeometry.x + deltaX,
+        y: drag.previousGeometry.y + deltaY
+      },
+      layout);
+    drag.latestGeometry = nextGeometry;
+    drag.moved = drag.moved || Math.abs(deltaX) > 0.2 || Math.abs(deltaY) > 0.2;
+    onPreviewGeometry(element.elementId, nextGeometry);
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragState.current = null;
+    setDragging(false);
+    if (drag.moved) {
+      onCommitGeometry(element.elementId, drag.latestGeometry, drag.previousGeometry);
+    }
+  };
+
+  const handlePointerCancel = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    dragState.current = null;
+    setDragging(false);
+    onPreviewGeometry(element.elementId, drag.previousGeometry);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (disabled || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const step = event.shiftKey ? 10 : 1;
+    const previousGeometry = toGeometry(element);
+    const nextGeometry = clampGeometry({
+      ...previousGeometry,
+      x: previousGeometry.x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0),
+      y: previousGeometry.y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
+    }, layout);
+    onPreviewGeometry(element.elementId, nextGeometry);
+    onCommitGeometry(element.elementId, nextGeometry, previousGeometry);
+  };
+
   return (
-    <div className={`site-layout-element ${toElementClass(element.kind)}`} style={style} title={element.targetId}>
+    <button
+      type="button"
+      className={`site-layout-element ${toElementClass(element.kind)}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}`}
+      style={style}
+      title={`${element.label} · ${element.targetId}`}
+      aria-pressed={selected}
+      disabled={disabled}
+      onClick={() => onSelect(element.elementId)}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onKeyDown={handleKeyDown}
+      data-testid={`layout-element-${element.elementId}`}
+    >
       {element.kind === 'ModuleShape' ? <Box size={13} /> : null}
       <span>{element.label}</span>
-    </div>
+    </button>
   );
+}
+
+function LayoutGeometryInspector({
+  layout,
+  element,
+  disabled,
+  onCommit
+}: {
+  layout: SiteLayoutResponse | null;
+  element: SiteLayoutElementResponse | null;
+  disabled: boolean;
+  onCommit(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ): void;
+}): React.ReactElement {
+  const [draft, setDraft] = useState<UpdateSiteLayoutElementGeometryRequest | null>(
+    element ? toGeometry(element) : null);
+
+  useEffect(() => {
+    setDraft(element ? toGeometry(element) : null);
+  }, [element]);
+
+  if (!layout || !element || !draft) {
+    return <div className="layout-geometry-inspector empty">Select a layout element to edit geometry.</div>;
+  }
+
+  const fields: Array<{
+    key: keyof UpdateSiteLayoutElementGeometryRequest;
+    label: string;
+  }> = [
+    { key: 'x', label: 'X' },
+    { key: 'y', label: 'Y' },
+    { key: 'width', label: 'W' },
+    { key: 'height', label: 'H' },
+    { key: 'rotationDegrees', label: 'ROT' }
+  ];
+
+  return (
+    <form
+      className="layout-geometry-inspector"
+      onSubmit={event => {
+        event.preventDefault();
+        onCommit(element.elementId, clampGeometry(draft, layout), toGeometry(element));
+      }}
+    >
+      <div className="layout-inspector-target">
+        <strong>{element.label}</strong>
+        <span>{element.kind} · {element.targetId}</span>
+      </div>
+      {fields.map(field => (
+        <label key={field.key}>
+          <span>{field.label}</span>
+          <input
+            type="number"
+            step="0.1"
+            value={draft[field.key]}
+            disabled={disabled}
+            data-testid={`layout-geometry-${field.key}`}
+            onChange={event => setDraft(current => current
+              ? { ...current, [field.key]: Number(event.target.value) }
+              : current)}
+          />
+        </label>
+      ))}
+      <button type="submit" className="button primary" disabled={disabled} data-testid="save-layout-geometry">
+        Apply
+      </button>
+    </form>
+  );
+}
+
+function toGeometry(element: SiteLayoutElementResponse): UpdateSiteLayoutElementGeometryRequest {
+  return {
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+    rotationDegrees: element.rotationDegrees
+  };
+}
+
+function clampGeometry(
+  geometry: UpdateSiteLayoutElementGeometryRequest,
+  layout: SiteLayoutResponse
+): UpdateSiteLayoutElementGeometryRequest {
+  const width = clampFinite(geometry.width, 1, layout.canvasWidth);
+  const height = clampFinite(geometry.height, 1, layout.canvasHeight);
+
+  return normalizeGeometry({
+    x: clampFinite(geometry.x, 0, layout.canvasWidth - width),
+    y: clampFinite(geometry.y, 0, layout.canvasHeight - height),
+    width,
+    height,
+    rotationDegrees: Number.isFinite(geometry.rotationDegrees) ? geometry.rotationDegrees : 0
+  });
+}
+
+function normalizeGeometry(
+  geometry: UpdateSiteLayoutElementGeometryRequest
+): UpdateSiteLayoutElementGeometryRequest {
+  const round = (value: number): number => {
+    const rounded = Math.round(value * 1000) / 1000;
+    return Object.is(rounded, -0) ? 0 : rounded;
+  };
+
+  return {
+    x: round(geometry.x),
+    y: round(geometry.y),
+    width: round(geometry.width),
+    height: round(geometry.height),
+    rotationDegrees: round(geometry.rotationDegrees)
+  };
+}
+
+function clampFinite(value: number, minimum: number, maximum: number): number {
+  const finiteValue = Number.isFinite(value) ? value : minimum;
+  return Math.min(Math.max(finiteValue, minimum), Math.max(minimum, maximum));
+}
+
+function updateLayoutGeometry(
+  layout: SiteLayoutResponse | null,
+  elementId: string,
+  geometry: UpdateSiteLayoutElementGeometryRequest
+): SiteLayoutResponse | null {
+  return layout
+    ? {
+      ...layout,
+      elements: layout.elements.map(element => element.elementId === elementId
+        ? { ...element, ...normalizeGeometry(geometry) }
+        : element)
+    }
+    : null;
 }
 
 function createSeedTopologyModel(projectId: string): SeedTopologyModel {

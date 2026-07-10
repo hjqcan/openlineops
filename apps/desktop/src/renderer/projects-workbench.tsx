@@ -21,6 +21,7 @@ import type {
   PublishedProjectSnapshotResponse
 } from './contracts';
 import {
+  addProjectApplication,
   createAutomationProjectWorkspace,
   listAutomationProjects,
   openAutomationProjectWorkspace,
@@ -30,7 +31,9 @@ import { TopologyDesigner } from './topology-designer';
 
 interface ProjectsWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
   isBackendHealthy: boolean;
+  onActiveApplicationChanged(applicationId: string): void;
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
@@ -43,18 +46,27 @@ interface ProjectDraft {
   defaultApplicationName: string;
 }
 
+interface ApplicationDraft {
+  applicationId: string;
+  displayName: string;
+}
+
 const recentProjectsStorageKey = 'openlineops.recentProjectPaths.v1';
 
 export function ProjectsWorkbench({
   activeWorkspace,
+  activeApplicationId,
   isBackendHealthy,
+  onActiveApplicationChanged,
   onWorkspaceChanged,
   onMessage
 }: ProjectsWorkbenchProps): React.ReactElement {
   const [draft, setDraft] = useState<ProjectDraft>(() => createProjectDraft());
   const [openPath, setOpenPath] = useState('');
+  const [applicationDraft, setApplicationDraft] = useState<ApplicationDraft>(() => createApplicationDraft());
   const [projects, setProjects] = useState<AutomationProjectSummaryResponse[]>([]);
   const [recentProjects, setRecentProjects] = useState<string[]>(() => readRecentProjects());
+  const [showStartCenter, setShowStartCenter] = useState(activeWorkspace === null);
   const [busy, setBusy] = useState(false);
 
   const activeApplications = activeWorkspace?.project.applications ?? [];
@@ -83,6 +95,12 @@ export function ProjectsWorkbench({
     refreshProjects().catch(error => onMessage(`Project list failed: ${String(error)}`));
   }, [onMessage, refreshProjects]);
 
+  useEffect(() => {
+    if (!activeWorkspace) {
+      setShowStartCenter(true);
+    }
+  }, [activeWorkspace]);
+
   const rememberProject = useCallback((projectPath: string) => {
     const next = rememberRecentProject(projectPath);
     setRecentProjects(next);
@@ -104,6 +122,7 @@ export function ProjectsWorkbench({
       }
 
       onWorkspaceChanged(response.body);
+      setShowStartCenter(false);
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body.project.projectPath);
       onMessage(`Project created ${response.body.project.projectId}`);
@@ -129,6 +148,7 @@ export function ProjectsWorkbench({
       }
 
       onWorkspaceChanged(response.body);
+      setShowStartCenter(false);
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body.project.projectPath);
       onMessage(`Project opened ${response.body.project.projectId}`);
@@ -159,6 +179,43 @@ export function ProjectsWorkbench({
     }
   }, [activeWorkspace, onMessage, onWorkspaceChanged, rememberProject]);
 
+  const addApplication = useCallback(async () => {
+    if (!activeWorkspace) {
+      return;
+    }
+
+    const applicationId = applicationDraft.applicationId.trim();
+    const displayName = applicationDraft.displayName.trim();
+    if (!applicationId || !displayName) {
+      onMessage('Application id and display name are required');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const response = await addProjectApplication(
+        activeWorkspace.project.projectId,
+        { applicationId, displayName });
+      if (!response.ok || !response.body) {
+        onMessage(`Application create failed: ${response.status} ${response.text}`);
+        return;
+      }
+
+      const savedWorkspace = await saveAutomationProjectManifest(activeWorkspace.project.projectId);
+      if (!savedWorkspace.ok || !savedWorkspace.body) {
+        onMessage(`Application manifest save failed: ${savedWorkspace.status} ${savedWorkspace.text}`);
+        return;
+      }
+
+      onWorkspaceChanged(savedWorkspace.body);
+      onActiveApplicationChanged(applicationId);
+      setApplicationDraft(createApplicationDraft());
+      onMessage(`Application created ${applicationId}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [activeWorkspace, applicationDraft, onActiveApplicationChanged, onMessage, onWorkspaceChanged]);
+
   const chooseCreateDirectory = useCallback(async () => {
     const result = await desktop.selectDirectory({
       title: 'Select project folder',
@@ -188,9 +245,120 @@ export function ProjectsWorkbench({
     setOpenPath(nextDraft.projectPath);
   }, []);
 
+  if (activeWorkspace && !showStartCenter) {
+    return (
+      <section className="projects-workbench project-overview-workbench" data-testid="project-workspace-panel">
+        <div className="panel project-overview-panel">
+          <div className="panel-title">
+            <div>
+              <FileJson size={17} />
+              <h2>Project Explorer</h2>
+            </div>
+            <span>{activeWorkspace.project.projectId}</span>
+          </div>
+
+          <div className="projects-toolbar project-overview-toolbar">
+            <button
+              type="button"
+              className="button ghost"
+              onClick={() => setShowStartCenter(true)}
+              data-testid="switch-project-workspace"
+            >
+              <FolderOpen size={15} />
+              Open Another Project
+            </button>
+            <button
+              type="button"
+              className="button primary"
+              onClick={saveManifest}
+              disabled={!canCallBackend}
+              data-testid="save-project-manifest"
+            >
+              <Save size={15} />
+              Save Project
+            </button>
+          </div>
+
+          <div className="project-overview-content">
+            <aside className="project-overview-summary">
+              <ProjectIdentity workspace={activeWorkspace} />
+              <ManifestFacts rows={manifestRows} />
+              <ProjectApplications
+                applications={activeApplications}
+                activeApplicationId={activeApplicationId}
+                onSelect={onActiveApplicationChanged}
+              />
+              <div className="project-application-add">
+                <input
+                  value={applicationDraft.applicationId}
+                  onChange={event => setApplicationDraft(current => ({
+                    ...current,
+                    applicationId: event.target.value
+                  }))}
+                  placeholder="application id"
+                  aria-label="New application id"
+                  data-testid="new-application-id"
+                />
+                <input
+                  value={applicationDraft.displayName}
+                  onChange={event => setApplicationDraft(current => ({
+                    ...current,
+                    displayName: event.target.value
+                  }))}
+                  placeholder="display name"
+                  aria-label="New application display name"
+                  data-testid="new-application-name"
+                />
+                <button
+                  type="button"
+                  className="button"
+                  onClick={addApplication}
+                  disabled={!canCallBackend}
+                  data-testid="add-project-application"
+                >
+                  <FolderPlus size={14} />
+                  Add Application
+                </button>
+              </div>
+              <ProjectSnapshots snapshots={activeSnapshots} />
+            </aside>
+            <section className="project-overview-designer">
+              <TopologyDesigner
+                activeWorkspace={activeWorkspace}
+                activeApplicationId={activeApplicationId}
+                isBackendHealthy={isBackendHealthy}
+                onWorkspaceChanged={onWorkspaceChanged}
+                onMessage={onMessage}
+              />
+            </section>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
-    <section className="projects-workbench" data-testid="project-workspace-panel">
-      <div className="panel projects-builder-panel">
+    <section className="projects-workbench project-start-center" data-testid="project-workspace-panel">
+      <div className="project-start-hero">
+        <span className="project-start-kicker">AUTOMATION LINE IDE</span>
+        <h2>Build the line.<br />Prove the run.</h2>
+        <p>
+          One project contains the topology, devices, flows, scripts, published
+          snapshots, and trace evidence needed to deliver an automation line.
+        </p>
+        <div className="project-start-steps">
+          <article><strong>01</strong><span>Create or open a project folder</span></article>
+          <article><strong>02</strong><span>Compose systems, slots, flows, and scripts</span></article>
+          <article><strong>03</strong><span>Publish once, run from IDE or Runner</span></article>
+        </div>
+        <div className="project-start-tags">
+          <span>Text project package</span>
+          <span>Blockly-first</span>
+          <span>Python extensible</span>
+        </div>
+      </div>
+
+      <div className="panel project-start-actions">
         <div className="panel-title">
           <div>
             <FolderKanban size={17} />
@@ -206,62 +374,37 @@ export function ProjectsWorkbench({
           </button>
           <button type="button" className="button ghost" onClick={newSeed} disabled={busy}>
             <FolderPlus size={15} />
-            New Seed
+            New Draft
           </button>
-          <button
-            type="button"
-            className="button primary"
-            onClick={createWorkspace}
-            disabled={!canCallBackend}
-            data-testid="create-project-workspace"
-          >
-            <FolderPlus size={15} />
-            Create
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => { void openWorkspace(); }}
-            disabled={!canCallBackend}
-            data-testid="open-project-workspace"
-          >
-            <FolderOpen size={15} />
-            Open
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={saveManifest}
-            disabled={!canCallBackend || !activeWorkspace}
-            data-testid="save-project-manifest"
-          >
-            <Save size={15} />
-            Save
-          </button>
+          {activeWorkspace ? (
+            <button type="button" className="button" onClick={() => setShowStartCenter(false)}>
+              Back to {activeWorkspace.project.displayName}
+            </button>
+          ) : null}
         </div>
 
-        <div className="projects-layout">
-          <div className="projects-form">
-            <fieldset className="projects-fieldset">
-              <legend>New Project</legend>
-              <TextField
-                label="Project ID"
-                value={draft.projectId}
-                onChange={value => setDraft(current => ({ ...current, projectId: value }))}
-              />
-              <TextField
-                label="Display Name"
-                value={draft.displayName}
-                onChange={value => setDraft(current => ({ ...current, displayName: value }))}
-              />
-              <PathField
-                label="Project Path"
-                value={draft.projectPath}
-                testId="select-project-directory"
-                inputTestId="project-path-input"
-                onBrowse={chooseCreateDirectory}
-                onChange={value => setDraft(current => ({ ...current, projectPath: value }))}
-              />
+        <div className="project-start-actions-body">
+          <fieldset className="projects-fieldset project-create-form">
+            <legend>New Project</legend>
+            <TextField
+              label="Project ID"
+              value={draft.projectId}
+              onChange={value => setDraft(current => ({ ...current, projectId: value }))}
+            />
+            <TextField
+              label="Display Name"
+              value={draft.displayName}
+              onChange={value => setDraft(current => ({ ...current, displayName: value }))}
+            />
+            <PathField
+              label="Project Path"
+              value={draft.projectPath}
+              testId="select-project-directory"
+              inputTestId="project-path-input"
+              onBrowse={chooseCreateDirectory}
+              onChange={value => setDraft(current => ({ ...current, projectPath: value }))}
+            />
+            <div className="project-application-fields">
               <TextField
                 label="Default Application ID"
                 value={draft.defaultApplicationId}
@@ -272,8 +415,20 @@ export function ProjectsWorkbench({
                 value={draft.defaultApplicationName}
                 onChange={value => setDraft(current => ({ ...current, defaultApplicationName: value }))}
               />
-            </fieldset>
+            </div>
+            <button
+              type="button"
+              className="button primary project-primary-action"
+              onClick={createWorkspace}
+              disabled={!canCallBackend}
+              data-testid="create-project-workspace"
+            >
+              <FolderPlus size={15} />
+              Create Project
+            </button>
+          </fieldset>
 
+          <div className="project-open-column">
             <fieldset className="projects-fieldset">
               <legend>Open Project</legend>
               <PathField
@@ -284,6 +439,16 @@ export function ProjectsWorkbench({
                 onBrowse={chooseOpenDirectory}
                 onChange={setOpenPath}
               />
+              <button
+                type="button"
+                className="button project-primary-action"
+                onClick={() => { void openWorkspace(); }}
+                disabled={!canCallBackend}
+                data-testid="open-project-workspace"
+              >
+                <FolderOpen size={15} />
+                Open Folder
+              </button>
               <RecentProjectsList
                 recentProjects={recentProjects}
                 onOpen={path => {
@@ -292,44 +457,17 @@ export function ProjectsWorkbench({
                 }}
               />
             </fieldset>
-          </div>
 
-          <ProjectResourceGrid
-            projects={projects}
-            activeWorkspace={activeWorkspace}
-            onOpen={path => {
-              setOpenPath(path);
-              void openWorkspace(path);
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="panel projects-detail-panel">
-        <div className="panel-title">
-          <div>
-            <FileJson size={17} />
-            <h2>Project Explorer</h2>
-          </div>
-          <span>{activeWorkspace?.project.projectId ?? 'none'}</span>
-        </div>
-
-        {activeWorkspace ? (
-          <div className="project-detail">
-            <ProjectIdentity workspace={activeWorkspace} />
-            <ManifestFacts rows={manifestRows} />
-            <ProjectApplications applications={activeApplications} />
-            <TopologyDesigner
+            <ProjectResourceGrid
+              projects={projects}
               activeWorkspace={activeWorkspace}
-              isBackendHealthy={isBackendHealthy}
-              onWorkspaceChanged={onWorkspaceChanged}
-              onMessage={onMessage}
+              onOpen={path => {
+                setOpenPath(path);
+                void openWorkspace(path);
+              }}
             />
-            <ProjectSnapshots snapshots={activeSnapshots} />
           </div>
-        ) : (
-          <div className="projects-empty">No project workspace is open.</div>
-        )}
+        </div>
       </div>
     </section>
   );
@@ -505,9 +643,13 @@ function ManifestFacts({
 }
 
 function ProjectApplications({
-  applications
+  applications,
+  activeApplicationId,
+  onSelect
 }: {
   applications: ProjectApplicationResponse[];
+  activeApplicationId: string | null;
+  onSelect(applicationId: string): void;
 }): React.ReactElement {
   return (
     <section className="project-detail-list">
@@ -519,11 +661,16 @@ function ProjectApplications({
       {applications.length === 0 ? (
         <p>No applications</p>
       ) : applications.map(application => (
-        <article key={application.applicationId}>
+        <button
+          type="button"
+          className={application.applicationId === activeApplicationId ? 'active' : ''}
+          key={application.applicationId}
+          onClick={() => onSelect(application.applicationId)}
+        >
           <strong>{application.displayName}</strong>
           <span>{application.applicationId}</span>
           <small>{application.topologyId ?? `${application.processDefinitionIds.length} processes`}</small>
-        </article>
+        </button>
       ))}
     </section>
   );
@@ -564,6 +711,14 @@ function createProjectDraft(): ProjectDraft {
     projectPath: `C:\\OpenLineOps\\Projects\\${projectId}`,
     defaultApplicationId: `application-${seed}`,
     defaultApplicationName: 'Default Application'
+  };
+}
+
+function createApplicationDraft(): ApplicationDraft {
+  const seed = Date.now().toString(36);
+  return {
+    applicationId: `application-${seed}`,
+    displayName: `Application ${seed.toUpperCase()}`
   };
 }
 

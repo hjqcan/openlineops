@@ -14,6 +14,108 @@ public sealed class ProcessDefinitionServiceTests
 {
     private static readonly DateTimeOffset CreatedAtUtc = new(2026, 6, 30, 8, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset PublishedAtUtc = CreatedAtUtc.AddMinutes(5);
+    private const string ReplacementBlocklyWorkspaceJson =
+        """{"blocks":{"languageVersion":0,"blocks":[{"type":"flow_wait","id":"wait-1"}]}}""";
+    private const string ReplacementPythonSource =
+        "automation_plan = []\nautomation_plan.append({'type': 'flow.wait', 'duration_ms': 25})\nresult = {'automation_plan': automation_plan}\n";
+
+    [Fact]
+    public async Task ReplaceDraftAsyncReplacesEntireGraphAndScriptArtifactsAndPreservesCreatedAt()
+    {
+        var original = CreatePythonScriptDefinition();
+        var repository = new FakeProcessDefinitionRepository(original);
+        var service = CreateService(repository);
+
+        var result = await service.ReplaceDraftAsync(
+            original.Id.Value,
+            CreateReplacementRequest(original.Id.Value));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(original.Id.Value, result.Value.ProcessDefinitionId);
+        Assert.Equal("python-script-process@2.0.0", result.Value.VersionId);
+        Assert.Equal("Replacement Python Script Process", result.Value.DisplayName);
+        Assert.Equal("Draft", result.Value.Status);
+        Assert.Equal(CreatedAtUtc, result.Value.CreatedAtUtc);
+        Assert.Null(result.Value.PublishedAtUtc);
+        Assert.Equal(3, result.Value.Nodes.Count);
+        Assert.DoesNotContain(result.Value.Nodes, node => node.NodeId == "normalize");
+
+        var scriptNode = Assert.Single(result.Value.Nodes, node => node.Kind == "PythonScript");
+        Assert.Equal("inspect", scriptNode.NodeId);
+        Assert.Equal("Inspect With Blockly", scriptNode.DisplayName);
+        Assert.Equal(25, scriptNode.TimeoutSeconds);
+        Assert.Equal("Blockly", scriptNode.ScriptEditorMode);
+        Assert.Equal(ReplacementBlocklyWorkspaceJson, scriptNode.BlocklyWorkspaceJson);
+        Assert.Equal(ReplacementPythonSource, scriptNode.ScriptSourceCode);
+        Assert.False(string.IsNullOrWhiteSpace(scriptNode.ScriptSourceHash));
+        Assert.Equal("2", scriptNode.ScriptVersion);
+        Assert.Equal("""{"partId":"P-42"}""", scriptNode.InputPayload);
+        Assert.Equal(
+            ["replacement-inspect-to-end", "replacement-start-to-inspect"],
+            result.Value.Transitions
+                .Select(transition => transition.TransitionId)
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToArray());
+        Assert.Equal(1, repository.SaveCount);
+
+        var stored = await repository.GetByIdAsync(original.Id);
+        Assert.NotNull(stored);
+        Assert.NotSame(original, stored);
+        Assert.Equal(CreatedAtUtc, stored.CreatedAtUtc);
+        Assert.Equal("Replacement Python Script Process", stored.DisplayName);
+    }
+
+    [Fact]
+    public async Task ReplaceDraftAsyncRejectsPublishedDefinitionWithoutSaving()
+    {
+        var published = CreatePythonScriptDefinition();
+        AssertAccepted(published.Publish(PublishedAtUtc));
+        var repository = new FakeProcessDefinitionRepository(published);
+        var service = CreateService(repository);
+
+        var result = await service.ReplaceDraftAsync(
+            published.Id.Value,
+            CreateReplacementRequest(published.Id.Value));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Conflict.Processes.DefinitionImmutable", result.Error.Code);
+        Assert.Equal(0, repository.SaveCount);
+        Assert.Equal(ProcessDefinitionStatus.Published, published.Status);
+        Assert.Equal("Python Script Process", published.DisplayName);
+        Assert.Contains(published.Nodes, node => node.Id.Value == "normalize");
+    }
+
+    [Fact]
+    public async Task ReplaceDraftAsyncRejectsRouteAndBodyProcessDefinitionIdMismatch()
+    {
+        var original = CreatePythonScriptDefinition();
+        var repository = new FakeProcessDefinitionRepository(original);
+        var service = CreateService(repository);
+
+        var result = await service.ReplaceDraftAsync(
+            original.Id.Value,
+            CreateReplacementRequest("different-process"));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Processes.DefinitionIdMismatch", result.Error.Code);
+        Assert.Equal(0, repository.SaveCount);
+        Assert.Equal("Python Script Process", original.DisplayName);
+    }
+
+    [Fact]
+    public async Task ReplaceDraftAsyncReturnsNotFoundWhenDefinitionDoesNotExist()
+    {
+        var repository = new FakeProcessDefinitionRepository();
+        var service = CreateService(repository);
+
+        var result = await service.ReplaceDraftAsync(
+            "missing-process",
+            CreateReplacementRequest("missing-process"));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("NotFound.Processes.DefinitionNotFound", result.Error.Code);
+        Assert.Equal(0, repository.SaveCount);
+    }
 
     [Fact]
     public async Task PublishAsyncWithPythonScriptValidationIssueDoesNotPublishDefinition()
@@ -84,6 +186,76 @@ public sealed class ProcessDefinitionServiceTests
             NodeId("end")));
 
         return definition;
+    }
+
+    private static CreateProcessDefinitionRequest CreateReplacementRequest(string processDefinitionId)
+    {
+        return new CreateProcessDefinitionRequest(
+            processDefinitionId,
+            "python-script-process@2.0.0",
+            "Replacement Python Script Process",
+            [
+                new CreateProcessNodeRequest(
+                    "replacement-start",
+                    "Start",
+                    "Replacement Start",
+                    RequiredCapability: null,
+                    CommandName: null,
+                    TimeoutSeconds: null,
+                    InputPayload: null,
+                    ScriptEditorMode: null,
+                    BlocklyWorkspaceJson: null,
+                    ScriptSourceCode: null,
+                    ScriptVersion: null),
+                new CreateProcessNodeRequest(
+                    "inspect",
+                    "PythonScript",
+                    "Inspect With Blockly",
+                    RequiredCapability: null,
+                    CommandName: null,
+                    TimeoutSeconds: 25,
+                    InputPayload: """{"partId":"P-42"}""",
+                    ScriptEditorMode: "Blockly",
+                    BlocklyWorkspaceJson: ReplacementBlocklyWorkspaceJson,
+                    ScriptSourceCode: ReplacementPythonSource,
+                    ScriptVersion: "2"),
+                new CreateProcessNodeRequest(
+                    "replacement-end",
+                    "End",
+                    "Replacement End",
+                    RequiredCapability: null,
+                    CommandName: null,
+                    TimeoutSeconds: null,
+                    InputPayload: null,
+                    ScriptEditorMode: null,
+                    BlocklyWorkspaceJson: null,
+                    ScriptSourceCode: null,
+                    ScriptVersion: null)
+            ],
+            [
+                new CreateProcessTransitionRequest(
+                    "replacement-start-to-inspect",
+                    "replacement-start",
+                    "inspect",
+                    Label: "inspect",
+                    LoopPolicy: null,
+                    MaxTraversals: null),
+                new CreateProcessTransitionRequest(
+                    "replacement-inspect-to-end",
+                    "inspect",
+                    "replacement-end",
+                    Label: "complete",
+                    LoopPolicy: null,
+                    MaxTraversals: null)
+            ]);
+    }
+
+    private static ProcessDefinitionService CreateService(FakeProcessDefinitionRepository repository)
+    {
+        return new ProcessDefinitionService(
+            repository,
+            new FixedClock(PublishedAtUtc.AddMinutes(5)),
+            new FakeProcessScriptDefinitionValidator(ProcessScriptValidationReport.Valid));
     }
 
     private static void AddNode(ProcessDefinition definition, ProcessNode node)

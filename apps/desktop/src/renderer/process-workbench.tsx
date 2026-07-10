@@ -49,6 +49,7 @@ import {
   saveAutomationProjectManifest,
   startProjectSnapshotRuntimeSession,
   startProcessRuntimeSession,
+  updateProcessDefinition,
   validateProcessDefinition
 } from './api';
 
@@ -59,6 +60,7 @@ type TransitionLoopPolicy = 'None' | 'Counted';
 
 interface ProcessWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
   isBackendHealthy: boolean;
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
@@ -346,12 +348,15 @@ const fallbackBlocklyBlockCatalog: ProcessBlocklyBlockDefinition[] = [
 
 export function ProcessWorkbench({
   activeWorkspace,
+  activeApplicationId,
   isBackendHealthy,
   onWorkspaceChanged,
   onMessage
 }: ProcessWorkbenchProps): React.ReactElement {
   const [definitions, setDefinitions] = useState<ProcessDefinitionSummary[]>([]);
   const [selectedDefinition, setSelectedDefinition] = useState<ProcessDefinitionResponse | null>(null);
+  const [editingDefinitionId, setEditingDefinitionId] = useState<string | null>(null);
+  const [loadedDefinitionStatus, setLoadedDefinitionStatus] = useState<string | null>(null);
   const [validationReport, setValidationReport] = useState<ProcessGraphValidationReport | null>(null);
   const [draft, setDraft] = useState<ProcessDraft>(() => createDraft());
   const [launchDraft, setLaunchDraft] = useState<RuntimeLaunchDraft>(() => createRuntimeLaunchDraft());
@@ -368,7 +373,29 @@ export function ProcessWorkbench({
   const [lastProjectSnapshot, setLastProjectSnapshot] = useState<PublishedProjectSnapshotResponse | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const activeApplication = activeWorkspace?.project.applications[0] ?? null;
+  const activeApplication = activeWorkspace?.project.applications.find(
+    application => application.applicationId === activeApplicationId)
+    ?? activeWorkspace?.project.applications[0]
+    ?? null;
+  const selectedApplicationSnapshot = useMemo(
+    () => findApplicationSnapshot(
+      activeWorkspace,
+      activeApplication?.applicationId ?? null,
+      lastProjectSnapshot),
+    [activeApplication?.applicationId, activeWorkspace, lastProjectSnapshot]);
+  const projectApplicationApiScope = useMemo(
+    () => activeWorkspace && activeApplication
+      ? {
+        projectId: activeWorkspace.project.projectId,
+        applicationId: activeApplication.applicationId
+      }
+      : undefined,
+    [activeApplication, activeWorkspace]);
+  const editorScopeKey = activeWorkspace && activeApplication
+    ? `${activeWorkspace.project.projectId}\u0000${activeApplication.applicationId}`
+    : null;
+  const isLoadedDefinitionReadOnly = editingDefinitionId !== null
+    && loadedDefinitionStatus !== 'Draft';
   const selectedNode = useMemo(
     () => draft.nodes.find(node => node.nodeId === draft.selectedNodeId) ?? draft.nodes[0] ?? null,
     [draft.nodes, draft.selectedNodeId]);
@@ -398,9 +425,9 @@ export function ProcessWorkbench({
       return;
     }
 
-    const rows = await listProcessDefinitions();
+    const rows = await listProcessDefinitions(projectApplicationApiScope);
     setDefinitions(rows);
-  }, [isBackendHealthy]);
+  }, [isBackendHealthy, projectApplicationApiScope]);
 
   const loadBlocklyBlocks = useCallback(async () => {
     if (!isBackendHealthy) {
@@ -418,13 +445,23 @@ export function ProcessWorkbench({
       return;
     }
 
-    const response = await getAutomationTopology(activeApplication.topologyId);
+    const response = await getAutomationTopology(activeApplication.topologyId, projectApplicationApiScope);
     setProjectTopology(response.ok && response.body ? response.body : null);
-  }, [activeApplication?.topologyId, isBackendHealthy]);
+  }, [activeApplication?.topologyId, isBackendHealthy, projectApplicationApiScope]);
 
   useEffect(() => {
     loadDefinitions().catch(error => onMessage(`Process list failed: ${String(error)}`));
   }, [loadDefinitions, onMessage]);
+
+  useEffect(() => {
+    setSelectedDefinition(null);
+    setEditingDefinitionId(null);
+    setLoadedDefinitionStatus(null);
+    setValidationReport(null);
+    setDraft(createDraft());
+    setLastStartedSession(null);
+    setLastProjectSnapshot(null);
+  }, [editorScopeKey]);
 
   useEffect(() => {
     loadBlocklyBlocks().catch(error => onMessage(`Blockly block list failed: ${String(error)}`));
@@ -487,6 +524,8 @@ export function ProcessWorkbench({
   const resetDraft = useCallback(() => {
     setDraft(createDraft(blockCatalog));
     setSelectedDefinition(null);
+    setEditingDefinitionId(null);
+    setLoadedDefinitionStatus(null);
     setValidationReport(null);
     setLaunchDraft(createRuntimeLaunchDraft());
     setLastStartedSession(null);
@@ -494,35 +533,54 @@ export function ProcessWorkbench({
   }, [blockCatalog]);
 
   const saveDraft = useCallback(async () => {
+    if (isLoadedDefinitionReadOnly) {
+      onMessage('Published process definitions cannot be overwritten. Create a new draft to continue.');
+      return;
+    }
+
     setBusy(true);
     setValidationReport(null);
 
     try {
       const request = toCreateRequest(draft, blockCatalog);
-      const response = await createProcessDefinition(request);
+      const response = editingDefinitionId
+        ? await updateProcessDefinition(editingDefinitionId, request, projectApplicationApiScope)
+        : await createProcessDefinition(request, projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Process save failed: ${response.status} ${response.text}`);
         return;
       }
 
       setSelectedDefinition(response.body);
+      setEditingDefinitionId(response.body.processDefinitionId);
+      setLoadedDefinitionStatus(response.body.status);
       setLastProjectSnapshot(null);
       onMessage(`Saved ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
       setBusy(false);
     }
-  }, [blockCatalog, draft, loadDefinitions, onMessage]);
+  }, [
+    blockCatalog,
+    draft,
+    editingDefinitionId,
+    isLoadedDefinitionReadOnly,
+    loadDefinitions,
+    onMessage,
+    projectApplicationApiScope
+  ]);
 
   const validateSelected = useCallback(async () => {
     if (!selectedDefinition) {
       return;
     }
 
-    const report = await validateProcessDefinition(selectedDefinition.processDefinitionId);
+    const report = await validateProcessDefinition(
+      selectedDefinition.processDefinitionId,
+      projectApplicationApiScope);
     setValidationReport(report);
     onMessage(report?.isValid ? 'Process graph is valid' : 'Process graph has validation issues');
-  }, [onMessage, selectedDefinition]);
+  }, [onMessage, projectApplicationApiScope, selectedDefinition]);
 
   const publishSelected = useCallback(async () => {
     if (!selectedDefinition) {
@@ -531,13 +589,17 @@ export function ProcessWorkbench({
 
     setBusy(true);
     try {
-      const response = await publishProcessDefinition(selectedDefinition.processDefinitionId);
+      const response = await publishProcessDefinition(
+        selectedDefinition.processDefinitionId,
+        projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Publish failed: ${response.status} ${response.text}`);
         return;
       }
 
       setSelectedDefinition(response.body);
+      setEditingDefinitionId(response.body.processDefinitionId);
+      setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body, blockCatalog));
       setLastStartedSession(null);
       setLastProjectSnapshot(null);
@@ -546,19 +608,21 @@ export function ProcessWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [blockCatalog, loadDefinitions, onMessage, selectedDefinition]);
+  }, [blockCatalog, loadDefinitions, onMessage, projectApplicationApiScope, selectedDefinition]);
 
   const loadExisting = useCallback(async (summary: ProcessDefinitionSummary) => {
     setBusy(true);
     setValidationReport(null);
     try {
-      const response = await getProcessDefinition(summary.processDefinitionId);
+      const response = await getProcessDefinition(summary.processDefinitionId, projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Process load failed: ${response.status} ${response.text}`);
         return;
       }
 
       setSelectedDefinition(response.body);
+      setEditingDefinitionId(response.body.processDefinitionId);
+      setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body, blockCatalog));
       setLastStartedSession(null);
       setLastProjectSnapshot(null);
@@ -566,14 +630,13 @@ export function ProcessWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [blockCatalog, onMessage]);
+  }, [blockCatalog, onMessage, projectApplicationApiScope]);
 
   const startPublishedRuntimeSession = useCallback(async () => {
-    const projectSnapshotId = lastProjectSnapshot?.snapshotId
-      ?? activeWorkspace?.project.activeSnapshotId
-      ?? null;
+    const projectSnapshotId = selectedApplicationSnapshot?.snapshotId ?? null;
 
-    if (projectSnapshotId && !activeWorkspace) {
+    if (activeWorkspace && !projectSnapshotId) {
+      onMessage('Publish a project snapshot before starting runtime');
       return;
     }
 
@@ -583,10 +646,10 @@ export function ProcessWorkbench({
 
     setBusy(true);
     try {
-      const response = projectSnapshotId && activeWorkspace
+      const response = activeWorkspace
         ? await startProjectSnapshotRuntimeSession(
           activeWorkspace.project.projectId,
-          projectSnapshotId,
+          projectSnapshotId!,
           toStartProjectSnapshotRuntimeSessionRequest(launchDraft))
         : await startProcessRuntimeSession(
           selectedDefinition!.processDefinitionId,
@@ -601,7 +664,7 @@ export function ProcessWorkbench({
     } finally {
       setBusy(false);
     }
-  }, [activeWorkspace, lastProjectSnapshot?.snapshotId, launchDraft, onMessage, selectedDefinition]);
+  }, [activeWorkspace, launchDraft, onMessage, selectedApplicationSnapshot?.snapshotId, selectedDefinition]);
 
   const publishCurrentProjectSnapshot = useCallback(async () => {
     if (!activeWorkspace || !activeApplication || !activeApplication.topologyId || !selectedDefinition || !projectTopology) {
@@ -881,8 +944,10 @@ export function ProcessWorkbench({
             type="button"
             className="button primary"
             onClick={saveDraft}
-            disabled={!isBackendHealthy || busy}
-            title="Save process definition"
+            disabled={!isBackendHealthy || busy || isLoadedDefinitionReadOnly}
+            title={isLoadedDefinitionReadOnly
+              ? 'Published definitions are read-only. Create a new draft to continue.'
+              : 'Save process definition'}
             data-testid="save-process-definition"
           >
             <Save size={16} />
@@ -913,7 +978,11 @@ export function ProcessWorkbench({
 
         <div className="process-layout">
           <section className="process-form">
-            <GraphMetadataEditor draft={draft} onChange={updateDraftField} />
+            <GraphMetadataEditor
+              draft={draft}
+              definitionIdDisabled={editingDefinitionId !== null}
+              onChange={updateDraftField}
+            />
             <NodeToolbox onAddNode={addNode} />
             <NodeInspector
               node={selectedNode}
@@ -1047,9 +1116,11 @@ export function ProcessWorkbench({
 
 function GraphMetadataEditor({
   draft,
+  definitionIdDisabled,
   onChange
 }: {
   draft: ProcessDraft;
+  definitionIdDisabled: boolean;
   onChange<TKey extends keyof ProcessDraft>(key: TKey, value: ProcessDraft[TKey]): void;
 }): React.ReactElement {
   return (
@@ -1058,7 +1129,9 @@ function GraphMetadataEditor({
         <span>Definition ID</span>
         <input
           value={draft.processDefinitionId}
+          disabled={definitionIdDisabled}
           onChange={event => onChange('processDefinitionId', event.target.value)}
+          data-testid="process-definition-id"
         />
       </label>
       <label>
@@ -1066,6 +1139,7 @@ function GraphMetadataEditor({
         <input
           value={draft.versionId}
           onChange={event => onChange('versionId', event.target.value)}
+          data-testid="process-version-id"
         />
       </label>
       <label>
@@ -1073,6 +1147,7 @@ function GraphMetadataEditor({
         <input
           value={draft.displayName}
           onChange={event => onChange('displayName', event.target.value)}
+          data-testid="process-display-name"
         />
       </label>
     </div>
@@ -1858,9 +1933,10 @@ function RuntimeLaunchPanel({
   onStart(): void;
 }): React.ReactElement {
   const isPublished = selectedDefinition?.status === 'Published';
-  const launchSnapshotId = lastProjectSnapshot?.snapshotId
-    ?? activeWorkspace?.project.activeSnapshotId
-    ?? null;
+  const launchSnapshotId = findApplicationSnapshot(
+    activeWorkspace,
+    activeApplicationId,
+    lastProjectSnapshot)?.snapshotId ?? null;
   const canPublishProjectSnapshot = isBackendHealthy
     && activeWorkspace !== null
     && activeApplicationId !== null
@@ -1869,7 +1945,9 @@ function RuntimeLaunchPanel({
     && launchDraft.configurationSnapshotId.trim().length > 0
     && !busy;
   const canStart = isBackendHealthy
-    && (launchSnapshotId !== null || (isPublished && launchDraft.configurationSnapshotId.trim().length > 0))
+    && (activeWorkspace
+      ? launchSnapshotId !== null
+      : isPublished && launchDraft.configurationSnapshotId.trim().length > 0)
     && !busy;
 
   return (
@@ -1991,6 +2069,28 @@ function RuntimeLaunchPanel({
       ) : null}
     </div>
   );
+}
+
+function findApplicationSnapshot(
+  workspace: AutomationProjectWorkspaceResponse | null,
+  applicationId: string | null,
+  preferredSnapshot: PublishedProjectSnapshotResponse | null
+): PublishedProjectSnapshotResponse | null {
+  if (!workspace || !applicationId) {
+    return null;
+  }
+
+  if (preferredSnapshot?.applicationId === applicationId) {
+    return preferredSnapshot;
+  }
+
+  const snapshots = workspace.project.snapshots.filter(
+    snapshot => snapshot.applicationId === applicationId);
+  return snapshots.find(snapshot => snapshot.snapshotId === workspace.project.activeSnapshotId)
+    ?? snapshots
+      .slice()
+      .sort((left, right) => right.publishedAtUtc.localeCompare(left.publishedAtUtc))[0]
+    ?? null;
 }
 
 function createProjectTargetOptions(

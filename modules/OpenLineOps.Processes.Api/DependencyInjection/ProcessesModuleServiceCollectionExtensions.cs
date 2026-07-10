@@ -5,6 +5,7 @@ using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Api.Scripting;
 using OpenLineOps.Processes.Application.Definitions;
 using OpenLineOps.Processes.Application.Persistence;
+using OpenLineOps.Processes.Application.ProjectWorkspaces;
 using OpenLineOps.Processes.Application.Runtime;
 using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Infrastructure.Persistence;
@@ -56,8 +57,11 @@ public static class ProcessesModuleServiceCollectionExtensions
             ServiceDescriptor.Singleton<IProcessBlocklyBlockCatalogSource, PluginCommandBlocklyBlockCatalogSource>());
         services.TryAddSingleton<IProcessBlocklyBlockCatalog, ProcessBlocklyBlockCatalog>();
         services.TryAddSingleton<IProcessScriptDefinitionValidator, PythonScriptDefinitionValidator>();
+        services.TryAddSingleton<IProjectProcessDefinitionRepository, FileSystemProjectProcessDefinitionRepository>();
         services.AddScoped<IProcessDefinitionService, ProcessDefinitionService>();
+        services.AddScoped<IProjectProcessDefinitionService, ProjectProcessDefinitionService>();
         services.AddScoped<IProcessRuntimeSessionLauncher, ProcessRuntimeSessionLauncher>();
+        services.AddScoped<IProjectProcessRuntimeSessionLauncher, ProjectProcessRuntimeSessionLauncher>();
 
         return services;
     }

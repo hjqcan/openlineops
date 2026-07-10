@@ -28,22 +28,33 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         Directory.CreateDirectory(projectPath);
 
         var manifestPath = GetManifestPath(projectPath);
-        var temporaryPath = $"{manifestPath}.tmp";
+        var temporaryPath = $"{manifestPath}.{Guid.NewGuid():N}.tmp";
 
-        await using (var stream = new FileStream(
-            temporaryPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 16 * 1024,
-            useAsync: true))
+        try
         {
-            await JsonSerializer
-                .SerializeAsync(stream, Normalize(manifest, projectPath), JsonOptions, cancellationToken)
-                .ConfigureAwait(false);
-        }
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 16 * 1024,
+                useAsync: true))
+            {
+                await JsonSerializer
+                    .SerializeAsync(stream, Normalize(manifest, projectPath), JsonOptions, cancellationToken)
+                    .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-        File.Move(temporaryPath, manifestPath, overwrite: true);
+            File.Move(temporaryPath, manifestPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     public async ValueTask<AutomationProjectManifest?> LoadAsync(

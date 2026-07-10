@@ -142,6 +142,7 @@ npm audit --audit-level=high --registry=https://registry.npmjs.org
 
 - Development plan: `docs/development-execution-plan.md`
 - Automation project workspace: `docs/automation-project-workspace.md`
+- Automation IDE and headless Runner product shell: `docs/automation-ide-product-shell.md`
 - Composable automation model: `docs/composable-automation-model.md`
 - Composable building block architecture: `docs/composable-building-block-architecture.md`
 - ADR index: `docs/adr/README.md`

@@ -368,7 +368,7 @@ public sealed class AutomationTopologiesController : ControllerBase
             statusCode: statusCode);
     }
 
-    private static Dictionary<string, string[]> Validate(ApiCreateTopologyRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiCreateTopologyRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -382,7 +382,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddNodeRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddNodeRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -397,7 +397,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddCapabilityRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddCapabilityRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -414,7 +414,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddModuleRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddModuleRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -432,7 +432,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddDriverBindingRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddDriverBindingRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -448,7 +448,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddSlotGroupRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddSlotGroupRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)
@@ -465,7 +465,7 @@ public sealed class AutomationTopologiesController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(ApiAddSlotRequest? request)
+    internal static Dictionary<string, string[]> Validate(ApiAddSlotRequest? request)
     {
         var errors = NewErrors(request);
         if (request is null)

@@ -15,5 +15,11 @@ public static class OpenLineOpsApiRoutes
     public const string RuntimeSessions = "api/runtime/sessions";
     public const string AutomationTopologies = "api/automation-topologies";
     public const string SiteLayouts = "api/site-layouts";
+    public const string ProjectApplicationTopologies =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/topologies";
+    public const string ProjectApplicationSiteLayouts =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/layouts";
+    public const string ProjectApplicationProcesses =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/processes";
     public const string Traceability = "api/traceability";
 }

@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
+using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Topology.Api.Models;
-using OpenLineOps.Topology.Application.Layouts;
-using OpenLineOps.Topology.Application.Topologies;
+using OpenLineOps.Topology.Application.ProjectWorkspaces;
 using ApiAddElementRequest = OpenLineOps.Topology.Api.Models.AddSiteLayoutElementRequest;
 using ApiCreateLayoutRequest = OpenLineOps.Topology.Api.Models.CreateSiteLayoutRequest;
 using ApiUpdateElementGeometryRequest = OpenLineOps.Topology.Api.Models.UpdateSiteLayoutElementGeometryRequest;
@@ -15,12 +15,12 @@ namespace OpenLineOps.Topology.Api.Controllers;
 
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.TopologyV1)]
-[Route(OpenLineOpsApiRoutes.SiteLayouts)]
-public sealed class SiteLayoutsController : ControllerBase
+[Route(OpenLineOpsApiRoutes.ProjectApplicationSiteLayouts)]
+public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
 {
-    private readonly IAutomationTopologyService _topologyService;
+    private readonly IProjectAutomationTopologyService _topologyService;
 
-    public SiteLayoutsController(IAutomationTopologyService topologyService)
+    public ProjectApplicationSiteLayoutsController(IProjectAutomationTopologyService topologyService)
     {
         _topologyService = topologyService;
     }
@@ -31,10 +31,12 @@ public sealed class SiteLayoutsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<SiteLayoutResponse>> CreateAsync(
+        string projectId,
+        string applicationId,
         ApiCreateLayoutRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = Validate(request);
+        var validationErrors = SiteLayoutsController.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -42,6 +44,8 @@ public sealed class SiteLayoutsController : ControllerBase
 
         var result = await _topologyService
             .CreateLayoutAsync(
+                projectId,
+                applicationId,
                 new AppCreateLayoutRequest(
                     request.LayoutId!,
                     request.TopologyId!,
@@ -51,29 +55,33 @@ public sealed class SiteLayoutsController : ControllerBase
                     request.Units!),
                 cancellationToken)
             .ConfigureAwait(false);
-
         if (result.IsFailure)
         {
             return ToProblem(result.Error);
         }
 
-        var response = ToResponse(result.Value);
-
-        return Created($"/api/site-layouts/{response.LayoutId}", response);
+        var response = SiteLayoutsController.ToResponse(result.Value);
+        return Created(
+            $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/layouts/{Uri.EscapeDataString(response.LayoutId)}",
+            response);
     }
 
     [HttpGet("{layoutId}")]
     [ProducesResponseType<SiteLayoutResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<SiteLayoutResponse>> GetByIdAsync(
+        string projectId,
+        string applicationId,
         string layoutId,
         CancellationToken cancellationToken)
     {
-        var result = await _topologyService.GetLayoutByIdAsync(layoutId, cancellationToken).ConfigureAwait(false);
+        var result = await _topologyService
+            .GetLayoutByIdAsync(projectId, applicationId, layoutId, cancellationToken)
+            .ConfigureAwait(false);
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+            : Ok(SiteLayoutsController.ToResponse(result.Value));
     }
 
     [HttpPost("{layoutId}/elements")]
@@ -82,11 +90,13 @@ public sealed class SiteLayoutsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<SiteLayoutResponse>> AddElementAsync(
+        string projectId,
+        string applicationId,
         string layoutId,
         ApiAddElementRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = Validate(request);
+        var validationErrors = SiteLayoutsController.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -94,6 +104,8 @@ public sealed class SiteLayoutsController : ControllerBase
 
         var result = await _topologyService
             .AddLayoutElementAsync(
+                projectId,
+                applicationId,
                 layoutId,
                 new AppAddElementRequest(
                     request.ElementId!,
@@ -112,7 +124,7 @@ public sealed class SiteLayoutsController : ControllerBase
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+            : Ok(SiteLayoutsController.ToResponse(result.Value));
     }
 
     [HttpPut("{layoutId}/elements/{elementId}/geometry")]
@@ -120,12 +132,14 @@ public sealed class SiteLayoutsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<SiteLayoutResponse>> UpdateElementGeometryAsync(
+        string projectId,
+        string applicationId,
         string layoutId,
         string elementId,
         ApiUpdateElementGeometryRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = Validate(request);
+        var validationErrors = SiteLayoutsController.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -133,6 +147,8 @@ public sealed class SiteLayoutsController : ControllerBase
 
         var result = await _topologyService
             .UpdateLayoutElementGeometryAsync(
+                projectId,
+                applicationId,
                 layoutId,
                 elementId,
                 new AppUpdateElementGeometryRequest(
@@ -146,35 +162,10 @@ public sealed class SiteLayoutsController : ControllerBase
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+            : Ok(SiteLayoutsController.ToResponse(result.Value));
     }
 
-    internal static SiteLayoutResponse ToResponse(SiteLayoutDetails layout)
-    {
-        return new SiteLayoutResponse(
-            layout.LayoutId,
-            layout.TopologyId,
-            layout.DisplayName,
-            layout.CanvasWidth,
-            layout.CanvasHeight,
-            layout.Units,
-            layout.Elements
-                .Select(element => new SiteLayoutElementResponse(
-                    element.ElementId,
-                    element.Kind,
-                    element.TargetKind,
-                    element.TargetId,
-                    element.X,
-                    element.Y,
-                    element.Width,
-                    element.Height,
-                    element.RotationDegrees,
-                    element.LayerId,
-                    element.Label))
-                .ToArray());
-    }
-
-    private ObjectResult ToProblem(OpenLineOps.Application.Abstractions.Results.ApplicationError error)
+    private ObjectResult ToProblem(ApplicationError error)
     {
         var statusCode = error.Code.Split('.', 2)[0] switch
         {
@@ -183,89 +174,6 @@ public sealed class SiteLayoutsController : ControllerBase
             _ => StatusCodes.Status409Conflict
         };
 
-        return Problem(
-            title: error.Code,
-            detail: error.Message,
-            statusCode: statusCode);
-    }
-
-    internal static Dictionary<string, string[]> Validate(ApiCreateLayoutRequest? request)
-    {
-        var errors = AutomationTopologiesController.NewErrors(request);
-        if (request is null)
-        {
-            return errors;
-        }
-
-        AutomationTopologiesController.AddRequired(errors, nameof(request.LayoutId), request.LayoutId);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.TopologyId), request.TopologyId);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.DisplayName), request.DisplayName);
-        AddPositive(errors, nameof(request.CanvasWidth), request.CanvasWidth);
-        AddPositive(errors, nameof(request.CanvasHeight), request.CanvasHeight);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.Units), request.Units);
-
-        return errors;
-    }
-
-    internal static Dictionary<string, string[]> Validate(ApiAddElementRequest? request)
-    {
-        var errors = AutomationTopologiesController.NewErrors(request);
-        if (request is null)
-        {
-            return errors;
-        }
-
-        AutomationTopologiesController.AddRequired(errors, nameof(request.ElementId), request.ElementId);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.Kind), request.Kind);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.TargetKind), request.TargetKind);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.TargetId), request.TargetId);
-        AddNumber(errors, nameof(request.X), request.X);
-        AddNumber(errors, nameof(request.Y), request.Y);
-        AddPositive(errors, nameof(request.Width), request.Width);
-        AddPositive(errors, nameof(request.Height), request.Height);
-        AddNumber(errors, nameof(request.RotationDegrees), request.RotationDegrees);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.LayerId), request.LayerId);
-        AutomationTopologiesController.AddRequired(errors, nameof(request.Label), request.Label);
-
-        return errors;
-    }
-
-    internal static Dictionary<string, string[]> Validate(ApiUpdateElementGeometryRequest? request)
-    {
-        var errors = AutomationTopologiesController.NewErrors(request);
-        if (request is null)
-        {
-            return errors;
-        }
-
-        AddNumber(errors, nameof(request.X), request.X);
-        AddNumber(errors, nameof(request.Y), request.Y);
-        AddPositive(errors, nameof(request.Width), request.Width);
-        AddPositive(errors, nameof(request.Height), request.Height);
-        AddNumber(errors, nameof(request.RotationDegrees), request.RotationDegrees);
-
-        return errors;
-    }
-
-    private static void AddNumber(
-        Dictionary<string, string[]> errors,
-        string key,
-        double? value)
-    {
-        if (value is null)
-        {
-            errors[key] = ["Value is required."];
-        }
-    }
-
-    private static void AddPositive(
-        Dictionary<string, string[]> errors,
-        string key,
-        double? value)
-    {
-        if (value is null or <= 0)
-        {
-            errors[key] = ["Value must be positive."];
-        }
+        return Problem(title: error.Code, detail: error.Message, statusCode: statusCode);
     }
 }

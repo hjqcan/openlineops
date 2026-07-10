@@ -1,6 +1,6 @@
 # Automation Project Workspace Architecture
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 ## Purpose
 
@@ -17,6 +17,10 @@ The detailed composable building block model is defined in
 `docs/composable-automation-model.md`, with the implementation architecture in
 `docs/composable-building-block-architecture.md`. This document focuses on the
 workspace workflow around that model.
+
+The IDE shell, Edit/Run mode boundary, immutable project release, deployable
+package, CLI, Runner, and Agent host model are defined in
+`docs/automation-ide-product-shell.md`.
 
 ## Product Workflow
 
@@ -178,7 +182,9 @@ measurements, and audit entries.
 
 Project editing is draft-oriented. Users can change layout, group membership,
 slot binding, process references, custom Blockly blocks, and Python source while
-the project is open.
+the project is open. A saved process Draft remains editable and is replaced in
+place while preserving its identity and creation time. Publishing makes that
+definition immutable; further work starts from a new Draft/version.
 
 Runtime execution should not depend on mutable draft state. Starting a runtime
 session requires a published snapshot that freezes:
@@ -194,20 +200,31 @@ session requires a published snapshot that freezes:
 
 ## API Shape
 
-The first API surface should be project lifecycle and composition oriented:
+The project source API is explicitly scoped by project and application. The
+legacy global topology/layout endpoints remain temporarily for compatibility,
+but Studio uses the scoped routes:
 
 - `POST /api/automation-projects`
 - `GET /api/automation-projects`
 - `GET /api/automation-projects/{projectId}`
 - `PUT /api/automation-projects/{projectId}/manifest`
 - `PUT /api/automation-projects/{projectId}/applications/{applicationId}`
-- `PUT /api/automation-projects/{projectId}/topology`
-- `PUT /api/automation-projects/{projectId}/topology/nodes/{nodeId}`
-- `PUT /api/automation-projects/{projectId}/topology/modules/{moduleId}`
-- `PUT /api/automation-projects/{projectId}/topology/slot-groups/{slotGroupId}`
-- `PUT /api/automation-projects/{projectId}/topology/slots/{slotId}`
-- `PUT /api/automation-projects/{projectId}/topology/driver-bindings/{bindingId}`
-- `PUT /api/automation-projects/{projectId}/site-layout`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/topologies`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}/nodes`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}/modules`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}/slot-groups`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}/slots`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}/driver-bindings`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/layouts`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/layouts/{layoutId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/processes`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/processes`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}`
+- `PUT /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}/validation`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}/publish`
 - `POST /api/automation-projects/{projectId}/publish`
 - `GET /api/automation-projects/{projectId}/snapshots`
 
@@ -307,8 +324,10 @@ coordinates, target references, and duplicate placement.
 
 ### Slice 4: Persistence And API
 
-Add application services, repository ports, in-memory and SQLite adapters, API
-controllers, and host-level API tests for create/list/open/update/publish.
+Add application services, project/application-scoped repository ports,
+project-folder source adapters, API controllers, and host-level API tests for
+create/list/open/update/publish. Global databases can be indexes or runtime
+state, but are not the authority for editable project source.
 
 ### Slice 5: Desktop Project Shell
 
@@ -323,15 +342,22 @@ sessions from a published project snapshot instead of manually assembled ids.
 
 ## Current Gap
 
-The repository already has strong foundations for Processes, Runtime, Devices,
-Plugins, Engineering, Traceability, Electron, Blockly, and PythonScript. The
-first Projects and Topology backend slice now covers project applications,
-equipment nodes, modules, capabilities, driver bindings, slot groups, slots,
-site layout drafts, immutable snapshot publication, and a manifest-backed
-project folder create/open/save workflow through HTTP.
+The repository now has a project-first Studio shell plus durable project source
+for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, and Python.
+Every repository is keyed by the same explicit `(project, application)` scope.
+Topology and layout use versioned JSON; a process uses `flow.json` as an atomic
+commit pointer to content-addressed Blockly/Python artifacts with verified
+SHA-256 digests. The same local topology/layout/process ids are therefore valid
+in two applications.
 
-The remaining product gap is the complete desktop workbench: Electron still
-needs the visible new/open/recent project shell, project explorer, layout
-canvas, Blockly target selectors, snapshot-based runtime launch, trace
-enrichment, and durable SQLite draft persistence for project and topology
-state.
+A cold-restart API test destroys the first host, moves the complete project
+folder, opens its manifest in a fresh host, and restores two isolated
+applications. Persistence tests also reject a modified Python artifact whose
+digest no longer matches `flow.json`.
+
+The remaining persistence gap is Engineering configuration, project custom
+blocks, bindings, and the immutable release publisher. Those contexts must
+adopt the same explicit scope rather than treating their current global
+databases as project source. The desktop also still needs a real editable
+layout canvas, explicit active-application selection, richer editor
+tabs/inspector state, and the separate Runner/Agent/CLI hosts.

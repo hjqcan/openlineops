@@ -10,6 +10,7 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 import type {
+  AutomationProjectWorkspaceResponse,
   EngineeringProjectResponse,
   ProcessDefinitionSummary,
   RecipeResponse,
@@ -31,6 +32,8 @@ import {
 } from './api';
 
 interface EngineeringWorkbenchProps {
+  activeWorkspace: AutomationProjectWorkspaceResponse | null;
+  activeApplicationId: string | null;
   isBackendHealthy: boolean;
   onMessage(message: string): void;
 }
@@ -70,6 +73,8 @@ const emptyResources: EngineeringResources = {
 };
 
 export function EngineeringWorkbench({
+  activeWorkspace,
+  activeApplicationId,
   isBackendHealthy,
   onMessage
 }: EngineeringWorkbenchProps): React.ReactElement {
@@ -77,6 +82,17 @@ export function EngineeringWorkbench({
   const [draft, setDraft] = useState<EngineeringDraft>(() => createEngineeringDraft());
   const [createdProject, setCreatedProject] = useState<EngineeringProjectResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const projectApplicationApiScope = useMemo(() => {
+    const application = activeWorkspace?.project.applications.find(
+      candidate => candidate.applicationId === activeApplicationId)
+      ?? activeWorkspace?.project.applications[0];
+    return activeWorkspace && application
+      ? {
+        projectId: activeWorkspace.project.projectId,
+        applicationId: application.applicationId
+      }
+      : undefined;
+  }, [activeApplicationId, activeWorkspace]);
 
   const publishedProcesses = useMemo(
     () => resources.processDefinitions.filter(definition => definition.status === 'Published'),
@@ -98,7 +114,7 @@ export function EngineeringWorkbench({
       listEngineeringProjects(),
       listRecipes(),
       listStationProfiles(),
-      listProcessDefinitions()
+      listProcessDefinitions(projectApplicationApiScope)
     ]);
 
     setResources({
@@ -119,7 +135,7 @@ export function EngineeringWorkbench({
           processVersionId: firstPublishedProcess.versionId
         });
     }
-  }, [isBackendHealthy]);
+  }, [isBackendHealthy, projectApplicationApiScope]);
 
   useEffect(() => {
     loadResources().catch(error => onMessage(`Engineering load failed: ${String(error)}`));

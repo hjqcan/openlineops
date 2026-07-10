@@ -17,6 +17,7 @@ const maxCdpEvents = 80;
 let previewProcess;
 let electronProcess;
 let cdp;
+let activeProjectApplicationScope;
 
 async function main() {
   assertNodeRuntime();
@@ -59,10 +60,11 @@ async function main() {
   await cdp.send('Page.enable');
 
   await waitForExpression(
-    '(() => document.body?.innerText.includes("Station Runtime Dashboard")'
+    '(() => document.body?.innerText.includes("AUTOMATION LINE IDE")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"automation-ide-shell\\"]"))'
     + ' && Boolean(window.openlineopsDesktop))()',
     30000,
-    'desktop shell to render');
+    'automation IDE start center to render');
 
   await evaluate('window.__openlineopsSmokeEvents = {}');
   await clickByTestId('start-backend');
@@ -97,6 +99,7 @@ async function main() {
     + ' && document.body.innerText.includes("openlineops.project.json"))()',
     30000,
     'automation project manifest to save from desktop');
+  await clickByTestId('switch-project-workspace');
   await setInputByTestId('open-project-path-input', smokeProjectPath);
   await clickByTestId('open-project-workspace');
   await waitForExpression(
@@ -113,6 +116,14 @@ async function main() {
     + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("Station 1"))()',
     45000,
     'project topology and site layout to seed from desktop');
+  await setInputByTestId('layout-geometry-x', '160');
+  await clickByTestId('save-layout-geometry');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Layout geometry saved")'
+    + ' && document.querySelector("[data-testid=\\"layout-geometry-x\\"]")?.value === "160")()',
+    30000,
+    'site layout geometry to be edited and saved');
+  await clickByTestId('switch-project-workspace');
   await setInputByTestId('open-project-path-input', smokeProjectPath);
   await clickByTestId('open-project-workspace');
   await waitForExpression(
@@ -121,6 +132,42 @@ async function main() {
     + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("L1"))()',
     30000,
     'automation project topology link to persist through manifest reopen');
+
+  const openedProject = await getAutomationProjectByPath(smokeProjectPath);
+  const openedApplication = openedProject.applications?.[0];
+  if (!openedApplication) {
+    throw new Error(`Opened automation project has no application: ${JSON.stringify(openedProject)}`);
+  }
+  activeProjectApplicationScope = {
+    projectId: openedProject.projectId,
+    applicationId: openedApplication.applicationId
+  };
+  const layoutId = `${openedProject.projectId}.layout.main`;
+  const layoutResponse = await apiRequest(
+    `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
+    + `/applications/${encodeURIComponent(openedApplication.applicationId)}`
+    + `/layouts/${encodeURIComponent(layoutId)}`);
+  const editedElement = layoutResponse.body?.elements?.find(
+    element => element.targetId === `${openedProject.projectId}.module.axis.x`);
+  if (layoutResponse.status !== 200 || editedElement?.x !== 160) {
+    throw new Error(`Edited layout geometry was not persisted: ${layoutResponse.text}`);
+  }
+
+  const secondaryApplicationId = `${openedApplication.applicationId}-secondary`;
+  await setInputByTestId('new-application-id', secondaryApplicationId);
+  await setInputByTestId('new-application-name', 'Secondary Application');
+  await clickByTestId('add-project-application');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(secondaryApplicationId)}`
+    + ' && document.body.innerText.includes("Application created"))()',
+    30000,
+    'secondary project application to be created and selected');
+  await setSelectByTestId('active-application-selector', openedApplication.applicationId);
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(openedApplication.applicationId)}`
+    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("L1"))()',
+    30000,
+    'primary project application topology to be restored after switching applications');
 
   await clickByTestId('nav-dashboard');
   await waitForExpression(
@@ -244,6 +291,20 @@ async function main() {
   if (countedTransition?.loopPolicy !== 'Counted' || countedTransition?.maxTraversals !== 2) {
     throw new Error(`Counted transition policy was not persisted: ${JSON.stringify(countedTransition)}`);
   }
+  const updatedProcessDisplayName = `Updated Automation Flow ${Date.now().toString(36)}`;
+  await setInputByTestId('process-display-name', updatedProcessDisplayName);
+  await clickByTestId('save-process-definition');
+  const updatedDefinition = await waitForProcessDefinitionDisplayName(
+    savedDefinition.processDefinitionId,
+    updatedProcessDisplayName);
+  if (updatedDefinition.createdAtUtc !== savedDefinition.createdAtUtc) {
+    throw new Error(
+      `Replacing a draft changed its creation time: ${savedDefinition.createdAtUtc} -> ${updatedDefinition.createdAtUtc}`);
+  }
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"publish-process-definition\\"]")?.disabled === false)()',
+    15000,
+    'updated process draft to remain selected for publication');
   await clickByTestId('publish-process-definition');
   await waitForExpression(
     '(() => document.body.innerText.includes("Published desktop-python-")'
@@ -352,8 +413,8 @@ async function waitForHealthyBackend() {
       await clickByTestId('refresh-backend');
       await waitForExpression(
         `(() => {
-          const runButton = document.querySelector('[data-testid="run-simulation"]');
-          return document.body.innerText.includes("Healthy") && runButton?.disabled === false;
+          const refreshButton = document.querySelector('[data-testid="refresh-backend"]');
+          return document.body.innerText.includes("Runtime Healthy") && refreshButton?.disabled === false;
         })()`,
         15000,
         'renderer to reflect healthy backend');
@@ -439,7 +500,13 @@ async function getPublishedDesktopProcessDefinition() {
 }
 
 async function getLatestDesktopProcessDefinition(predicate = () => true) {
-  const response = await apiRequest('/api/process-definitions');
+  if (!activeProjectApplicationScope) {
+    throw new Error('Active project application scope was not captured.');
+  }
+
+  const collectionPath = `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
+    + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/processes`;
+  const response = await apiRequest(collectionPath);
   const definition = response.body
     ?.filter(item => item.processDefinitionId.startsWith('desktop-python-') && predicate(item))
     ?.sort((left, right) => left.processDefinitionId.localeCompare(right.processDefinitionId))
@@ -450,13 +517,37 @@ async function getLatestDesktopProcessDefinition(predicate = () => true) {
   }
 
   const detailResponse = await apiRequest(
-    `/api/process-definitions/${encodeURIComponent(definition.processDefinitionId)}`);
+    `${collectionPath}/${encodeURIComponent(definition.processDefinitionId)}`);
   if (detailResponse.status !== 200) {
     throw new Error(
       `Process detail lookup failed: expected 200, got ${detailResponse.status}. ${detailResponse.text}`);
   }
 
   return detailResponse.body;
+}
+
+async function waitForProcessDefinitionDisplayName(processDefinitionId, expectedDisplayName) {
+  if (!activeProjectApplicationScope) {
+    throw new Error('Active project application scope was not captured.');
+  }
+
+  const definitionPath = `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
+    + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/processes/`
+    + encodeURIComponent(processDefinitionId);
+  const deadline = Date.now() + 30000;
+  let lastResponse;
+
+  while (Date.now() < deadline) {
+    lastResponse = await apiRequest(definitionPath);
+    if (lastResponse.status === 200 && lastResponse.body?.displayName === expectedDisplayName) {
+      return lastResponse.body;
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(
+    `Timed out waiting for process draft update ${expectedDisplayName}: ${lastResponse?.text ?? 'no response'}`);
 }
 
 async function getAutomationProjectByPath(projectPath) {

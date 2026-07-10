@@ -166,7 +166,7 @@ public sealed class ProcessDefinitionsController : ControllerBase
         return Created($"/api/runtime/sessions/{response.SessionId}", response);
     }
 
-    private static CreateApplicationDefinitionRequest ToApplicationRequest(
+    internal static CreateApplicationDefinitionRequest ToApplicationRequest(
         CreateApiDefinitionRequest request)
     {
         return new CreateApplicationDefinitionRequest(
@@ -198,7 +198,7 @@ public sealed class ProcessDefinitionsController : ControllerBase
                 .ToArray());
     }
 
-    private static ProcessDefinitionResponse ToResponse(ProcessDefinitionDetails definition)
+    internal static ProcessDefinitionResponse ToResponse(ProcessDefinitionDetails definition)
     {
         return new ProcessDefinitionResponse(
             definition.ProcessDefinitionId,
@@ -211,7 +211,7 @@ public sealed class ProcessDefinitionsController : ControllerBase
             definition.Transitions.Select(ToTransitionResponse).ToArray());
     }
 
-    private static ProcessDefinitionSummaryResponse ToSummaryResponse(ProcessDefinitionSummary summary)
+    internal static ProcessDefinitionSummaryResponse ToSummaryResponse(ProcessDefinitionSummary summary)
     {
         return new ProcessDefinitionSummaryResponse(
             summary.ProcessDefinitionId,
@@ -251,7 +251,7 @@ public sealed class ProcessDefinitionsController : ControllerBase
             transition.MaxTraversals);
     }
 
-    private static ProcessGraphValidationReportResponse ToResponse(
+    internal static ProcessGraphValidationReportResponse ToResponse(
         ProcessGraphValidationReportDetails report)
     {
         return new ProcessGraphValidationReportResponse(
@@ -279,7 +279,7 @@ public sealed class ProcessDefinitionsController : ControllerBase
             statusCode: statusCode);
     }
 
-    private static Dictionary<string, string[]> Validate(CreateApiDefinitionRequest? request)
+    internal static Dictionary<string, string[]> Validate(CreateApiDefinitionRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 

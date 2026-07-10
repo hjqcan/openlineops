@@ -29,11 +29,11 @@ namespace OpenLineOps.Projects.Api.Controllers;
 public sealed class AutomationProjectsController : ControllerBase
 {
     private readonly IAutomationProjectService _projectService;
-    private readonly IProcessRuntimeSessionLauncher _runtimeSessionLauncher;
+    private readonly IProjectProcessRuntimeSessionLauncher _runtimeSessionLauncher;
 
     public AutomationProjectsController(
         IAutomationProjectService projectService,
-        IProcessRuntimeSessionLauncher runtimeSessionLauncher)
+        IProjectProcessRuntimeSessionLauncher runtimeSessionLauncher)
     {
         _projectService = projectService;
         _runtimeSessionLauncher = runtimeSessionLauncher;
@@ -242,6 +242,8 @@ public sealed class AutomationProjectsController : ControllerBase
         var startRequest = request!;
         var startResult = await _runtimeSessionLauncher
             .StartAsync(
+                snapshot.ProjectId,
+                snapshot.ApplicationId,
                 snapshot.ProcessDefinitionId,
                 new AppStartProcessRuntimeSessionRequest(
                     snapshot.ConfigurationSnapshotId,

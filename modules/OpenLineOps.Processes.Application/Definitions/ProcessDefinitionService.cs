@@ -54,35 +54,78 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
                     $"Process definition {definitionId} already exists."));
             }
 
-            var definition = ProcessDefinition.Create(
-                definitionId,
-                new ProcessVersionId(request.VersionId),
-                request.DisplayName,
-                _clock.UtcNow);
-
-            foreach (var nodeRequest in request.Nodes!)
+            var draftResult = BuildDraft(request, _clock.UtcNow);
+            if (draftResult.IsFailure)
             {
-                var nodeResult = AddNode(definition, nodeRequest);
-                if (nodeResult is not null)
-                {
-                    return Result.Failure<ProcessDefinitionDetails>(nodeResult);
-                }
+                return Result.Failure<ProcessDefinitionDetails>(draftResult.Error);
             }
 
-            foreach (var transitionRequest in request.Transitions!)
-            {
-                var transitionResult = AddTransition(definition, transitionRequest);
-                if (transitionResult is not null)
-                {
-                    return Result.Failure<ProcessDefinitionDetails>(transitionResult);
-                }
-            }
+            var definition = draftResult.Value;
 
             await _repository
                 .SaveAsync(definition, cancellationToken)
                 .ConfigureAwait(false);
 
             return Result.Success(ProcessDefinitionMapper.ToDetails(definition));
+        }
+        catch (ArgumentException exception)
+        {
+            return Result.Failure<ProcessDefinitionDetails>(ApplicationError.Validation(
+                "Processes.InvalidDefinitionInput",
+                exception.Message));
+        }
+    }
+
+    public async Task<Result<ProcessDefinitionDetails>> ReplaceDraftAsync(
+        string processDefinitionId,
+        CreateProcessDefinitionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var requestValidation = ValidateCreateRequest(request);
+        if (requestValidation is not null)
+        {
+            return Result.Failure<ProcessDefinitionDetails>(requestValidation);
+        }
+
+        if (!string.Equals(processDefinitionId, request.ProcessDefinitionId, StringComparison.Ordinal))
+        {
+            return Result.Failure<ProcessDefinitionDetails>(ApplicationError.Validation(
+                "Processes.DefinitionIdMismatch",
+                $"Route process definition id {processDefinitionId} does not match request id {request.ProcessDefinitionId}."));
+        }
+
+        try
+        {
+            var definitionId = new ProcessDefinitionId(processDefinitionId);
+            var existing = await _repository
+                .GetByIdAsync(definitionId, cancellationToken)
+                .ConfigureAwait(false);
+            if (existing is null)
+            {
+                return Result.Failure<ProcessDefinitionDetails>(NotFound(processDefinitionId));
+            }
+
+            if (existing.IsPublished)
+            {
+                return Result.Failure<ProcessDefinitionDetails>(ApplicationError.Conflict(
+                    "Processes.DefinitionImmutable",
+                    $"Process definition {definitionId} cannot be changed after publication."));
+            }
+
+            var draftResult = BuildDraft(request, existing.CreatedAtUtc);
+            if (draftResult.IsFailure)
+            {
+                return Result.Failure<ProcessDefinitionDetails>(draftResult.Error);
+            }
+
+            var replacement = draftResult.Value;
+            await _repository
+                .SaveAsync(replacement, cancellationToken)
+                .ConfigureAwait(false);
+
+            return Result.Success(ProcessDefinitionMapper.ToDetails(replacement));
         }
         catch (ArgumentException exception)
         {
@@ -275,6 +318,37 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
         return addResult.Succeeded
             ? null
             : ApplicationError.Validation(addResult.Code, addResult.Message);
+    }
+
+    private static Result<ProcessDefinition> BuildDraft(
+        CreateProcessDefinitionRequest request,
+        DateTimeOffset createdAtUtc)
+    {
+        var definition = ProcessDefinition.Create(
+            new ProcessDefinitionId(request.ProcessDefinitionId),
+            new ProcessVersionId(request.VersionId),
+            request.DisplayName,
+            createdAtUtc);
+
+        foreach (var nodeRequest in request.Nodes!)
+        {
+            var nodeResult = AddNode(definition, nodeRequest);
+            if (nodeResult is not null)
+            {
+                return Result.Failure<ProcessDefinition>(nodeResult);
+            }
+        }
+
+        foreach (var transitionRequest in request.Transitions!)
+        {
+            var transitionResult = AddTransition(definition, transitionRequest);
+            if (transitionResult is not null)
+            {
+                return Result.Failure<ProcessDefinition>(transitionResult);
+            }
+        }
+
+        return Result.Success(definition);
     }
 
     private static Result<ProcessScriptEditorMode?> ParseScriptEditorMode(

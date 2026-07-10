@@ -1,6 +1,8 @@
 export interface PlatformResponse {
-  service: string;
+  productName: string;
+  serviceName: string;
   version: string;
+  runtime: string;
   environment: string;
 }
 
@@ -345,6 +347,11 @@ export interface ProjectApplicationResponse {
   processDefinitionIds: string[];
 }
 
+export interface AddProjectApplicationRequest {
+  applicationId: string;
+  displayName: string;
+}
+
 export interface PublishedProjectSnapshotResponse {
   snapshotId: string;
   projectId: string;
@@ -545,6 +552,14 @@ export interface AddSiteLayoutElementRequest {
   rotationDegrees: number;
   layerId: string;
   label: string;
+}
+
+export interface UpdateSiteLayoutElementGeometryRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDegrees: number;
 }
 
 export interface LinkProjectTopologyRequest {
