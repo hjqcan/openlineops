@@ -5,4 +5,5 @@ public sealed record RegisterProcessBlocklyBlockDefinitionRequest(
     string Category,
     string DisplayName,
     string BlocklyJson,
-    string PythonCodeTemplate);
+    string RuntimeActionContractSchemaVersion,
+    string RuntimeActionContractJson);

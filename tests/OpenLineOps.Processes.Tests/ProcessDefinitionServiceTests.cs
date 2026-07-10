@@ -16,8 +16,6 @@ public sealed class ProcessDefinitionServiceTests
     private static readonly DateTimeOffset PublishedAtUtc = CreatedAtUtc.AddMinutes(5);
     private const string ReplacementBlocklyWorkspaceJson =
         """{"blocks":{"languageVersion":0,"blocks":[{"type":"flow_wait","id":"wait-1"}]}}""";
-    private const string ReplacementPythonSource =
-        "automation_plan = []\nautomation_plan.append({'type': 'flow.wait', 'duration_ms': 25})\nresult = {'automation_plan': automation_plan}\n";
 
     [Fact]
     public async Task ReplaceDraftAsyncReplacesEntireGraphAndScriptArtifactsAndPreservesCreatedAt()
@@ -40,15 +38,14 @@ public sealed class ProcessDefinitionServiceTests
         Assert.Equal(3, result.Value.Nodes.Count);
         Assert.DoesNotContain(result.Value.Nodes, node => node.NodeId == "normalize");
 
-        var scriptNode = Assert.Single(result.Value.Nodes, node => node.Kind == "PythonScript");
+        var scriptNode = Assert.Single(result.Value.Nodes, node => node.Kind == "Blockly");
         Assert.Equal("inspect", scriptNode.NodeId);
         Assert.Equal("Inspect With Blockly", scriptNode.DisplayName);
         Assert.Equal(25, scriptNode.TimeoutSeconds);
-        Assert.Equal("Blockly", scriptNode.ScriptEditorMode);
         Assert.Equal(ReplacementBlocklyWorkspaceJson, scriptNode.BlocklyWorkspaceJson);
-        Assert.Equal(ReplacementPythonSource, scriptNode.ScriptSourceCode);
-        Assert.False(string.IsNullOrWhiteSpace(scriptNode.ScriptSourceHash));
-        Assert.Equal("2", scriptNode.ScriptVersion);
+        Assert.Null(scriptNode.ScriptSourceCode);
+        Assert.Null(scriptNode.ScriptSourceHash);
+        Assert.Null(scriptNode.ScriptVersion);
         Assert.Equal("""{"partId":"P-42"}""", scriptNode.InputPayload);
         Assert.Equal(
             ["replacement-inspect-to-end", "replacement-start-to-inspect"],
@@ -170,9 +167,7 @@ public sealed class ProcessDefinitionServiceTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize Measurement",
-            ProcessScriptEditorMode.Blockly,
-            """{"blocks":{"languageVersion":0}}""",
-            "result = {'normalized': input_payload}",
+            sourceCode: "result = {'normalized': input_payload}",
             scriptVersion: "1",
             scriptTimeout: TimeSpan.FromSeconds(10)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
@@ -203,22 +198,20 @@ public sealed class ProcessDefinitionServiceTests
                     CommandName: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
-                    ScriptEditorMode: null,
                     BlocklyWorkspaceJson: null,
                     ScriptSourceCode: null,
                     ScriptVersion: null),
                 new CreateProcessNodeRequest(
                     "inspect",
-                    "PythonScript",
+                    "Blockly",
                     "Inspect With Blockly",
                     RequiredCapability: null,
                     CommandName: null,
                     TimeoutSeconds: 25,
                     InputPayload: """{"partId":"P-42"}""",
-                    ScriptEditorMode: "Blockly",
                     BlocklyWorkspaceJson: ReplacementBlocklyWorkspaceJson,
-                    ScriptSourceCode: ReplacementPythonSource,
-                    ScriptVersion: "2"),
+                    ScriptSourceCode: null,
+                    ScriptVersion: null),
                 new CreateProcessNodeRequest(
                     "replacement-end",
                     "End",
@@ -227,7 +220,6 @@ public sealed class ProcessDefinitionServiceTests
                     CommandName: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
-                    ScriptEditorMode: null,
                     BlocklyWorkspaceJson: null,
                     ScriptSourceCode: null,
                     ScriptVersion: null)

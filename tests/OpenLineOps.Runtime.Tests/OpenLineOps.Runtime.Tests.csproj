@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />

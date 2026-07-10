@@ -206,14 +206,17 @@ The workbench should expose composition as a progressive workflow:
    logical work items.
 6. Draw the top-down `SiteLayout` by placing references to existing nodes,
    modules, groups, slots, zones, paths, and operator panels.
-7. Build a flow with Blockly blocks such as move axis, write output, rotate
+7. Compose a production line from a DUT model, topology-bound workstations and
+   ordered stages that reference published flows.
+8. Build each flow with Blockly blocks such as move axis, write output, rotate
    motor, clamp fixture, scan barcode, inspect image, wait, branch, and upload
    result.
-8. Let custom blocks declare their block shape and generated PythonScript, but
-   require hardware actions to go through runtime capability commands.
-9. Publish a snapshot that validates every target, capability, driver binding,
-   block version, generated source hash, timeout, interlock, and trace field.
-10. Run from the snapshot and trace back to project/application/topology/layout,
+9. Let custom blocks declare Blockly shape plus a typed Runtime Action Contract;
+   never execute custom Python templates.
+10. Publish a snapshot that validates every target, capability, driver binding,
+   block version/contract hash, provider package hash, timeout, interlock, and
+   trace field.
+11. Run from the snapshot and trace back to project/application/topology/layout,
     group, slot, block, script, driver, provider, and operator identities.
 
 ## Composable Building Block Layers
@@ -261,9 +264,9 @@ Flow blocks describe what should happen:
 - pick from a tooling slot and place into a process slot
 - upload a result to an external system
 
-Flow blocks are Blockly-first and PythonScript-backed. The generated Python
-should call platform runtime commands or emit a typed automation plan, not
-directly instantiate hardware adapters.
+Flow blocks are Blockly-first and compile directly to typed Flow IR actions.
+Explicit PythonScript nodes remain available for advanced dynamic logic, but a
+Blockly block never generates Python or directly instantiates hardware adapters.
 
 ### Layout Blocks
 
@@ -289,10 +292,10 @@ declared as a versioned contract:
 | Field | Purpose |
 | --- | --- |
 | `blockType` | Stable Blockly type identifier. |
-| `version` | Semantic version for generator compatibility. |
+| `version` | Exact immutable definition version. |
 | `category` | Toolbox category. |
 | `blockDefinition` | Blockly JSON or JavaScript definition. |
-| `pythonGenerator` | Python code template or generator reference. |
+| `runtimeActionContract` | Canonical typed emit contract and SHA-256. |
 | `inputContract` | Typed inputs accepted by the block. |
 | `outputContract` | Typed outputs produced by the block. |
 | `requiredCapabilityId` | Capability that must resolve before publish. |
@@ -300,8 +303,8 @@ declared as a versioned contract:
 | `safetyClass` | Runtime review and interlock requirements. |
 | `traceFields` | Fields that must appear in command trace records. |
 
-Publishing validates custom block versions, generated Python hashes, capability
-bindings, target references, and safety policies together.
+Publishing validates custom block versions and contract hashes, capability
+bindings, target references, provider package hashes, and safety policies together.
 
 ## Conceptual Model
 
@@ -705,19 +708,19 @@ Required metadata:
 - version
 - category
 - Blockly JSON
-- Python template
+- canonical Runtime Action Contract and hash
 - input contract
 - output contract
 - required capability contract
 - target selector type
 - safety class
-- generated action schema
+- target-bound action schema
 
 Rules:
 
 - User blocks are versioned.
-- Generated Python must be deterministic for the same block version and inputs.
-- Blocks should generate automation intents that Runtime can dispatch and trace.
+- The same block version, contract and fields must produce identical Flow IR.
+- Blocks emit automation actions that Runtime can dispatch and trace.
 - Manual Python remains possible but should use the same runtime command
   contracts whenever it touches hardware.
 
@@ -831,7 +834,8 @@ Minimum publish-time validation:
 - Process definitions are published and compatible with the target project
   snapshot.
 - Blockly block versions used by process nodes are available.
-- Generated Python source hashes match the published process node metadata.
+- Blockly contract hashes and static Flow IR source maps match the workspace.
+- Explicit PythonScript source hashes match published Python node metadata.
 - Safety-classified commands declare timeout, cancellation, authorization, and
   interlock policy.
 
@@ -850,6 +854,7 @@ Use these names in the implementation:
 - `SlotDefinition` and `SlotGroup` for material endpoints.
 - `SiteLayout` for spatial projection.
 - `ProcessDefinition` for executable flow graph.
+- `ProductionLineDefinition` for DUT, workstation and ordered-stage composition.
 - `BlocklyBlockDefinition` for visual authoring blocks.
 - `PublishedProjectSnapshot` for immutable runtime handoff.
 
@@ -880,8 +885,8 @@ properties that call code modules. The primary interaction should be:
 - compose the automation topology
 - place it visually
 - author the flow with Blockly
-- inspect generated Python
-- optionally edit Python for advanced cases
+- inspect compiled Flow IR and source-block mapping
+- add an explicit PythonScript node for advanced cases
 - publish a snapshot
 - run and trace
 

@@ -56,7 +56,8 @@ public sealed class PluginDeviceCommandInventory : IPluginDeviceCommandInventory
                         TrimOptional(command.InputSchema),
                         TrimOptional(command.OutputSchema),
                         command.TimeoutMilliseconds,
-                        command.MaxRetries));
+                        command.MaxRetries,
+                        package.RuntimeIdentity));
             }
         }
 

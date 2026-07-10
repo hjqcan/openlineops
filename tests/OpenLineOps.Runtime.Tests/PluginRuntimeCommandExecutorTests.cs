@@ -1,4 +1,5 @@
 using OpenLineOps.Plugins.Application.Commands;
+using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -51,6 +52,73 @@ public sealed class PluginRuntimeCommandExecutorTests
         Assert.Null(invoker.Request);
     }
 
+    [Fact]
+    public async Task ExecuteAsyncProjectSnapshotFailsClosedWithoutReleaseResolver()
+    {
+        var invoker = new CapturingPluginProcessCommandInvoker(
+            PluginProcessCommandInvocationResult.Completed("should-not-run"));
+        var executor = new PluginRuntimeCommandExecutor(
+            new InMemoryPluginProcessCommandInventory(VisionCommand),
+            invoker);
+
+        var result = await executor.ExecuteAsync(CreateReleaseContext());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
+        Assert.Contains("verified release package resolver", result.Reason, StringComparison.Ordinal);
+        Assert.Null(invoker.Request);
+    }
+
+    [Fact]
+    public async Task ExecuteAsyncIncompleteProjectReleaseIdentityFailsClosedWithoutLiveInventoryFallback()
+    {
+        var invoker = new CapturingPluginProcessCommandInvoker(
+            PluginProcessCommandInvocationResult.Completed("should-not-run"));
+        var executor = new PluginRuntimeCommandExecutor(
+            new InMemoryPluginProcessCommandInventory(VisionCommand),
+            invoker);
+
+        var result = await executor.ExecuteAsync(CreateContext() with
+        {
+            ProjectId = "project.main"
+        });
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
+        Assert.Contains("identity is incomplete", result.Reason, StringComparison.Ordinal);
+        Assert.Null(invoker.Request);
+    }
+
+    [Fact]
+    public async Task ExecuteAsyncProjectSnapshotUsesExactLockedPackageWithoutLiveInventoryFallback()
+    {
+        var invoker = new CapturingPluginProcessCommandInvoker(
+            PluginProcessCommandInvocationResult.Completed("locked"));
+        var releaseCommand = new ProjectReleasePluginCommand(
+            "openlineops.vision-process-plugin",
+            "2.3.4",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64),
+            "1.0.0",
+            "win-x64",
+            "openlineops.plugin-abi/1",
+            "release/packages/locked",
+            "process.vision:inspect@2",
+            "process.vision",
+            "Inspect");
+        var executor = new PluginRuntimeCommandExecutor(
+            new InMemoryPluginProcessCommandInventory(),
+            invoker,
+            new StaticProjectReleasePluginCommandResolver(releaseCommand));
+
+        var result = await executor.ExecuteAsync(CreateReleaseContext());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.NotNull(invoker.Request);
+        Assert.Equal("process.vision:inspect@2", invoker.Request.CommandDefinitionId);
+        Assert.Equal("2.3.4", invoker.Request.PackageIdentity!.Version);
+        Assert.Equal(new string('a', 64), invoker.Request.PackageIdentity.PackageContentSha256);
+    }
+
     [Theory]
     [InlineData(PluginProcessCommandInvocationOutcome.Failed, RuntimeCommandExecutionOutcome.Failed)]
     [InlineData(PluginProcessCommandInvocationOutcome.Rejected, RuntimeCommandExecutionOutcome.Rejected)]
@@ -101,6 +169,16 @@ public sealed class PluginRuntimeCommandExecutorTests
             TimeSpan.FromSeconds(30));
     }
 
+    private static RuntimeCommandExecutionContext CreateReleaseContext()
+    {
+        return CreateContext() with
+        {
+            ProjectId = "project.main",
+            ApplicationId = "application.main",
+            ProjectSnapshotId = "snapshot.release"
+        };
+    }
+
     private sealed class InMemoryPluginProcessCommandInventory(
         params PluginProcessCommandDescriptor[] commands) : IPluginProcessCommandInventory
     {
@@ -126,6 +204,22 @@ public sealed class PluginRuntimeCommandExecutorTests
             Request = request;
 
             return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class StaticProjectReleasePluginCommandResolver(
+        ProjectReleasePluginCommand? command) : IProjectReleasePluginCommandResolver
+    {
+        public ValueTask<ProjectReleasePluginCommand?> ResolveAsync(
+            string projectId,
+            string applicationId,
+            string snapshotId,
+            string capabilityId,
+            string commandName,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(command);
         }
     }
 }

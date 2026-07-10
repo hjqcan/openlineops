@@ -229,11 +229,12 @@ Rules:
 - Project Explorer is a projection of project resources, not the persistence
   model itself.
 - Topology and Site Layout use the full central editor area.
-- Blockly and Python are two views of the same flow document.
+- Blockly and Python are distinct flow node kinds. Blockly is declarative and
+  primary; Python is an explicit advanced dynamic-code node.
 - Inspector displays the selected Node, Module, Driver Binding, Group, Slot,
   Flow Node, Block, or Layout Element.
-- Generated Python, workspace JSON, validation errors, runtime output, and trace
-  details belong in the Bottom Panel.
+- Compiled Flow IR, workspace JSON, validation errors, Python source for explicit
+  PythonScript nodes, runtime output, and trace details belong in the Bottom Panel.
 - Block Catalog belongs in an Explorer/Extensions view, not permanently beside
   the Blockly canvas.
 - Run Profile and runtime results belong in Run Mode, not in flow properties.
@@ -252,6 +253,9 @@ project-root/
         topology-main--<stable-hash>.json
       layouts/
         layout-main--<stable-hash>.json
+      production/
+        lines/
+          <line-id>/line.json
       flows/
         inspect-part--<stable-hash>/
           flow.json
@@ -327,7 +331,7 @@ not redirect the resource to a global database. Engineering JSON is
 schema-versioned and atomically replaced; each custom block version is an
 immutable `version-000001.json`-style artifact.
 
-Release manifest schema v3 records the exact Application project path plus the
+The current release manifest records the exact Application project path plus the
 selected topology, layouts, process and version, Engineering configuration
 snapshot, capability bindings, target
 references, publish-selected Blockly block versions, canonical Flow IR schema,
@@ -381,9 +385,9 @@ frozen source root and maps that Flow IR into the executable runtime process.
 Release-identified device commands resolve the topology capability and device
 binding from that same release, with no mutable/global configuration fallback.
 
-This is a local immutable release boundary. It does not yet create an
-`.olopkg`, sign a package, lock plugin binaries, update an active-release
-pointer, or provide package/deployment verification. The current one-shot
+This is a local immutable release boundary. It freezes provider package binaries
+and hashes but does not yet create or sign an `.olopkg`, update an active-release
+pointer, or provide deployment-package verification. The current one-shot
 Runner consumes this local release boundary; it is not an `.olopkg` verifier.
 
 The development-only `POST /api/runtime/sessions/simulated` and
@@ -393,44 +397,36 @@ environment is `Development` or `Test` and
 `OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is explicitly enabled.
 Project Snapshot launch is the production execution route.
 
-## Frozen Flow IR And Dynamic Child Actions
+## Frozen Flow IR And Action Lifecycle
 
-Flow IR v1 freezes process/node/transition identity, command targets, timeouts,
-loop metadata, Python source hashes, and a dynamic action slot for PythonScript
-nodes. Current Blockly authoring still produces Python that returns an
-`automation_plan`, so Blockly and manual-Python children are resolved at
-runtime with container-level source mapping.
+Flow IR freezes process/node/transition identity, loop metadata, Python source
+hashes, and statically compiled Blockly actions. A Blockly workspace is parsed
+server-side; every block resolves to an exact definition version and canonical
+Runtime Action Contract hash. Each emitted action carries its source block id,
+action type, explicit topology target, capability, command, payload, timeout,
+retry policy and trace identity.
 
-Dynamic expansion now participates in the `RuntimeSession` aggregate rather
-than recursively bypassing it. The outer action and every child step/command
-carry `ActionId`; the child step records its parent and sequence, and execution
-context propagates that identity. The runner persists lifecycle changes before
-and after execution. Child failure or rejection fails the container, external
-cancellation cancels it, and child or container timeout propagates as the
-appropriate terminal outcome. Runtime and trace projections can therefore
-distinguish and order nested actions.
+Blockly never generates Python. PythonScript remains an explicit dynamic action
+slot and uses the governed script executor. Both static and dynamic actions are
+represented by aggregate Runtime steps and commands, so failure, rejection,
+cancellation and timeout propagate through the same lifecycle.
 
-This is not yet static Blockly compilation. Block id/type/version source maps,
-compile-time field validation, and exact block/contract locks remain future
-Flow IR inputs.
+## Declarative Runtime Action Contracts And Dependency Locks
 
-## Declarative Runtime Action Contract Foundation
+Processes.Application defines strict
+`openlineops.runtime-action-contract/v1` contracts with deterministic canonical
+serialization and SHA-256. Built-in, Application-local custom, and compatible
+plugin-generated blocks use only declarative `deviceCommand`, `delay`, and
+`resultPatch` emits. Legacy Python templates and arbitrary frontend generators
+are rejected.
 
-Processes.Application now defines strict
-`openlineops.runtime-action-contract/v1` typed contracts and deterministic
-canonical serialization/SHA-256. The five built-in Blockly blocks expose safe
-declarative contracts for `deviceCommand`, `delay`, and `resultPatch`, using
-literal, field, context, object, and array values. Capability and command are
-fixed contract data; retry is currently zero. The validator rejects unknown or
-duplicate properties, dynamic routing, scripts/templates/raw expressions,
-non-finite numbers, hostile null structures, and non-canonical documents.
-
-This D1 work is a metadata and validation foundation only. Persisted custom and
-plugin-generated blocks still use `LegacyPythonTemplate`; the workspace does
-not yet store an exact definition version and contract hash; Publisher does not
-yet compile individual Blockly blocks to static Flow IR children; and plugin
-package/version/hash locks are not frozen. Generated Python and dynamic action
-expansion remain the current execution path.
+Publication validates block fields and topology targets, freezes exact block
+version plus contract hash, resolves Flow IR commands to provider packages, and
+copies exact package trees into content-addressed release storage. Dependency
+locks record provider binding, package/plugin id, version, full-tree hash,
+manifest and entry hashes, contract, RID, ABI, commands, and file inventory.
+Runtime verifies the release and loads only those frozen packages; it has no
+live plugin-inventory fallback.
 
 ## Future `.olopkg` Contents
 
@@ -599,8 +595,9 @@ Future production policy requires:
 
 ### Phase 1: Durable Project Source
 
-- Implemented: persist Projects, Topology, Layout, Processes, Blockly/Python,
-  Blocks, and Engineering Configuration by explicit project/application scope.
+- Implemented: persist Projects, Topology, Layout, Production Lines, Processes,
+  Blockly/Python, Blocks, and Engineering Configuration by explicit
+  project/application scope.
 - Implemented: text project-folder source, content-addressed flow artifacts,
   schema-versioned resources, immutable custom-block versions, and atomic save.
 - Implemented: root `.oloproj` composition plus independent `.oloapp`
@@ -617,16 +614,15 @@ Future production policy requires:
   and Project Snapshot release-only runtime loading.
 - Implemented: route release-identified device commands through release
   capability metadata and frozen Engineering device bindings.
-- Implemented: release manifest schema v3 freezes the exact Application project
-  path plus canonical Flow IR v1; dynamic Python/Blockly children execute as
-  aggregate Runtime steps/commands with
-  action/parent/sequence identity and terminal propagation.
+- Implemented: the current release manifest freezes the exact Application
+  project path, canonical Flow IR, static Blockly actions, exact block contract
+  locks, and content-addressed provider package dependency locks.
 - Implemented: direct simulated/process-definition starts are gated to an
   explicitly enabled Development/Test host.
-- Implemented foundation: declarative Runtime Action Contract v1 for five
-  built-ins with canonical JSON/hash and strict validation.
-- Next: server-side Blockly workspace compilation, exact block/contract and
-  provider/plugin locks, package signing, and an active-release pointer.
+- Implemented: declarative Runtime Action Contract v1 for built-in, custom and
+  plugin-generated blocks, with server-side workspace compilation, canonical
+  JSON/hash and strict validation.
+- Next: package signing and an active-release pointer.
 
 ### Phase 3: One-Shot Runner
 

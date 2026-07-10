@@ -92,7 +92,6 @@ internal static class ProcessDefinitionSnapshotMapper
             node.CommandTimeout,
             node.InputPayload,
             node.ScriptLanguage,
-            node.ScriptEditorMode?.ToString(),
             node.BlocklyWorkspaceJson,
             node.ScriptSourceCode,
             node.ScriptSourceHash,
@@ -131,13 +130,15 @@ internal static class ProcessDefinitionSnapshotMapper
             ProcessNodeKind.PythonScript => ProcessNode.PythonScript(
                 nodeId,
                 node.DisplayName,
-                string.IsNullOrWhiteSpace(node.ScriptEditorMode)
-                    ? null
-                    : ParseEnum<ProcessScriptEditorMode>(node.ScriptEditorMode, nameof(node.ScriptEditorMode)),
-                node.BlocklyWorkspaceJson,
                 node.ScriptSourceCode,
                 node.ScriptVersion,
                 node.ScriptTimeout,
+                node.InputPayload),
+            ProcessNodeKind.Blockly => ProcessNode.Blockly(
+                nodeId,
+                node.DisplayName,
+                node.BlocklyWorkspaceJson,
+                node.CommandTimeout,
                 node.InputPayload),
             ProcessNodeKind.Decision => ProcessNode.Decision(nodeId, node.DisplayName),
             ProcessNodeKind.Delay => ProcessNode.Delay(nodeId, node.DisplayName),
@@ -195,7 +196,6 @@ internal sealed record PersistedProcessNode(
     TimeSpan? CommandTimeout,
     string? InputPayload,
     string? ScriptLanguage,
-    string? ScriptEditorMode,
     string? BlocklyWorkspaceJson,
     string? ScriptSourceCode,
     string? ScriptSourceHash,

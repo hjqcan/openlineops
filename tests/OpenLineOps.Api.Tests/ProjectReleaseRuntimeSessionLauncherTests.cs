@@ -241,7 +241,8 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
                     "Driver",
                     "driver.axis.x")],
                 [new ProjectReleaseTargetReference("Station", "station.main")],
-                ["motion.move@1"]),
+                ["motion.move@1"],
+                []),
             []);
     }
 

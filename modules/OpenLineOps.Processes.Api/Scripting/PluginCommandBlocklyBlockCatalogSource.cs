@@ -9,6 +9,7 @@ namespace OpenLineOps.Processes.Api.Scripting;
 internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessBlocklyBlockCatalogSource
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly RuntimeActionContractCanonicalSerializer ContractSerializer = new();
     private static readonly DateTimeOffset GeneratedRecordedAtUtc = new(2026, 6, 30, 0, 0, 0, TimeSpan.Zero);
 
     private readonly IServiceProvider _serviceProvider;
@@ -110,9 +111,31 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
             new
             {
                 type = blockType,
-                message0 = $"{command.KindLabel} {command.PluginName} {command.CommandName} payload %1 timeout %2 ms",
+                message0 = $"{command.KindLabel} {command.PluginName} {command.CommandName} target %1 %2 payload %3 timeout %4 ms",
                 args0 = new object[]
                 {
+                    new
+                    {
+                        type = "field_dropdown",
+                        name = "TARGET_KIND",
+                        options = new[]
+                        {
+                            new[] { "Module", RuntimeActionTargetKinds.AutomationModule },
+                            new[] { "Equipment", RuntimeActionTargetKinds.EquipmentNode },
+                            new[] { "Slot group", RuntimeActionTargetKinds.SlotGroup },
+                            new[] { "Slot", RuntimeActionTargetKinds.Slot },
+                            new[] { "DUT", RuntimeActionTargetKinds.Dut },
+                            new[] { "System", RuntimeActionTargetKinds.System },
+                            new[] { "Capability", RuntimeActionTargetKinds.Capability },
+                            new[] { "Driver", RuntimeActionTargetKinds.Driver }
+                        }
+                    },
+                    new
+                    {
+                        type = "field_input",
+                        name = "TARGET_ID",
+                        text = command.PluginId
+                    },
                     new
                     {
                         type = "field_input",
@@ -135,16 +158,26 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
             },
             JsonOptions);
 
+        var contractArtifact = ContractSerializer.Serialize(CreateContract(command));
+        if (contractArtifact.IsFailure)
+        {
+            throw new InvalidOperationException(
+                $"Generated Blockly block {blockType} has an invalid Runtime Action Contract: {contractArtifact.Error.Message}");
+        }
+
         return new ProcessBlocklyBlockDefinitionDetails(
             blockType,
             command.Category,
             $"{command.PluginName} / {command.CommandName}",
             blocklyJson,
-            CreatePythonTemplate(command),
             IsBuiltIn: true,
             Version: 1,
             GeneratedRecordedAtUtc,
-            GeneratedRecordedAtUtc);
+            GeneratedRecordedAtUtc,
+            ExecutionMode: ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            RuntimeActionContractSchemaVersion: contractArtifact.Value.SchemaVersion,
+            RuntimeActionContractJson: contractArtifact.Value.CanonicalJson,
+            RuntimeActionContractSha256: contractArtifact.Value.Sha256);
     }
 
     private static string CreateBlockType(GeneratedPluginCommand command)
@@ -171,18 +204,44 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
         return $"Append plugin {command.KindLabel} command {command.Capability}/{command.CommandName}. Input schema: {inputSchema}.";
     }
 
-    private static string CreatePythonTemplate(GeneratedPluginCommand command)
+    private static RuntimeActionContract CreateContract(GeneratedPluginCommand command)
     {
-        return "automation_plan.append({"
-            + "'type': 'command.execute', "
-            + "'capability': " + ToPythonStringLiteral(command.Capability) + ", "
-            + "'command': " + ToPythonStringLiteral(command.CommandName) + ", "
-            + "'command_definition_id': " + ToPythonStringLiteral(command.CommandDefinitionId) + ", "
-            + "'plugin_id': " + ToPythonStringLiteral(command.PluginId) + ", "
-            + "'plugin_kind': " + ToPythonStringLiteral(command.PluginKind) + ", "
-            + "'payload': {{INPUT_PAYLOAD}}, "
-            + "'timeout_ms': {{number:TIMEOUT_MS}}"
-            + "})";
+        return new RuntimeActionContract(
+            RuntimeActionContractSchemaVersions.V1,
+            $"plugin.{command.KindLabel}.command",
+            new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
+            {
+                ["TARGET_KIND"] = new(
+                    RuntimeActionFieldType.Text,
+                    Required: true,
+                    RuntimeActionTargetKinds.All,
+                    MaxLength: 32),
+                ["TARGET_ID"] = new(
+                    RuntimeActionFieldType.TargetReference,
+                    Required: true,
+                    MaxLength: 256),
+                ["INPUT_PAYLOAD"] = new(
+                    RuntimeActionFieldType.Text,
+                    Required: true,
+                    MaxLength: 4_096),
+                ["TIMEOUT_MS"] = new(
+                    RuntimeActionFieldType.WholeNumber,
+                    Required: true,
+                    Minimum: 1)
+            },
+            new RuntimeDeviceCommandEmit(
+                new RuntimeActionFieldValue("TARGET_KIND"),
+                new RuntimeActionFieldValue("TARGET_ID"),
+                Literal(command.Capability),
+                Literal(command.CommandName),
+                new RuntimeActionObjectValue(new Dictionary<string, RuntimeActionValueExpression>(StringComparer.Ordinal)
+                {
+                    ["commandDefinitionId"] = Literal(command.CommandDefinitionId),
+                    ["payload"] = new RuntimeActionFieldValue("INPUT_PAYLOAD"),
+                    ["pluginId"] = Literal(command.PluginId),
+                    ["pluginKind"] = Literal(command.PluginKind)
+                }),
+                new RuntimeActionFieldValue("TIMEOUT_MS")));
     }
 
     private static string DefaultPayload(string? inputSchema)
@@ -197,9 +256,9 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
             : "payload";
     }
 
-    private static string ToPythonStringLiteral(string value)
+    private static RuntimeActionLiteralValue Literal(string value)
     {
-        return $"'{value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal)}'";
+        return new RuntimeActionLiteralValue(JsonSerializer.SerializeToElement(value));
     }
 
     [GeneratedRegex("[^A-Za-z0-9_]+", RegexOptions.CultureInvariant)]

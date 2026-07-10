@@ -445,41 +445,39 @@ to draw them with Canvas, SVG, WebGL, or Three.js.
 
 ## Blockly And PythonScript
 
-Blockly remains the default process authoring mode. A block represents an
+Blockly is the primary process node kind. A block represents an
 automation intent, such as moving an axis, turning on a light, rotating a motor,
 waiting, executing a plugin command, or invoking a custom project operation.
 
 Custom blocks must store:
 
 - Blockly JSON definition.
-- Python code template.
 - block type and version.
 - display category.
-- declared inputs and outputs when available.
-- optional target capability or project slot constraints.
+- canonical Runtime Action Contract and SHA-256.
+- declared typed inputs and emitted action.
+- explicit target kind/id fields for target-bound actions.
 
-The generated Python should emit an automation plan that Runtime dispatches
-through command execution. Direct hardware control should still pass through
-the runtime/device/plugin command path whenever possible so command results,
-timeouts, failures, and trace records remain consistent.
+The server compiles the workspace directly to static Flow IR. Hardware control
+always passes through the runtime/device/plugin command path so command results,
+timeouts, failures, cancellation, monitoring and trace records remain consistent.
 
-Manual Python editing remains available for advanced users, but it is not the
-primary product model.
+An explicit `PythonScript` node remains available for advanced users, but it is
+not a mode or generated representation of a Blockly node.
 
 The Processes application layer now also defines strict
 `openlineops.runtime-action-contract/v1` typed contracts with deterministic
-canonical JSON and SHA-256. The five built-in blocks have declarative contracts
+canonical JSON and SHA-256. Built-in, custom and compatible plugin-generated blocks have declarative contracts
 for `deviceCommand`, `delay`, or `resultPatch` emits and safe literal, field,
 context, object, and array values. Unknown fields, scripts/templates/raw
 expressions, dynamic capability/command selection, duplicate JSON properties,
 non-finite numbers, hostile nulls, and non-canonical documents are rejected.
 
-This is a foundation, not yet the Blockly execution authority. Persisted custom
-blocks and plugin-generated blocks remain `LegacyPythonTemplate`; workspaces do
-not yet pin an exact block definition version plus contract hash; Publisher does
-not yet compile workspace block ids/fields into static child Flow IR actions;
-and releases do not yet lock plugin packages. Current Blockly execution still
-uses frozen Python plus the aggregate-aware dynamic action path described above.
+This contract is the Blockly execution authority. Publication resolves every
+workspace block id/type/field set to an exact definition version and contract
+hash, validates topology targets, emits source-mapped static Flow IR actions,
+and freezes content-addressed provider package locks. Runtime rejects missing or
+mismatched release artifacts and never falls back to the live catalog.
 
 ## One-Shot Headless Runner
 

@@ -11,4 +11,6 @@ public sealed record PluginManifest(
     string ContractVersion = "1.0.0",
     string MinimumPlatformVersion = "1.0.0",
     IReadOnlyCollection<PluginDeviceCommandDefinition>? DeviceCommands = null,
-    IReadOnlyCollection<PluginProcessCommandDefinition>? ProcessCommands = null);
+    IReadOnlyCollection<PluginProcessCommandDefinition>? ProcessCommands = null,
+    string RuntimeIdentifier = "any",
+    string AbiVersion = "openlineops.plugin-abi/1");

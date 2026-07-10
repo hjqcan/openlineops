@@ -7,6 +7,7 @@ public static class OpenLineOpsApiGroups
     public const string EngineeringV1 = "engineering-v1";
     public const string OperationsV1 = "operations-v1";
     public const string PluginsV1 = "plugins-v1";
+    public const string ProductionV1 = "production-v1";
     public const string ProjectsV1 = "projects-v1";
     public const string ProcessesV1 = "processes-v1";
     public const string RuntimeV1 = "runtime-v1";

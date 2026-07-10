@@ -63,6 +63,32 @@ public sealed class PluginDeviceCommandExecutorTests
         Assert.Null(invoker.Request);
     }
 
+    [Fact]
+    public async Task ExecuteAsyncProjectReleaseUsesLockedPackageIdentityWithoutLiveInventory()
+    {
+        var invoker = new CapturingPluginDeviceCommandInvoker(
+            PluginDeviceCommandInvocationResult.Completed("locked"));
+        var executor = new PluginDeviceCommandExecutor(
+            new InMemoryPluginDeviceCommandInventory(),
+            invoker);
+        var package = new DevicePluginPackageIdentity(
+            "openlineops.scanner-driver",
+            "4.5.6",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64),
+            "1.0.0",
+            "win-x64",
+            "openlineops.plugin-abi/1");
+
+        var result = await executor.ExecuteAsync(CreateRequest(pluginPackage: package));
+
+        Assert.Equal(DeviceCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.NotNull(invoker.Request);
+        Assert.Equal("4.5.6", invoker.Request.PackageIdentity!.Version);
+        Assert.Equal(new string('a', 64), invoker.Request.PackageIdentity.PackageContentSha256);
+    }
+
     [Theory]
     [InlineData(PluginDeviceCommandInvocationOutcome.Failed, DeviceCommandExecutionOutcome.Failed)]
     [InlineData(PluginDeviceCommandInvocationOutcome.Rejected, DeviceCommandExecutionOutcome.Rejected)]
@@ -98,7 +124,8 @@ public sealed class PluginDeviceCommandExecutorTests
         0);
 
     private static DeviceCommandExecutionRequest CreateRequest(
-        string commandDefinitionId = "device.scanner:scan")
+        string commandDefinitionId = "device.scanner:scan",
+        DevicePluginPackageIdentity? pluginPackage = null)
     {
         return new DeviceCommandExecutionRequest(
             new DeviceInstanceId("scanner-01"),
@@ -106,7 +133,8 @@ public sealed class PluginDeviceCommandExecutorTests
             new DeviceCapabilityId("device.scanner"),
             "Scan",
             "{\"serial\":\"ABC\"}",
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            pluginPackage);
     }
 
     private sealed class InMemoryPluginDeviceCommandInventory(

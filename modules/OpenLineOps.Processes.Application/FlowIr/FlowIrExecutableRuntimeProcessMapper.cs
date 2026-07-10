@@ -33,11 +33,21 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
 
         try
         {
-            var runtimeNodes = document.Nodes
-                .Where(node => node.Kind is FlowIrNodeKind.Command or FlowIrNodeKind.PythonScript)
+            var executableNodes = document.Nodes
+                .Where(node => node.Kind is FlowIrNodeKind.Command
+                    or FlowIrNodeKind.PythonScript
+                    or FlowIrNodeKind.Blockly)
                 .OrderBy(node => node.NodeId, StringComparer.Ordinal)
-                .Select(ToRuntimeNode)
                 .ToArray();
+            var runtimeNodes = executableNodes
+                .SelectMany(ToRuntimeNodes)
+                .ToArray();
+            var finalNodeIds = executableNodes.ToDictionary(
+                node => node.NodeId,
+                node => node.Kind == FlowIrNodeKind.Blockly && node.Actions.Length > 1
+                    ? CreateBlocklyRuntimeNodeId(node.NodeId, node.Actions.Length)
+                    : node.NodeId,
+                StringComparer.Ordinal);
             var routingNodes = document.Nodes
                 .Where(node => node.Kind is FlowIrNodeKind.Start
                     or FlowIrNodeKind.Decision
@@ -49,12 +59,17 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
             var transitions = document.Transitions
                 .OrderBy(transition => transition.TransitionId, StringComparer.Ordinal)
                 .Select(transition => new ExecutableRuntimeTransition(
-                    new RuntimeNodeId(transition.FromNodeId),
+                    new RuntimeNodeId(finalNodeIds.GetValueOrDefault(
+                        transition.FromNodeId,
+                        transition.FromNodeId)),
                     new RuntimeNodeId(transition.ToNodeId),
                     transition.Label,
                     transition.LoopPolicy == FlowIrLoopPolicy.Counted
                         ? transition.MaxTraversals
                         : null))
+                .Concat(executableNodes
+                    .Where(node => node.Kind == FlowIrNodeKind.Blockly && node.Actions.Length > 1)
+                    .SelectMany(CreateBlocklyInternalTransitions))
                 .ToArray();
 
             return Result.Success(new ExecutableRuntimeProcess(
@@ -77,9 +92,31 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
         }
     }
 
-    private static ExecutableRuntimeNode ToRuntimeNode(FlowIrNode node)
+    private static IEnumerable<ExecutableRuntimeNode> ToRuntimeNodes(FlowIrNode node)
     {
-        var action = node.Actions[0];
+        if (node.Kind != FlowIrNodeKind.Blockly)
+        {
+            yield return ToRuntimeNode(node, node.Actions[0], node.NodeId, node.DisplayName);
+            yield break;
+        }
+
+        for (var index = 0; index < node.Actions.Length; index += 1)
+        {
+            var action = node.Actions[index];
+            yield return ToRuntimeNode(
+                node,
+                action,
+                index == 0 ? node.NodeId : CreateBlocklyRuntimeNodeId(node.NodeId, index + 1),
+                action.DisplayName);
+        }
+    }
+
+    private static ExecutableRuntimeNode ToRuntimeNode(
+        FlowIrNode node,
+        FlowIrAction action,
+        string runtimeNodeId,
+        string displayName)
+    {
         var timeout = TimeSpan.FromTicks(checked(
             action.Execution.TimeoutMilliseconds * TimeSpan.TicksPerMillisecond));
         var inputPayload = action.Kind == FlowIrActionKind.PythonScript
@@ -93,9 +130,9 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
             : action.InputPayload;
 
         return new ExecutableRuntimeNode(
-            new RuntimeNodeId(node.NodeId),
-            node.DisplayName,
-            new RuntimeCapabilityId(action.Target.Reference),
+            new RuntimeNodeId(runtimeNodeId),
+            displayName,
+            new RuntimeCapabilityId(action.RequiredCapability),
             action.CommandName,
             timeout,
             inputPayload,
@@ -108,6 +145,24 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
                     action.DynamicChildren.SequenceBase,
                     action.DynamicChildren.SourceMappingMode.ToString()));
     }
+
+    private static IEnumerable<ExecutableRuntimeTransition> CreateBlocklyInternalTransitions(
+        FlowIrNode node)
+    {
+        for (var actionNumber = 1; actionNumber < node.Actions.Length; actionNumber += 1)
+        {
+            yield return new ExecutableRuntimeTransition(
+                new RuntimeNodeId(actionNumber == 1
+                    ? node.NodeId
+                    : CreateBlocklyRuntimeNodeId(node.NodeId, actionNumber)),
+                new RuntimeNodeId(CreateBlocklyRuntimeNodeId(node.NodeId, actionNumber + 1)),
+                Label: null,
+                MaxTraversals: null);
+        }
+    }
+
+    private static string CreateBlocklyRuntimeNodeId(string blocklyNodeId, int actionNumber) =>
+        $"{blocklyNodeId}:block-action:{actionNumber}";
 
     private static ExecutableRuntimeRoutingNode ToRoutingNode(FlowIrNode node)
     {

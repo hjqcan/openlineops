@@ -559,9 +559,26 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             var binding = Assert.Single(snapshot.GetProperty("capabilityBindings").EnumerateArray());
             Assert.Equal(capabilityId, binding.GetProperty("capabilityId").GetString());
             Assert.Equal(bindingId, binding.GetProperty("bindingId").GetString());
-            var target = Assert.Single(snapshot.GetProperty("targetReferences").EnumerateArray());
-            Assert.Equal("EquipmentNode", target.GetProperty("kind").GetString());
-            Assert.Equal("site.main", target.GetProperty("targetId").GetString());
+            var targets = snapshot.GetProperty("targetReferences")
+                .EnumerateArray()
+                .Select(target => (
+                    Kind: target.GetProperty("kind").GetString(),
+                    TargetId: target.GetProperty("targetId").GetString()))
+                .ToArray();
+            Assert.Equal(4, targets.Length);
+            Assert.Equal(targets.Length, targets.Distinct().Count());
+            Assert.Equal(
+                targets.OrderBy(target => target.Kind, StringComparer.Ordinal)
+                    .ThenBy(target => target.TargetId, StringComparer.Ordinal)
+                    .ToArray(),
+                targets);
+            Assert.Contains(targets, target => target is { Kind: "EquipmentNode", TargetId: "site.main" });
+            Assert.Contains(targets, target => target is { Kind: "Capability" }
+                && target.TargetId == capabilityId);
+            Assert.Contains(targets, target => target is { Kind: "Driver" }
+                && target.TargetId == bindingId);
+            Assert.Contains(targets, target => target is { Kind: "System" }
+                && target.TargetId == topologyId);
             Assert.Empty(snapshot.GetProperty("blockVersionIds").EnumerateArray());
             AssertImmutableRelease(snapshot, projectDirectory);
 
@@ -963,7 +980,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.True(File.Exists(manifestPath), $"Release manifest was not found at {manifestPath}.");
         using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(3, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
     }
 

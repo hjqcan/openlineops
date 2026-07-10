@@ -74,8 +74,7 @@ public sealed class SqliteProcessDefinitionRepositoryTests
         Assert.NotNull(restored);
         var scriptNode = Assert.Single(restored.Nodes, node => node.Kind == ProcessNodeKind.PythonScript);
         Assert.Equal("Python", scriptNode.ScriptLanguage);
-        Assert.Equal(ProcessScriptEditorMode.Blockly, scriptNode.ScriptEditorMode);
-        Assert.Equal("""{"blocks":{"languageVersion":0}}""", scriptNode.BlocklyWorkspaceJson);
+        Assert.Null(scriptNode.BlocklyWorkspaceJson);
         Assert.Equal("result = {'normalized': input_payload}", scriptNode.ScriptSourceCode);
         Assert.False(string.IsNullOrWhiteSpace(scriptNode.ScriptSourceHash));
         Assert.Equal("2", scriptNode.ScriptVersion);
@@ -198,9 +197,7 @@ public sealed class SqliteProcessDefinitionRepositoryTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize Measurement",
-            ProcessScriptEditorMode.Blockly,
-            """{"blocks":{"languageVersion":0}}""",
-            "result = {'normalized': input_payload}",
+            sourceCode: "result = {'normalized': input_payload}",
             scriptVersion: "2",
             scriptTimeout: TimeSpan.FromSeconds(12),
             inputPayload: "scan-ok"));

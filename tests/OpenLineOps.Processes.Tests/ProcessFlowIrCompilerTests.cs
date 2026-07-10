@@ -74,9 +74,7 @@ public sealed class ProcessFlowIrCompilerTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize",
-            ProcessScriptEditorMode.Blockly,
-            """{"blocks":{"languageVersion":0}}""",
-            "result = {'automation_plan': []}",
+            sourceCode: "result = {'automation_plan': []}",
             scriptVersion: "3",
             scriptTimeout: TimeSpan.FromSeconds(12),
             inputPayload: "raw-reading"));
@@ -98,11 +96,9 @@ public sealed class ProcessFlowIrCompilerTests
 
         var script = Assert.IsType<FlowIrPythonScript>(action.PythonScript);
         Assert.Equal("Python", script.Language);
-        Assert.Equal("Blockly", script.EditorMode);
         Assert.Equal("result = {'automation_plan': []}", script.SourceCode);
         Assert.Equal("3", script.Version);
         Assert.Equal(action.Source.ContentHash, script.SourceHash);
-        Assert.Equal("""{"blocks":{"languageVersion":0}}""", script.BlocklyWorkspaceJson);
 
         var dynamicChildren = Assert.IsType<FlowIrDynamicActionSlot>(action.DynamicChildren);
         Assert.Equal("normalize:action:1:automation-plan", dynamicChildren.SlotId);
@@ -392,9 +388,7 @@ public sealed class ProcessFlowIrCompilerTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize",
-            ProcessScriptEditorMode.Blockly,
-            """{"blocks":{"languageVersion":0}}""",
-            "result = {'automation_plan': []}",
+            sourceCode: "result = {'automation_plan': []}",
             scriptVersion: "3",
             scriptTimeout: TimeSpan.FromSeconds(12)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));

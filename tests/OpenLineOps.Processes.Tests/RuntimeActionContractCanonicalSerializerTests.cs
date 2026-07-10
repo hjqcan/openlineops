@@ -97,13 +97,15 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             "test.action",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal),
             new RuntimeDeviceCommandEmit(
-                "test.capability",
-                "Execute",
+                Literal(RuntimeActionTargetKinds.Capability),
+                Literal("test.capability"),
+                Literal("test.capability"),
+                Literal("Execute"),
                 new RuntimeActionLiteralValue(JsonSerializer.SerializeToElement(new
                 {
                     script = "import os"
                 })),
-                TimeoutMilliseconds: 1000));
+                TimeoutMilliseconds: Literal(1000)));
 
         var missingFieldsResult = _serializer.Serialize(missingFields);
         var invalidRangeResult = _serializer.Serialize(invalidRange);
@@ -228,10 +230,12 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             "motion.axis.move",
             fields,
             new RuntimeDeviceCommandEmit(
-                "motion.axis",
-                "MoveAxis",
+                Literal(RuntimeActionTargetKinds.Capability),
+                Literal("motion.axis"),
+                Literal("motion.axis"),
+                Literal("MoveAxis"),
                 new RuntimeActionObjectValue(input),
-                TimeoutMilliseconds: 30_000));
+                TimeoutMilliseconds: Literal(30_000)));
     }
 
     private static RuntimeActionFieldValue Field(string name) => new(name);

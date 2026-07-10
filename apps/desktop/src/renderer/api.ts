@@ -40,6 +40,8 @@ import type {
   ProcessDefinitionSummary,
   ProcessGraphValidationReport,
   ProcessBlocklyBlockDefinition,
+  ProductionLineResponse,
+  ProductionLineSummaryResponse,
   PluginLifecycleRecordResponse,
   PluginManagementOverviewResponse,
   PublishConfigurationSnapshotRequest,
@@ -54,6 +56,7 @@ import type {
   RuntimeStationStatusesResponse,
   RuntimeTimelineEntry,
   RuntimeTimelineResponse,
+  SaveProductionLineRequest,
   RegisterProcessBlocklyBlockDefinitionRequest,
   StartedProjectSnapshotRuntimeSessionResponse,
   StartedProcessRuntimeSessionResponse,
@@ -644,6 +647,47 @@ export async function listProcessDefinitions(
   return response.body ?? [];
 }
 
+export async function listProductionLines(
+  scope: ProjectApplicationApiScope
+): Promise<ProductionLineSummaryResponse[]> {
+  const response = await desktop.apiRequest<ProductionLineSummaryResponse[]>(
+    productionLineCollectionPath(scope));
+  return response.body ?? [];
+}
+
+export async function getProductionLine(
+  lineDefinitionId: string,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ProductionLineResponse>> {
+  return desktop.apiRequest<ProductionLineResponse>(
+    `${productionLineCollectionPath(scope)}/${encodeURIComponent(lineDefinitionId)}`);
+}
+
+export async function createProductionLine(
+  request: SaveProductionLineRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ProductionLineResponse>> {
+  return desktop.apiRequest<ProductionLineResponse>(
+    productionLineCollectionPath(scope),
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function replaceProductionLine(
+  lineDefinitionId: string,
+  request: SaveProductionLineRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ProductionLineResponse>> {
+  return desktop.apiRequest<ProductionLineResponse>(
+    `${productionLineCollectionPath(scope)}/${encodeURIComponent(lineDefinitionId)}`,
+    {
+      method: 'PUT',
+      body: request
+    });
+}
+
 export async function listProcessBlocklyBlocks(
   scope?: ProjectApplicationApiScope
 ): Promise<ProcessBlocklyBlockDefinition[]> {
@@ -730,6 +774,10 @@ function processCollectionPath(scope?: ProjectApplicationApiScope): string {
   return scope
     ? `${projectApplicationPath(scope)}/processes`
     : '/api/process-definitions';
+}
+
+function productionLineCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/production-lines`;
 }
 
 function processBlockCollectionPath(scope?: ProjectApplicationApiScope): string {

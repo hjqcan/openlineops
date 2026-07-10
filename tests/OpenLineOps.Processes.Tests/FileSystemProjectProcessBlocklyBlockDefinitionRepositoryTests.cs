@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Processes.Application.Persistence;
+using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 
 namespace OpenLineOps.Processes.Tests;
@@ -23,29 +25,32 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         var applicationB = Scope("application.b", _projectDirectory);
         var writer = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
 
-        var applicationAFirst = await writer.SaveNewVersionAsync(
+        var applicationAFirst = await SaveNewVersionAsync(
+            writer,
             applicationA,
             blockType,
             "Fixture",
             "Application A Fixture Action",
             BlockJson(blockType, "application A fixture action v1"),
-            "automation_plan.append({'application': 'A', 'revision': 1})",
+            "test.fixture.application-a.v1",
             FirstRecordedAtUtc);
-        var applicationASecond = await writer.SaveNewVersionAsync(
+        var applicationASecond = await SaveNewVersionAsync(
+            writer,
             applicationA,
             blockType,
             "Fixture",
             "Application A Fixture Action V2",
             BlockJson(blockType, "application A fixture action v2"),
-            "automation_plan.append({'application': 'A', 'revision': 2})",
+            "test.fixture.application-a.v2",
             SecondRecordedAtUtc);
-        var applicationBFirst = await writer.SaveNewVersionAsync(
+        var applicationBFirst = await SaveNewVersionAsync(
+            writer,
             applicationB,
             blockType,
             "Fixture",
             "Application B Fixture Action",
             BlockJson(blockType, "application B fixture action"),
-            "automation_plan.append({'application': 'B', 'revision': 1})",
+            "test.fixture.application-b.v1",
             SecondRecordedAtUtc);
 
         Assert.Equal(1, applicationAFirst.Version);
@@ -77,13 +82,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         const string blockType = "user_identity_tamper";
         var scope = Scope("application.identity", _projectDirectory);
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
-        await repository.SaveNewVersionAsync(
+        await SaveNewVersionAsync(
+            repository,
             scope,
             blockType,
             "Fixture",
             "Identity Test",
             BlockJson(blockType, "identity test"),
-            "automation_plan.append({'identity': 'trusted'})",
+            "test.fixture.identity",
             FirstRecordedAtUtc);
         var documentPath = FindBlockDocumentPath(_projectDirectory, blockType);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(documentPath))!.AsObject();
@@ -105,13 +111,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         const string blockType = "user_invalid_json";
         var scope = Scope("application.invalid-json", _projectDirectory);
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
-        await repository.SaveNewVersionAsync(
+        await SaveNewVersionAsync(
+            repository,
             scope,
             blockType,
             "Fixture",
             "Invalid JSON Test",
             BlockJson(blockType, "invalid json test"),
-            "automation_plan.append({'json': 'trusted'})",
+            "test.fixture.invalid-json",
             FirstRecordedAtUtc);
         var documentPath = FindBlockDocumentPath(_projectDirectory, blockType);
         await File.WriteAllTextAsync(documentPath, "{ this-is-not-json");
@@ -130,13 +137,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         const string blockType = "user_obsolete_schema";
         var scope = Scope("application.current-only", _projectDirectory);
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
-        await repository.SaveNewVersionAsync(
+        await SaveNewVersionAsync(
+            repository,
             scope,
             blockType,
             "Fixture",
             "Current Only",
             BlockJson(blockType, "current only"),
-            "automation_plan.append({'current': True})",
+            "test.fixture.current-only",
             FirstRecordedAtUtc);
         var path = FindBlockDocumentPath(_projectDirectory, blockType);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
@@ -153,13 +161,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         const string blockType = "user_removed_host_project";
         var scope = Scope("application.strict", _projectDirectory);
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
-        await repository.SaveNewVersionAsync(
+        await SaveNewVersionAsync(
+            repository,
             scope,
             blockType,
             "Fixture",
             "Strict",
             BlockJson(blockType, "strict"),
-            "automation_plan.append({'strict': True})",
+            "test.fixture.strict",
             FirstRecordedAtUtc);
         var path = FindBlockDocumentPath(_projectDirectory, blockType);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
@@ -181,13 +190,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             "applications/Operator Cell/Main Line.oloapp");
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
 
-        await repository.SaveNewVersionAsync(
+        await SaveNewVersionAsync(
+            repository,
             scope,
             blockType,
             "Fixture",
             "Custom Root Fixture Action",
             BlockJson(blockType, "custom root fixture action"),
-            "automation_plan.append({'custom_root': True})",
+            "test.fixture.custom-root",
             FirstRecordedAtUtc);
 
         var versionPath = Assert.Single(Directory.GetFiles(
@@ -234,7 +244,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         Assert.Equal(2, latestA.Version);
         Assert.Equal("Application A Fixture Action V2", latestA.DisplayName);
         Assert.Equal(BlockJson(blockType, "application A fixture action v2"), latestA.BlocklyJson);
-        Assert.Contains("'application': 'A'", latestA.PythonCodeTemplate);
+        AssertCanonicalContract(latestA, "test.fixture.application-a.v2");
         Assert.Equal(FirstRecordedAtUtc, latestA.CreatedAtUtc);
         Assert.Equal(SecondRecordedAtUtc, latestA.UpdatedAtUtc);
         Assert.Single(listedA);
@@ -245,23 +255,83 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             {
                 Assert.Equal(2, block.Version);
                 Assert.Equal("Application A Fixture Action V2", block.DisplayName);
+                AssertCanonicalContract(block, "test.fixture.application-a.v2");
             },
             block =>
             {
                 Assert.Equal(1, block.Version);
                 Assert.Equal("Application A Fixture Action", block.DisplayName);
+                AssertCanonicalContract(block, "test.fixture.application-a.v1");
             });
 
         Assert.NotNull(latestB);
         Assert.Equal(1, latestB.Version);
         Assert.Equal("Application B Fixture Action", latestB.DisplayName);
         Assert.Equal(BlockJson(blockType, "application B fixture action"), latestB.BlocklyJson);
-        Assert.Contains("'application': 'B'", latestB.PythonCodeTemplate);
+        AssertCanonicalContract(latestB, "test.fixture.application-b.v1");
         Assert.Equal(SecondRecordedAtUtc, latestB.CreatedAtUtc);
         Assert.Equal(SecondRecordedAtUtc, latestB.UpdatedAtUtc);
         Assert.Single(listedB);
         Assert.Equal(1, listedB.Single().Version);
-        Assert.Collection(versionsB, block => Assert.Equal(1, block.Version));
+        Assert.Collection(
+            versionsB,
+            block =>
+            {
+                Assert.Equal(1, block.Version);
+                AssertCanonicalContract(block, "test.fixture.application-b.v1");
+            });
+    }
+
+    private static ValueTask<ProcessBlocklyBlockDefinitionRecord> SaveNewVersionAsync(
+        FileSystemProjectProcessBlocklyBlockDefinitionRepository repository,
+        ProjectApplicationWorkspaceScope scope,
+        string blockType,
+        string category,
+        string displayName,
+        string blocklyJson,
+        string actionType,
+        DateTimeOffset recordedAtUtc)
+    {
+        var contract = CreateContract(actionType);
+        return repository.SaveNewVersionAsync(
+            scope,
+            blockType,
+            category,
+            displayName,
+            blocklyJson,
+            ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            contract.SchemaVersion,
+            contract.CanonicalJson,
+            contract.Sha256,
+            recordedAtUtc);
+    }
+
+    private static RuntimeActionContractCanonicalArtifact CreateContract(string actionType)
+    {
+        var result = new RuntimeActionContractCanonicalSerializer().Serialize(new RuntimeActionContract(
+            RuntimeActionContractSchemaVersions.V1,
+            actionType,
+            new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal),
+            new RuntimeDelayEmit(new RuntimeActionLiteralValue(JsonSerializer.SerializeToElement(1)))));
+
+        Assert.True(result.IsSuccess, result.Error.Message);
+        return result.Value;
+    }
+
+    private static void AssertCanonicalContract(
+        ProcessBlocklyBlockDefinitionRecord block,
+        string expectedActionType)
+    {
+        Assert.Equal(ProcessBlocklyBlockExecutionModes.DeclarativeActionContract, block.ExecutionMode);
+        Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+        var serializer = new RuntimeActionContractCanonicalSerializer();
+        var parsed = serializer.Deserialize(block.RuntimeActionContractJson);
+        Assert.True(parsed.IsSuccess, parsed.Error.Message);
+        Assert.Equal(expectedActionType, parsed.Value.ActionType);
+        var canonical = serializer.Serialize(parsed.Value);
+        Assert.True(canonical.IsSuccess, canonical.Error.Message);
+        Assert.Equal(block.RuntimeActionContractJson, canonical.Value.CanonicalJson);
+        Assert.Equal(block.RuntimeActionContractSha256, canonical.Value.Sha256);
     }
 
     private static ProjectApplicationWorkspaceScope Scope(string applicationId, string projectDirectory)

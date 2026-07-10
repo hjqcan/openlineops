@@ -52,7 +52,8 @@ public sealed class DeviceRuntimeCommandExecutor : IRuntimeCommandExecutor
             route.CapabilityId,
             context.CommandName,
             context.InputPayload,
-            context.Timeout);
+            context.Timeout,
+            route.PluginPackage);
 
         var deviceResult = await _deviceCommandExecutor
             .ExecuteAsync(deviceRequest, cancellationToken)

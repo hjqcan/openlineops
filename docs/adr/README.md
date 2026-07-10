@@ -18,6 +18,7 @@ an accepted ADR to change history. Add a new ADR that supersedes the old one.
 | [0006](0006-use-strongly-typed-domain-identifiers.md) | Use Strongly Typed Domain Identifiers | Accepted | 2026-06-30 |
 | [0007](0007-make-automation-project-workspace-primary-product-shell.md) | Make Automation Project Workspace The Primary Product Shell | Accepted | 2026-07-09 |
 | [0008](0008-use-portable-application-project-units.md) | Use Portable Application Project Units | Accepted | 2026-07-10 |
+| [0009](0009-model-production-lines-and-compile-blockly-directly.md) | Model Production Lines Separately And Compile Blockly Directly | Accepted | 2026-07-10 |
 
 ## Status Values
 

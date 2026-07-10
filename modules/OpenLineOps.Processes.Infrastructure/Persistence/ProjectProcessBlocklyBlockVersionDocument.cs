@@ -9,11 +9,14 @@ internal sealed record ProjectProcessBlocklyBlockVersionDocument(
     string Category,
     string DisplayName,
     string BlocklyJson,
-    string PythonCodeTemplate,
+    string ExecutionMode,
+    string RuntimeActionContractSchemaVersion,
+    string RuntimeActionContractJson,
+    string RuntimeActionContractSha256,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc)
 {
     public const string CurrentSchema = "openlineops.process-blockly-block-version";
 
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 }

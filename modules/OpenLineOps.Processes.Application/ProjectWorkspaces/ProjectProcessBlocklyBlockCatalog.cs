@@ -132,7 +132,10 @@ public sealed class ProjectProcessBlocklyBlockCatalog : IProjectProcessBlocklyBl
             string category,
             string displayName,
             string blocklyJson,
-            string pythonCodeTemplate,
+            string executionMode,
+            string runtimeActionContractSchemaVersion,
+            string runtimeActionContractJson,
+            string runtimeActionContractSha256,
             DateTimeOffset recordedAtUtc,
             CancellationToken cancellationToken = default)
         {
@@ -142,7 +145,10 @@ public sealed class ProjectProcessBlocklyBlockCatalog : IProjectProcessBlocklyBl
                 category,
                 displayName,
                 blocklyJson,
-                pythonCodeTemplate,
+                executionMode,
+                runtimeActionContractSchemaVersion,
+                runtimeActionContractJson,
+                runtimeActionContractSha256,
                 recordedAtUtc,
                 cancellationToken);
         }

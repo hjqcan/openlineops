@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\lib\pythonscript\PythonScript\PythonScript.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Domain.Abstractions\OpenLineOps.Domain.Abstractions.csproj" />
     <ProjectReference Include="..\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
   </ItemGroup>

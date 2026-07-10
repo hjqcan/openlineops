@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Transitions;
@@ -10,7 +11,9 @@ namespace OpenLineOps.Processes.Application.FlowIr;
 
 public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
 {
-    public Result<FlowIrCompilation> Compile(ProcessDefinition definition)
+    public Result<FlowIrCompilation> Compile(
+        ProcessDefinition definition,
+        IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails>? blockCatalog = null)
     {
         ArgumentNullException.ThrowIfNull(definition);
 
@@ -49,7 +52,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
         }
 
         var executableNodeCount = definition.Nodes.Count(node =>
-            node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript);
+            node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript or ProcessNodeKind.Blockly);
         if (executableNodeCount == 0)
         {
             return Result.Failure<FlowIrCompilation>(ApplicationError.Validation(
@@ -59,10 +62,43 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
 
         var startNode = definition.Nodes.Single(node => node.Kind == ProcessNodeKind.Start);
         var diagnostics = ImmutableArray.CreateBuilder<FlowIrCompilationDiagnostic>();
-        var nodes = definition.Nodes
-            .OrderBy(node => node.Id.Value, StringComparer.Ordinal)
-            .Select(node => ToNode(definition, node, diagnostics))
-            .ToImmutableArray();
+        var nodes = ImmutableArray.CreateBuilder<FlowIrNode>(definition.Nodes.Count);
+        var blockDependencies = new Dictionary<string, FlowIrBlockDependency>(StringComparer.Ordinal);
+        var effectiveCatalog = blockCatalog?.ToArray()
+            ?? ProcessBlocklyBlockCatalog.BuiltInBlocks().ToArray();
+        foreach (var node in definition.Nodes.OrderBy(node => node.Id.Value, StringComparer.Ordinal))
+        {
+            if (node.Kind == ProcessNodeKind.Blockly)
+            {
+                var workspaceResult = BlocklyWorkspaceActionCompiler.Compile(
+                    definition,
+                    node,
+                    effectiveCatalog);
+                if (workspaceResult.IsFailure)
+                {
+                    return Result.Failure<FlowIrCompilation>(workspaceResult.Error);
+                }
+
+                nodes.Add(ToBlocklyNode(definition, node, workspaceResult.Value));
+                foreach (var dependency in workspaceResult.Value.Dependencies)
+                {
+                    if (blockDependencies.TryGetValue(dependency.BlockType, out var existing)
+                        && existing != dependency)
+                    {
+                        return Result.Failure<FlowIrCompilation>(ApplicationError.Conflict(
+                            "Processes.FlowIrBlocklyDependencyConflict",
+                            $"Blockly block {dependency.BlockType} resolved to more than one version or contract hash."));
+                    }
+
+                    blockDependencies[dependency.BlockType] = dependency;
+                }
+
+                continue;
+            }
+
+            nodes.Add(ToNode(definition, node, diagnostics));
+        }
+
         var transitions = definition.Transitions
             .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
             .Select(transition => ToTransition(definition, transition))
@@ -74,10 +110,31 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             definition.VersionId.Value,
             definition.DisplayName,
             startNode.Id.Value,
-            nodes,
-            transitions);
+            nodes.ToImmutable(),
+            transitions,
+            blockDependencies.Values
+                .OrderBy(dependency => dependency.BlockType, StringComparer.Ordinal)
+                .ToImmutableArray());
 
         return Result.Success(new FlowIrCompilation(document, diagnostics.ToImmutable()));
+    }
+
+    private static FlowIrNode ToBlocklyNode(
+        ProcessDefinition definition,
+        ProcessNode node,
+        CompiledBlocklyWorkspace workspace)
+    {
+        return new FlowIrNode(
+            node.Id.Value,
+            FlowIrNodeKind.Blockly,
+            node.DisplayName,
+            workspace.Actions,
+            new FlowIrSourceTrace(
+                definition.Id.Value,
+                definition.VersionId.Value,
+                FlowIrSourceElementKind.ProcessNode,
+                node.Id.Value,
+                workspace.WorkspaceSha256));
     }
 
     private static FlowIrNode ToNode(
@@ -89,13 +146,14 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
         var actions = node.Kind switch
         {
             ProcessNodeKind.Command => ImmutableArray.Create(ToDeviceCommandAction(node, source)),
-            ProcessNodeKind.PythonScript => ImmutableArray.Create(ToPythonScriptAction(node, source, diagnostics)),
+            ProcessNodeKind.PythonScript => ImmutableArray.Create(
+                ToPythonScriptAction(node, source, diagnostics)),
             _ => ImmutableArray<FlowIrAction>.Empty
         };
 
         return new FlowIrNode(
             node.Id.Value,
-            ToNodeKind(node.Kind),
+            ToNodeKind(node),
             node.DisplayName,
             actions,
             source);
@@ -155,11 +213,9 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             CreateExecutionPolicy(node.ScriptTimeout!.Value),
             new FlowIrPythonScript(
                 node.ScriptLanguage!,
-                node.ScriptEditorMode!.Value.ToString(),
                 node.ScriptSourceCode!,
                 node.ScriptSourceHash!,
-                node.ScriptVersion!,
-                node.BlocklyWorkspaceJson),
+                node.ScriptVersion!),
             dynamicSlot,
             source);
     }
@@ -175,10 +231,12 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
     private static ApplicationError? ValidateTimeouts(ProcessDefinition definition)
     {
         foreach (var node in definition.Nodes
-                     .Where(node => node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript)
+                     .Where(node => node.Kind is ProcessNodeKind.Command
+                         or ProcessNodeKind.PythonScript
+                         or ProcessNodeKind.Blockly)
                      .OrderBy(node => node.Id.Value, StringComparer.Ordinal))
         {
-            var timeout = node.Kind == ProcessNodeKind.Command
+            var timeout = node.Kind is ProcessNodeKind.Command or ProcessNodeKind.Blockly
                 ? node.CommandTimeout!.Value
                 : node.ScriptTimeout!.Value;
             if (timeout <= TimeSpan.Zero)
@@ -245,9 +303,9 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
         return $"{node.Id.Value}:action:1";
     }
 
-    private static FlowIrNodeKind ToNodeKind(ProcessNodeKind kind)
+    private static FlowIrNodeKind ToNodeKind(ProcessNode node)
     {
-        return kind switch
+        return node.Kind switch
         {
             ProcessNodeKind.Start => FlowIrNodeKind.Start,
             ProcessNodeKind.Command => FlowIrNodeKind.Command,
@@ -255,7 +313,8 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             ProcessNodeKind.Delay => FlowIrNodeKind.Delay,
             ProcessNodeKind.End => FlowIrNodeKind.End,
             ProcessNodeKind.PythonScript => FlowIrNodeKind.PythonScript,
-            _ => throw new InvalidOperationException($"Unsupported process node kind {kind}.")
+            ProcessNodeKind.Blockly => FlowIrNodeKind.Blockly,
+            _ => throw new InvalidOperationException($"Unsupported process node kind {node.Kind}.")
         };
     }
 

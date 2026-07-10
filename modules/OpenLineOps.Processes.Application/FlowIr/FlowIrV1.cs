@@ -23,7 +23,17 @@ public sealed record FlowIrDocument(
     string DisplayName,
     string StartNodeId,
     ImmutableArray<FlowIrNode> Nodes,
-    ImmutableArray<FlowIrTransition> Transitions);
+    ImmutableArray<FlowIrTransition> Transitions,
+    ImmutableArray<FlowIrBlockDependency> BlockDependencies);
+
+public sealed record FlowIrBlockDependency(
+    string BlockType,
+    int Version,
+    string ContractSchemaVersion,
+    string ContractSha256)
+{
+    public string LockId => $"{BlockType}@{Version}#{ContractSha256}";
+}
 
 public sealed record FlowIrNode(
     string NodeId,
@@ -56,11 +66,9 @@ public sealed record FlowIrTargetReference(
 
 public sealed record FlowIrPythonScript(
     string Language,
-    string EditorMode,
     string SourceCode,
     string SourceHash,
-    string Version,
-    string? BlocklyWorkspaceJson);
+    string Version);
 
 public sealed record FlowIrDynamicActionSlot(
     string SlotId,
@@ -100,7 +108,8 @@ public enum FlowIrNodeKind
     Decision = 2,
     Delay = 3,
     End = 4,
-    PythonScript = 5
+    PythonScript = 5,
+    Blockly = 6
 }
 
 public enum FlowIrActionKind
@@ -111,7 +120,14 @@ public enum FlowIrActionKind
 
 public enum FlowIrTargetReferenceKind
 {
-    Capability = 1
+    AutomationModule = 1,
+    EquipmentNode = 2,
+    SlotGroup = 3,
+    Slot = 4,
+    Dut = 5,
+    System = 6,
+    Capability = 7,
+    Driver = 8
 }
 
 public enum FlowIrCancellationMode
@@ -126,7 +142,8 @@ public enum FlowIrDynamicActionExpansionKind
 
 public enum FlowIrChildSourceMappingMode
 {
-    ContainerOnly = 1
+    ContainerOnly = 1,
+    ExactBlock = 2
 }
 
 public enum FlowIrLoopPolicy
@@ -138,7 +155,8 @@ public enum FlowIrLoopPolicy
 public enum FlowIrSourceElementKind
 {
     ProcessNode = 1,
-    ProcessTransition = 2
+    ProcessTransition = 2,
+    BlocklyBlock = 3
 }
 
 public enum FlowIrDiagnosticSeverity

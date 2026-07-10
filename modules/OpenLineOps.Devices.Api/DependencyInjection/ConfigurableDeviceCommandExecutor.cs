@@ -31,6 +31,11 @@ internal sealed class ConfigurableDeviceCommandExecutor : IDeviceCommandExecutor
         DeviceCommandExecutionRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (request.PluginPackage is not null)
+        {
+            return ExecutePluginAsync(request, cancellationToken);
+        }
+
         var provider = _configuration[$"{DeviceRuntimeBridgeOptions.DevicesExecutionSectionName}:Provider"]
             ?? _options.Provider;
 
@@ -46,23 +51,29 @@ internal sealed class ConfigurableDeviceCommandExecutor : IDeviceCommandExecutor
 
         if (DeviceCommandExecutorProviders.IsPlugin(provider))
         {
-            try
-            {
-                var pluginExecutor = _serviceProvider.GetService<PluginDeviceCommandExecutor>()
-                    ?? ActivatorUtilities.CreateInstance<PluginDeviceCommandExecutor>(_serviceProvider);
-
-                return pluginExecutor
-                    .ExecuteAsync(request, cancellationToken);
-            }
-            catch (InvalidOperationException exception)
-            {
-                throw new InvalidOperationException(
-                    "Plugin device command execution requires IPluginDeviceCommandInventory and IPluginDeviceCommandInvoker registrations.",
-                    exception);
-            }
+            return ExecutePluginAsync(request, cancellationToken);
         }
 
         throw new InvalidOperationException(
             $"Unsupported device command executor provider '{provider}'.");
+    }
+
+    private Task<DeviceCommandExecutionResult> ExecutePluginAsync(
+        DeviceCommandExecutionRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var pluginExecutor = _serviceProvider.GetService<PluginDeviceCommandExecutor>()
+                ?? ActivatorUtilities.CreateInstance<PluginDeviceCommandExecutor>(_serviceProvider);
+
+            return pluginExecutor.ExecuteAsync(request, cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new InvalidOperationException(
+                "Plugin device command execution requires IPluginDeviceCommandInventory and IPluginDeviceCommandInvoker registrations.",
+                exception);
+        }
     }
 }

@@ -1,7 +1,9 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Processes.Application.FlowIr;
+using OpenLineOps.Plugins.Infrastructure.Discovery;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Topology.Application.Persistence;
+using OpenLineOps.Topology.Application.Topologies;
 using OpenLineOps.Topology.Domain.Identifiers;
 using OpenLineOps.Topology.Domain.Topology;
 
@@ -9,6 +11,166 @@ namespace OpenLineOps.Api.Tests;
 
 public sealed class ProjectReleaseSourceResolverTests
 {
+    [Fact]
+    public void ResolveActionCapabilityTargetUsesRequiredCapabilityForAutomationModuleTarget()
+    {
+        var topology = new AutomationTopologyDetails(
+            "topology.main",
+            "Main",
+            DateTimeOffset.UtcNow,
+            [new EquipmentNodeDetails("node.main", null, "Station", "Main")],
+            [new AutomationModuleDetails(
+                "module.axis",
+                "node.main",
+                "Axis",
+                "Axis",
+                ["motion.axis"],
+                [])],
+            [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
+            [new DriverBindingDetails("binding.axis", "motion.axis", "PluginCommand", "plugin.axis")],
+            [],
+            []);
+        var action = new FlowIrAction(
+            "action.move",
+            FlowIrActionKind.DeviceCommand,
+            "Move",
+            "motion.axis",
+            "Move",
+            new FlowIrTargetReference(FlowIrTargetReferenceKind.AutomationModule, "module.axis"),
+            "{}",
+            new FlowIrExecutionPolicy(30_000, 0, FlowIrCancellationMode.Cooperative),
+            null,
+            null,
+            new FlowIrSourceTrace(
+                "process.main",
+                "process.main@1",
+                FlowIrSourceElementKind.ProcessNode,
+                "node.move",
+                null));
+
+        var result = ProjectReleaseSourceResolver.ResolveActionCapabilityTarget(topology, action);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("motion.axis", result.Value);
+        Assert.NotEqual(action.Target.Reference, result.Value);
+    }
+
+    [Fact]
+    public async Task ResolvePackageDependenciesLocksExactPackageForCompiledModuleTargetAction()
+    {
+        var packageRoot = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-release-package-resolution",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(packageRoot);
+            await File.WriteAllTextAsync(
+                Path.Combine(packageRoot, "manifest.json"),
+                """
+                {
+                  "id": "plugin.axis",
+                  "name": "Axis Provider",
+                  "version": "3.2.1",
+                  "kind": "ProcessNode",
+                  "entryAssembly": "plugin.axis.dll",
+                  "entryType": "Plugin.Axis",
+                  "contractVersion": "1.0.0",
+                  "runtimeIdentifier": "win-x64",
+                  "abiVersion": "openlineops.plugin-abi/1",
+                  "capabilities": [ "motion.axis" ],
+                  "processCommands": [
+                    {
+                      "id": "axis.move.v3",
+                      "capability": "motion.axis",
+                      "commandName": "Move",
+                      "timeoutMilliseconds": 30000,
+                      "maxRetries": 0
+                    }
+                  ]
+                }
+                """);
+            await File.WriteAllTextAsync(Path.Combine(packageRoot, "plugin.axis.dll"), "axis-binary-v3");
+            await File.WriteAllTextAsync(Path.Combine(packageRoot, "dependency.bin"), "axis-sidecar-v3");
+            var topology = new AutomationTopologyDetails(
+                "topology.main",
+                "Main",
+                DateTimeOffset.UtcNow,
+                [new EquipmentNodeDetails("node.main", null, "Station", "Main")],
+                [new AutomationModuleDetails("module.axis", "node.main", "Axis", "Axis", ["motion.axis"], [])],
+                [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
+                [new DriverBindingDetails(
+                    "binding.axis",
+                    "motion.axis",
+                    "ProcessCommandProvider",
+                    "plugin.axis")],
+                [],
+                []);
+            var action = new FlowIrAction(
+                "action.move",
+                FlowIrActionKind.DeviceCommand,
+                "Move",
+                "motion.axis",
+                "Move",
+                new FlowIrTargetReference(FlowIrTargetReferenceKind.AutomationModule, "module.axis"),
+                "{}",
+                new FlowIrExecutionPolicy(30_000, 0, FlowIrCancellationMode.Cooperative),
+                null,
+                null,
+                new FlowIrSourceTrace(
+                    "process.main",
+                    "process.main@1",
+                    FlowIrSourceElementKind.ProcessNode,
+                    "node.move",
+                    null));
+            var document = new FlowIrDocument(
+                FlowIrSchemaVersions.V1,
+                "process.main",
+                "process.main@1",
+                "Main",
+                "node.move",
+                [new FlowIrNode(
+                    "node.move",
+                    FlowIrNodeKind.Command,
+                    "Move",
+                    [action],
+                    action.Source)],
+                [],
+                []);
+            var resolver = new ProjectReleaseSourceResolver(
+                topologyRepository: null!,
+                layoutRepository: null!,
+                processRepository: null!,
+                engineeringRepository: null!,
+                blockRepository: null!,
+                flowIrCompiler: null!,
+                flowIrSerializer: null!,
+                clock: null!,
+                packageCatalog: new FileSystemPluginPackageCatalog(packageRoot));
+
+            var result = await resolver.ResolvePackageDependenciesAsync(
+                topology,
+                document,
+                CancellationToken.None);
+
+            Assert.True(result.IsSuccess);
+            var dependency = Assert.Single(result.Value);
+            Assert.Equal("plugin.axis", dependency.PluginId);
+            Assert.Equal("3.2.1", dependency.PackageVersion);
+            Assert.Equal("win-x64", dependency.RuntimeIdentifier);
+            Assert.Equal(64, dependency.PackageContentSha256.Length);
+            Assert.Contains(dependency.Files, file => file.RelativePath == "dependency.bin");
+            Assert.Equal("axis.move.v3", Assert.Single(dependency.Commands).CommandDefinitionId);
+        }
+        finally
+        {
+            if (Directory.Exists(packageRoot))
+            {
+                Directory.Delete(packageRoot, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task ResolveAsyncMapsScopedRepositoryStorageFailureToDeterministicValidationError()
     {

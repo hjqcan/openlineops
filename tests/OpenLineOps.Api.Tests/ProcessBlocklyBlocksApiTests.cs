@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
+using OpenLineOps.Processes.Application.Scripting;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -43,14 +44,16 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
             && block.GetProperty("category").GetString() == "Plugin Device Commands"
             && block.GetProperty("isBuiltIn").GetBoolean()
             && block.GetProperty("blocklyJson").GetProperty("type").GetString() == "openlineops_plugin_device_openlineops_samples_loopback_device_loopback_echo"
-            && block.GetProperty("pythonCodeTemplate").GetString()!.Contains("command.execute", StringComparison.Ordinal)
-            && block.GetProperty("pythonCodeTemplate").GetString()!.Contains("device.loopback", StringComparison.Ordinal));
+            && block.GetProperty("executionMode").GetString() == ProcessBlocklyBlockExecutionModes.DeclarativeActionContract
+            && block.GetProperty("runtimeActionContractSha256").GetString()!.Length == 64
+            && block.GetProperty("runtimeActionContract").GetProperty("emit").GetProperty("kind").GetString() == "deviceCommand");
     }
 
     [Fact]
     public async Task RegisterAddsUserDefinedBlocklyBlock()
     {
         var blockType = $"user_open_clamp_{Guid.NewGuid():N}";
+        var contract = CreateFixtureContract(includeClamp: true);
 
         using var createResponse = await _client.PostAsJsonAsync(
             "/api/process-blocks",
@@ -76,7 +79,8 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
                     nextStatement = (string?)null,
                     colour = 130
                 },
-                pythonCodeTemplate = "automation_plan.append({'type': 'fixture.clamp', 'clamp': {{CLAMP}}, 'state': 'open'})"
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = contract.Contract
             });
         using var createBody = await ReadJsonAsync(createResponse);
 
@@ -91,6 +95,10 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
         Assert.NotEqual(default(DateTimeOffset), createBody.RootElement.GetProperty("createdAtUtc").GetDateTimeOffset());
         Assert.NotEqual(default(DateTimeOffset), createBody.RootElement.GetProperty("updatedAtUtc").GetDateTimeOffset());
         Assert.Equal(blockType, createBody.RootElement.GetProperty("blocklyJson").GetProperty("type").GetString());
+        Assert.Equal(contract.Sha256, createBody.RootElement.GetProperty("runtimeActionContractSha256").GetString());
+        Assert.Equal(
+            ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            createBody.RootElement.GetProperty("executionMode").GetString());
 
         Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
         Assert.Contains(listBody.RootElement.EnumerateArray(), block =>
@@ -102,6 +110,7 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
     public async Task RegisterExistingUserDefinedBlockCreatesNewVersion()
     {
         var blockType = $"user_close_clamp_{Guid.NewGuid():N}";
+        var contract = CreateFixtureContract(includeClamp: false);
 
         using var firstResponse = await _client.PostAsJsonAsync(
             "/api/process-blocks",
@@ -117,7 +126,8 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
                     previousStatement = (string?)null,
                     nextStatement = (string?)null
                 },
-                pythonCodeTemplate = "automation_plan.append({'type': 'fixture.clamp', 'state': 'closed'})"
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = contract.Contract
             });
         using var firstBody = await ReadJsonAsync(firstResponse);
 
@@ -135,7 +145,8 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
                     previousStatement = (string?)null,
                     nextStatement = (string?)null
                 },
-                pythonCodeTemplate = "automation_plan.append({'type': 'fixture.clamp', 'state': 'closed', 'force': 'normal'})"
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = contract.Contract
             });
         using var secondBody = await ReadJsonAsync(secondResponse);
 
@@ -173,6 +184,7 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
     [Fact]
     public async Task RegisterRejectsBlocklyJsonTypeMismatch()
     {
+        var contract = CreateFixtureContract(includeClamp: false);
         using var response = await _client.PostAsJsonAsync(
             "/api/process-blocks",
             new
@@ -184,7 +196,8 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
                 {
                     type = "different_block"
                 },
-                pythonCodeTemplate = "automation_plan.append({'type': 'fixture.clamp'})"
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = contract.Contract
             });
         using var body = await ReadJsonAsync(response);
 
@@ -193,6 +206,49 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
             "Validation.Processes.BlocklyBlockJsonTypeMismatch",
             body.RootElement.GetProperty("title").GetString());
     }
+
+    private static ContractPayload CreateFixtureContract(bool includeClamp)
+    {
+        var fields = new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal);
+        var input = new Dictionary<string, RuntimeActionValueExpression>(StringComparer.Ordinal)
+        {
+            ["state"] = Literal("closed")
+        };
+        if (includeClamp)
+        {
+            fields["CLAMP"] = new RuntimeActionFieldDefinition(
+                RuntimeActionFieldType.Text,
+                Required: true,
+                MaxLength: 128);
+            input["clamp"] = new RuntimeActionFieldValue("CLAMP");
+        }
+
+        var contract = new RuntimeActionContract(
+            RuntimeActionContractSchemaVersions.V1,
+            "fixture.clamp.set",
+            fields,
+            new RuntimeDeviceCommandEmit(
+                Literal(RuntimeActionTargetKinds.Capability),
+                Literal("fixture.clamp"),
+                Literal("fixture.clamp"),
+                Literal("SetState"),
+                new RuntimeActionObjectValue(input),
+                Literal(30_000)));
+        var artifact = new RuntimeActionContractCanonicalSerializer().Serialize(contract);
+        Assert.True(artifact.IsSuccess, artifact.Error.Message);
+        return new ContractPayload(
+            artifact.Value.SchemaVersion,
+            JsonSerializer.Deserialize<JsonElement>(artifact.Value.CanonicalJson),
+            artifact.Value.Sha256);
+    }
+
+    private static RuntimeActionLiteralValue Literal<T>(T value) =>
+        new(JsonSerializer.SerializeToElement(value));
+
+    private sealed record ContractPayload(
+        string SchemaVersion,
+        JsonElement Contract,
+        string Sha256);
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)
     {

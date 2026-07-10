@@ -17,6 +17,7 @@ public static class ProcessGraphValidator
 
         ValidateNodeSet(nodes, issues);
         ValidateCommandExecutionMetadata(nodes.Values, issues);
+        ValidateBlocklyMetadata(nodes.Values, issues);
         ValidatePythonScriptMetadata(nodes.Values, issues);
 
         var validTransitions = ValidateTransitionEndpoints(nodes, transitions, issues);
@@ -95,21 +96,6 @@ public static class ProcessGraphValidator
                     $"Python script node {node.Id} must declare Python as the script language."));
             }
 
-            if (node.ScriptEditorMode is null)
-            {
-                issues.Add(Error(
-                    "Processes.PythonScriptEditorModeMissing",
-                    $"Python script node {node.Id} must declare an editor mode."));
-            }
-
-            if (node.ScriptEditorMode == ProcessScriptEditorMode.Blockly
-                && string.IsNullOrWhiteSpace(node.BlocklyWorkspaceJson))
-            {
-                issues.Add(Error(
-                    "Processes.PythonScriptBlocklyWorkspaceMissing",
-                    $"Python script node {node.Id} must persist Blockly workspace JSON when Blockly editing is used."));
-            }
-
             if (string.IsNullOrWhiteSpace(node.ScriptSourceCode))
             {
                 issues.Add(Error(
@@ -136,6 +122,39 @@ public static class ProcessGraphValidator
                 issues.Add(Error(
                     "Processes.PythonScriptTimeoutInvalid",
                     $"Python script node {node.Id} must declare a positive script timeout."));
+            }
+        }
+    }
+
+    private static void ValidateBlocklyMetadata(
+        IEnumerable<ProcessNode> nodes,
+        List<ProcessGraphValidationIssue> issues)
+    {
+        foreach (var node in nodes.Where(node => node.IsBlockly))
+        {
+            if (string.IsNullOrWhiteSpace(node.BlocklyWorkspaceJson))
+            {
+                issues.Add(Error(
+                    "Processes.BlocklyWorkspaceMissing",
+                    $"Blockly node {node.Id} must persist workspace JSON."));
+            }
+
+            if (node.CommandTimeout is null || node.CommandTimeout <= TimeSpan.Zero)
+            {
+                issues.Add(Error(
+                    "Processes.BlocklyTimeoutInvalid",
+                    $"Blockly node {node.Id} must declare a positive execution timeout."));
+            }
+
+            if (!string.IsNullOrWhiteSpace(node.ScriptLanguage)
+                || !string.IsNullOrWhiteSpace(node.ScriptSourceCode)
+                || !string.IsNullOrWhiteSpace(node.ScriptSourceHash)
+                || !string.IsNullOrWhiteSpace(node.ScriptVersion)
+                || node.ScriptTimeout is not null)
+            {
+                issues.Add(Error(
+                    "Processes.BlocklyScriptMetadataForbidden",
+                    $"Blockly node {node.Id} cannot contain Python script metadata."));
             }
         }
     }

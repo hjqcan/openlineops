@@ -13,9 +13,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Plugin.Abstractions\OpenLineOps.Plugin.Abstractions.csproj" />
     <ProjectReference Include="..\OpenLineOps.Engineering.Application\OpenLineOps.Engineering.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Engineering.Domain\OpenLineOps.Engineering.Domain.csproj" />
     <ProjectReference Include="..\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
     <ProjectReference Include="..\OpenLineOps.Topology.Application\OpenLineOps.Topology.Application.csproj" />

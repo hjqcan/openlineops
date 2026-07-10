@@ -72,20 +72,43 @@ public sealed class RuntimeActionContractCanonicalSerializer
 
     public Result<RuntimeActionContract> Deserialize(string canonicalJson)
     {
-        if (string.IsNullOrWhiteSpace(canonicalJson))
+        var parsed = Parse(canonicalJson);
+        if (parsed.IsFailure)
         {
-            return Failure<RuntimeActionContract>("Canonical contract JSON is required.");
+            return parsed;
         }
 
-        if (Encoding.UTF8.GetByteCount(canonicalJson) > _maximumCanonicalJsonBytes)
+        var artifact = Serialize(parsed.Value);
+        if (artifact.IsFailure)
+        {
+            return Result.Failure<RuntimeActionContract>(artifact.Error);
+        }
+
+        if (!string.Equals(canonicalJson, artifact.Value.CanonicalJson, StringComparison.Ordinal))
         {
             return Failure<RuntimeActionContract>(
-                $"Canonical contract JSON exceeds {_maximumCanonicalJsonBytes} UTF-8 bytes.");
+                "Contract JSON is valid but is not in canonical form.");
+        }
+
+        return parsed;
+    }
+
+    public Result<RuntimeActionContract> Parse(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Failure<RuntimeActionContract>("Contract JSON is required.");
+        }
+
+        if (Encoding.UTF8.GetByteCount(json) > _maximumCanonicalJsonBytes)
+        {
+            return Failure<RuntimeActionContract>(
+                $"Contract JSON exceeds {_maximumCanonicalJsonBytes} UTF-8 bytes.");
         }
 
         try
         {
-            using var document = JsonDocument.Parse(canonicalJson, DocumentOptions);
+            using var document = JsonDocument.Parse(json, DocumentOptions);
             var duplicatePath = FindDuplicateProperty(document.RootElement, "$", depth: 0);
             if (duplicatePath is not null)
             {
@@ -98,18 +121,6 @@ public sealed class RuntimeActionContractCanonicalSerializer
             if (validation.IsFailure)
             {
                 return validation;
-            }
-
-            var artifact = Serialize(validation.Value);
-            if (artifact.IsFailure)
-            {
-                return Result.Failure<RuntimeActionContract>(artifact.Error);
-            }
-
-            if (!string.Equals(canonicalJson, artifact.Value.CanonicalJson, StringComparison.Ordinal))
-            {
-                return Failure<RuntimeActionContract>(
-                    "Contract JSON is valid but is not in canonical form.");
             }
 
             return Result.Success(validation.Value);
@@ -189,6 +200,8 @@ public sealed class RuntimeActionContractCanonicalSerializer
             element,
             path,
             "kind",
+            "targetKind",
+            "targetId",
             "capability",
             "commandName",
             "input",
@@ -196,10 +209,22 @@ public sealed class RuntimeActionContractCanonicalSerializer
             "retryLimit");
 
         return new RuntimeDeviceCommandEmit(
-            RequiredString(element, "capability", path),
-            RequiredString(element, "commandName", path),
+            ReadValueExpression(
+                RequiredProperty(element, "targetKind", path, JsonValueKind.Object),
+                $"{path}.targetKind"),
+            ReadValueExpression(
+                RequiredProperty(element, "targetId", path, JsonValueKind.Object),
+                $"{path}.targetId"),
+            ReadValueExpression(
+                RequiredProperty(element, "capability", path, JsonValueKind.Object),
+                $"{path}.capability"),
+            ReadValueExpression(
+                RequiredProperty(element, "commandName", path, JsonValueKind.Object),
+                $"{path}.commandName"),
             ReadValueExpression(RequiredProperty(element, "input", path, JsonValueKind.Object), $"{path}.input"),
-            RequiredInt64(element, "timeoutMilliseconds", path),
+            ReadValueExpression(
+                RequiredProperty(element, "timeoutMilliseconds", path, JsonValueKind.Object),
+                $"{path}.timeoutMilliseconds"),
             RequiredInt32(element, "retryLimit", path));
     }
 
@@ -382,11 +407,18 @@ public sealed class RuntimeActionContractCanonicalSerializer
         {
             case RuntimeDeviceCommandEmit command:
                 writer.WriteString("kind", "deviceCommand");
-                writer.WriteString("capability", command.Capability);
-                writer.WriteString("commandName", command.CommandName);
+                writer.WritePropertyName("targetKind");
+                WriteValueExpression(writer, command.TargetKind);
+                writer.WritePropertyName("targetId");
+                WriteValueExpression(writer, command.TargetId);
+                writer.WritePropertyName("capability");
+                WriteValueExpression(writer, command.Capability);
+                writer.WritePropertyName("commandName");
+                WriteValueExpression(writer, command.CommandName);
                 writer.WritePropertyName("input");
                 WriteValueExpression(writer, command.Input);
-                writer.WriteNumber("timeoutMilliseconds", command.TimeoutMilliseconds);
+                writer.WritePropertyName("timeoutMilliseconds");
+                WriteValueExpression(writer, command.TimeoutMilliseconds);
                 writer.WriteNumber("retryLimit", command.RetryLimit);
                 break;
             case RuntimeDelayEmit delay:

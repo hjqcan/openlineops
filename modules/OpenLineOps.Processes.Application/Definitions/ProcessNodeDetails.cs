@@ -9,7 +9,6 @@ public sealed record ProcessNodeDetails(
     int? TimeoutSeconds,
     string? InputPayload,
     string? ScriptLanguage,
-    string? ScriptEditorMode,
     string? BlocklyWorkspaceJson,
     string? ScriptSourceCode,
     string? ScriptSourceHash,

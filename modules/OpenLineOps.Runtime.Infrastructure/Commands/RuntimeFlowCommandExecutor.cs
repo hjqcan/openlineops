@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Runtime.Application.Commands;
 
 namespace OpenLineOps.Runtime.Infrastructure.Commands;
@@ -13,6 +14,11 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+
+        if (RuntimeFlowCommand.IsResultPatch(context))
+        {
+            return ExecuteResultPatch(context);
+        }
 
         if (!RuntimeFlowCommand.IsWait(context))
         {
@@ -62,6 +68,63 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
         {
             return RuntimeCommandExecutionResult.TimedOut("Runtime flow wait timed out.");
         }
+    }
+
+    private static RuntimeCommandExecutionResult ExecuteResultPatch(
+        RuntimeCommandExecutionContext context)
+    {
+        try
+        {
+            var payload = JsonNode.Parse(context.InputPayload ?? string.Empty) as JsonObject;
+            if (payload?["assignments"] is not JsonArray assignments)
+            {
+                return RuntimeCommandExecutionResult.Rejected(
+                    "Runtime result patch payload must contain an assignments array.");
+            }
+
+            var result = new JsonObject();
+            foreach (var assignmentNode in assignments)
+            {
+                if (assignmentNode is not JsonObject assignment
+                    || assignment["key"] is not JsonValue keyValue
+                    || !keyValue.TryGetValue<string>(out var key)
+                    || string.IsNullOrWhiteSpace(key))
+                {
+                    return RuntimeCommandExecutionResult.Rejected(
+                        "Runtime result patch assignments must contain canonical string keys.");
+                }
+
+                result[key] = ResolveResultValue(assignment["value"], context);
+            }
+
+            return RuntimeCommandExecutionResult.Completed(result.ToJsonString());
+        }
+        catch (JsonException exception)
+        {
+            return RuntimeCommandExecutionResult.Rejected(
+                $"Runtime result patch payload is invalid JSON: {exception.Message}");
+        }
+    }
+
+    private static JsonNode? ResolveResultValue(
+        JsonNode? value,
+        RuntimeCommandExecutionContext context)
+    {
+        if (value is not JsonObject contextValue
+            || contextValue.Count != 1
+            || contextValue["$context"] is not JsonValue contextNameValue
+            || !contextNameValue.TryGetValue<string>(out var contextName))
+        {
+            return value?.DeepClone();
+        }
+
+        return contextName switch
+        {
+            "nodeId" => JsonValue.Create(context.NodeId.Value),
+            "timestampUtc" => JsonValue.Create(DateTimeOffset.UtcNow),
+            "inputPayload" => JsonValue.Create(context.InputPayload),
+            _ => value.DeepClone()
+        };
     }
 
     private static bool TryReadDuration(

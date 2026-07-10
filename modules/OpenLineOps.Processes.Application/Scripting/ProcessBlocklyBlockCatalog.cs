@@ -130,13 +130,30 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 $"Generated Blockly block {blockType} cannot be overwritten."));
         }
 
+        var contractResult = ActionContractSerializer.Parse(request.RuntimeActionContractJson);
+        if (contractResult.IsFailure)
+        {
+            return Result.Failure<ProcessBlocklyBlockDefinitionDetails>(contractResult.Error);
+        }
+
+        var contractArtifactResult = ActionContractSerializer.Serialize(contractResult.Value);
+        if (contractArtifactResult.IsFailure)
+        {
+            return Result.Failure<ProcessBlocklyBlockDefinitionDetails>(contractArtifactResult.Error);
+        }
+
+        var contractArtifact = contractArtifactResult.Value;
+
         var record = await _repository
             .SaveNewVersionAsync(
                 blockType,
                 request.Category.Trim(),
                 request.DisplayName.Trim(),
                 NormalizeJson(request.BlocklyJson),
-                request.PythonCodeTemplate.Trim(),
+                ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+                contractArtifact.SchemaVersion,
+                contractArtifact.CanonicalJson,
+                contractArtifact.Sha256,
                 _clock.UtcNow,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -190,12 +207,14 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             record.Category,
             record.DisplayName,
             record.BlocklyJson,
-            record.PythonCodeTemplate,
             IsBuiltIn: false,
             record.Version,
             record.CreatedAtUtc,
             record.UpdatedAtUtc,
-            ExecutionMode: ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate);
+            ExecutionMode: record.ExecutionMode,
+            RuntimeActionContractSchemaVersion: record.RuntimeActionContractSchemaVersion,
+            RuntimeActionContractJson: record.RuntimeActionContractJson,
+            RuntimeActionContractSha256: record.RuntimeActionContractSha256);
     }
 
     private static ApplicationError? Validate(RegisterProcessBlocklyBlockDefinitionRequest request)
@@ -248,14 +267,88 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 $"BlocklyJson type '{blockType}' must match BlockType '{request.BlockType.Trim()}'.");
         }
 
-        if (string.IsNullOrWhiteSpace(request.PythonCodeTemplate))
+        if (string.IsNullOrWhiteSpace(request.RuntimeActionContractSchemaVersion)
+            || string.IsNullOrWhiteSpace(request.RuntimeActionContractJson))
         {
             return ApplicationError.Validation(
-                "Processes.BlocklyBlockPythonTemplateRequired",
-                "PythonCodeTemplate is required.");
+                "Processes.BlocklyBlockRuntimeActionContractRequired",
+                "Runtime Action Contract schema and JSON are required.");
+        }
+
+        var contractResult = ActionContractSerializer.Parse(request.RuntimeActionContractJson);
+        if (contractResult.IsFailure)
+        {
+            return ApplicationError.Validation(
+                "Processes.BlocklyBlockRuntimeActionContractInvalid",
+                contractResult.Error.Message);
+        }
+
+        var artifactResult = ActionContractSerializer.Serialize(contractResult.Value);
+        if (artifactResult.IsFailure
+            || !string.Equals(
+                request.RuntimeActionContractSchemaVersion,
+                artifactResult.Value.SchemaVersion,
+                StringComparison.Ordinal))
+        {
+            return ApplicationError.Validation(
+                "Processes.BlocklyBlockRuntimeActionContractHashMismatch",
+                "Runtime Action Contract schema does not match its JSON contract.");
+        }
+
+        HashSet<string> blockFields;
+        try
+        {
+            blockFields = ReadBlocklyFieldNames(request.BlocklyJson);
+        }
+        catch (InvalidDataException exception)
+        {
+            return ApplicationError.Validation(
+                "Processes.BlocklyBlockJsonInvalid",
+                exception.Message);
+        }
+
+        var contractFields = contractResult.Value.Fields.Keys.ToHashSet(StringComparer.Ordinal);
+        if (!blockFields.SetEquals(contractFields))
+        {
+            return ApplicationError.Validation(
+                "Processes.BlocklyBlockContractFieldsMismatch",
+                "Blockly field names must exactly match the Runtime Action Contract field names.");
         }
 
         return null;
+    }
+
+    private static HashSet<string> ReadBlocklyFieldNames(string blocklyJson)
+    {
+        using var document = JsonDocument.Parse(blocklyJson);
+        var fields = new HashSet<string>(StringComparer.Ordinal);
+        if (!document.RootElement.TryGetProperty("args0", out var args)
+            || args.ValueKind != JsonValueKind.Array)
+        {
+            return fields;
+        }
+
+        foreach (var argument in args.EnumerateArray())
+        {
+            if (argument.ValueKind != JsonValueKind.Object
+                || !argument.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || !type.GetString()!.StartsWith("field_", StringComparison.Ordinal)
+                || !argument.TryGetProperty("name", out var name)
+                || name.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(name.GetString()))
+            {
+                continue;
+            }
+
+            if (!fields.Add(name.GetString()!))
+            {
+                throw new InvalidDataException(
+                    $"BlocklyJson contains duplicate field name '{name.GetString()}'.");
+            }
+        }
+
+        return fields;
     }
 
     private static string NormalizeJson(string json)
@@ -299,7 +392,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
         }
     }
 
-    private static IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails> BuiltInBlocks()
+    internal static IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails> BuiltInBlocks()
     {
         return
         [
@@ -310,8 +403,18 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_move_axis",
-                  "message0": "move axis %1 to %2 %3 speed %4",
+                  "message0": "move target %1 %2 axis %3 to %4 %5 speed %6",
                   "args0": [
+                    {
+                      "type": "field_dropdown",
+                      "name": "TARGET_KIND",
+                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "TARGET_ID",
+                      "text": "module.motion"
+                    },
                     {
                       "type": "field_dropdown",
                       "name": "AXIS",
@@ -341,8 +444,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "colour": 176,
                   "tooltip": "Append an axis movement command to the automation plan."
                 }
-                """,
-                "automation_plan.append({'type': 'axis.move', 'axis': {{AXIS}}, 'position': {{number:POSITION}}, 'unit': {{UNIT}}, 'speed': {{number:SPEED}}})"),
+                """),
             BuiltIn(
                 "openlineops_set_light",
                 "I/O",
@@ -350,8 +452,18 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_set_light",
-                  "message0": "set light %1 %2",
+                  "message0": "set light target %1 %2 channel %3 state %4",
                   "args0": [
+                    {
+                      "type": "field_dropdown",
+                      "name": "TARGET_KIND",
+                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "TARGET_ID",
+                      "text": "module.io"
+                    },
                     {
                       "type": "field_input",
                       "name": "CHANNEL",
@@ -368,8 +480,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "colour": 205,
                   "tooltip": "Append a digital output command for a light channel."
                 }
-                """,
-                "automation_plan.append({'type': 'io.light', 'channel': {{CHANNEL}}, 'state': {{STATE}}})"),
+                """),
             BuiltIn(
                 "openlineops_rotate_motor",
                 "Motion",
@@ -377,8 +488,18 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_rotate_motor",
-                  "message0": "rotate motor %1 at %2 rpm for %3 ms",
+                  "message0": "rotate motor target %1 %2 motor %3 at %4 rpm for %5 ms",
                   "args0": [
+                    {
+                      "type": "field_dropdown",
+                      "name": "TARGET_KIND",
+                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "TARGET_ID",
+                      "text": "module.motor"
+                    },
                     {
                       "type": "field_input",
                       "name": "MOTOR",
@@ -403,8 +524,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "colour": 176,
                   "tooltip": "Append a timed motor rotation command."
                 }
-                """,
-                "automation_plan.append({'type': 'motor.rotate', 'motor': {{MOTOR}}, 'rpm': {{number:RPM}}, 'duration_ms': {{number:DURATION_MS}}})"),
+                """),
             BuiltIn(
                 "openlineops_wait",
                 "Flow",
@@ -427,8 +547,55 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "colour": 48,
                   "tooltip": "Append a deterministic wait step."
                 }
-                """,
-                "automation_plan.append({'type': 'flow.wait', 'duration_ms': {{number:DURATION_MS}}})"),
+                """),
+            BuiltIn(
+                "openlineops_run_external_test",
+                "Production",
+                "Run External Test",
+                """
+                {
+                  "type": "openlineops_run_external_test",
+                  "message0": "run external test target %1 %2 capability %3 command %4 adapter %5 timeout %6 ms",
+                  "args0": [
+                    {
+                      "type": "field_dropdown",
+                      "name": "TARGET_KIND",
+                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "TARGET_ID",
+                      "text": "workstation.main"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "CAPABILITY",
+                      "text": "production.external-test"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "COMMAND",
+                      "text": "Run"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "ADAPTER_ID",
+                      "text": "adapter.main"
+                    },
+                    {
+                      "type": "field_number",
+                      "name": "TIMEOUT_MS",
+                      "value": 300000,
+                      "min": 1,
+                      "precision": 1
+                    }
+                  ],
+                  "previousStatement": null,
+                  "nextStatement": null,
+                  "colour": 12,
+                  "tooltip": "Run an external production test through an explicitly bound adapter."
+                }
+                """),
             BuiltIn(
                 "openlineops_result_from_input",
                 "Result",
@@ -469,15 +636,6 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "colour": 176,
                   "tooltip": "Write the PythonScript result payload used by runtime traceability."
                 }
-                """,
-                """
-                input_payload = {{INPUT_PAYLOAD}}
-                result[{{OUTPUT_KEY}}] = input_payload
-                result['status'] = {{STATUS}}
-                if {{INCLUDE_TIMESTAMP}} == 'TRUE':
-                    result['timestamp_utc'] = 'runtime-provided'
-                if {{INCLUDE_NODE_ID}} == 'TRUE':
-                    result['node'] = node_id
                 """)
         ];
     }
@@ -486,8 +644,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
         string blockType,
         string category,
         string displayName,
-        string blocklyJson,
-        string pythonCodeTemplate)
+        string blocklyJson)
     {
         var contractResult = ActionContractSerializer.Serialize(
             BuiltInRuntimeActionContracts.Get(blockType));
@@ -503,7 +660,6 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             category,
             displayName,
             NormalizeJson(blocklyJson),
-            pythonCodeTemplate,
             IsBuiltIn: true,
             Version: 1,
             CreatedAtUtc: BuiltInRecordedAtUtc,

@@ -7,8 +7,11 @@ public sealed record ProcessBlocklyBlockDefinitionResponse(
     string Category,
     string DisplayName,
     JsonElement BlocklyJson,
-    string PythonCodeTemplate,
     bool IsBuiltIn,
     int Version,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string ExecutionMode,
+    string RuntimeActionContractSchemaVersion,
+    JsonElement RuntimeActionContract,
+    string RuntimeActionContractSha256);

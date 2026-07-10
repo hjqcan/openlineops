@@ -95,6 +95,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
         return ValueTask.FromResult(PluginActivationResult.Success(
             new ExternalProcessOpenLineOpsPlugin(
                 package.Manifest,
+                package.RuntimeIdentity,
                 request,
                 _processRunner,
                 _processRegistry,
@@ -222,6 +223,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
     private sealed class ExternalProcessOpenLineOpsPlugin(
         PluginManifest manifest,
+        PluginPackageRuntimeIdentity packageIdentity,
         ExternalPluginProcessStartRequest processStartRequest,
         IExternalPluginProcessRunner processRunner,
         IExternalPluginProcessRegistry processRegistry,
@@ -257,7 +259,14 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
             if (!_process.HasExited)
             {
-                processRegistry.Register(Manifest.Id, _process);
+                if (packageIdentity.IsComplete)
+                {
+                    processRegistry.Register(packageIdentity, _process);
+                }
+                else
+                {
+                    processRegistry.Register(Manifest.Id, _process);
+                }
 
                 eventSink.Record(new ExternalPluginProcessEvent(
                     ExternalPluginProcessEventKind.Started,
@@ -292,7 +301,14 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
             }
             finally
             {
-                processRegistry.Unregister(Manifest.Id, _process);
+                if (packageIdentity.IsComplete)
+                {
+                    processRegistry.Unregister(packageIdentity, _process);
+                }
+                else
+                {
+                    processRegistry.Unregister(Manifest.Id, _process);
+                }
                 _process = null;
             }
         }

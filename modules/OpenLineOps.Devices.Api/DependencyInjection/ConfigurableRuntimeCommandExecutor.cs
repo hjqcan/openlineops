@@ -36,7 +36,7 @@ internal sealed class ConfigurableRuntimeCommandExecutor : IRuntimeCommandExecut
         RuntimeCommandExecutionContext context,
         CancellationToken cancellationToken = default)
     {
-        if (RuntimeFlowCommand.IsWait(context))
+        if (RuntimeFlowCommand.IsInternal(context))
         {
             return await _flowExecutor.ExecuteAsync(context, cancellationToken)
                 .ConfigureAwait(false);

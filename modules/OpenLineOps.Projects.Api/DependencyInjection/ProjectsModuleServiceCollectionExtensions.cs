@@ -24,6 +24,7 @@ public static class ProjectsModuleServiceCollectionExtensions
             serviceProvider.GetRequiredService<InMemoryAutomationProjectRepository>());
         services.TryAddSingleton<IAutomationProjectManifestStore, FileSystemAutomationProjectManifestStore>();
         services.TryAddSingleton<IProjectReleaseArtifactStore, FileSystemProjectReleaseArtifactStore>();
+        services.TryAddSingleton<IProjectReleasePluginCommandResolver, ProjectReleasePluginCommandResolver>();
         services.TryAddScoped<IProjectApplicationWorkspaceScopeResolver, AutomationProjectWorkspaceScopeResolver>();
         services.AddScoped<IProjectReleaseSourceResolver, ProjectReleaseSourceResolver>();
         services.AddScoped<IProjectReleasePublisher, ProjectReleasePublisher>();

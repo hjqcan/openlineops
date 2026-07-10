@@ -1,11 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Blockly from 'blockly';
-import { pythonGenerator } from 'blockly/python';
 import {
   ArrowRight,
   Braces,
   CheckCircle2,
-  Code2,
   FilePlus2,
   GitBranch,
   History,
@@ -16,7 +14,6 @@ import {
   Plus,
   RotateCcw,
   Save,
-  Sparkles,
   Trash2,
   Workflow
 } from 'lucide-react';
@@ -53,9 +50,8 @@ import {
   validateProcessDefinition
 } from './api';
 
-type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'PythonScript';
+type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'Blockly' | 'PythonScript';
 type AddableProcessNodeKind = Exclude<ProcessNodeKind, 'Start'>;
-type ScriptEditorMode = 'Blockly' | 'ManualCode';
 type TransitionLoopPolicy = 'None' | 'Counted';
 
 interface ProcessWorkbenchProps {
@@ -74,7 +70,6 @@ interface ProcessNodeDraft {
   commandName: string;
   timeoutSeconds: number;
   inputPayload: string;
-  scriptEditorMode: ScriptEditorMode;
   scriptVersion: string;
   blocklyWorkspaceJson: string;
   manualSourceCode: string;
@@ -119,231 +114,61 @@ interface ProjectTargetOption {
   inputPayload: string;
 }
 
+const projectTargetFieldType = 'field_openlineops_project_target';
+const projectTargetsByWorkspace = new WeakMap<Blockly.Workspace, ProjectTargetOption[]>();
+const registeredProcessBlockTypes = new Set<string>();
+
+class ProjectTargetDropdown extends Blockly.FieldDropdown {
+  constructor() {
+    super(function (this: Blockly.FieldDropdown): Blockly.MenuOption[] {
+      const sourceBlock = this.getSourceBlock();
+      if (!sourceBlock) {
+        return [['Select target', '']];
+      }
+
+      const targetKind = String(sourceBlock.getFieldValue('TARGET_KIND') ?? '');
+      const targets = (projectTargetsByWorkspace.get(sourceBlock.workspace) ?? [])
+        .filter(target => target.targetKind === targetKind);
+      const currentValue = this.getValue();
+      const options: Blockly.MenuOption[] = targets.map(target => [
+        `${target.label} · ${target.targetId}`,
+        target.targetId
+      ]);
+
+      if (currentValue && !targets.some(target => target.targetId === currentValue)) {
+        options.push([`Missing target · ${currentValue}`, currentValue]);
+      }
+
+      return options.length > 0
+        ? options
+        : [[`No ${targetKind || 'matching'} targets`, '']];
+    });
+  }
+
+  static fromJson(): ProjectTargetDropdown {
+    return new ProjectTargetDropdown();
+  }
+
+  protected override doClassValidation_(newValue?: string): string | null {
+    return typeof newValue === 'string' ? newValue : null;
+  }
+}
+
 interface CustomBlocklyBlockDraft {
   blockType: string;
   category: string;
   displayName: string;
   blocklyJsonText: string;
-  pythonCodeTemplate: string;
+  runtimeActionContractText: string;
 }
 
 const addableNodeKinds: AddableProcessNodeKind[] = [
+  'Blockly',
   'PythonScript',
   'Command',
   'Decision',
   'Delay',
   'End'
-];
-
-const openLineOpsResultBlockType = 'openlineops_result_from_input';
-const openLineOpsMoveAxisBlockType = 'openlineops_move_axis';
-const openLineOpsSetLightBlockType = 'openlineops_set_light';
-const openLineOpsRotateMotorBlockType = 'openlineops_rotate_motor';
-const openLineOpsWaitBlockType = 'openlineops_wait';
-const builtInBlocklyCatalogTimestamp = '2026-06-30T00:00:00+00:00';
-
-const fallbackBlocklyBlockCatalog: ProcessBlocklyBlockDefinition[] = [
-  {
-    blockType: openLineOpsMoveAxisBlockType,
-    category: 'Motion',
-    displayName: 'Move Axis',
-    blocklyJson: {
-      type: openLineOpsMoveAxisBlockType,
-      message0: 'move axis %1 to %2 %3 speed %4',
-      args0: [
-        {
-          type: 'field_dropdown',
-          name: 'AXIS',
-          options: [
-            ['X', 'X'],
-            ['Y', 'Y'],
-            ['Z', 'Z']
-          ]
-        },
-        {
-          type: 'field_number',
-          name: 'POSITION',
-          value: 10,
-          precision: 0.001
-        },
-        {
-          type: 'field_dropdown',
-          name: 'UNIT',
-          options: [
-            ['mm', 'mm'],
-            ['deg', 'deg']
-          ]
-        },
-        {
-          type: 'field_number',
-          name: 'SPEED',
-          value: 5,
-          min: 0,
-          precision: 0.001
-        }
-      ],
-      previousStatement: null,
-      nextStatement: null,
-      colour: 176,
-      tooltip: 'Append an axis movement command to the automation plan.'
-    },
-    pythonCodeTemplate: "automation_plan.append({'type': 'axis.move', 'axis': {{AXIS}}, 'position': {{number:POSITION}}, 'unit': {{UNIT}}, 'speed': {{number:SPEED}}})",
-    isBuiltIn: true,
-    version: 1,
-    createdAtUtc: builtInBlocklyCatalogTimestamp,
-    updatedAtUtc: builtInBlocklyCatalogTimestamp
-  },
-  {
-    blockType: openLineOpsSetLightBlockType,
-    category: 'I/O',
-    displayName: 'Set Light',
-    blocklyJson: {
-      type: openLineOpsSetLightBlockType,
-      message0: 'set light %1 %2',
-      args0: [
-        {
-          type: 'field_input',
-          name: 'CHANNEL',
-          text: 'tower.green'
-        },
-        {
-          type: 'field_dropdown',
-          name: 'STATE',
-          options: [
-            ['on', 'On'],
-            ['off', 'Off']
-          ]
-        }
-      ],
-      previousStatement: null,
-      nextStatement: null,
-      colour: 205,
-      tooltip: 'Append a digital output command for a light channel.'
-    },
-    pythonCodeTemplate: "automation_plan.append({'type': 'io.light', 'channel': {{CHANNEL}}, 'state': {{STATE}}})",
-    isBuiltIn: true,
-    version: 1,
-    createdAtUtc: builtInBlocklyCatalogTimestamp,
-    updatedAtUtc: builtInBlocklyCatalogTimestamp
-  },
-  {
-    blockType: openLineOpsRotateMotorBlockType,
-    category: 'Motion',
-    displayName: 'Rotate Motor',
-    blocklyJson: {
-      type: openLineOpsRotateMotorBlockType,
-      message0: 'rotate motor %1 at %2 rpm for %3 ms',
-      args0: [
-        {
-          type: 'field_input',
-          name: 'MOTOR',
-          text: 'motor.main'
-        },
-        {
-          type: 'field_number',
-          name: 'RPM',
-          value: 1200,
-          precision: 1
-        },
-        {
-          type: 'field_number',
-          name: 'DURATION_MS',
-          value: 500,
-          min: 0,
-          precision: 1
-        }
-      ],
-      previousStatement: null,
-      nextStatement: null,
-      colour: 176,
-      tooltip: 'Append a timed motor rotation command.'
-    },
-    pythonCodeTemplate: "automation_plan.append({'type': 'motor.rotate', 'motor': {{MOTOR}}, 'rpm': {{number:RPM}}, 'duration_ms': {{number:DURATION_MS}}})",
-    isBuiltIn: true,
-    version: 1,
-    createdAtUtc: builtInBlocklyCatalogTimestamp,
-    updatedAtUtc: builtInBlocklyCatalogTimestamp
-  },
-  {
-    blockType: openLineOpsWaitBlockType,
-    category: 'Flow',
-    displayName: 'Wait',
-    blocklyJson: {
-      type: openLineOpsWaitBlockType,
-      message0: 'wait %1 ms',
-      args0: [
-        {
-          type: 'field_number',
-          name: 'DURATION_MS',
-          value: 250,
-          min: 0,
-          precision: 1
-        }
-      ],
-      previousStatement: null,
-      nextStatement: null,
-      colour: 48,
-      tooltip: 'Append a deterministic wait step.'
-    },
-    pythonCodeTemplate: "automation_plan.append({'type': 'flow.wait', 'duration_ms': {{number:DURATION_MS}}})",
-    isBuiltIn: true,
-    version: 1,
-    createdAtUtc: builtInBlocklyCatalogTimestamp,
-    updatedAtUtc: builtInBlocklyCatalogTimestamp
-  },
-  {
-    blockType: openLineOpsResultBlockType,
-    category: 'Result',
-    displayName: 'Result From Input',
-    blocklyJson: {
-      type: openLineOpsResultBlockType,
-      message0: 'result key %1 from input %2 status %3 include node %4 include timestamp %5',
-      args0: [
-        {
-          type: 'field_input',
-          name: 'OUTPUT_KEY',
-          text: 'normalized'
-        },
-        {
-          type: 'field_input',
-          name: 'INPUT_PAYLOAD',
-          text: 'scan-ok'
-        },
-        {
-          type: 'field_input',
-          name: 'STATUS',
-          text: 'ok'
-        },
-        {
-          type: 'field_checkbox',
-          name: 'INCLUDE_NODE_ID',
-          checked: true
-        },
-        {
-          type: 'field_checkbox',
-          name: 'INCLUDE_TIMESTAMP',
-          checked: false
-        }
-      ],
-      previousStatement: null,
-      nextStatement: null,
-      colour: 176,
-      tooltip: 'Write the PythonScript result payload used by runtime traceability.'
-    },
-    pythonCodeTemplate: [
-      'input_payload = {{INPUT_PAYLOAD}}',
-      'result[{{OUTPUT_KEY}}] = input_payload',
-      "result['status'] = {{STATUS}}",
-      "if {{INCLUDE_TIMESTAMP}} == 'TRUE':",
-      "    result['timestamp_utc'] = 'runtime-provided'",
-      "if {{INCLUDE_NODE_ID}} == 'TRUE':",
-      "    result['node'] = node_id"
-    ].join('\n'),
-    isBuiltIn: true,
-    version: 1,
-    createdAtUtc: builtInBlocklyCatalogTimestamp,
-    updatedAtUtc: builtInBlocklyCatalogTimestamp
-  }
 ];
 
 export function ProcessWorkbench({
@@ -363,7 +188,7 @@ export function ProcessWorkbench({
   const [lastStartedSession, setLastStartedSession] =
     useState<StartedProcessRuntimeSessionResponse | null>(null);
   const [blockCatalog, setBlockCatalog] =
-    useState<ProcessBlocklyBlockDefinition[]>(() => fallbackBlocklyBlockCatalog);
+    useState<ProcessBlocklyBlockDefinition[]>([]);
   const [customBlockDraft, setCustomBlockDraft] =
     useState<CustomBlocklyBlockDraft>(() => createCustomBlocklyBlockDraft());
   const [selectedBlockHistoryType, setSelectedBlockHistoryType] = useState('');
@@ -401,15 +226,17 @@ export function ProcessWorkbench({
   const selectedNode = useMemo(
     () => draft.nodes.find(node => node.nodeId === draft.selectedNodeId) ?? draft.nodes[0] ?? null,
     [draft.nodes, draft.selectedNodeId]);
-  const previewScriptNode = selectedNode?.kind === 'PythonScript'
+  const previewScriptNode = selectedNode?.kind === 'Blockly' || selectedNode?.kind === 'PythonScript'
     ? selectedNode
-    : draft.nodes.find(node => node.kind === 'PythonScript') ?? null;
-  const previewWorkspaceJson = previewScriptNode
+    : draft.nodes.find(node => node.kind === 'Blockly')
+      ?? draft.nodes.find(node => node.kind === 'PythonScript')
+      ?? null;
+  const previewWorkspaceJson = previewScriptNode?.kind === 'Blockly'
     ? previewScriptNode.blocklyWorkspaceJson
     : '';
-  const previewSourceCode = previewScriptNode
-    ? getNodeSourceCode(previewScriptNode, blockCatalog)
-    : '# Select or add a PythonScript node to preview source.';
+  const previewSourceCode = previewScriptNode?.kind === 'PythonScript'
+    ? previewScriptNode.manualSourceCode
+    : null;
   const orderedNodes = useMemo(
     () => orderNodesByTransitions(draft.nodes, draft.transitions),
     [draft.nodes, draft.transitions]);
@@ -435,14 +262,14 @@ export function ProcessWorkbench({
     const requestedScopeKey = editorScopeKey;
     if (!isBackendHealthy) {
       if (blockScopeKeyRef.current === requestedScopeKey) {
-        setBlockCatalog(fallbackBlocklyBlockCatalog);
+        setBlockCatalog([]);
       }
       return;
     }
 
     const rows = await listProcessBlocklyBlocks(projectApplicationApiScope);
     if (blockScopeKeyRef.current === requestedScopeKey) {
-      setBlockCatalog(rows.length > 0 ? rows : fallbackBlocklyBlockCatalog);
+      setBlockCatalog(rows);
     }
   }, [editorScopeKey, isBackendHealthy, projectApplicationApiScope]);
 
@@ -466,7 +293,7 @@ export function ProcessWorkbench({
     setLoadedDefinitionStatus(null);
     setValidationReport(null);
     setDraft(createDraft());
-    setBlockCatalog(fallbackBlocklyBlockCatalog);
+    setBlockCatalog([]);
     setSelectedBlockHistoryType('');
     setBlockHistory([]);
     setBlockHistoryBusy(false);
@@ -550,7 +377,7 @@ export function ProcessWorkbench({
   }, []);
 
   const resetDraft = useCallback(() => {
-    setDraft(createDraft(blockCatalog));
+    setDraft(createDraft());
     setSelectedDefinition(null);
     setEditingDefinitionId(null);
     setLoadedDefinitionStatus(null);
@@ -570,7 +397,7 @@ export function ProcessWorkbench({
     setValidationReport(null);
 
     try {
-      const request = toCreateRequest(draft, blockCatalog);
+      const request = toCreateRequest(draft);
       const response = editingDefinitionId
         ? await updateProcessDefinition(editingDefinitionId, request, projectApplicationApiScope)
         : await createProcessDefinition(request, projectApplicationApiScope);
@@ -628,7 +455,7 @@ export function ProcessWorkbench({
       setSelectedDefinition(response.body);
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
-      setDraft(fromProcessDefinition(response.body, blockCatalog));
+      setDraft(fromProcessDefinition(response.body));
       setLastStartedSession(null);
       setLastProjectSnapshot(null);
       onMessage(`Published ${response.body.processDefinitionId}`);
@@ -651,7 +478,7 @@ export function ProcessWorkbench({
       setSelectedDefinition(response.body);
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
-      setDraft(fromProcessDefinition(response.body, blockCatalog));
+      setDraft(fromProcessDefinition(response.body));
       setLastStartedSession(null);
       setLastProjectSnapshot(null);
       onMessage(`${response.body.processDefinitionId} loaded`);
@@ -772,7 +599,7 @@ export function ProcessWorkbench({
 
   const addNode = useCallback((kind: AddableProcessNodeKind) => {
     mutateDraft(current => {
-      const newNode = createNode(kind, createUniqueNodeId(kind, current.nodes), blockCatalog);
+      const newNode = createNode(kind, createUniqueNodeId(kind, current.nodes));
       const fromNode = findInsertionSource(current) ?? current.nodes[0];
       const transitionPatch = createInsertionTransitions(current, fromNode?.nodeId ?? 'start', newNode);
 
@@ -860,6 +687,7 @@ export function ProcessWorkbench({
     }
 
     let blocklyJson: Record<string, unknown>;
+    let runtimeActionContract: Record<string, unknown>;
     try {
       const parsed = JSON.parse(customBlockDraft.blocklyJsonText) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -873,12 +701,26 @@ export function ProcessWorkbench({
       return;
     }
 
+    try {
+      const parsed = JSON.parse(customBlockDraft.runtimeActionContractText) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        onMessage('Runtime Action Contract must be a JSON object');
+        return;
+      }
+
+      runtimeActionContract = parsed as Record<string, unknown>;
+    } catch (error) {
+      onMessage(`Runtime Action Contract parse failed: ${String(error)}`);
+      return;
+    }
+
     const request: RegisterProcessBlocklyBlockDefinitionRequest = {
       blockType: customBlockDraft.blockType,
       category: customBlockDraft.category,
       displayName: customBlockDraft.displayName,
       blocklyJson,
-      pythonCodeTemplate: customBlockDraft.pythonCodeTemplate
+      runtimeActionContractSchemaVersion: 'openlineops.runtime-action-contract/v1',
+      runtimeActionContract
     };
 
     const requestedScopeKey = editorScopeKey;
@@ -936,7 +778,8 @@ export function ProcessWorkbench({
         category: block.category,
         displayName: block.displayName,
         blocklyJson: block.blocklyJson,
-        pythonCodeTemplate: block.pythonCodeTemplate
+        runtimeActionContractSchemaVersion: block.runtimeActionContractSchemaVersion,
+        runtimeActionContract: block.runtimeActionContract
       }, projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Blockly block restore failed: ${response.status} ${response.text}`);
@@ -969,6 +812,30 @@ export function ProcessWorkbench({
     loadBlocklyBlocks,
     onMessage,
     projectApplicationApiScope
+  ]);
+
+  const insertBlocklyBlock = useCallback((block: ProcessBlocklyBlockDefinition) => {
+    if (selectedNode?.kind !== 'Blockly') {
+      onMessage('Select a Blockly node before inserting an automation block');
+      return;
+    }
+
+    try {
+      const workspaceJson = appendBlocklyBlock(
+        selectedNode.blocklyWorkspaceJson,
+        block,
+        projectTargets);
+      updateSelectedNode(current => ({ ...current, blocklyWorkspaceJson: workspaceJson }));
+      onMessage(`Blockly block inserted ${block.displayName}`);
+    } catch (error) {
+      onMessage(`Blockly block insert failed: ${String(error)}`);
+    }
+  }, [
+    onMessage,
+    projectTargets,
+    selectedNode?.blocklyWorkspaceJson,
+    selectedNode?.kind,
+    updateSelectedNode
   ]);
 
   const removeTransition = useCallback((transitionId: string) => {
@@ -1043,6 +910,7 @@ export function ProcessWorkbench({
               nodes={draft.nodes}
               transitions={draft.transitions}
               blockCatalog={blockCatalog}
+              projectTargets={projectTargets}
               onSelectNode={selectNode}
               onRemoveNode={removeSelectedNode}
               onUpdateNode={updateSelectedNode}
@@ -1066,9 +934,13 @@ export function ProcessWorkbench({
             <div className="source-preview">
               <div className="source-header">
                 <Braces size={16} />
-                <span>Generated Python</span>
+                <span>{previewSourceCode === null ? 'Direct Flow IR' : 'Manual Python'}</span>
               </div>
-              <pre>{previewSourceCode}</pre>
+              {previewSourceCode === null ? (
+                <p>Blockly is compiled directly into immutable Flow IR when the process is published.</p>
+              ) : (
+                <pre>{previewSourceCode}</pre>
+              )}
             </div>
             <div className="workspace-preview">
               <strong>Workspace JSON</strong>
@@ -1147,6 +1019,7 @@ export function ProcessWorkbench({
           onSelectBlockHistory={setSelectedBlockHistoryType}
           onRegister={registerCustomBlocklyBlock}
           onRestoreVersion={restoreBlocklyBlockVersion}
+          onInsert={insertBlocklyBlock}
         />
 
         <RuntimeLaunchPanel
@@ -1235,6 +1108,7 @@ function NodeInspector({
   nodes,
   transitions,
   blockCatalog,
+  projectTargets,
   onSelectNode,
   onRemoveNode,
   onUpdateNode
@@ -1243,6 +1117,7 @@ function NodeInspector({
   nodes: ProcessNodeDraft[];
   transitions: ProcessTransitionDraft[];
   blockCatalog: ProcessBlocklyBlockDefinition[];
+  projectTargets: ProjectTargetOption[];
   onSelectNode(nodeId: string): void;
   onRemoveNode(): void;
   onUpdateNode(updater: (node: ProcessNodeDraft) => ProcessNodeDraft): void;
@@ -1299,6 +1174,7 @@ function NodeInspector({
       <NodeKindFields
         node={node}
         blockCatalog={blockCatalog}
+        projectTargets={projectTargets}
         onUpdateNode={onUpdateNode}
       />
 
@@ -1314,10 +1190,12 @@ function NodeInspector({
 function NodeKindFields({
   node,
   blockCatalog,
+  projectTargets,
   onUpdateNode
 }: {
   node: ProcessNodeDraft;
   blockCatalog: ProcessBlocklyBlockDefinition[];
+  projectTargets: ProjectTargetOption[];
   onUpdateNode(updater: (node: ProcessNodeDraft) => ProcessNodeDraft): void;
 }): React.ReactElement | null {
   if (node.kind === 'Command') {
@@ -1372,6 +1250,34 @@ function NodeKindFields({
     );
   }
 
+  if (node.kind === 'Blockly') {
+    return (
+      <>
+        <label>
+          <span>Timeout Seconds</span>
+          <input
+            type="number"
+            min="1"
+            value={node.timeoutSeconds}
+            onChange={event => onUpdateNode(current => ({
+              ...current,
+              timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
+            }))}
+          />
+        </label>
+        <BlocklyWorkspaceEditor
+          workspaceJson={node.blocklyWorkspaceJson}
+          blockCatalog={blockCatalog}
+          projectTargets={projectTargets}
+          onChange={change => onUpdateNode(current => ({
+            ...current,
+            blocklyWorkspaceJson: change.workspaceJson
+          }))}
+        />
+      </>
+    );
+  }
+
   if (node.kind === 'PythonScript') {
     return (
       <>
@@ -1397,67 +1303,26 @@ function NodeKindFields({
             }))}
           />
         </label>
-        <div className="segmented-control" role="group" aria-label="Script editor mode">
-          <button
-            type="button"
-            className={node.scriptEditorMode === 'Blockly' ? 'selected' : ''}
-            onClick={() => onUpdateNode(current => ({
+        <label>
+          <span>Input Payload</span>
+          <input
+            value={node.inputPayload}
+            onChange={event => onUpdateNode(current => ({
               ...current,
-              scriptEditorMode: 'Blockly'
-            }))}
-          >
-            <Sparkles size={15} />
-            Blockly
-          </button>
-          <button
-            type="button"
-            className={node.scriptEditorMode === 'ManualCode' ? 'selected' : ''}
-            onClick={() => onUpdateNode(current => ({
-              ...current,
-              scriptEditorMode: 'ManualCode',
-              manualSourceCode: current.manualSourceCode || createPythonSource(current.blocklyWorkspaceJson, blockCatalog)
-            }))}
-          >
-            <Code2 size={15} />
-            Code
-          </button>
-        </div>
-
-        {node.scriptEditorMode === 'Blockly' ? (
-          <BlocklyWorkspaceEditor
-            workspaceJson={node.blocklyWorkspaceJson}
-            blockCatalog={blockCatalog}
-            onChange={change => onUpdateNode(current => ({
-              ...current,
-              blocklyWorkspaceJson: change.workspaceJson,
-              inputPayload: change.inputPayload,
-              manualSourceCode: current.manualSourceCode || change.sourceCode
+              inputPayload: event.target.value
             }))}
           />
-        ) : (
-          <>
-            <label>
-              <span>Input Payload</span>
-              <input
-                value={node.inputPayload}
-                onChange={event => onUpdateNode(current => ({
-                  ...current,
-                  inputPayload: event.target.value
-                }))}
-              />
-            </label>
-            <label className="source-editor">
-              <span>Manual Python</span>
-              <textarea
-                value={node.manualSourceCode}
-                onChange={event => onUpdateNode(current => ({
-                  ...current,
-                  manualSourceCode: event.target.value
-                }))}
-              />
-            </label>
-          </>
-        )}
+        </label>
+        <label className="source-editor">
+          <span>Python Source</span>
+          <textarea
+            value={node.manualSourceCode}
+            onChange={event => onUpdateNode(current => ({
+              ...current,
+              manualSourceCode: event.target.value
+            }))}
+          />
+        </label>
       </>
     );
   }
@@ -1468,14 +1333,14 @@ function NodeKindFields({
 function BlocklyWorkspaceEditor({
   workspaceJson,
   blockCatalog,
+  projectTargets,
   onChange
 }: {
   workspaceJson: string;
   blockCatalog: ProcessBlocklyBlockDefinition[];
+  projectTargets: ProjectTargetOption[];
   onChange(change: {
     workspaceJson: string;
-    sourceCode: string;
-    inputPayload: string;
   }): void;
 }): React.ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1519,6 +1384,7 @@ function BlocklyWorkspaceEditor({
       }
     });
     workspaceRef.current = workspace;
+    projectTargetsByWorkspace.set(workspace, projectTargets);
     loadWorkspaceState(workspaceJson, workspace);
     Blockly.svgResize(workspace);
 
@@ -1527,12 +1393,11 @@ function BlocklyWorkspaceEditor({
         return;
       }
 
+      resetTargetIdAfterKindChange(event, workspace);
       const nextJson = saveWorkspaceState(workspace);
       lastAppliedJsonRef.current = nextJson;
       onChangeRef.current({
-        workspaceJson: nextJson,
-        sourceCode: createPythonSource(nextJson, blockCatalog),
-        inputPayload: getWorkspaceInputPayload(nextJson)
+        workspaceJson: nextJson
       });
     };
     workspace.addChangeListener(changeListener);
@@ -1548,7 +1413,7 @@ function BlocklyWorkspaceEditor({
       workspace.dispose();
       workspaceRef.current = null;
     };
-  }, [blockCatalog, toolbox]);
+  }, [blockCatalog, projectTargets, toolbox]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -1566,7 +1431,7 @@ function BlocklyWorkspaceEditor({
       <div ref={containerRef} className="blockly-workspace-host" data-testid="blockly-workspace" />
       <div className="blockly-summary">
         <strong>Automation Blocks</strong>
-        <span>Motion, I/O, wait, and result blocks generate PythonScript source.</span>
+        <span>Targets bind to this Application topology and compile directly to Flow IR.</span>
       </div>
     </div>
   );
@@ -1593,7 +1458,7 @@ function ProjectTargetPanel({
   onRefresh(): void;
   onApplyTarget(target: ProjectTargetOption): void;
 }): React.ReactElement {
-  const canApply = selectedNode?.kind === 'Command' || selectedNode?.kind === 'PythonScript';
+  const canApply = selectedNode?.kind === 'Command';
 
   return (
     <div className="project-target-panel" data-testid="project-target-panel">
@@ -1616,6 +1481,9 @@ function ProjectTargetPanel({
         <span>{activeWorkspace?.project.displayName ?? 'No project open'}</span>
         <small>{activeApplicationId ?? 'No application selected'}</small>
         <small>{topology?.topologyId ?? 'No topology linked'}</small>
+        {selectedNode?.kind === 'Blockly' ? (
+          <small>Choose targets directly inside each Blockly action.</small>
+        ) : null}
       </div>
       {targets.length === 0 ? (
         <div className="project-target-empty">No topology targets available.</div>
@@ -1656,7 +1524,8 @@ function ProcessBlocklyBlockCatalogPanel({
   onChange,
   onSelectBlockHistory,
   onRegister,
-  onRestoreVersion
+  onRestoreVersion,
+  onInsert
 }: {
   blockCatalog: ProcessBlocklyBlockDefinition[];
   customBlocks: ProcessBlocklyBlockDefinition[];
@@ -1670,6 +1539,7 @@ function ProcessBlocklyBlockCatalogPanel({
   onSelectBlockHistory(blockType: string): void;
   onRegister(): void;
   onRestoreVersion(block: ProcessBlocklyBlockDefinition): void;
+  onInsert(block: ProcessBlocklyBlockDefinition): void;
 }): React.ReactElement {
   const latestVersion = blockHistory[0]?.version ?? 0;
 
@@ -1684,12 +1554,19 @@ function ProcessBlocklyBlockCatalogPanel({
       </div>
       <div className="block-catalog-list">
         {blockCatalog.slice(0, 7).map(block => (
-          <span key={block.blockType}>
-            {block.displayName}
-            {block.isBuiltIn ? ' v1' : ` v${block.version}`}
-          </span>
+          <button
+            type="button"
+            key={block.blockType}
+            onClick={() => onInsert(block)}
+            data-testid={`insert-block-${block.blockType}`}
+            title={`Insert ${block.displayName}`}
+          >
+            <Plus size={12} />
+            <span>{block.displayName}</span>
+            <small>{block.isBuiltIn ? 'v1' : `v${block.version}`}</small>
+          </button>
         ))}
-        {blockCatalog.length > 7 ? <span>+{blockCatalog.length - 7} more</span> : null}
+        {blockCatalog.length > 7 ? <em>+{blockCatalog.length - 7} more</em> : null}
       </div>
       <div className="block-catalog-form">
         <input
@@ -1727,12 +1604,12 @@ function ProcessBlocklyBlockCatalogPanel({
           aria-label="Blockly JSON"
         />
         <textarea
-          value={draft.pythonCodeTemplate}
+          value={draft.runtimeActionContractText}
           onChange={event => onChange(current => ({
             ...current,
-            pythonCodeTemplate: event.target.value
+            runtimeActionContractText: event.target.value
           }))}
-          aria-label="Python code template"
+          aria-label="Runtime Action Contract"
         />
         <button
           type="button"
@@ -2197,11 +2074,18 @@ function createProjectTargetOptions(
 
   const moduleTargets = topology.modules.map((module, index) => createOption(
     `module-${index}`,
-    'AutomationModule',
+    module.moduleKind === 'System' ? 'System' : 'AutomationModule',
     module.moduleId,
     module.displayName,
     `${module.moduleKind} on ${module.nodeId}`,
     module.providedCapabilityIds[0] ?? module.requiredCapabilityIds[0] ?? ''));
+
+  const equipmentTargets = topology.nodes.map((node, index) => createOption(
+    `equipment-${index}`,
+    'EquipmentNode',
+    node.nodeId,
+    node.displayName,
+    `${node.kind}${node.parentNodeId ? ` under ${node.parentNodeId}` : ''}`));
 
   const slotGroupTargets = topology.slotGroups.map((group, index) => createOption(
     `slot-group-${index}`,
@@ -2219,17 +2103,27 @@ function createProjectTargetOptions(
 
   const capabilityTargets = topology.capabilities.map((capability, index) => createOption(
     `capability-${index}`,
-    'CapabilityContract',
+    'Capability',
     capability.capabilityId,
     capability.commandName,
     `${capability.safetyClass}, ${capability.timeoutSeconds}s`,
     capability.capabilityId));
 
+  const driverTargets = topology.driverBindings.map((binding, index) => createOption(
+    `driver-${index}`,
+    'Driver',
+    binding.bindingId,
+    binding.providerKey,
+    `${binding.providerKind} for ${binding.capabilityId}`,
+    binding.capabilityId));
+
   return [
     ...moduleTargets,
+    ...equipmentTargets,
     ...slotGroupTargets,
     ...slotTargets,
-    ...capabilityTargets
+    ...capabilityTargets,
+    ...driverTargets
   ];
 }
 
@@ -2247,68 +2141,35 @@ function applyProjectTargetToNode(
     };
   }
 
-  if (node.kind === 'PythonScript') {
-    return {
-      ...node,
-      inputPayload: target.inputPayload,
-      blocklyWorkspaceJson: setWorkspaceInputPayload(node.blocklyWorkspaceJson, target.inputPayload)
-    };
-  }
-
   return node;
 }
 
-function setWorkspaceInputPayload(workspaceJson: string, inputPayload: string): string {
-  try {
-    const parsed = JSON.parse(workspaceJson) as {
-      blocks?: {
-        blocks?: WorkspaceBlockState[];
-      };
-    };
-    const resultBlock = findWorkspaceBlock(parsed.blocks?.blocks ?? [], openLineOpsResultBlockType);
-    if (!resultBlock) {
-      return workspaceJson;
-    }
-
-    resultBlock.fields = {
-      ...resultBlock.fields,
-      INPUT_PAYLOAD: inputPayload
-    };
-
-    return JSON.stringify(parsed);
-  } catch {
-    return workspaceJson;
-  }
-}
-
-function createDraft(
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): ProcessDraft {
+function createDraft(): ProcessDraft {
   const seed = Date.now().toString(36);
-  const pythonNode = createNode('PythonScript', 'normalize', blockCatalog);
+  const blocklyNode = createNode('Blockly', 'automation');
 
   return {
-    processDefinitionId: `desktop-python-${seed}`,
-    versionId: `desktop-python-${seed}@1.0.0`,
-    displayName: 'Desktop Python Script Process',
-    selectedNodeId: pythonNode.nodeId,
+    processDefinitionId: `desktop-flow-${seed}`,
+    versionId: `desktop-flow-${seed}@1.0.0`,
+    displayName: 'Desktop Automation Flow',
+    selectedNodeId: blocklyNode.nodeId,
     nodes: [
-      createNode('Start', 'start', blockCatalog),
-      pythonNode,
-      createNode('End', 'end', blockCatalog)
+      createNode('Start', 'start'),
+      blocklyNode,
+      createNode('End', 'end')
     ],
     transitions: [
       {
-        transitionId: 'start-to-normalize',
+        transitionId: 'start-to-automation',
         fromNodeId: 'start',
-        toNodeId: 'normalize',
+        toNodeId: 'automation',
         label: '',
         loopPolicy: 'None',
         maxTraversals: 1
       },
       {
-        transitionId: 'normalize-to-end',
-        fromNodeId: 'normalize',
+        transitionId: 'automation-to-end',
+        fromNodeId: 'automation',
         toNodeId: 'end',
         label: 'done',
         loopPolicy: 'None',
@@ -2338,8 +2199,27 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
     displayName: 'Fixture Action',
     blocklyJsonText: JSON.stringify({
       type: 'user_fixture_action',
-      message0: 'fixture action %1',
+      message0: 'fixture target kind %1 target %2 action %3',
       args0: [
+        {
+          type: 'field_dropdown',
+          name: 'TARGET_KIND',
+          options: [
+            ['Automation module', 'AutomationModule'],
+            ['Equipment node', 'EquipmentNode'],
+            ['Slot group', 'SlotGroup'],
+            ['Slot', 'Slot'],
+            ['DUT', 'Dut'],
+            ['System', 'System'],
+            ['Capability', 'Capability'],
+            ['Driver', 'Driver']
+          ]
+        },
+        {
+          type: 'field_input',
+          name: 'TARGET_ID',
+          text: 'fixture.module'
+        },
         {
           type: 'field_input',
           name: 'ACTION',
@@ -2349,9 +2229,54 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
       previousStatement: null,
       nextStatement: null,
       colour: 130,
-      tooltip: 'Run a user-defined fixture action.'
+      tooltip: 'Emit a target-bound fixture command through Flow IR.'
     }, null, 2),
-    pythonCodeTemplate: "automation_plan.append({'type': 'fixture.action', 'action': {{ACTION}}})"
+    runtimeActionContractText: JSON.stringify({
+      schemaVersion: 'openlineops.runtime-action-contract/v1',
+      actionType: 'fixture.action',
+      fields: {
+        ACTION: {
+          type: 'string',
+          required: true,
+          maxLength: 64
+        },
+        TARGET_ID: {
+          type: 'targetReference',
+          required: true,
+          maxLength: 256
+        },
+        TARGET_KIND: {
+          type: 'string',
+          required: true,
+          enum: [
+            'AutomationModule',
+            'EquipmentNode',
+            'SlotGroup',
+            'Slot',
+            'Dut',
+            'System',
+            'Capability',
+            'Driver'
+          ],
+          maxLength: 32
+        }
+      },
+      emit: {
+        kind: 'deviceCommand',
+        targetKind: { source: 'field', name: 'TARGET_KIND' },
+        targetId: { source: 'field', name: 'TARGET_ID' },
+        capability: { source: 'literal', value: 'fixture.control' },
+        commandName: { source: 'literal', value: 'FixtureAction' },
+        input: {
+          source: 'object',
+          properties: {
+            action: { source: 'field', name: 'ACTION' }
+          }
+        },
+        timeoutMilliseconds: { source: 'literal', value: 30000 },
+        retryLimit: 0
+      }
+    }, null, 2)
   };
 }
 
@@ -2376,12 +2301,10 @@ function formatCompactDateTime(value: string): string {
     : `${timestamp.toISOString().slice(0, 16).replace('T', ' ')}Z`;
 }
 
-function fromProcessDefinition(
-  definition: ProcessDefinitionResponse,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): ProcessDraft {
-  const nodes = definition.nodes.map(node => fromNodeResponse(node, blockCatalog));
-  const selectedNodeId = nodes.find(node => node.kind === 'PythonScript')?.nodeId
+function fromProcessDefinition(definition: ProcessDefinitionResponse): ProcessDraft {
+  const nodes = definition.nodes.map(fromNodeResponse);
+  const selectedNodeId = nodes.find(node => node.kind === 'Blockly')?.nodeId
+    ?? nodes.find(node => node.kind === 'PythonScript')?.nodeId
     ?? nodes[0]?.nodeId
     ?? '';
 
@@ -2402,16 +2325,10 @@ function fromProcessDefinition(
   };
 }
 
-function fromNodeResponse(
-  node: ProcessNodeResponse,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): ProcessNodeDraft {
+function fromNodeResponse(node: ProcessNodeResponse): ProcessNodeDraft {
   const kind = parseNodeKind(node.kind);
-  const scriptEditorMode = parseScriptEditorMode(node.scriptEditorMode);
-  const blocklyWorkspaceJson = normalizeBlocklyWorkspaceJson(
-    node.blocklyWorkspaceJson,
-    node.inputPayload ?? defaultInputPayload(kind));
-  const manualSourceCode = node.scriptSourceCode ?? createPythonSource(blocklyWorkspaceJson, blockCatalog);
+  const blocklyWorkspaceJson = normalizeBlocklyWorkspaceJson(node.blocklyWorkspaceJson);
+  const manualSourceCode = node.scriptSourceCode ?? createDefaultManualPythonSource();
 
   return {
     nodeId: node.nodeId,
@@ -2420,8 +2337,7 @@ function fromNodeResponse(
     requiredCapability: node.requiredCapability ?? defaultRequiredCapability(kind),
     commandName: node.commandName ?? defaultCommandName(kind),
     timeoutSeconds: node.timeoutSeconds ?? defaultTimeoutSeconds(kind),
-    inputPayload: node.inputPayload ?? getWorkspaceInputPayload(blocklyWorkspaceJson),
-    scriptEditorMode,
+    inputPayload: node.inputPayload ?? defaultInputPayload(kind),
     scriptVersion: node.scriptVersion ?? '1',
     blocklyWorkspaceJson,
     manualSourceCode
@@ -2430,10 +2346,9 @@ function fromNodeResponse(
 
 function createNode(
   kind: ProcessNodeKind,
-  nodeId: string,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
+  nodeId: string
 ): ProcessNodeDraft {
-  const blocklyWorkspaceJson = createDefaultBlocklyWorkspaceJson(defaultInputPayload(kind));
+  const blocklyWorkspaceJson = createEmptyBlocklyWorkspaceJson();
 
   return {
     nodeId,
@@ -2442,23 +2357,19 @@ function createNode(
     requiredCapability: defaultRequiredCapability(kind),
     commandName: defaultCommandName(kind),
     timeoutSeconds: defaultTimeoutSeconds(kind),
-    inputPayload: getWorkspaceInputPayload(blocklyWorkspaceJson),
-    scriptEditorMode: 'Blockly',
+    inputPayload: defaultInputPayload(kind),
     scriptVersion: '1',
     blocklyWorkspaceJson,
-    manualSourceCode: createPythonSource(blocklyWorkspaceJson, blockCatalog)
+    manualSourceCode: createDefaultManualPythonSource()
   };
 }
 
-function toCreateRequest(
-  draft: ProcessDraft,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): CreateProcessDefinitionRequest {
+function toCreateRequest(draft: ProcessDraft): CreateProcessDefinitionRequest {
   return {
     processDefinitionId: draft.processDefinitionId,
     versionId: draft.versionId,
     displayName: draft.displayName,
-    nodes: draft.nodes.map(node => toCreateNodeRequest(node, blockCatalog)),
+    nodes: draft.nodes.map(toCreateNodeRequest),
     transitions: draft.transitions.map(transition => ({
       transitionId: transition.transitionId,
       fromNodeId: transition.fromNodeId,
@@ -2499,10 +2410,7 @@ function toStartProjectSnapshotRuntimeSessionRequest(draft: RuntimeLaunchDraft):
   };
 }
 
-function toCreateNodeRequest(
-  node: ProcessNodeDraft,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): CreateProcessNodeRequest {
+function toCreateNodeRequest(node: ProcessNodeDraft): CreateProcessNodeRequest {
   if (node.kind === 'Command') {
     return {
       ...baseNodeRequest(node),
@@ -2513,16 +2421,24 @@ function toCreateNodeRequest(
     };
   }
 
+  if (node.kind === 'Blockly') {
+    return {
+      ...baseNodeRequest(node),
+      timeoutSeconds: node.timeoutSeconds,
+      inputPayload: toOptionalString(node.inputPayload),
+      blocklyWorkspaceJson: node.blocklyWorkspaceJson,
+      scriptSourceCode: null,
+      scriptVersion: null
+    };
+  }
+
   if (node.kind === 'PythonScript') {
     return {
       ...baseNodeRequest(node),
       timeoutSeconds: node.timeoutSeconds,
       inputPayload: toOptionalString(node.inputPayload),
-      scriptEditorMode: node.scriptEditorMode,
-      blocklyWorkspaceJson: node.scriptEditorMode === 'Blockly'
-        ? node.blocklyWorkspaceJson
-        : null,
-      scriptSourceCode: getNodeSourceCode(node, blockCatalog),
+      blocklyWorkspaceJson: null,
+      scriptSourceCode: node.manualSourceCode,
       scriptVersion: toOptionalString(node.scriptVersion) ?? '1'
     };
   }
@@ -2539,113 +2455,38 @@ function baseNodeRequest(node: ProcessNodeDraft): CreateProcessNodeRequest {
     commandName: null,
     timeoutSeconds: null,
     inputPayload: null,
-    scriptEditorMode: null,
     blocklyWorkspaceJson: null,
     scriptSourceCode: null,
     scriptVersion: null
   };
 }
 
-function getNodeSourceCode(
-  node: ProcessNodeDraft,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): string {
-  return node.scriptEditorMode === 'Blockly'
-    ? createPythonSource(node.blocklyWorkspaceJson, blockCatalog)
-    : node.manualSourceCode;
+function createDefaultManualPythonSource(): string {
+  return [
+    "result = {'status': 'ok'}",
+    "result['message'] = 'manual Python action completed'"
+  ].join('\n');
 }
 
-function createPythonSource(
-  workspaceJson: string,
-  blockCatalog: ProcessBlocklyBlockDefinition[] = fallbackBlocklyBlockCatalog
-): string {
-  registerProcessBlocklyBlocks(blockCatalog);
-  const workspace = new Blockly.Workspace();
-  try {
-    loadWorkspaceState(workspaceJson, workspace);
-    const generatedCode = pythonGenerator.workspaceToCode(workspace).trim();
-    const lines = [
-      'automation_plan = []',
-      "result = {'automation_plan': automation_plan}"
-    ];
-
-    if (generatedCode) {
-      lines.push(generatedCode);
-    }
-
-    lines.push("result['command_count'] = len(automation_plan)");
-    return lines.join('\n');
-  } finally {
-    workspace.dispose();
-  }
-}
-
-function createDefaultBlocklyWorkspaceJson(inputPayload: string): string {
+function createEmptyBlocklyWorkspaceJson(): string {
   return JSON.stringify({
     blocks: {
       languageVersion: 0,
-      blocks: [
-        {
-          id: 'move-x-axis',
-          type: openLineOpsMoveAxisBlockType,
-          x: 32,
-          y: 32,
-          fields: {
-            AXIS: 'X',
-            POSITION: 10,
-            SPEED: 5,
-            UNIT: 'mm'
-          },
-          next: {
-            block: {
-              id: 'turn-light-on',
-              type: openLineOpsSetLightBlockType,
-              fields: {
-                CHANNEL: 'tower.green',
-                STATE: 'On'
-              },
-              next: {
-                block: {
-                  id: 'spin-motor',
-                  type: openLineOpsRotateMotorBlockType,
-                  fields: {
-                    MOTOR: 'motor.main',
-                    RPM: 1200,
-                    DURATION_MS: 500
-                  },
-                  next: {
-                    block: {
-                      id: 'normalize-result',
-                      type: openLineOpsResultBlockType,
-                      fields: {
-                        OUTPUT_KEY: 'normalized',
-                        INPUT_PAYLOAD: inputPayload,
-                        STATUS: 'ok',
-                        INCLUDE_NODE_ID: 'TRUE',
-                        INCLUDE_TIMESTAMP: 'FALSE'
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      ]
+      blocks: []
     }
   });
 }
 
-function normalizeBlocklyWorkspaceJson(value: string | null, inputPayload: string): string {
+function normalizeBlocklyWorkspaceJson(value: string | null): string {
   if (!value) {
-    return createDefaultBlocklyWorkspaceJson(inputPayload);
+    return createEmptyBlocklyWorkspaceJson();
   }
 
   try {
     const parsed = JSON.parse(value) as unknown;
     return JSON.stringify(parsed);
   } catch {
-    return createDefaultBlocklyWorkspaceJson(inputPayload);
+    return createEmptyBlocklyWorkspaceJson();
   }
 }
 
@@ -2662,33 +2503,32 @@ function loadWorkspaceState(
     Blockly.serialization.workspaces.load(JSON.parse(workspaceJson), workspace);
   } catch {
     Blockly.serialization.workspaces.load(
-      JSON.parse(createDefaultBlocklyWorkspaceJson(defaultInputPayload('PythonScript'))),
+      JSON.parse(createEmptyBlocklyWorkspaceJson()),
       workspace);
   }
 }
 
-function getWorkspaceInputPayload(workspaceJson: string): string {
-  try {
-    const parsed = JSON.parse(workspaceJson) as {
-      blocks?: {
-        blocks?: WorkspaceBlockState[];
-      };
-    };
-    const resultBlock = findWorkspaceBlock(parsed.blocks?.blocks ?? [], openLineOpsResultBlockType);
-    return getTextField(resultBlock, 'INPUT_PAYLOAD')
-      ?? defaultInputPayload('PythonScript');
-  } catch {
-    return defaultInputPayload('PythonScript');
-  }
-}
-
 function registerProcessBlocklyBlocks(blockCatalog: ProcessBlocklyBlockDefinition[]): void {
+  if (!Blockly.registry.hasItem(Blockly.registry.Type.FIELD, projectTargetFieldType)) {
+    Blockly.fieldRegistry.register(projectTargetFieldType, ProjectTargetDropdown);
+  }
+
   const blockRegistry = Blockly.Blocks as Record<string, unknown>;
+  for (const blockType of registeredProcessBlockTypes) {
+    delete blockRegistry[blockType];
+  }
+  registeredProcessBlockTypes.clear();
+
   const blockDefinitions = blockCatalog
-    .map(block => block.blocklyJson)
+    .map(block => prepareBlocklyBlockJson(block.blocklyJson))
     .filter(blockJson => {
       const type = blockJson.type;
-      return typeof type === 'string' && !blockRegistry[type];
+      if (typeof type !== 'string') {
+        return false;
+      }
+
+      registeredProcessBlockTypes.add(type);
+      return true;
     });
 
   if (blockDefinitions.length > 0) {
@@ -2696,10 +2536,53 @@ function registerProcessBlocklyBlocks(blockCatalog: ProcessBlocklyBlockDefinitio
       blockDefinitions as Parameters<typeof Blockly.common.defineBlocksWithJsonArray>[0]);
   }
 
-  for (const definition of blockCatalog) {
-    pythonGenerator.forBlock[definition.blockType] = block =>
-      ensureTrailingNewline(renderPythonTemplate(definition.pythonCodeTemplate, block));
+}
+
+function prepareBlocklyBlockJson(blocklyJson: Record<string, unknown>): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(blocklyJson)) as Record<string, unknown>;
+  if (!Array.isArray(cloned.args0)) {
+    return cloned;
   }
+
+  cloned.args0 = cloned.args0.map(argument => {
+    if (!isRecord(argument) || argument.name !== 'TARGET_ID') {
+      return argument;
+    }
+
+    return {
+      ...argument,
+      type: projectTargetFieldType
+    };
+  });
+  return cloned;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function resetTargetIdAfterKindChange(
+  event: Blockly.Events.Abstract,
+  workspace: Blockly.Workspace
+): void {
+  const change = event as Blockly.Events.BlockChange;
+  if (change.type !== Blockly.Events.BLOCK_CHANGE
+    || change.element !== 'field'
+    || change.name !== 'TARGET_KIND'
+    || !change.blockId) {
+    return;
+  }
+
+  const block = workspace.getBlockById(change.blockId);
+  const targetField = block?.getField('TARGET_ID');
+  if (!block || !targetField) {
+    return;
+  }
+
+  const targetKind = String(block.getFieldValue('TARGET_KIND') ?? '');
+  const firstTarget = (projectTargetsByWorkspace.get(workspace) ?? [])
+    .find(target => target.targetKind === targetKind);
+  targetField.setValue(firstTarget?.targetId ?? '');
 }
 
 function createBlocklyToolbox(blockCatalog: ProcessBlocklyBlockDefinition[]): Blockly.utils.toolbox.ToolboxDefinition {
@@ -2739,31 +2622,6 @@ function createBlocklyToolbox(blockCatalog: ProcessBlocklyBlockDefinition[]): Bl
   };
 }
 
-function renderPythonTemplate(template: string, block: Blockly.Block): string {
-  return template.replace(
-    /\{\{\s*(?:(raw|number|string):)?([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g,
-    (_match: string, mode: string | undefined, fieldName: string) => {
-      const fieldValue = block.getFieldValue(fieldName);
-      const value = typeof fieldValue === 'string'
-        ? fieldValue
-        : String(fieldValue ?? '');
-
-      if (mode === 'raw') {
-        return value;
-      }
-
-      if (mode === 'number') {
-        return toPythonNumberLiteral(value, 0);
-      }
-
-      return toPythonStringLiteral(value);
-    });
-}
-
-function ensureTrailingNewline(value: string): string {
-  return value.endsWith('\n') ? value : `${value}\n`;
-}
-
 function blockCategoryColour(category: string): string {
   switch (category) {
     case 'Motion':
@@ -2779,41 +2637,6 @@ function blockCategoryColour(category: string): string {
   }
 }
 
-interface WorkspaceBlockState {
-  type?: string;
-  fields?: Record<string, unknown>;
-  next?: {
-    block?: WorkspaceBlockState;
-  };
-}
-
-function findWorkspaceBlock(
-  blocks: WorkspaceBlockState[],
-  type: string
-): WorkspaceBlockState | null {
-  for (const block of blocks) {
-    if (block.type === type) {
-      return block;
-    }
-
-    const nested = block.next?.block
-      ? findWorkspaceBlock([block.next.block], type)
-      : null;
-    if (nested) {
-      return nested;
-    }
-  }
-
-  return null;
-}
-
-function getTextField(block: WorkspaceBlockState | null, fieldName: string): string | null {
-  const value = block?.fields?.[fieldName];
-  return typeof value === 'string' && value.trim().length > 0
-    ? value
-    : null;
-}
-
 function findInsertionSource(draft: ProcessDraft): ProcessNodeDraft | null {
   const selected = draft.nodes.find(node => node.nodeId === draft.selectedNodeId);
   if (selected && selected.kind !== 'End') {
@@ -2822,6 +2645,7 @@ function findInsertionSource(draft: ProcessDraft): ProcessNodeDraft | null {
 
   const selectedIncoming = draft.transitions.find(transition => transition.toNodeId === selected?.nodeId);
   return draft.nodes.find(node => node.nodeId === selectedIncoming?.fromNodeId)
+    ?? draft.nodes.find(node => node.kind === 'Blockly')
     ?? draft.nodes.find(node => node.kind === 'PythonScript')
     ?? draft.nodes.find(node => node.kind === 'Start')
     ?? null;
@@ -2906,7 +2730,8 @@ function removeNode(draft: ProcessDraft, nodeId: string): ProcessDraft {
 
   return {
     ...draft,
-    selectedNodeId: nodes.find(candidate => candidate.kind === 'PythonScript')?.nodeId
+    selectedNodeId: nodes.find(candidate => candidate.kind === 'Blockly')?.nodeId
+      ?? nodes.find(candidate => candidate.kind === 'PythonScript')?.nodeId
       ?? nodes[0]?.nodeId
       ?? '',
     nodes,
@@ -2940,9 +2765,7 @@ function orderNodesByTransitions(
 }
 
 function createUniqueNodeId(kind: ProcessNodeKind, nodes: ProcessNodeDraft[]): string {
-  const baseId = kind === 'PythonScript'
-    ? 'python'
-    : kind.toLowerCase();
+  const baseId = kind.toLowerCase();
   let index = nodes.filter(node => node.kind === kind).length + 1;
   let candidate = `${baseId}-${index}`;
   const existingIds = new Set(nodes.map(node => node.nodeId));
@@ -2979,13 +2802,10 @@ function parseNodeKind(value: string): ProcessNodeKind {
     || value === 'Decision'
     || value === 'Delay'
     || value === 'End'
+    || value === 'Blockly'
     || value === 'PythonScript'
     ? value
     : 'Command';
-}
-
-function parseScriptEditorMode(value: string | null): ScriptEditorMode {
-  return value === 'ManualCode' ? 'ManualCode' : 'Blockly';
 }
 
 function parseTransitionLoopPolicy(value: string | null): TransitionLoopPolicy {
@@ -3004,8 +2824,10 @@ function defaultDisplayName(kind: ProcessNodeKind): string {
       return 'Delay';
     case 'End':
       return 'End';
+    case 'Blockly':
+      return 'Blockly Automation';
     case 'PythonScript':
-      return 'Automation Sequence';
+      return 'Python Automation';
   }
 }
 
@@ -3018,7 +2840,7 @@ function defaultCommandName(kind: ProcessNodeKind): string {
 }
 
 function defaultTimeoutSeconds(kind: ProcessNodeKind): number {
-  return kind === 'Command' || kind === 'PythonScript' ? 15 : 1;
+  return kind === 'Command' || kind === 'Blockly' || kind === 'PythonScript' ? 15 : 1;
 }
 
 function defaultInputPayload(kind: ProcessNodeKind): string {
@@ -3033,15 +2855,4 @@ function toPositiveInteger(value: string, fallback: number): number {
 function toOptionalString(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function toPythonStringLiteral(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
-}
-
-function toPythonNumberLiteral(value: string | number | null, fallback: number): string {
-  const parsed = typeof value === 'number'
-    ? value
-    : Number.parseFloat(value ?? '');
-  return Number.isFinite(parsed) ? String(parsed) : String(fallback);
 }

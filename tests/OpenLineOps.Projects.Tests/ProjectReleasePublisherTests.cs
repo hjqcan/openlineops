@@ -279,7 +279,8 @@ public sealed class ProjectReleasePublisherTests
                     "simulator.motion")
             ],
             [new ProjectReleaseTargetReference("Slot", "slot.main")],
-            ["openlineops_move_axis@1"]);
+            ["openlineops_move_axis@1"],
+            []);
     }
 
     private static ProjectReleaseArtifactDescriptor CreateArtifact(string projectPath)

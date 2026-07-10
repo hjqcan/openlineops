@@ -26,6 +26,7 @@ public sealed class ApiMetadataTests : IClassFixture<WebApplicationFactory<Progr
         Assert.Contains(OpenLineOpsApiGroups.EngineeringV1, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.PluginsV1, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.ProcessesV1, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.ProductionV1, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.RuntimeV1, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.TraceabilityV1, groupNames);
     }

@@ -112,18 +112,13 @@ internal static class ProjectProcessResourcePath
         ProjectApplicationWorkspaceScope scope,
         string processDefinitionId,
         string nodeId,
-        string editorMode,
         string sha256)
     {
-        var prefix = string.Equals(editorMode, "ManualCode", StringComparison.OrdinalIgnoreCase)
-            ? "source"
-            : "generated";
-
         return EnsureInsideApplication(
             scope,
             Path.Combine(
                 GetNodeDirectory(scope, processDefinitionId, nodeId),
-                $"{prefix}.{sha256}.py"));
+                $"source.{sha256}.py"));
     }
 
     public static string ResolveRelativeFile(

@@ -56,9 +56,7 @@ public static class DevicesModuleServiceCollectionExtensions
         services.TryAddSingleton(serviceProvider => new ProjectReleaseDeviceCommandRouteResolver(
             serviceProvider.GetRequiredService<IAutomationProjectRepository>(),
             serviceProvider.GetRequiredService<IProjectReleaseArtifactStore>(),
-            serviceProvider.GetRequiredService<IProjectEngineeringConfigurationRepository>(),
-            serviceProvider.GetService<IPluginCapabilityInventory>(),
-            serviceProvider.GetService<IPluginDeviceCommandInventory>()));
+            serviceProvider.GetRequiredService<IProjectEngineeringConfigurationRepository>()));
         services.Replace(ServiceDescriptor.Singleton<IDeviceCommandRouteResolver, ConfigurableDeviceCommandRouteResolver>());
         services.TryAddSingleton<DeviceRuntimeCommandExecutor>();
         services.TryAddSingleton<SimulatedRuntimeCommandExecutor>();

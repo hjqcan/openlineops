@@ -34,18 +34,16 @@ public sealed class ProcessDefinitionTests
     }
 
     [Fact]
-    public void PublishValidGraphWithBlocklyPythonScriptMarksDefinitionPublished()
+    public void PublishValidGraphWithBlocklyNodeMarksDefinitionPublished()
     {
         var definition = CreateDefinition();
 
         AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
-        AddNode(definition, ProcessNode.PythonScript(
+        AddNode(definition, ProcessNode.Blockly(
             NodeId("normalize"),
             "Normalize Measurement",
-            ProcessScriptEditorMode.Blockly,
-            """{"blocks":{"languageVersion":0}}""",
-            "result = {'normalized': input_payload}",
-            scriptTimeout: TimeSpan.FromSeconds(10)));
+            """{"blocks":{"languageVersion":0,"blocks":[]}}""",
+            executionTimeout: TimeSpan.FromSeconds(10)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
         AddTransition(definition, ProcessTransition.Create(TransitionId("start-to-normalize"), NodeId("start"), NodeId("normalize")));
         AddTransition(definition, ProcessTransition.Create(TransitionId("normalize-to-end"), NodeId("normalize"), NodeId("end")));
@@ -272,8 +270,6 @@ public sealed class ProcessDefinitionTests
         var node = ProcessNode.PythonScript(
             NodeId("script"),
             "Script",
-            ProcessScriptEditorMode.ManualCode,
-            blocklyWorkspaceJson: null,
             sourceCode,
             scriptTimeout: TimeSpan.FromSeconds(5));
         var expectedHash = Convert
@@ -282,7 +278,7 @@ public sealed class ProcessDefinitionTests
 
         Assert.Equal(ProcessNodeKind.PythonScript, node.Kind);
         Assert.Equal("Python", node.ScriptLanguage);
-        Assert.Equal(ProcessScriptEditorMode.ManualCode, node.ScriptEditorMode);
+        Assert.Null(node.BlocklyWorkspaceJson);
         Assert.Equal(sourceCode, node.ScriptSourceCode);
         Assert.Equal(expectedHash, node.ScriptSourceHash);
         Assert.Equal("1", node.ScriptVersion);
@@ -297,8 +293,6 @@ public sealed class ProcessDefinitionTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("script"),
             "Script",
-            editorMode: null,
-            blocklyWorkspaceJson: null,
             sourceCode: null,
             scriptVersion: "",
             scriptTimeout: null));
@@ -309,7 +303,6 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.PythonScriptEditorModeMissing");
         Assert.Contains(report.Issues, issue => issue.Code == "Processes.PythonScriptSourceMissing");
         Assert.Contains(report.Issues, issue => issue.Code == "Processes.PythonScriptSourceHashMissing");
         Assert.Contains(report.Issues, issue => issue.Code == "Processes.PythonScriptVersionMissing");
@@ -317,17 +310,15 @@ public sealed class ProcessDefinitionTests
     }
 
     [Fact]
-    public void BlocklyPythonScriptWithoutWorkspaceIsInvalid()
+    public void BlocklyNodeWithoutWorkspaceIsInvalid()
     {
         var definition = CreateDefinition();
         AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
-        AddNode(definition, ProcessNode.PythonScript(
+        AddNode(definition, ProcessNode.Blockly(
             NodeId("script"),
             "Script",
-            ProcessScriptEditorMode.Blockly,
-            blocklyWorkspaceJson: null,
-            sourceCode: "result = {'ok': True}",
-            scriptTimeout: TimeSpan.FromSeconds(5)));
+            workspaceJson: null,
+            executionTimeout: TimeSpan.FromSeconds(5)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
         AddTransition(definition, ProcessTransition.Create(TransitionId("start-to-script"), NodeId("start"), NodeId("script")));
         AddTransition(definition, ProcessTransition.Create(TransitionId("script-to-end"), NodeId("script"), NodeId("end")));
@@ -335,7 +326,7 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.PythonScriptBlocklyWorkspaceMissing");
+        Assert.Contains(report.Issues, issue => issue.Code == "Processes.BlocklyWorkspaceMissing");
     }
 
     private static ProcessDefinition CreateValidDefinition()

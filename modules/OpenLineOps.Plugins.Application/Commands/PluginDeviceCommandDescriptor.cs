@@ -1,4 +1,5 @@
 using OpenLineOps.Plugin.Abstractions;
+using OpenLineOps.Plugins.Application.Discovery;
 
 namespace OpenLineOps.Plugins.Application.Commands;
 
@@ -12,4 +13,5 @@ public sealed record PluginDeviceCommandDescriptor(
     string? InputSchema,
     string? OutputSchema,
     int TimeoutMilliseconds,
-    int MaxRetries);
+    int MaxRetries,
+    PluginPackageRuntimeIdentity? PackageIdentity = null);

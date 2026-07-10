@@ -1,8 +1,8 @@
 # OpenLineOps
 
-OpenLineOps is a next-generation automation project workspace and extensible runtime platform for automated test production lines.
+OpenLineOps is an automation-production-line IDE and immutable runtime platform.
 
-It is designed to let users create and open automation projects, compose applications, automation topology, equipment nodes, modules, capability contracts, driver bindings, slot groups, and slots, edit a visual site layout, author execution flows with Blockly, run flexible PythonScript logic through the .NET runtime boundary, monitor production runs, and trace results. OpenLineOps is a ground-up original open-source platform.
+It lets users create and open portable automation projects, compose independent Applications, model DUTs, workstations and ordered production stages, bind semantic topology and site layout, author execution flows primarily with Blockly, use controlled Python for advanced logic, integrate external vendor test programs through the same command lifecycle, run immutable releases, and trace results. OpenLineOps is a ground-up original open-source platform.
 
 ## Current Status
 
@@ -14,18 +14,24 @@ This project is in early platform development.
   New/Open/Recent Start Center before a project is opened and an IDE workbench
   scoped to the active project and application after open.
 - Persistence: in-memory and SQLite for local development, PostgreSQL adapters for deployment mode, and reusable `OpenLineOps.Infrastructure.Data.Core` package adoption through the `OpenLineOps.SampleInspection` template and Devices `EfSqlite` provider.
-- Runtime: immutable Project Snapshot launch verifies release manifest schema v3,
+- Runtime: immutable Project Snapshot launch verifies the current release manifest,
   canonical frozen Flow IR, release-scoped process/configuration source, and
-  release-scoped device routing. Dynamically expanded Python/Blockly automation
-  actions are persisted as child Runtime steps and commands: steps record action,
-  parent, and sequence identity, commands share the action identity, and failure,
-  cancellation, and timeout propagate to the container.
-- Blockly and Python: official Blockly editing, built-in, plugin-generated, and
-  persisted/versioned custom blocks, Python preview/manual editing, source hashing,
-  process-isolated execution, and governed automation-plan dispatch are in place.
-  Runtime Action Contract v1 now provides a canonical, hashed declarative contract
-  foundation for the five built-in blocks; the server-side Blockly workspace
-  compiler and exact block/contract/plugin dependency locks remain future work.
+  release-scoped device routing. Blockly actions are statically compiled into
+  Flow IR actions with source block identity and enter the same runtime command,
+  monitoring, timeout, failure, cancellation, and trace lifecycle as native
+  commands. Python remains an explicit isolated dynamic-action node.
+- Blockly and Python: `Blockly` and `PythonScript` are separate node kinds.
+  Blockly workspaces are the sole visual source and compile server-side from
+  canonical Runtime Action Contracts; no Python is generated or persisted for
+  them. Built-in, plugin-generated, and Application-local custom blocks carry
+  exact versions and contract hashes. Publication freezes those dependencies and
+  content-addressed provider packages; runtime has no live-inventory fallback.
+- Production lines: the independent `OpenLineOps.Production` bounded context
+  stores strict Application-local line definitions under `production/lines`.
+  Each definition composes a DUT model, topology-bound workstations, contiguous
+  stages, published flows, and optional external-test adapters. Vendor programs
+  are declared as Application executables or exact providers and are invoked only
+  through a workstation-targeted Flow IR command.
 - Project workspace: project-folder source is isolated by explicit project and
   application scope across topology, layout, processes, Blockly/Python artifacts,
   blocks, and Engineering configuration. A root `<projectId>.oloproj` composes
@@ -183,7 +189,7 @@ npm audit --audit-level=high --registry=https://registry.npmjs.org
 - API projects expose HTTP and SignalR contracts and should not contain domain decisions.
 - Electron never reads backend databases directly. It talks to the backend through HTTP, SignalR, and explicit preload APIs.
 - Plugins must declare manifests and capabilities and must pass compatibility validation before activation.
-- Python scripting uses the in-repository `lib/pythonscript` component; Blockly is the default desktop editing mode, plugin command manifests can generate read-only Blockly blocks, persisted custom blocks generate user-defined Python templates with desktop version browsing and restore controls, and manual Python code editing remains available. Built-in blocks also expose canonical Runtime Action Contract v1 metadata, but current releases still compile Blockly-authored Python nodes through frozen Flow IR dynamic-action slots rather than through a complete server-side Blockly contract compiler.
+- Python scripting uses the in-repository `lib/pythonscript` component only for explicit `PythonScript` nodes. Blockly is a separate primary node kind and compiles declarative Runtime Action Contracts directly to static Flow IR. Custom and plugin-generated blocks cannot execute Python templates. Publication freezes exact block-contract and provider-package content hashes, and runtime resolves only those release artifacts.
 
 ## Documentation
 

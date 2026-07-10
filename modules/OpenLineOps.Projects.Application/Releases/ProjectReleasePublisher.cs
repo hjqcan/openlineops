@@ -324,11 +324,29 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 "Resolved release source does not contain a valid frozen Flow IR schema, canonical JSON, and SHA-256.");
         }
 
-        return metadata.BlockVersionIds is null
-            ? ApplicationError.Conflict(
+        if (metadata.BlockVersionIds is null)
+        {
+            return ApplicationError.Conflict(
                 "Projects.ReleaseBlockVersionsMissing",
-                "Resolved release source does not contain a block version collection.")
-            : null;
+                "Resolved release source does not contain a block version collection.");
+        }
+
+        if (metadata.PackageDependencies is null)
+        {
+            return ApplicationError.Conflict(
+                "Projects.ReleasePackageDependenciesMissing",
+                "Resolved release source does not contain a package dependency lock collection.");
+        }
+
+        return metadata.PackageDependencies.All(dependency => metadata.CapabilityBindings.Count(binding =>
+                   string.Equals(binding.CapabilityId, dependency.CapabilityId, StringComparison.Ordinal)
+                   && string.Equals(binding.BindingId, dependency.BindingId, StringComparison.Ordinal)
+                   && string.Equals(binding.ProviderKind, dependency.ProviderKind, StringComparison.Ordinal)
+                   && string.Equals(binding.ProviderKey, dependency.ProviderKey, StringComparison.Ordinal)) == 1)
+            ? null
+            : ApplicationError.Conflict(
+                "Projects.ReleasePackageDependencyCoverageMismatch",
+                "Every frozen package dependency lock must match exactly one capability binding.");
     }
 
     private static ApplicationError? ValidateReleaseDescriptor(
@@ -376,7 +394,8 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         }
 
         if (!SequenceEqualOrdinal(left.LayoutIds, right.LayoutIds)
-            || !SequenceEqualOrdinal(left.BlockVersionIds, right.BlockVersionIds))
+            || !SequenceEqualOrdinal(left.BlockVersionIds, right.BlockVersionIds)
+            || !PackageDependenciesEqual(left.PackageDependencies, right.PackageDependencies))
         {
             return false;
         }
@@ -404,6 +423,64 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             .ThenBy(target => target.TargetId, StringComparer.Ordinal);
 
         return leftTargets.SequenceEqual(rightTargets);
+    }
+
+    private static bool PackageDependenciesEqual(
+        IReadOnlyCollection<ProjectReleasePackageDependencyLock> left,
+        IReadOnlyCollection<ProjectReleasePackageDependencyLock> right)
+    {
+        var leftLocks = left
+            .OrderBy(item => item.CapabilityId, StringComparer.Ordinal)
+            .ThenBy(item => item.BindingId, StringComparer.Ordinal)
+            .ToArray();
+        var rightLocks = right
+            .OrderBy(item => item.CapabilityId, StringComparer.Ordinal)
+            .ThenBy(item => item.BindingId, StringComparer.Ordinal)
+            .ToArray();
+        if (leftLocks.Length != rightLocks.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < leftLocks.Length; index++)
+        {
+            var leftLock = leftLocks[index];
+            var rightLock = rightLocks[index];
+            if (!string.Equals(leftLock.CapabilityId, rightLock.CapabilityId, StringComparison.Ordinal)
+                || !string.Equals(leftLock.BindingId, rightLock.BindingId, StringComparison.Ordinal)
+                || !string.Equals(leftLock.ProviderKind, rightLock.ProviderKind, StringComparison.Ordinal)
+                || !string.Equals(leftLock.ProviderKey, rightLock.ProviderKey, StringComparison.Ordinal)
+                || !string.Equals(leftLock.PackageId, rightLock.PackageId, StringComparison.Ordinal)
+                || !string.Equals(leftLock.PluginId, rightLock.PluginId, StringComparison.Ordinal)
+                || !string.Equals(leftLock.PackageVersion, rightLock.PackageVersion, StringComparison.Ordinal)
+                || !string.Equals(leftLock.PackageContentSha256, rightLock.PackageContentSha256, StringComparison.Ordinal)
+                || !string.Equals(leftLock.ManifestSha256, rightLock.ManifestSha256, StringComparison.Ordinal)
+                || !string.Equals(leftLock.EntryAssemblySha256, rightLock.EntryAssemblySha256, StringComparison.Ordinal)
+                || !string.Equals(leftLock.ContractVersion, rightLock.ContractVersion, StringComparison.Ordinal)
+                || !string.Equals(leftLock.RuntimeIdentifier, rightLock.RuntimeIdentifier, StringComparison.Ordinal)
+                || !string.Equals(leftLock.AbiVersion, rightLock.AbiVersion, StringComparison.Ordinal)
+                || !string.Equals(leftLock.PackageRelativePath, rightLock.PackageRelativePath, StringComparison.Ordinal)
+                || !string.Equals(leftLock.ManifestRelativePath, rightLock.ManifestRelativePath, StringComparison.Ordinal)
+                || !string.Equals(leftLock.EntryAssemblyRelativePath, rightLock.EntryAssemblyRelativePath, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var leftCommands = leftLock.Commands
+                .OrderBy(item => item.Kind, StringComparer.Ordinal)
+                .ThenBy(item => item.CommandDefinitionId, StringComparer.Ordinal);
+            var rightCommands = rightLock.Commands
+                .OrderBy(item => item.Kind, StringComparer.Ordinal)
+                .ThenBy(item => item.CommandDefinitionId, StringComparer.Ordinal);
+            var leftFiles = leftLock.Files.OrderBy(item => item.RelativePath, StringComparer.Ordinal);
+            var rightFiles = rightLock.Files.OrderBy(item => item.RelativePath, StringComparer.Ordinal);
+            if (!leftCommands.SequenceEqual(rightCommands) || !leftFiles.SequenceEqual(rightFiles))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsSha256(string? value)

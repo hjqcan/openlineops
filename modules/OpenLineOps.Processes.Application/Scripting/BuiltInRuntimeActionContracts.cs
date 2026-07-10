@@ -13,6 +13,7 @@ internal static class BuiltInRuntimeActionContracts
             "openlineops_rotate_motor" => RotateMotor(),
             "openlineops_wait" => Wait(),
             "openlineops_result_from_input" => ResultFromInput(),
+            "openlineops_run_external_test" => RunExternalTest(),
             _ => throw new ArgumentException(
                 $"Built-in Blockly block {blockType} does not have a Runtime Action Contract.",
                 nameof(blockType))
@@ -25,20 +26,24 @@ internal static class BuiltInRuntimeActionContracts
             "motion.axis.move",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
+                ["TARGET_KIND"] = TargetKindField(),
+                ["TARGET_ID"] = TargetIdField(),
                 ["AXIS"] = TextField(["X", "Y", "Z"], maxLength: 16),
                 ["POSITION"] = NumberField(),
                 ["SPEED"] = NumberField(minimum: 0),
                 ["UNIT"] = TextField(["mm", "deg"], maxLength: 16)
             },
             new RuntimeDeviceCommandEmit(
-                "motion.axis",
-                "MoveAxis",
+                Field("TARGET_KIND"),
+                Field("TARGET_ID"),
+                Literal("motion.axis"),
+                Literal("MoveAxis"),
                 Object(
                     ("axis", Field("AXIS")),
                     ("position", Field("POSITION")),
                     ("speed", Field("SPEED")),
                     ("unit", Field("UNIT"))),
-                TimeoutMilliseconds: 30_000));
+                Literal(30_000)));
     }
 
     private static RuntimeActionContract SetLight()
@@ -47,16 +52,20 @@ internal static class BuiltInRuntimeActionContracts
             "io.light.set",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
+                ["TARGET_KIND"] = TargetKindField(),
+                ["TARGET_ID"] = TargetIdField(),
                 ["CHANNEL"] = TextField(maxLength: 256),
                 ["STATE"] = TextField(["On", "Off"], maxLength: 16)
             },
             new RuntimeDeviceCommandEmit(
-                "io.light",
-                "SetLight",
+                Field("TARGET_KIND"),
+                Field("TARGET_ID"),
+                Literal("io.light"),
+                Literal("SetLight"),
                 Object(
                     ("channel", Field("CHANNEL")),
                     ("state", Field("STATE"))),
-                TimeoutMilliseconds: 30_000));
+                Literal(30_000)));
     }
 
     private static RuntimeActionContract RotateMotor()
@@ -65,18 +74,22 @@ internal static class BuiltInRuntimeActionContracts
             "motion.motor.rotate",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
+                ["TARGET_KIND"] = TargetKindField(),
+                ["TARGET_ID"] = TargetIdField(),
                 ["DURATION_MS"] = IntegerField(minimum: 0),
                 ["MOTOR"] = TextField(maxLength: 256),
                 ["RPM"] = NumberField()
             },
             new RuntimeDeviceCommandEmit(
-                "motion.motor",
-                "RotateMotor",
+                Field("TARGET_KIND"),
+                Field("TARGET_ID"),
+                Literal("motion.motor"),
+                Literal("RotateMotor"),
                 Object(
                     ("duration_ms", Field("DURATION_MS")),
                     ("motor", Field("MOTOR")),
                     ("rpm", Field("RPM"))),
-                TimeoutMilliseconds: 30_000));
+                Literal(30_000)));
     }
 
     private static RuntimeActionContract Wait()
@@ -119,6 +132,28 @@ internal static class BuiltInRuntimeActionContracts
                     new RuntimeActionContextValue(RuntimeActionContextValueKind.TimestampUtc),
                     new RuntimeActionFieldEqualsCondition("INCLUDE_TIMESTAMP", ExpectedValue: true))
             ]));
+    }
+
+    private static RuntimeActionContract RunExternalTest()
+    {
+        return Contract(
+            "production.external-test.run",
+            new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
+            {
+                ["TARGET_KIND"] = TargetKindField(),
+                ["TARGET_ID"] = TargetIdField(),
+                ["CAPABILITY"] = TextField(maxLength: 256),
+                ["COMMAND"] = TextField(maxLength: 256),
+                ["ADAPTER_ID"] = TextField(maxLength: 256),
+                ["TIMEOUT_MS"] = IntegerField(minimum: 1)
+            },
+            new RuntimeDeviceCommandEmit(
+                Field("TARGET_KIND"),
+                Field("TARGET_ID"),
+                Field("CAPABILITY"),
+                Field("COMMAND"),
+                Object(("externalTestProgramAdapterId", Field("ADAPTER_ID"))),
+                Field("TIMEOUT_MS")));
     }
 
     private static RuntimeActionContract Contract(
@@ -165,6 +200,19 @@ internal static class BuiltInRuntimeActionContracts
         return new RuntimeActionFieldDefinition(
             RuntimeActionFieldType.Boolean,
             Required: true);
+    }
+
+    private static RuntimeActionFieldDefinition TargetKindField()
+    {
+        return TextField(RuntimeActionTargetKinds.All, maxLength: 32);
+    }
+
+    private static RuntimeActionFieldDefinition TargetIdField()
+    {
+        return new RuntimeActionFieldDefinition(
+            RuntimeActionFieldType.TargetReference,
+            Required: true,
+            MaxLength: 256);
     }
 
     private static RuntimeActionFieldValue Field(string name) => new(name);

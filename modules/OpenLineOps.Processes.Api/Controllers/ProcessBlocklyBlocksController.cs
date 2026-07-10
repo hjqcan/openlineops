@@ -87,7 +87,8 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
             request.Category!,
             request.DisplayName!,
             request.BlocklyJson.GetRawText(),
-            request.PythonCodeTemplate!);
+            request.RuntimeActionContractSchemaVersion!,
+            request.RuntimeActionContract.GetRawText());
     }
 
     internal static ProcessBlocklyBlockDefinitionResponse ToResponse(
@@ -98,11 +99,14 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
             block.Category,
             block.DisplayName,
             JsonSerializer.Deserialize<JsonElement>(block.BlocklyJson),
-            block.PythonCodeTemplate,
             block.IsBuiltIn,
             block.Version,
             block.CreatedAtUtc,
-            block.UpdatedAtUtc);
+            block.UpdatedAtUtc,
+            block.ExecutionMode,
+            block.RuntimeActionContractSchemaVersion!,
+            JsonSerializer.Deserialize<JsonElement>(block.RuntimeActionContractJson!),
+            block.RuntimeActionContractSha256!);
     }
 
     private ObjectResult ToProblem(ApplicationError error)
@@ -133,11 +137,19 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
         AddRequired(errors, nameof(request.BlockType), request.BlockType);
         AddRequired(errors, nameof(request.Category), request.Category);
         AddRequired(errors, nameof(request.DisplayName), request.DisplayName);
-        AddRequired(errors, nameof(request.PythonCodeTemplate), request.PythonCodeTemplate);
+        AddRequired(
+            errors,
+            nameof(request.RuntimeActionContractSchemaVersion),
+            request.RuntimeActionContractSchemaVersion);
 
         if (request.BlocklyJson.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
             errors[nameof(request.BlocklyJson)] = ["BlocklyJson is required."];
+        }
+
+        if (request.RuntimeActionContract.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            errors[nameof(request.RuntimeActionContract)] = ["RuntimeActionContract is required."];
         }
 
         return errors;

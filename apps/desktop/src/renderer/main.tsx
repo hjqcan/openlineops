@@ -9,6 +9,7 @@ import {
   Code2,
   Database,
   FileSearch,
+  Factory,
   FolderKanban,
   GitBranch,
   Gauge,
@@ -62,8 +63,14 @@ const ProcessWorkbench = React.lazy(async () => {
   return { default: module.ProcessWorkbench };
 });
 
+const ProductionWorkbench = React.lazy(async () => {
+  const module = await import('./production-workbench');
+  return { default: module.ProductionWorkbench };
+});
+
 const navItems = [
   { id: 'projects', label: 'Explorer', icon: FolderKanban },
+  { id: 'production', label: 'Line Designer', icon: Factory },
   { id: 'processes', label: 'Flow Designer', icon: Blocks },
   { id: 'engineering', label: 'Configuration', icon: MonitorCog },
   { id: 'devices', label: 'Devices', icon: PlugZap },
@@ -407,6 +414,19 @@ function App(): React.ReactElement {
       );
     }
 
+    if (activeNav === 'production') {
+      return (
+        <React.Suspense fallback={<WorkbenchLoading label="Production lines" />}>
+          <ProductionWorkbench
+            activeWorkspace={activeWorkspace}
+            activeApplicationId={activeApplication?.applicationId ?? null}
+            isBackendHealthy={backendStatus?.health === 'Healthy'}
+            onMessage={setMessage}
+          />
+        </React.Suspense>
+      );
+    }
+
     if (activeNav === 'projects') {
       return (
         <ProjectsWorkbench
@@ -599,7 +619,13 @@ function App(): React.ReactElement {
           <>
             <div className="ide-editor-tabs">
           <div className="ide-editor-tab active">
-            {activeNav === 'processes' ? <Blocks size={14} /> : activeNav === 'dashboard' ? <Play size={14} /> : <FileSearch size={14} />}
+            {activeNav === 'processes'
+              ? <Blocks size={14} />
+              : activeNav === 'production'
+                ? <Factory size={14} />
+                : activeNav === 'dashboard'
+                  ? <Play size={14} />
+                  : <FileSearch size={14} />}
             <span>{activeTitle}</span>
             {activeWorkspace ? <small>{activeWorkspace.project.projectId}</small> : null}
           </div>
@@ -692,6 +718,7 @@ function ProjectExplorer({
     icon: React.ComponentType<{ size?: number }>;
   }> = [
     { nav: 'projects', label: 'Systems & Layout', detail: application?.topologyId ?? 'not configured', icon: LayoutDashboard },
+    { nav: 'production', label: 'Production Lines', detail: 'DUT · workstations · stages', icon: Factory },
     { nav: 'processes', label: 'Flows & Scripts', detail: `${application?.processDefinitionIds.length ?? 0} linked`, icon: Blocks },
     { nav: 'engineering', label: 'Configuration', detail: 'recipes · stations', icon: MonitorCog },
     { nav: 'devices', label: 'Devices & Drivers', detail: 'capability providers', icon: PlugZap }
@@ -977,6 +1004,7 @@ function WorkbenchLoading({ label }: { label: string }): React.ReactElement {
 const secondaryCopy: Record<NavId, string> = {
   dashboard: '',
   projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
+  production: 'Production lines compose DUT models, topology-bound workstations, ordered stages and external test adapters.',
   engineering: 'Workspace and project selection will use backend engineering contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',
   devices: 'Device configuration is read from backend APIs and never from local databases.',

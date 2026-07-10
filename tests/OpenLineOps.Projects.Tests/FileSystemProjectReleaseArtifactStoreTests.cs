@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -72,7 +73,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             "openlineops.project-release-artifact",
             manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(3, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
     }
 
@@ -118,6 +119,52 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             "applications/Main Line/MainLine.oloapp",
             manifest.RootElement.GetProperty("applicationProjectRelativePath").GetString());
+    }
+
+    [Fact]
+    public async Task PublishCopiesContentAddressedPluginPackageAndOpenRejectsPackageTampering()
+    {
+        var scope = CreateScope("project.package", "application.main");
+        WriteSourceFile(scope, "flows/process-main/flow.json", "package-flow");
+        var packagePath = Path.Combine(_testRoot, "plugin-package");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.motion\"}");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-v1");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "dependency.dat"), "dependency-v1");
+        var dependency = CreatePackageDependency(packagePath);
+        var metadata = CreateMetadata() with
+        {
+            CapabilityBindings =
+            [
+                new ProjectReleaseCapabilityBinding(
+                    "capability.main",
+                    "binding.main",
+                    "PluginCommand",
+                    "plugin.motion")
+            ],
+            PackageDependencies = [dependency]
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.package",
+            PublishedAtUtc,
+            metadata);
+        var opened = Assert.IsType<OpenedProjectReleaseArtifact>(
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+        var frozenDependency = Assert.Single(opened.Metadata.PackageDependencies);
+        var frozenPackagePath = Path.Combine(
+            opened.ReleaseRootPath,
+            frozenDependency.PackageRelativePath.Replace('/', Path.DirectorySeparatorChar));
+
+        Assert.Equal("dependency-v1", File.ReadAllText(Path.Combine(frozenPackagePath, "dependency.dat")));
+        Assert.DoesNotContain(Path.GetFullPath(packagePath), await File.ReadAllTextAsync(descriptor.ManifestPath));
+
+        await File.WriteAllTextAsync(Path.Combine(frozenPackagePath, "dependency.dat"), "dependency-tampered");
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+        Assert.Contains("plugin package", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -300,13 +347,13 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             PublishedAtUtc,
             CreateMetadata());
         var manifest = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
-        manifest["schemaVersion"] = 2;
+        manifest["schemaVersion"] = 3;
         await File.WriteAllTextAsync(descriptor.ManifestPath, manifest.ToJsonString());
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
 
-        Assert.Contains("schema version 2", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("schema version 3", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -443,7 +490,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "configuration.main.v1",
             [new ProjectReleaseCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main")],
             [new ProjectReleaseTargetReference("Station", "station.main")],
-            ["block.main@1"]);
+            ["block.main@1"],
+            []);
     }
 
     private static ProjectReleaseSourceMetadata CreateUnnormalizedMetadata()
@@ -466,7 +514,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 new ProjectReleaseTargetReference("Station", "station.main"),
                 new ProjectReleaseTargetReference(" Slot ", "slot.main")
             ],
-            ["block.move@2", " block.inspect@1 ", "block.move@2"]);
+            ["block.move@2", " block.inspect@1 ", "block.move@2"],
+            []);
     }
 
     private static string WriteSourceFile(
@@ -500,5 +549,56 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     private static string GetApplicationSourcePath(ProjectApplicationWorkspaceScope scope)
     {
         return scope.ApplicationRootPath;
+    }
+
+    private static ProjectReleasePackageDependencyLock CreatePackageDependency(string packagePath)
+    {
+        var files = Directory.EnumerateFiles(packagePath, "*", SearchOption.AllDirectories)
+            .Select(path =>
+            {
+                var bytes = File.ReadAllBytes(path);
+                return new ProjectReleasePackageFile(
+                    Path.GetRelativePath(packagePath, path).Replace('\\', '/'),
+                    bytes.LongLength,
+                    Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+            })
+            .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        var canonical = new StringBuilder();
+        foreach (var file in files)
+        {
+            canonical.Append(file.RelativePath)
+                .Append('\0')
+                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append('\0')
+                .Append(file.Sha256)
+                .Append('\n');
+        }
+
+        var contentSha256 = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+        var manifest = files.Single(file => file.RelativePath == "manifest.json");
+        var entry = files.Single(file => file.RelativePath == "plugin.dll");
+        return new ProjectReleasePackageDependencyLock(
+            "capability.main",
+            "binding.main",
+            "PluginCommand",
+            "plugin.motion",
+            "plugin.motion",
+            "plugin.motion",
+            "1.2.3",
+            contentSha256,
+            manifest.Sha256,
+            entry.Sha256,
+            "1.0.0",
+            "any",
+            "openlineops.plugin-abi/1",
+            $"packages/{contentSha256}",
+            manifest.RelativePath,
+            entry.RelativePath,
+            [new ProjectReleasePackageCommandLock("Device", "motion.move", "capability.main", "Move")],
+            files,
+            packagePath);
     }
 }

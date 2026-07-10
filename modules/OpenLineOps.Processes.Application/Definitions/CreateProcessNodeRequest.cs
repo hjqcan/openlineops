@@ -8,7 +8,6 @@ public sealed record CreateProcessNodeRequest(
     string? CommandName,
     int? TimeoutSeconds,
     string? InputPayload,
-    string? ScriptEditorMode,
     string? BlocklyWorkspaceJson,
     string? ScriptSourceCode,
     string? ScriptVersion);

@@ -59,7 +59,10 @@ public sealed class InMemoryProcessBlocklyBlockDefinitionRepository : IProcessBl
         string category,
         string displayName,
         string blocklyJson,
-        string pythonCodeTemplate,
+        string executionMode,
+        string runtimeActionContractSchemaVersion,
+        string runtimeActionContractJson,
+        string runtimeActionContractSha256,
         DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken = default)
     {
@@ -79,7 +82,10 @@ public sealed class InMemoryProcessBlocklyBlockDefinitionRepository : IProcessBl
                 category,
                 displayName,
                 blocklyJson,
-                pythonCodeTemplate,
+                executionMode,
+                runtimeActionContractSchemaVersion,
+                runtimeActionContractJson,
+                runtimeActionContractSha256,
                 latest?.Version + 1 ?? 1,
                 latest?.CreatedAtUtc ?? recordedAtUtc,
                 recordedAtUtc);

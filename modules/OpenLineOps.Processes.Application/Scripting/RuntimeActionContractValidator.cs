@@ -144,20 +144,72 @@ public static partial class RuntimeActionContractValidator
         RuntimeDeviceCommandEmit command,
         IReadOnlyDictionary<string, RuntimeActionFieldDefinition> fields)
     {
-        if (!IsIdentifier(command.Capability, CapabilityRegex()))
+        var capabilityError = ValidateExpression(command.Capability, fields, "emit.capability", depth: 0);
+        if (capabilityError is not null)
         {
-            return "Device command capability must be a fixed canonical identifier.";
+            return capabilityError;
         }
 
-        if (!IsIdentifier(command.CommandName, CommandNameRegex()))
+        if (!IsIdentifierExpression(command.Capability, fields, CapabilityRegex()))
         {
-            return "Device command name must be a fixed canonical identifier.";
+            return "Device command capability must resolve to a canonical identifier.";
         }
 
-        if (command.TimeoutMilliseconds <= 0
-            || command.TimeoutMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond)
+        var commandNameError = ValidateExpression(command.CommandName, fields, "emit.commandName", depth: 0);
+        if (commandNameError is not null)
         {
-            return "Device command timeoutMilliseconds must be a positive whole number supported by TimeSpan.";
+            return commandNameError;
+        }
+
+        if (!IsIdentifierExpression(command.CommandName, fields, CommandNameRegex()))
+        {
+            return "Device command name must resolve to a canonical identifier.";
+        }
+
+        var targetKindError = ValidateExpression(
+            command.TargetKind,
+            fields,
+            "emit.targetKind",
+            depth: 0);
+        if (targetKindError is not null)
+        {
+            return targetKindError;
+        }
+
+        if (!IsStringExpression(command.TargetKind, fields)
+            || !ResolvesOnlySupportedTargetKinds(command.TargetKind, fields))
+        {
+            return "Device command targetKind must resolve to a supported target kind.";
+        }
+
+        var targetIdError = ValidateExpression(
+            command.TargetId,
+            fields,
+            "emit.targetId",
+            depth: 0);
+        if (targetIdError is not null)
+        {
+            return targetIdError;
+        }
+
+        if (!IsStringExpression(command.TargetId, fields))
+        {
+            return "Device command targetId must resolve from a string or targetReference field.";
+        }
+
+        var timeoutError = ValidateExpression(
+            command.TimeoutMilliseconds,
+            fields,
+            "emit.timeoutMilliseconds",
+            depth: 0);
+        if (timeoutError is not null)
+        {
+            return timeoutError;
+        }
+
+        if (!IsNumericExpression(command.TimeoutMilliseconds, fields))
+        {
+            return "Device command timeoutMilliseconds must resolve from a numeric literal or numeric field.";
         }
 
         if (command.RetryLimit != 0)
@@ -166,6 +218,25 @@ public static partial class RuntimeActionContractValidator
         }
 
         return ValidateExpression(command.Input, fields, "emit.input", depth: 0);
+    }
+
+    private static bool ResolvesOnlySupportedTargetKinds(
+        RuntimeActionValueExpression expression,
+        IReadOnlyDictionary<string, RuntimeActionFieldDefinition> fields)
+    {
+        return expression switch
+        {
+            RuntimeActionLiteralValue literal => literal.Value.ValueKind == JsonValueKind.String
+                && RuntimeActionTargetKinds.All.Contains(
+                    literal.Value.GetString() ?? string.Empty,
+                    StringComparer.Ordinal),
+            RuntimeActionFieldValue field => fields.TryGetValue(field.FieldName, out var definition)
+                && definition.AllowedValues is { Count: > 0 }
+                && definition.AllowedValues.All(value => RuntimeActionTargetKinds.All.Contains(
+                    value,
+                    StringComparer.Ordinal)),
+            _ => false
+        };
     }
 
     private static string? ValidateDelay(
@@ -372,6 +443,23 @@ public static partial class RuntimeActionContractValidator
             RuntimeActionFieldValue field => fields.TryGetValue(field.FieldName, out var definition)
                                              && definition.Type is RuntimeActionFieldType.Text
                                                  or RuntimeActionFieldType.TargetReference,
+            _ => false
+        };
+    }
+
+    private static bool IsIdentifierExpression(
+        RuntimeActionValueExpression expression,
+        IReadOnlyDictionary<string, RuntimeActionFieldDefinition> fields,
+        Regex pattern)
+    {
+        return expression switch
+        {
+            RuntimeActionLiteralValue literal => literal.Value.ValueKind == JsonValueKind.String
+                && IsIdentifier(literal.Value.GetString(), pattern),
+            RuntimeActionFieldValue field => fields.TryGetValue(field.FieldName, out var definition)
+                && definition.Type == RuntimeActionFieldType.Text
+                && (definition.AllowedValues is null
+                    || definition.AllowedValues.All(value => IsIdentifier(value, pattern))),
             _ => false
         };
     }

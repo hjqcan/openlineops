@@ -59,6 +59,15 @@ public sealed class FileSystemPluginPackageCatalogTests
                   "capabilities": [ "device.loopback" ]
                 }
                 """);
+            await File.WriteAllTextAsync(
+                Path.Combine(scannerDirectory, "OpenLineOps.FakeScanner.dll"),
+                "scanner-binary");
+            await File.WriteAllTextAsync(
+                Path.Combine(exporterDirectory, "OpenLineOps.CsvExporter.dll"),
+                "exporter-binary");
+            await File.WriteAllTextAsync(
+                Path.Combine(sampleDirectory, "OpenLineOps.SamplePlugins.LoopbackDevice.dll"),
+                "loopback-binary");
 
             var catalog = new FileSystemPluginPackageCatalog(root);
 
@@ -78,6 +87,18 @@ public sealed class FileSystemPluginPackageCatalogTests
                 && package.Manifest.Kind == PluginKind.DeviceDriver
                 && package.Manifest.Capabilities.Single() == "device.loopback"
                 && Path.GetFileName(package.ManifestPath) == "manifest.json");
+            Assert.All(packages, package =>
+            {
+                Assert.True(package.RuntimeIdentity.IsComplete);
+                Assert.Equal(64, package.PackageContentSha256.Length);
+                Assert.Equal(64, package.ManifestSha256.Length);
+                Assert.Equal(64, package.EntryAssemblySha256.Length);
+                Assert.Contains(package.Files!, file =>
+                    string.Equals(
+                        file.RelativePath,
+                        package.EntryAssemblyRelativePath,
+                        StringComparison.Ordinal));
+            });
         }
         finally
         {
@@ -97,5 +118,47 @@ public sealed class FileSystemPluginPackageCatalogTests
         var packages = await catalog.DiscoverAsync();
 
         Assert.Empty(packages);
+    }
+
+    [Fact]
+    public async Task DiscoverAsyncFullTreeHashChangesWhenSidecarChanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugin-hash-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "manifest.json"),
+                """
+                {
+                  "id": "openlineops.hash-test",
+                  "name": "Hash Test",
+                  "version": "1.0.0",
+                  "kind": "ProcessNode",
+                  "entryAssembly": "Plugin.dll",
+                  "entryType": "HashTest.Plugin",
+                  "capabilities": [ "process.hash" ]
+                }
+                """);
+            await File.WriteAllTextAsync(Path.Combine(root, "Plugin.dll"), "binary-v1");
+            var sidecarPath = Path.Combine(root, "dependency.dat");
+            await File.WriteAllTextAsync(sidecarPath, "sidecar-v1");
+            var catalog = new FileSystemPluginPackageCatalog(root);
+
+            var first = Assert.Single(await catalog.DiscoverAsync());
+            await File.WriteAllTextAsync(sidecarPath, "sidecar-v2");
+            var second = Assert.Single(await catalog.DiscoverAsync());
+
+            Assert.NotEqual(first.PackageContentSha256, second.PackageContentSha256);
+            Assert.Equal(first.EntryAssemblySha256, second.EntryAssemblySha256);
+            Assert.Equal(first.ManifestSha256, second.ManifestSha256);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 }

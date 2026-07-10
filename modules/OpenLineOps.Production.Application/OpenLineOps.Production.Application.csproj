@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="../OpenLineOps.Processes.Application/OpenLineOps.Processes.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Processes.Domain/OpenLineOps.Processes.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Production.Domain/OpenLineOps.Production.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Topology.Application/OpenLineOps.Topology.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Topology.Domain/OpenLineOps.Topology.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

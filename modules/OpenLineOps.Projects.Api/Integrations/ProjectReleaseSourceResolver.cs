@@ -1,4 +1,6 @@
-using System.Text.Json;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
@@ -8,7 +10,9 @@ using OpenLineOps.Processes.Application.Definitions;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Application.Scripting;
+using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.Topologies;
 using OpenLineOps.Topology.Domain.Identifiers;
@@ -27,6 +31,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     private readonly IFlowIrCanonicalSerializer _flowIrSerializer;
     private readonly IClock _clock;
     private readonly IProcessBlocklyBlockCatalogSource[] _blockSources;
+    private readonly IPluginPackageCatalog? _packageCatalog;
 
     public ProjectReleaseSourceResolver(
         IProjectAutomationTopologyRepository topologyRepository,
@@ -37,7 +42,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         IProcessFlowIrCompiler flowIrCompiler,
         IFlowIrCanonicalSerializer flowIrSerializer,
         IClock clock,
-        IEnumerable<IProcessBlocklyBlockCatalogSource>? blockSources = null)
+        IEnumerable<IProcessBlocklyBlockCatalogSource>? blockSources = null,
+        IPluginPackageCatalog? packageCatalog = null)
     {
         _topologyRepository = topologyRepository;
         _layoutRepository = layoutRepository;
@@ -48,6 +54,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         _flowIrSerializer = flowIrSerializer;
         _clock = clock;
         _blockSources = blockSources?.ToArray() ?? [];
+        _packageCatalog = packageCatalog;
     }
 
     public async Task<Result<ProjectReleaseSourceMetadata>> ResolveAsync(
@@ -182,7 +189,21 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 $"Process definition {process.ProcessDefinitionId} must be published before a project release can be created."));
         }
 
-        var flowIrCompilationResult = _flowIrCompiler.Compile(processAggregate);
+        var catalog = new ProcessBlocklyBlockCatalog(
+            new ScopedBlockRepository(scope, _blockRepository),
+            _clock,
+            _blockSources);
+        var catalogResult = await catalog
+            .ListAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (catalogResult.IsFailure)
+        {
+            return Result.Failure<ProjectReleaseSourceMetadata>(catalogResult.Error);
+        }
+
+        var flowIrCompilationResult = _flowIrCompiler.Compile(
+            processAggregate,
+            catalogResult.Value);
         if (flowIrCompilationResult.IsFailure)
         {
             return Result.Failure<ProjectReleaseSourceMetadata>(ApplicationError.Conflict(
@@ -234,7 +255,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         }
 
         var bindingValidation = ValidateRequiredCapabilityBindings(
-            process,
+            flowIrCompilationResult.Value.Document,
+            process.ProcessDefinitionId,
             topology,
             configurationSnapshot);
         if (bindingValidation is not null)
@@ -266,22 +288,19 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 $"Topology {topology.TopologyId} does not contain a runtime target."));
         }
 
-        var catalog = new ProcessBlocklyBlockCatalog(
-            new ScopedBlockRepository(scope, _blockRepository),
-            _clock,
-            _blockSources);
-        var catalogResult = await catalog
-            .ListAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (catalogResult.IsFailure)
-        {
-            return Result.Failure<ProjectReleaseSourceMetadata>(catalogResult.Error);
-        }
+        var blockVersionIds = flowIrCompilationResult.Value.Document.BlockDependencies
+            .Select(dependency => dependency.LockId)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
-        var blockVersionsResult = ResolveUsedBlockVersions(process, catalogResult.Value);
-        if (blockVersionsResult.IsFailure)
+        var packageDependenciesResult = await ResolvePackageDependenciesAsync(
+                topology,
+                flowIrCompilationResult.Value.Document,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (packageDependenciesResult.IsFailure)
         {
-            return Result.Failure<ProjectReleaseSourceMetadata>(blockVersionsResult.Error);
+            return Result.Failure<ProjectReleaseSourceMetadata>(packageDependenciesResult.Error);
         }
 
         return Result.Success(new ProjectReleaseSourceMetadata(
@@ -295,7 +314,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             configurationSnapshot.SnapshotId,
             capabilityBindings,
             targetReferences,
-            blockVersionsResult.Value));
+            blockVersionIds,
+            packageDependenciesResult.Value));
     }
 
     private static ApplicationError? Validate(
@@ -347,45 +367,55 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     }
 
     private static ApplicationError? ValidateRequiredCapabilityBindings(
-        ProcessDefinitionDetails process,
+        FlowIrDocument flowIr,
+        string processDefinitionId,
         AutomationTopologyDetails topology,
         ConfigurationSnapshotDetails configurationSnapshot)
     {
-        var requiredCapabilities = process.Nodes
-            .Select(node => node.RequiredCapability)
-            .Where(capability => !string.IsNullOrWhiteSpace(capability))
-            .Select(capability => capability!.Trim())
-            .Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal)
+        var requiredActions = flowIr.Nodes
+            .SelectMany(node => node.Actions)
+            .Where(action => action.Kind == FlowIrActionKind.DeviceCommand)
+            .Where(action => !(action.Target.Kind == FlowIrTargetReferenceKind.System
+                && string.Equals(action.RequiredCapability, RuntimeFlowCommand.Capability, StringComparison.Ordinal)))
+            .OrderBy(action => action.ActionId, StringComparer.Ordinal)
             .ToArray();
 
         var declaredCapabilities = topology.Capabilities
             .Select(capability => capability.CapabilityId)
             .ToHashSet(StringComparer.Ordinal);
-        var topologyBindings = topology.DriverBindings
-            .Select(binding => binding.CapabilityId)
-            .ToHashSet(StringComparer.Ordinal);
         var configurationBindings = configurationSnapshot.DeviceBindings
             .Select(binding => binding.CapabilityId)
             .ToHashSet(StringComparer.Ordinal);
 
-        foreach (var capabilityId in requiredCapabilities)
+        foreach (var action in requiredActions)
         {
+            var capabilityResult = ResolveActionCapabilityTarget(topology, action);
+            if (capabilityResult.IsFailure)
+            {
+                return capabilityResult.Error;
+            }
+
+            var capabilityId = capabilityResult.Value;
             if (!declaredCapabilities.Contains(capabilityId))
             {
                 return ApplicationError.Conflict(
                     "Projects.ReleaseRequiredCapabilityMissing",
-                    $"Process definition {process.ProcessDefinitionId} requires capability {capabilityId}, but topology {topology.TopologyId} does not declare it.");
+                    $"Process definition {processDefinitionId} requires capability {capabilityId}, but topology {topology.TopologyId} does not declare it.");
             }
 
-            if (!topologyBindings.Contains(capabilityId))
+            var topologyBindings = topology.DriverBindings
+                .Where(binding => string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (topologyBindings.Length != 1)
             {
                 return ApplicationError.Conflict(
                     "Projects.ReleaseDriverBindingMissing",
-                    $"Required capability {capabilityId} does not have a driver binding in topology {topology.TopologyId}.");
+                    $"Required capability {capabilityId} must have exactly one driver binding in topology {topology.TopologyId}.");
             }
 
-            if (!configurationBindings.Contains(capabilityId))
+            if (IsDevicePluginProvider(topologyBindings[0].ProviderKind)
+                && !configurationBindings.Contains(capabilityId))
             {
                 return ApplicationError.Conflict(
                     "Projects.ReleaseDeviceBindingMissing",
@@ -410,126 +440,388 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             .Concat(topology.Slots.Select(slot => new ProjectReleaseTargetReference(
                 "Slot",
                 slot.SlotId)))
+            .Concat(topology.Capabilities.Select(capability => new ProjectReleaseTargetReference(
+                "Capability",
+                capability.CapabilityId)))
+            .Concat(topology.DriverBindings.Select(binding => new ProjectReleaseTargetReference(
+                "Driver",
+                binding.BindingId)))
+            .Concat(topology.Modules.Select(module => new ProjectReleaseTargetReference(
+                "System",
+                module.ModuleId)))
+            .Append(new ProjectReleaseTargetReference("System", topology.TopologyId))
+            .Concat(topology.Slots
+                .Where(slot => string.Equals(slot.MaterialKind, "Dut", StringComparison.OrdinalIgnoreCase))
+                .Select(slot => new ProjectReleaseTargetReference("Dut", slot.SlotId)))
             .DistinctBy(target => $"{target.Kind}\u001f{target.TargetId}", StringComparer.OrdinalIgnoreCase)
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
             .ToArray();
     }
 
-    private static Result<IReadOnlyCollection<string>> ResolveUsedBlockVersions(
-        ProcessDefinitionDetails process,
-        IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails> catalog)
+    internal async Task<Result<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>> ResolvePackageDependenciesAsync(
+        AutomationTopologyDetails topology,
+        FlowIrDocument flowIr,
+        CancellationToken cancellationToken)
     {
-        var usedBlockTypes = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var node in process.Nodes.Where(node => string.Equals(
-                     node.ScriptEditorMode,
-                     "Blockly",
-                     StringComparison.OrdinalIgnoreCase)))
+        var commandsByCapability = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        foreach (var action in flowIr.Nodes
+                     .SelectMany(node => node.Actions)
+                     .Where(action => action.Kind == FlowIrActionKind.DeviceCommand))
         {
-            if (string.IsNullOrWhiteSpace(node.BlocklyWorkspaceJson))
+            var capabilityResult = ResolveActionCapabilityTarget(topology, action);
+            if (capabilityResult.IsFailure)
             {
-                return Result.Failure<IReadOnlyCollection<string>>(ApplicationError.Validation(
-                    "Projects.ReleaseBlocklyWorkspaceMissing",
-                    $"Blockly process node {node.NodeId} does not contain a workspace document."));
+                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                    capabilityResult.Error);
             }
 
-            try
+            if (action.Target.Kind == FlowIrTargetReferenceKind.System
+                && !topology.DriverBindings.Any(binding => string.Equals(
+                    binding.CapabilityId,
+                    capabilityResult.Value,
+                    StringComparison.Ordinal)))
             {
-                using var workspace = JsonDocument.Parse(node.BlocklyWorkspaceJson);
-                var workspaceError = CollectWorkspaceBlockTypes(workspace.RootElement, usedBlockTypes);
-                if (workspaceError is not null)
+                // Internal system commands (for example runtime.flow result patching)
+                // do not resolve through a topology provider package.
+                continue;
+            }
+
+            if (!commandsByCapability.TryGetValue(capabilityResult.Value, out var commands))
+            {
+                commands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                commandsByCapability.Add(capabilityResult.Value, commands);
+            }
+
+            commands.Add(action.CommandName);
+        }
+
+        if (commandsByCapability.Count == 0)
+        {
+            return Result.Success<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>([]);
+        }
+
+        var resolvedRoutes = new List<(DriverBindingDetails Binding, string[] CommandNames)>();
+        foreach (var route in commandsByCapability.OrderBy(item => item.Key, StringComparer.Ordinal))
+        {
+            var bindings = topology.DriverBindings
+                .Where(binding => string.Equals(
+                    binding.CapabilityId,
+                    route.Key,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (bindings.Length != 1)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleaseFlowIrRouteBindingInvalid",
+                        $"Flow IR capability {route.Key} must resolve to exactly one topology driver binding."));
+            }
+
+            if (IsPluginProvider(bindings[0].ProviderKind))
+            {
+                resolvedRoutes.Add((
+                    bindings[0],
+                    route.Value.Order(StringComparer.OrdinalIgnoreCase).ToArray()));
+            }
+        }
+
+        if (resolvedRoutes.Count == 0)
+        {
+            return Result.Success<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>([]);
+        }
+
+        if (_packageCatalog is null)
+        {
+            return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                ApplicationError.Conflict(
+                    "Projects.ReleasePluginPackageCatalogMissing",
+                    "A plugin package catalog is required to freeze plugin-backed capability routes."));
+        }
+
+        var packages = await _packageCatalog.DiscoverAsync(cancellationToken).ConfigureAwait(false);
+        var locks = new List<ProjectReleasePackageDependencyLock>(resolvedRoutes.Count);
+
+        foreach (var route in resolvedRoutes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var binding = route.Binding;
+            var requiredCommandNames = route.CommandNames;
+
+            var matches = packages
+                .Select(package => new
                 {
-                    return Result.Failure<IReadOnlyCollection<string>>(ApplicationError.Validation(
-                        "Projects.ReleaseBlocklyWorkspaceInvalid",
-                        $"Blockly process node {node.NodeId} {workspaceError}"));
-                }
-            }
-            catch (JsonException exception)
+                    Package = package,
+                    Commands = GetPackageCommands(package, binding.ProviderKind, binding.CapabilityId, binding.ProviderKey)
+                })
+                .Where(candidate => candidate.Commands.Length > 0
+                                    && requiredCommandNames.All(required => candidate.Commands.Any(command =>
+                                        string.Equals(command.CommandName, required, StringComparison.OrdinalIgnoreCase))))
+                .Take(2)
+                .ToArray();
+            if (matches.Length == 0)
             {
-                return Result.Failure<IReadOnlyCollection<string>>(ApplicationError.Validation(
-                    "Projects.ReleaseBlocklyWorkspaceInvalid",
-                    $"Blockly process node {node.NodeId} contains invalid JSON: {exception.Message}"));
+                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleasePluginPackageMissing",
+                        $"Provider {binding.ProviderKind}/{binding.ProviderKey} for capability {binding.CapabilityId} does not resolve to an installed plugin package and command set."));
             }
+
+            if (matches.Length > 1)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleasePluginPackageAmbiguous",
+                        $"Provider {binding.ProviderKind}/{binding.ProviderKey} for capability {binding.CapabilityId} resolves to more than one plugin package."));
+            }
+
+            var match = matches[0];
+            var integrityError = ValidatePackageIntegrity(match.Package);
+            if (integrityError is not null)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleasePluginPackageIntegrityInvalid",
+                        $"Plugin package {match.Package.Manifest.Id} cannot be frozen: {integrityError}"));
+            }
+
+            var packageFiles = match.Package.Files!
+                .Select(file => new ProjectReleasePackageFile(
+                    file.RelativePath,
+                    file.SizeBytes,
+                    file.Sha256))
+                .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+                .ToArray();
+            var lockedCommands = match.Commands
+                .Where(command => requiredCommandNames.Contains(
+                    command.CommandName,
+                    StringComparer.OrdinalIgnoreCase))
+                .ToArray();
+            locks.Add(new ProjectReleasePackageDependencyLock(
+                binding.CapabilityId,
+                binding.BindingId,
+                binding.ProviderKind,
+                binding.ProviderKey,
+                match.Package.Manifest.Id,
+                match.Package.Manifest.Id,
+                match.Package.Manifest.Version,
+                match.Package.PackageContentSha256,
+                match.Package.ManifestSha256,
+                match.Package.EntryAssemblySha256,
+                match.Package.Manifest.ContractVersion,
+                match.Package.Manifest.RuntimeIdentifier,
+                match.Package.Manifest.AbiVersion,
+                $"packages/{match.Package.PackageContentSha256}",
+                match.Package.ManifestRelativePath,
+                match.Package.EntryAssemblyRelativePath,
+                lockedCommands.Select(command => new ProjectReleasePackageCommandLock(
+                        command.Kind,
+                        command.CommandDefinitionId,
+                        command.CapabilityId,
+                        command.CommandName))
+                    .OrderBy(command => command.Kind, StringComparer.Ordinal)
+                    .ThenBy(command => command.CommandDefinitionId, StringComparer.Ordinal)
+                    .ToArray(),
+                packageFiles,
+                Path.GetFullPath(match.Package.PackagePath)));
         }
 
-        var blocksByType = catalog
-            .GroupBy(block => block.BlockType, StringComparer.Ordinal)
-            .ToDictionary(
-                group => group.Key,
-                group => group.OrderByDescending(block => block.Version).First(),
-                StringComparer.Ordinal);
-        var versions = new List<string>(usedBlockTypes.Count);
-        foreach (var blockType in usedBlockTypes.Order(StringComparer.Ordinal))
-        {
-            if (!blocksByType.TryGetValue(blockType, out var block))
-            {
-                return Result.Failure<IReadOnlyCollection<string>>(ApplicationError.Conflict(
-                    "Projects.ReleaseBlocklyBlockDefinitionMissing",
-                    $"Blockly block {blockType} used by process {process.ProcessDefinitionId} is not available in the project application catalog."));
-            }
-
-            versions.Add($"{block.BlockType}@{block.Version}");
-        }
-
-        return Result.Success<IReadOnlyCollection<string>>(versions);
+        return Result.Success<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(locks);
     }
 
-    private static string? CollectWorkspaceBlockTypes(
-        JsonElement root,
-        ISet<string> blockTypes)
+    internal static Result<string> ResolveActionCapabilityTarget(
+        AutomationTopologyDetails topology,
+        FlowIrAction action)
     {
-        if (root.ValueKind != JsonValueKind.Object
-            || !root.TryGetProperty("blocks", out var blocks)
-            || blocks.ValueKind != JsonValueKind.Object)
+        var capabilityId = action.RequiredCapability?.Trim();
+        if (string.IsNullOrWhiteSpace(capabilityId))
         {
-            return "must contain a Blockly blocks object.";
+            return Result.Failure<string>(ApplicationError.Conflict(
+                "Projects.ReleaseFlowIrCapabilityMissing",
+                $"Flow IR action {action.ActionId} does not declare a required capability."));
         }
 
-        if (!blocks.TryGetProperty("blocks", out var blockArray))
+        var reference = action.Target.Reference?.Trim();
+        if (string.IsNullOrWhiteSpace(reference))
         {
-            return null;
+            return Result.Failure<string>(ApplicationError.Conflict(
+                "Projects.ReleaseFlowIrTargetMissing",
+                $"Flow IR action {action.ActionId} does not declare a target reference."));
         }
 
-        if (blockArray.ValueKind != JsonValueKind.Array)
+        var targetExists = action.Target.Kind switch
         {
-            return "must contain a Blockly blocks array.";
-        }
-
-        foreach (var block in blockArray.EnumerateArray())
-        {
-            CollectNestedBlockTypes(block, blockTypes);
-        }
-
-        return null;
+            FlowIrTargetReferenceKind.Capability => string.Equals(
+                reference,
+                capabilityId,
+                StringComparison.Ordinal),
+            FlowIrTargetReferenceKind.AutomationModule => topology.Modules.Any(module =>
+                string.Equals(module.ModuleId, reference, StringComparison.Ordinal)
+                && ModuleSupportsCapability(module, capabilityId)),
+            FlowIrTargetReferenceKind.EquipmentNode => topology.Nodes.Any(node =>
+                string.Equals(node.NodeId, reference, StringComparison.Ordinal))
+                && topology.Modules.Any(module => string.Equals(module.NodeId, reference, StringComparison.Ordinal)
+                    && ModuleSupportsCapability(module, capabilityId)),
+            FlowIrTargetReferenceKind.SlotGroup => topology.SlotGroups.Any(group =>
+                string.Equals(group.SlotGroupId, reference, StringComparison.Ordinal)
+                && topology.Modules.Any(module => string.Equals(
+                        module.NodeId,
+                        group.ParentNodeId,
+                        StringComparison.Ordinal)
+                    && ModuleSupportsCapability(module, capabilityId))),
+            FlowIrTargetReferenceKind.Slot => topology.Slots.Any(slot =>
+                string.Equals(slot.SlotId, reference, StringComparison.Ordinal)
+                && topology.Modules.Any(module => string.Equals(
+                        module.NodeId,
+                        slot.ParentNodeId,
+                        StringComparison.Ordinal)
+                    && ModuleSupportsCapability(module, capabilityId))),
+            FlowIrTargetReferenceKind.Driver => topology.DriverBindings.Any(binding =>
+                string.Equals(binding.BindingId, reference, StringComparison.Ordinal)
+                && string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.Dut => topology.Slots.Any(slot =>
+                string.Equals(slot.SlotId, reference, StringComparison.Ordinal)
+                && string.Equals(slot.MaterialKind, "Dut", StringComparison.OrdinalIgnoreCase)),
+            FlowIrTargetReferenceKind.System => string.Equals(
+                    reference,
+                    topology.TopologyId,
+                    StringComparison.Ordinal)
+                || (string.Equals(
+                        capabilityId,
+                        RuntimeFlowCommand.Capability,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        reference,
+                        RuntimeFlowCommand.Capability,
+                        StringComparison.Ordinal))
+                || topology.Modules.Any(module => string.Equals(
+                    module.ModuleId,
+                    reference,
+                    StringComparison.Ordinal)),
+            _ => false
+        };
+        return targetExists
+            ? Result.Success(capabilityId)
+            : Result.Failure<string>(ApplicationError.Conflict(
+                "Projects.ReleaseFlowIrTargetNotFound",
+                $"Flow IR action {action.ActionId} target {action.Target.Kind}/{reference} does not resolve inside topology {topology.TopologyId}."));
     }
 
-    private static void CollectNestedBlockTypes(JsonElement element, ISet<string> blockTypes)
+    private static bool ModuleSupportsCapability(
+        AutomationModuleDetails module,
+        string capabilityId)
     {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            if (element.TryGetProperty("type", out var typeElement)
-                && typeElement.ValueKind == JsonValueKind.String
-                && !string.IsNullOrWhiteSpace(typeElement.GetString()))
-            {
-                blockTypes.Add(typeElement.GetString()!.Trim());
-            }
-
-            foreach (var property in element.EnumerateObject())
-            {
-                CollectNestedBlockTypes(property.Value, blockTypes);
-            }
-
-            return;
-        }
-
-        if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                CollectNestedBlockTypes(item, blockTypes);
-            }
-        }
+        return module.RequiredCapabilityIds.Contains(capabilityId, StringComparer.Ordinal)
+            || module.ProvidedCapabilityIds.Contains(capabilityId, StringComparer.Ordinal);
     }
+
+    private static ResolvedPackageCommand[] GetPackageCommands(
+        PluginPackageDescriptor package,
+        string providerKind,
+        string capabilityId,
+        string providerKey)
+    {
+        IEnumerable<ResolvedPackageCommand> commands = IsDevicePluginProvider(providerKind)
+            ? (package.Manifest.DeviceCommands ?? []).Select(command => new ResolvedPackageCommand(
+                "Device",
+                command.Id,
+                command.Capability,
+                command.CommandName))
+            : (package.Manifest.ProcessCommands ?? []).Select(command => new ResolvedPackageCommand(
+                "Process",
+                command.Id,
+                command.Capability,
+                command.CommandName));
+        commands = commands.Where(command =>
+            string.Equals(command.CapabilityId, capabilityId, StringComparison.Ordinal));
+
+        if (string.Equals(package.Manifest.Id, providerKey, StringComparison.Ordinal))
+        {
+            return commands.ToArray();
+        }
+
+        return commands
+            .Where(command => string.Equals(
+                command.CommandDefinitionId,
+                providerKey,
+                StringComparison.Ordinal))
+            .ToArray();
+    }
+
+    private static string? ValidatePackageIntegrity(PluginPackageDescriptor package)
+    {
+        if (string.IsNullOrWhiteSpace(package.Manifest.Id)
+            || string.IsNullOrWhiteSpace(package.Manifest.Version)
+            || string.IsNullOrWhiteSpace(package.Manifest.ContractVersion)
+            || string.IsNullOrWhiteSpace(package.Manifest.RuntimeIdentifier)
+            || string.IsNullOrWhiteSpace(package.Manifest.AbiVersion))
+        {
+            return "identity, version, contract, RID, or ABI metadata is missing.";
+        }
+
+        if (!IsSha256(package.PackageContentSha256)
+            || !IsSha256(package.ManifestSha256)
+            || !IsSha256(package.EntryAssemblySha256))
+        {
+            return "package, manifest, or entry assembly SHA-256 is missing or invalid.";
+        }
+
+        if (package.Files is not { Count: > 0 }
+            || string.IsNullOrWhiteSpace(package.ManifestRelativePath)
+            || string.IsNullOrWhiteSpace(package.EntryAssemblyRelativePath)
+            || string.IsNullOrWhiteSpace(package.PackagePath)
+            || !Directory.Exists(package.PackagePath))
+        {
+            return "package file inventory or source path is missing.";
+        }
+
+        if (package.Files.Any(file => file.SizeBytes < 0 || !IsSha256(file.Sha256)))
+        {
+            return "package file inventory contains an invalid size or SHA-256.";
+        }
+
+        var canonical = new StringBuilder();
+        foreach (var file in package.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        {
+            canonical.Append(file.RelativePath)
+                .Append('\0')
+                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append('\0')
+                .Append(file.Sha256)
+                .Append('\n');
+        }
+
+        var computed = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+        return string.Equals(computed, package.PackageContentSha256, StringComparison.Ordinal)
+            ? null
+            : "package full-tree SHA-256 does not match its file inventory.";
+    }
+
+    private static bool IsPluginProvider(string providerKind)
+    {
+        return IsDevicePluginProvider(providerKind)
+            || string.Equals(providerKind, "ProcessCommandProvider", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDevicePluginProvider(string providerKind)
+    {
+        return string.Equals(providerKind, "PluginCommand", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSha256(string value)
+    {
+        return value.Length == 64
+               && string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal)
+               && value.All(Uri.IsHexDigit);
+    }
+
+    private sealed record ResolvedPackageCommand(
+        string Kind,
+        string CommandDefinitionId,
+        string CapabilityId,
+        string CommandName);
 
     private static ApplicationError Required(string code, string fieldName)
     {
@@ -582,7 +874,10 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             string category,
             string displayName,
             string blocklyJson,
-            string pythonCodeTemplate,
+            string executionMode,
+            string runtimeActionContractSchemaVersion,
+            string runtimeActionContractJson,
+            string runtimeActionContractSha256,
             DateTimeOffset recordedAtUtc,
             CancellationToken cancellationToken = default)
         {
@@ -592,7 +887,10 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 category,
                 displayName,
                 blocklyJson,
-                pythonCodeTemplate,
+                executionMode,
+                runtimeActionContractSchemaVersion,
+                runtimeActionContractJson,
+                runtimeActionContractSha256,
                 recordedAtUtc,
                 cancellationToken);
         }

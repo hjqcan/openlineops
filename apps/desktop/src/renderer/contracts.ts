@@ -668,6 +668,129 @@ export interface SiteLayoutElementResponse {
   label: string;
 }
 
+export interface ProductionLineSummaryResponse {
+  lineDefinitionId: string;
+  displayName: string;
+  topologyId: string;
+  dutModelCode: string;
+  stageCount: number;
+  updatedAtUtc: string;
+}
+
+export interface ProductionLineResponse {
+  lineDefinitionId: string;
+  displayName: string;
+  topologyId: string;
+  dutModel: DutModelResponse;
+  workstations: ProductionWorkstationResponse[];
+  stages: ProductionStageResponse[];
+  externalTestProgramAdapters: ExternalTestProgramAdapterResponse[];
+  createdAtUtc: string;
+  updatedAtUtc: string;
+}
+
+export interface DutModelResponse {
+  dutModelId: string;
+  modelCode: string;
+  identityInputKey: string;
+}
+
+export interface ProductionWorkstationResponse {
+  workstationId: string;
+  displayName: string;
+  topologyStationNodeId: string;
+  topologySystemModuleId: string;
+}
+
+export interface ProductionStageResponse {
+  stageId: string;
+  sequence: number;
+  displayName: string;
+  workstationId: string;
+  flowDefinitionId: string;
+  externalTestProgramAdapterId: string | null;
+  nextStageId: string | null;
+}
+
+export interface ExternalTestProgramAdapterResponse {
+  adapterId: string;
+  displayName: string;
+  capabilityId: string;
+  commandName: string;
+  launchKind: string;
+  executable: string | null;
+  providerKey: string | null;
+  argumentTemplates: string[];
+  inputMappings: ExternalTestProgramInputMappingResponse[];
+  resultMappings: ExternalTestProgramResultMappingResponse[];
+  timeoutMilliseconds: number;
+}
+
+export interface ExternalTestProgramInputMappingResponse {
+  source: string;
+  target: string;
+}
+
+export interface ExternalTestProgramResultMappingResponse {
+  sourcePath: string;
+  targetKey: string;
+}
+
+export interface SaveProductionLineRequest {
+  lineDefinitionId: string;
+  displayName: string;
+  topologyId: string;
+  dutModel: DutModelRequest;
+  workstations: ProductionWorkstationRequest[];
+  stages: ProductionStageRequest[];
+  externalTestProgramAdapters: ExternalTestProgramAdapterRequest[];
+}
+
+export interface DutModelRequest {
+  dutModelId: string;
+  modelCode: string;
+  identityInputKey: string;
+}
+
+export interface ProductionWorkstationRequest {
+  workstationId: string;
+  displayName: string;
+  topologyStationNodeId: string;
+  topologySystemModuleId: string;
+}
+
+export interface ProductionStageRequest {
+  stageId: string;
+  sequence: number;
+  displayName: string;
+  workstationId: string;
+  flowDefinitionId: string;
+  externalTestProgramAdapterId: string | null;
+}
+
+export interface ExternalTestProgramAdapterRequest {
+  adapterId: string;
+  displayName: string;
+  capabilityId: string;
+  commandName: string;
+  executable: string | null;
+  providerKey: string | null;
+  argumentTemplates: string[];
+  inputMappings: ExternalTestProgramInputMappingRequest[];
+  resultMappings: ExternalTestProgramResultMappingRequest[];
+  timeoutMilliseconds: number;
+}
+
+export interface ExternalTestProgramInputMappingRequest {
+  source: string;
+  target: string;
+}
+
+export interface ExternalTestProgramResultMappingRequest {
+  sourcePath: string;
+  targetKey: string;
+}
+
 export interface CreateWorkspaceRequest {
   workspaceId: string;
   displayName: string;
@@ -808,7 +931,6 @@ export interface ProcessNodeResponse {
   timeoutSeconds: number | null;
   inputPayload: string | null;
   scriptLanguage: string | null;
-  scriptEditorMode: string | null;
   blocklyWorkspaceJson: string | null;
   scriptSourceCode: string | null;
   scriptSourceHash: string | null;
@@ -870,7 +992,6 @@ export interface CreateProcessNodeRequest {
   commandName: string | null;
   timeoutSeconds: number | null;
   inputPayload: string | null;
-  scriptEditorMode?: string | null;
   blocklyWorkspaceJson?: string | null;
   scriptSourceCode?: string | null;
   scriptVersion?: string | null;
@@ -890,11 +1011,14 @@ export interface ProcessBlocklyBlockDefinition {
   category: string;
   displayName: string;
   blocklyJson: Record<string, unknown>;
-  pythonCodeTemplate: string;
   isBuiltIn: boolean;
   version: number;
   createdAtUtc: string;
   updatedAtUtc: string;
+  executionMode: string;
+  runtimeActionContractSchemaVersion: string;
+  runtimeActionContract: Record<string, unknown>;
+  runtimeActionContractSha256: string;
 }
 
 export interface RegisterProcessBlocklyBlockDefinitionRequest {
@@ -902,7 +1026,8 @@ export interface RegisterProcessBlocklyBlockDefinitionRequest {
   category: string;
   displayName: string;
   blocklyJson: Record<string, unknown>;
-  pythonCodeTemplate: string;
+  runtimeActionContractSchemaVersion: string;
+  runtimeActionContract: Record<string, unknown>;
 }
 
 export interface PluginManagementOverviewResponse {

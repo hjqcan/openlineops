@@ -5,12 +5,11 @@ public sealed record ProcessBlocklyBlockDefinitionDetails(
     string Category,
     string DisplayName,
     string BlocklyJson,
-    string PythonCodeTemplate,
     bool IsBuiltIn,
     int Version,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    string ExecutionMode = ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate,
+    string ExecutionMode = ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
     string? RuntimeActionContractSchemaVersion = null,
     string? RuntimeActionContractJson = null,
     string? RuntimeActionContractSha256 = null);

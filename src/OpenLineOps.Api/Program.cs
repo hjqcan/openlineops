@@ -7,6 +7,7 @@ using OpenLineOps.Operations.Api.DependencyInjection;
 using OpenLineOps.Operations.Infra.CrossCutting.IoC.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
 using OpenLineOps.Processes.Api.DependencyInjection;
+using OpenLineOps.Production.Api.DependencyInjection;
 using OpenLineOps.Projects.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Topology.Api.DependencyInjection;
@@ -18,6 +19,7 @@ builder.Services
     .AddControllers()
     .AddOpenLineOpsRuntimeApi()
     .AddOpenLineOpsProcessesApi()
+    .AddOpenLineOpsProductionApi()
     .AddOpenLineOpsDevicesApi()
     .AddOpenLineOpsEngineeringApi()
     .AddOpenLineOpsOperationsApi()
@@ -29,6 +31,7 @@ builder.Services.AddOpenLineOpsProjectsModule();
 builder.Services.AddOpenLineOpsTopologyModule();
 builder.Services.AddOpenLineOpsRuntimeModule(builder.Configuration);
 builder.Services.AddOpenLineOpsProcessesModule(builder.Configuration);
+builder.Services.AddOpenLineOpsProductionModule();
 builder.Services.AddOpenLineOpsEngineeringModule(builder.Configuration);
 builder.Services.AddOpenLineOpsDevicesModule(builder.Configuration);
 builder.Services.AddOpenLineOpsOperationsModule(builder.Configuration);

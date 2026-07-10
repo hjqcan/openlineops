@@ -34,7 +34,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 latest.category,
                 latest.display_name,
                 latest.blockly_json,
-                latest.python_code_template,
+                latest.execution_mode,
+                latest.runtime_action_contract_schema_version,
+                latest.runtime_action_contract_json,
+                latest.runtime_action_contract_sha256,
                 latest.version,
                 latest.created_at_utc,
                 latest.updated_at_utc
@@ -75,7 +78,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -108,7 +114,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -133,7 +142,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
         string category,
         string displayName,
         string blocklyJson,
-        string pythonCodeTemplate,
+        string executionMode,
+        string runtimeActionContractSchemaVersion,
+        string runtimeActionContractJson,
+        string runtimeActionContractSha256,
         DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken = default)
     {
@@ -153,7 +165,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
             category,
             displayName,
             blocklyJson,
-            pythonCodeTemplate,
+            executionMode,
+            runtimeActionContractSchemaVersion,
+            runtimeActionContractJson,
+            runtimeActionContractSha256,
             latest?.Version + 1 ?? 1,
             latest?.CreatedAtUtc ?? recordedAtUtc,
             recordedAtUtc);
@@ -167,7 +182,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json,
+                runtime_action_contract_sha256,
                 created_at_utc,
                 updated_at_utc)
             VALUES (
@@ -176,7 +194,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 $category,
                 $display_name,
                 $blockly_json,
-                $python_code_template,
+                $execution_mode,
+                $runtime_action_contract_schema_version,
+                $runtime_action_contract_json,
+                $runtime_action_contract_sha256,
                 $created_at_utc,
                 $updated_at_utc);
             """;
@@ -185,7 +206,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
         command.Parameters.AddWithValue("$category", record.Category);
         command.Parameters.AddWithValue("$display_name", record.DisplayName);
         command.Parameters.AddWithValue("$blockly_json", record.BlocklyJson);
-        command.Parameters.AddWithValue("$python_code_template", record.PythonCodeTemplate);
+        command.Parameters.AddWithValue("$execution_mode", record.ExecutionMode);
+        command.Parameters.AddWithValue("$runtime_action_contract_schema_version", record.RuntimeActionContractSchemaVersion);
+        command.Parameters.AddWithValue("$runtime_action_contract_json", record.RuntimeActionContractJson);
+        command.Parameters.AddWithValue("$runtime_action_contract_sha256", record.RuntimeActionContractSha256);
         command.Parameters.AddWithValue("$created_at_utc", ToRoundTripString(record.CreatedAtUtc));
         command.Parameters.AddWithValue("$updated_at_utc", ToRoundTripString(record.UpdatedAtUtc));
 
@@ -223,7 +247,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                     category TEXT NOT NULL,
                     display_name TEXT NOT NULL,
                     blockly_json TEXT NOT NULL,
-                    python_code_template TEXT NOT NULL,
+                    execution_mode TEXT NOT NULL,
+                    runtime_action_contract_schema_version TEXT NOT NULL,
+                    runtime_action_contract_json TEXT NOT NULL,
+                    runtime_action_contract_sha256 TEXT NOT NULL,
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL,
                     PRIMARY KEY (block_type, version)
@@ -256,7 +283,10 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -305,9 +335,12 @@ public sealed class SqliteProcessBlocklyBlockDefinitionRepository :
             reader.GetString(2),
             reader.GetString(3),
             reader.GetString(4),
-            reader.GetInt32(5),
-            ParseDateTimeOffset(reader.GetString(6)),
-            ParseDateTimeOffset(reader.GetString(7)));
+            reader.GetString(5),
+            reader.GetString(6),
+            reader.GetString(7),
+            reader.GetInt32(8),
+            ParseDateTimeOffset(reader.GetString(9)),
+            ParseDateTimeOffset(reader.GetString(10)));
     }
 
     private static DateTimeOffset ParseDateTimeOffset(string value)

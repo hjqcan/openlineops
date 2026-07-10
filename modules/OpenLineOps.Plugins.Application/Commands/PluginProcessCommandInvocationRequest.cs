@@ -1,3 +1,5 @@
+using OpenLineOps.Plugins.Application.Discovery;
+
 namespace OpenLineOps.Plugins.Application.Commands;
 
 public sealed record PluginProcessCommandInvocationRequest(
@@ -12,4 +14,5 @@ public sealed record PluginProcessCommandInvocationRequest(
     string Capability,
     string CommandName,
     string? InputPayload,
-    int TimeoutMilliseconds);
+    int TimeoutMilliseconds,
+    PluginPackageRuntimeIdentity? PackageIdentity = null);

@@ -13,8 +13,6 @@ public sealed class PythonScriptDefinitionValidatorTests
         var node = ProcessNode.PythonScript(
             new ProcessNodeId("valid-script"),
             "Valid Script",
-            ProcessScriptEditorMode.ManualCode,
-            blocklyWorkspaceJson: null,
             sourceCode: "result = {'ok': True}",
             scriptTimeout: TimeSpan.FromSeconds(5));
 
@@ -31,8 +29,6 @@ public sealed class PythonScriptDefinitionValidatorTests
         var node = ProcessNode.PythonScript(
             new ProcessNodeId("invalid-script"),
             "Invalid Script",
-            ProcessScriptEditorMode.ManualCode,
-            blocklyWorkspaceJson: null,
             sourceCode: "if True\n    result = 1",
             scriptTimeout: TimeSpan.FromSeconds(5));
 

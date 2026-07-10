@@ -7,5 +7,6 @@ public enum ProcessNodeKind
     Decision = 2,
     Delay = 3,
     End = 4,
-    PythonScript = 5
+    PythonScript = 5,
+    Blockly = 6
 }

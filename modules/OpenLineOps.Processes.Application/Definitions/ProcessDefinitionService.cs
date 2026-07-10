@@ -276,10 +276,20 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
         }
 
         var nodeId = new ProcessNodeId(request.NodeId);
-        var scriptEditorMode = ParseScriptEditorMode(request);
-        if (scriptEditorMode.IsFailure)
+        if (nodeKind == ProcessNodeKind.Blockly
+            && !string.IsNullOrWhiteSpace(request.ScriptSourceCode))
         {
-            return scriptEditorMode.Error;
+            return ApplicationError.Validation(
+                "Processes.BlocklyScriptSourceForbidden",
+                $"Blockly node {request.NodeId} cannot contain Python source.");
+        }
+
+        if (nodeKind == ProcessNodeKind.PythonScript
+            && !string.IsNullOrWhiteSpace(request.BlocklyWorkspaceJson))
+        {
+            return ApplicationError.Validation(
+                "Processes.PythonBlocklyWorkspaceForbidden",
+                $"Python script node {request.NodeId} cannot contain a Blockly workspace.");
         }
 
         ProcessNode node = nodeKind switch
@@ -299,10 +309,16 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
             ProcessNodeKind.PythonScript => ProcessNode.PythonScript(
                 nodeId,
                 request.DisplayName,
-                scriptEditorMode.Value,
-                request.BlocklyWorkspaceJson,
                 request.ScriptSourceCode,
                 request.ScriptVersion,
+                request.TimeoutSeconds is null
+                    ? null
+                    : TimeSpan.FromSeconds(request.TimeoutSeconds.Value),
+                request.InputPayload),
+            ProcessNodeKind.Blockly => ProcessNode.Blockly(
+                nodeId,
+                request.DisplayName,
+                request.BlocklyWorkspaceJson,
                 request.TimeoutSeconds is null
                     ? null
                     : TimeSpan.FromSeconds(request.TimeoutSeconds.Value),
@@ -349,30 +365,6 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
         }
 
         return Result.Success(definition);
-    }
-
-    private static Result<ProcessScriptEditorMode?> ParseScriptEditorMode(
-        CreateProcessNodeRequest request)
-    {
-        if (!Enum.TryParse<ProcessNodeKind>(request.Kind, ignoreCase: true, out var nodeKind)
-            || nodeKind != ProcessNodeKind.PythonScript)
-        {
-            return Result.Success<ProcessScriptEditorMode?>(null);
-        }
-
-        if (string.IsNullOrWhiteSpace(request.ScriptEditorMode))
-        {
-            return Result.Success<ProcessScriptEditorMode?>(ProcessScriptEditorMode.Blockly);
-        }
-
-        return Enum.TryParse<ProcessScriptEditorMode>(
-            request.ScriptEditorMode,
-            ignoreCase: true,
-            out var editorMode)
-            ? Result.Success<ProcessScriptEditorMode?>(editorMode)
-            : Result.Failure<ProcessScriptEditorMode?>(ApplicationError.Validation(
-                "Processes.InvalidScriptEditorMode",
-                $"Process node {request.NodeId} has unsupported script editor mode {request.ScriptEditorMode}."));
     }
 
     private static ApplicationError? AddTransition(

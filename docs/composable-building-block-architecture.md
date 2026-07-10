@@ -6,7 +6,8 @@ Last updated: 2026-07-09
 
 OpenLineOps needs a project-first model that lets users create or open an
 automation project, compose a production-line structure, draw the site layout,
-author flows with Blockly, run PythonScript-backed automation, and trace every
+author flows primarily with Blockly, use explicit PythonScript nodes for advanced
+logic, and trace every
 runtime fact back to stable project assets.
 
 The user-facing terms are simple: `AutomationProject`, `Application`, `System`,
@@ -36,7 +37,7 @@ PythonScript integration, publishing, runtime, and traceability.
 | AutomationML / IEC 62714 | Plant engineering exchange includes hierarchy, semantics, geometry, kinematics, logic, communication, references, units, and containers. | SiteLayout is a spatial projection with units and references, designed for future CAD/AutomationML import and 3D metadata. |
 | Asset Administration Shell | Digital twins need standardized metamodels, APIs, security, and package formats. | Future project packages can expose AAS-like submodels for module metadata, files, simulation, documentation, and operational data. |
 | SEMI E30 GEM | Equipment automation benefits from a stable equipment communication and control model, with related standards for processing, carrier handling, and substrate tracking. | Keep equipment command/control, carrier/material movement, and traceability as explicit provider/runtime contracts instead of ad hoc scripts. |
-| Blockly | A custom block requires a block definition, a language-specific code generator, and a toolbox reference; blocks generate executable text. | Custom automation blocks are versioned contracts that generate PythonScript code or typed automation actions. |
+| Blockly | A custom block requires a block definition, a language-specific code generator, and a toolbox reference; blocks generate executable text. | OpenLineOps does not use language generators for automation blocks. Blocks are versioned Runtime Action Contracts compiled directly to typed Flow IR. |
 | OpenTAP | Test automation platforms commonly separate test steps, instruments, DUTs, result listeners, and plugins. | Test execution concepts should integrate through capability-backed process nodes and trace records, not collapse equipment, DUT, and step logic into one object. |
 
 ### Public Source Map
@@ -84,7 +85,7 @@ OpenLineOps.
 | PLCopen Motion Control standardizes motion function blocks and state machines for single-axis and multi-axis control. | Motion-oriented Blockly blocks should target contracts such as `motion.axis.move`, `motion.axis.home`, `motion.axis.stop`, and coordinated motion contracts, not vendor SDK method names. |
 | AutomationML/IEC 62714 models object-oriented plant engineering data and separates topology, geometry, kinematics, communication, and logic references. | `SiteLayout` is a spatial projection with coordinate systems, units, layers, and target references. It must not become the source of topology identity. |
 | Asset Administration Shell defines metamodel, API, security, and AASX package ideas for asset information exchange. | Project packages should be manifest-driven and extension-friendly, with room for module metadata, documentation, simulation files, CAD/3D files, provider descriptors, and security metadata. |
-| Blockly custom blocks require a block definition, code generator, and toolbox reference. | User-defined blocks must be versioned artifacts. They generate deterministic PythonScript or typed automation actions and carry target, capability, timeout, safety, and trace metadata. |
+| Blockly custom blocks require a block definition, code generator, and toolbox reference. | User-defined OpenLineOps blocks are versioned declarative artifacts. They emit deterministic typed actions and carry target, capability, timeout, safety, and trace metadata; Python templates are forbidden. |
 | NI TestStand-style systems run sequences and steps that call code modules. | OpenLineOps should not be only a sequence runner. The primary model is project, topology, visual layout, capability binding, Blockly-authored behavior, runtime session, and traceability. |
 
 This synthesis deliberately avoids making OpenLineOps an implementation of any
@@ -201,7 +202,7 @@ published snapshots, provider compatibility checks, and traceability.
 | Provider binding | Test automation plugins, device drivers, external services | Driver, simulator, plugin, adapter | `CapabilityProvider`, `DriverBinding`, `DeviceInstance` | Publish resolves every required capability to a compatible provider route. |
 | Material handling | ISA-95 material model, production traceability | Slot, group, tray, fixture, carrier | `SlotGroup`, `SlotDefinition`, `RuntimeSlotOccupancy` | Slot definition is design-time; occupancy and movement are runtime facts. |
 | Spatial projection | AutomationML geometry, future digital twin models | SiteLayout, zone, top-down element, 3D transform | `SiteLayout`, `SiteLayoutElement` | Layout references topology targets and never becomes the source of topology identity. |
-| Behavior authoring | IEC 61499, Blockly, process/test sequencers | Visual flow block, custom block, Python block | `ProcessDefinition`, `BlocklyBlockDefinition` | Blocks generate typed automation intent or governed PythonScript calls. |
+| Behavior authoring | IEC 61499, Blockly, process/test sequencers | Visual flow block, custom block, explicit Python node | `ProcessDefinition`, `BlocklyBlockDefinition` | Blockly compiles typed automation intent; PythonScript is a separate governed node. |
 | Runtime lifecycle | PackML, runtime state machines | Start, run, pause, stop, reset, recover | `RuntimeSession`, `RuntimeUnit`, `RuntimeCommand` | Runtime starts from an immutable snapshot and owns live state. |
 | Evidence and history | Test result systems, audit, traceability | Trace, artifact, alarm, operation record | `TraceRecord`, `ArtifactRecord`, `AuditEntry` | Historical facts reference immutable project, topology, process, block, and slot ids. |
 
@@ -250,7 +251,7 @@ SiteLayoutElement
 BlocklyBlockDefinition
   requires CapabilityContract?
   selects target kind policy
-  emits PythonScript source and/or typed automation action
+  emits typed automation action through a canonical contract
 
 ProcessDefinition
   references BlocklyBlockDefinition*
@@ -384,7 +385,7 @@ layout, and trace data at the same time.
 | Group | Add fixture nest, tester bank, tray row, buffer lane, or robot pick group. | `SlotGroup` or `EquipmentNode(LogicalGroup)`. | Capacity, member slots, pick/place policy, calibration/audit rules. |
 | Slot | Add DUT, carrier, fixture, tray, nest, or logical work item endpoint. | `SlotDefinition`. | Unique address, allowed material kind, enabled policy, group capacity. |
 | SiteLayout | Draw top-down site and layers. | `SiteLayout` and `SiteLayoutElement`. | Target references exist, coordinates/units/layers are valid. |
-| Blockly block | Add built-in, plugin-generated, or user-defined automation block. | `BlocklyBlockDefinition` and process node metadata. | Block version, target selector, generated Python hash, required capability. |
+| Blockly block | Add built-in, plugin-generated, or user-defined automation block. | `BlocklyBlockDefinition` and process node metadata. | Block version, canonical contract hash, target selector, required capability. |
 
 ### Example: Axis, Light, Motor
 
@@ -507,8 +508,8 @@ CapabilityContract
 - AAS justifies future package/submodel design for module metadata, documents,
   files, simulation, security, APIs, and digital-twin exchange.
 - Blockly justifies custom block registration as a first-class extension
-  contract: block definition, generator, toolbox entry, version, input/output
-  contract, target selector, and trace metadata.
+  contract: block definition, toolbox entry, exact version, canonical Runtime
+  Action Contract hash, target selector, and trace metadata.
 - OpenTAP and similar test automation platforms justify keeping test steps,
   instruments, DUTs, plugins, results, and listeners modular; OpenLineOps
   should differentiate itself by making visual topology and Blockly-first
@@ -520,13 +521,17 @@ CapabilityContract
 | --- | --- | --- |
 | AutomationProject | `AutomationProject` | Projects |
 | Application | `ProjectApplication` | Projects |
+| Production line | `ProductionLineDefinition` | Production |
+| DUT model | `DutModelDefinition` | Production |
+| Workstation | `WorkstationDefinition` bound to topology Station and Module | Production and Topology |
+| Production stage | ordered `ProcessStage` referencing a published `ProcessDefinition` | Production and Processes |
 | System | `EquipmentNode`, `AutomationModule`, `RuntimeUnit` | Topology and Runtime |
 | Driver | `DriverPackage`, `CapabilityProvider`, `DriverBinding`, `DeviceInstance` | Plugins, Devices, Topology |
 | Group | `SlotGroup` or `EquipmentNode(LogicalGroup)` | Topology |
 | Slot | `SlotDefinition`, `RuntimeSlotOccupancy` | Topology, Runtime, Traceability |
 | SiteLayout | `SiteLayout`, `SiteLayoutElement` | Topology |
 | Blockly block | `BlocklyBlockDefinition` | Processes |
-| Python code | `ProcessScriptSource`, generated action plan | Processes and Runtime |
+| Python code | `ProcessScriptSource` for explicit PythonScript nodes | Processes and Runtime |
 
 `System` remains a UI word, but it should not be a catch-all domain aggregate.
 In implementation, a system can be a topology node, a module instance, or a
@@ -558,6 +563,26 @@ Projects does not execute hardware commands, parse Blockly, or open vendor SDKs.
 ### Topology
 
 Owns composable automation structure and layout drafts.
+
+### Production
+
+Owns Application-local manufacturing/test composition above topology and
+executable flows.
+
+Aggregate:
+
+- `ProductionLineDefinition`
+
+Responsibilities:
+
+- DUT model and runtime identity input key
+- topology-bound logical workstations
+- contiguous ordered stages that reference published flows
+- external test program adapter declarations and result mappings
+- cross-context validation through Topology and compiled Flow IR application ports
+
+Production does not duplicate physical equipment, execute flows, or launch
+vendor programs directly.
 
 Aggregates:
 
@@ -613,7 +638,7 @@ Responsibilities:
 
 - Blockly workspace data
 - user-registered block definitions
-- Python code generation
+- Runtime Action Contract parsing and Flow IR generation
 - manual Python source snapshots
 - process graph validation
 - published process versions
@@ -1052,7 +1077,7 @@ Required fields:
 - semantic version
 - category
 - block definition JSON or script reference
-- Python generator
+- canonical Runtime Action Contract
 - toolbox reference
 - input contract
 - output contract
@@ -1065,8 +1090,8 @@ Required fields:
 Rules:
 
 - block definitions are versioned
-- generated Python is deterministic for the same block version and inputs
-- blocks generate automation intent or PythonScript code, not direct vendor SDK
+- Flow IR output is deterministic for the same block version, contract and inputs
+- Blockly blocks emit typed automation intent, never Python or direct vendor SDK calls
   calls
 - manual Python can still call the same runtime command API
 
@@ -1196,7 +1221,7 @@ Minimum checks:
 - layout elements reference existing targets
 - process definitions are published or publishable
 - Blockly block definitions and versions are present
-- generated Python hashes match process metadata
+- Blockly contract hashes and source maps match process metadata
 - manual Python passes syntax and policy validation
 - safety-classified actions declare timeout, cancellation, authorization, and
   interlock policy
@@ -1267,7 +1292,7 @@ Primary panes:
   plugins, traces
 - Topology Designer: nodes, modules, capabilities, bindings, slots, groups
 - Site Layout: top-down canvas, layers, references, zones, labels
-- Process Designer: Blockly-first flow editor with Python preview/manual mode
+- Process Designer: Blockly-first flow editor plus separate explicit PythonScript nodes
 - Block Catalog: built-in, plugin-generated, and user-defined blocks
 - Runtime: publish, launch, monitor, pause/resume/stop, incidents
 - Trace: session history, serial number lookup, command details, slot occupancy
@@ -1328,7 +1353,7 @@ Important gaps:
 5. Add module template and port/connection model.
 6. Extend Blockly block definitions with target selector and capability
    metadata.
-7. Make generated Python produce typed automation actions.
+7. Compile Blockly Runtime Action Contracts directly into typed Flow IR actions.
 8. Publish project snapshots with resolved provider routes.
 9. Start runtime sessions from project snapshots.
 10. Add trace enrichment for project, application, topology, slot, group,

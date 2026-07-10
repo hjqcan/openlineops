@@ -32,12 +32,14 @@ internal static class ProjectProcessSourceMapper
             cancellationToken.ThrowIfCancellationRequested();
             ProjectProcessScriptArtifactsDocument? artifacts = null;
 
-            if (string.Equals(node.Kind, "PythonScript", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(node.Kind, "PythonScript", StringComparison.Ordinal)
+                || string.Equals(node.Kind, "Blockly", StringComparison.Ordinal))
             {
                 ProjectProcessFileReference? workspaceReference = null;
                 ProjectProcessFileReference? sourceReference = null;
 
-                if (node.BlocklyWorkspaceJson is not null)
+                if (string.Equals(node.Kind, "Blockly", StringComparison.Ordinal)
+                    && node.BlocklyWorkspaceJson is not null)
                 {
                     var workspaceBytes = StrictUtf8.GetBytes(node.BlocklyWorkspaceJson);
                     var workspaceSha256 = ProjectProcessResourceFileStore.ComputeSha256(workspaceBytes);
@@ -51,7 +53,8 @@ internal static class ProjectProcessSourceMapper
                         .ConfigureAwait(false);
                 }
 
-                if (node.ScriptSourceCode is not null)
+                if (string.Equals(node.Kind, "PythonScript", StringComparison.Ordinal)
+                    && node.ScriptSourceCode is not null)
                 {
                     var sourceBytes = StrictUtf8.GetBytes(node.ScriptSourceCode);
                     var sourceSha256 = ProjectProcessResourceFileStore.ComputeSha256(sourceBytes);
@@ -65,7 +68,6 @@ internal static class ProjectProcessSourceMapper
                         scope,
                         definition.Id.Value,
                         node.NodeId,
-                        node.ScriptEditorMode ?? "Blockly",
                         sourceSha256);
                     sourceReference = await ProjectProcessResourceFileStore
                         .SaveArtifactAsync(flowDirectory, sourcePath, sourceBytes, cancellationToken)
@@ -84,7 +86,6 @@ internal static class ProjectProcessSourceMapper
                 node.CommandTimeout?.Ticks,
                 node.InputPayload,
                 node.ScriptLanguage,
-                node.ScriptEditorMode,
                 node.ScriptVersion,
                 node.ScriptTimeout?.Ticks,
                 artifacts));
@@ -162,7 +163,6 @@ internal static class ProjectProcessSourceMapper
                 node.CommandTimeoutTicks is null ? null : TimeSpan.FromTicks(node.CommandTimeoutTicks.Value),
                 node.InputPayload,
                 node.ScriptLanguage,
-                node.ScriptEditorMode,
                 workspaceJson,
                 sourceCode,
                 sourceHash,

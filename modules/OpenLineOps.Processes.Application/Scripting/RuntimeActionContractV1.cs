@@ -10,8 +10,30 @@ public static class RuntimeActionContractSchemaVersions
 public static class ProcessBlocklyBlockExecutionModes
 {
     public const string DeclarativeActionContract = "DeclarativeActionContract";
+}
 
-    public const string LegacyPythonTemplate = "LegacyPythonTemplate";
+public static class RuntimeActionTargetKinds
+{
+    public const string AutomationModule = "AutomationModule";
+    public const string EquipmentNode = "EquipmentNode";
+    public const string SlotGroup = "SlotGroup";
+    public const string Slot = "Slot";
+    public const string Dut = "Dut";
+    public const string System = "System";
+    public const string Capability = "Capability";
+    public const string Driver = "Driver";
+
+    public static IReadOnlyCollection<string> All { get; } =
+    [
+        AutomationModule,
+        EquipmentNode,
+        SlotGroup,
+        Slot,
+        Dut,
+        System,
+        Capability,
+        Driver
+    ];
 }
 
 public sealed record RuntimeActionContract(
@@ -31,10 +53,12 @@ public sealed record RuntimeActionFieldDefinition(
 public abstract record RuntimeActionEmit;
 
 public sealed record RuntimeDeviceCommandEmit(
-    string Capability,
-    string CommandName,
+    RuntimeActionValueExpression TargetKind,
+    RuntimeActionValueExpression TargetId,
+    RuntimeActionValueExpression Capability,
+    RuntimeActionValueExpression CommandName,
     RuntimeActionValueExpression Input,
-    long TimeoutMilliseconds,
+    RuntimeActionValueExpression TimeoutMilliseconds,
     int RetryLimit = 0) : RuntimeActionEmit;
 
 public sealed record RuntimeDelayEmit(

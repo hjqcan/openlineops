@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
+using OpenLineOps.Processes.Application.Scripting;
 using ApiCreateProcessDefinitionRequest = OpenLineOps.Processes.Api.Models.CreateProcessDefinitionRequest;
 using ApiCreateProcessNodeRequest = OpenLineOps.Processes.Api.Models.CreateProcessNodeRequest;
 using ApiCreateProcessTransitionRequest = OpenLineOps.Processes.Api.Models.CreateProcessTransitionRequest;
@@ -10,9 +12,10 @@ namespace OpenLineOps.Api.Tests;
 
 public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 {
-    private const string DefaultBlocklyWorkspaceJson = """{"blocks":{"languageVersion":0}}""";
+    private const string DefaultBlocklyWorkspaceJson =
+        """{"blocks":{"languageVersion":0,"blocks":[{"type":"user_shared_fixture_action","id":"application-a-fixture","fields":{"DURATION_MS":100}}]}}""";
     private const string ReplacementBlocklyWorkspaceJson =
-        """{"blocks":{"languageVersion":0,"blocks":[{"type":"user_shared_fixture_action","id":"application-b-fixture"}]}}""";
+        """{"blocks":{"languageVersion":0,"blocks":[{"type":"user_shared_fixture_action","id":"application-b-fixture","fields":{"DURATION_MS":200}}]}}""";
     private const string ReplacementPythonSource =
         "result = {'application': 'B', 'revision': 2}\n";
 
@@ -123,7 +126,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 customBlockType,
                 "Application A Fixture Action",
                 "application A fixture action v1",
-                "automation_plan.append({'application': 'A', 'revision': 1})",
                 expectedVersion: 1);
             await RegisterApplicationBlockAsync(
                 client,
@@ -132,7 +134,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 customBlockType,
                 "Application A Fixture Action V2",
                 "application A fixture action v2",
-                "automation_plan.append({'application': 'A', 'revision': 2})",
                 expectedVersion: 2);
             await RegisterApplicationBlockAsync(
                 client,
@@ -141,7 +142,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 customBlockType,
                 "Application B Fixture Action",
                 "application B fixture action",
-                "automation_plan.append({'application': 'B', 'revision': 1})",
                 expectedVersion: 1);
 
             await CreateApplicationEngineeringConfigurationAsync(
@@ -246,8 +246,12 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         }
         Assert.True(
             Directory.GetFiles(_projectDirectory, "workspace.*.blockly.json", SearchOption.AllDirectories).Length >= 2);
+        Assert.Empty(Directory.GetFiles(
+            _projectDirectory,
+            "generated.*.py",
+            SearchOption.AllDirectories));
         Assert.True(
-            Directory.GetFiles(_projectDirectory, "generated.*.py", SearchOption.AllDirectories).Length >= 2);
+            Directory.GetFiles(_projectDirectory, "source.*.py", SearchOption.AllDirectories).Length >= 2);
         Directory.Move(_projectDirectory, MovedProjectDirectory);
 
         using (var secondFactory = new WebApplicationFactory<Program>())
@@ -292,20 +296,27 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal("Application A Flow", processA.RootElement.GetProperty("displayName").GetString());
             Assert.Equal($"{processDefinitionId}@1.0.0", processA.RootElement.GetProperty("versionId").GetString());
             Assert.Equal("Published", processA.RootElement.GetProperty("status").GetString());
+            var blocklyNodeA = FindProcessNode(processA, "blockly");
+            var pythonNodeA = FindProcessNode(processA, "script");
+            Assert.Equal("Blockly", blocklyNodeA.GetProperty("kind").GetString());
+            Assert.Equal(DefaultBlocklyWorkspaceJson, blocklyNodeA.GetProperty("blocklyWorkspaceJson").GetString());
+            Assert.Equal("PythonScript", pythonNodeA.GetProperty("kind").GetString());
             Assert.Equal(
                 "result = {'application': 'A'}\n",
-                processA.RootElement.GetProperty("nodes")[1].GetProperty("scriptSourceCode").GetString());
-            Assert.Equal(DefaultBlocklyWorkspaceJson,
-                processA.RootElement.GetProperty("nodes")[1].GetProperty("blocklyWorkspaceJson").GetString());
+                pythonNodeA.GetProperty("scriptSourceCode").GetString());
             Assert.Equal("Application B Flow Replaced", processB.RootElement.GetProperty("displayName").GetString());
             Assert.Equal($"{processDefinitionId}@2.0.0", processB.RootElement.GetProperty("versionId").GetString());
             Assert.Equal("Published", processB.RootElement.GetProperty("status").GetString());
-            Assert.Equal(
-                ReplacementPythonSource,
-                processB.RootElement.GetProperty("nodes")[1].GetProperty("scriptSourceCode").GetString());
+            var blocklyNodeB = FindProcessNode(processB, "blockly");
+            var pythonNodeB = FindProcessNode(processB, "script");
+            Assert.Equal("Blockly", blocklyNodeB.GetProperty("kind").GetString());
             Assert.Equal(
                 ReplacementBlocklyWorkspaceJson,
-                processB.RootElement.GetProperty("nodes")[1].GetProperty("blocklyWorkspaceJson").GetString());
+                blocklyNodeB.GetProperty("blocklyWorkspaceJson").GetString());
+            Assert.Equal("PythonScript", pythonNodeB.GetProperty("kind").GetString());
+            Assert.Equal(
+                ReplacementPythonSource,
+                pythonNodeB.GetProperty("scriptSourceCode").GetString());
 
             using var blocksAResponse = await client.GetAsync(ProjectBlocksPath(projectId, applicationA));
             using var blocksA = await ReadJsonAsync(blocksAResponse);
@@ -330,9 +341,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal(2, customBlockA.GetProperty("version").GetInt32());
             Assert.Equal("Application A Fixture Action V2", customBlockA.GetProperty("displayName").GetString());
             Assert.Equal(
-                "application A fixture action v2",
+                "application A fixture action v2 %1 ms",
                 customBlockA.GetProperty("blocklyJson").GetProperty("message0").GetString());
-            Assert.Contains("'application': 'A'", customBlockA.GetProperty("pythonCodeTemplate").GetString());
+            AssertFixtureActionContract(customBlockA);
 
             var customBlockB = Assert.Single(
                 blocksB.RootElement.EnumerateArray(),
@@ -341,9 +352,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal(1, customBlockB.GetProperty("version").GetInt32());
             Assert.Equal("Application B Fixture Action", customBlockB.GetProperty("displayName").GetString());
             Assert.Equal(
-                "application B fixture action",
+                "application B fixture action %1 ms",
                 customBlockB.GetProperty("blocklyJson").GetProperty("message0").GetString());
-            Assert.Contains("'application': 'B'", customBlockB.GetProperty("pythonCodeTemplate").GetString());
+            AssertFixtureActionContract(customBlockB);
 
             Assert.Contains(blocksA.RootElement.EnumerateArray(), IsMoveAxisBuiltInBlock);
             Assert.Contains(blocksB.RootElement.EnumerateArray(), IsMoveAxisBuiltInBlock);
@@ -606,9 +617,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string blockType,
         string displayName,
         string message,
-        string pythonCodeTemplate,
         int expectedVersion)
     {
+        var contract = FixtureActionContractArtifact();
         using var response = await client.PostAsJsonAsync(
             ProjectBlocksPath(projectId, applicationId),
             new
@@ -619,18 +630,33 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 blocklyJson = new
                 {
                     type = blockType,
-                    message0 = message,
+                    message0 = $"{message} %1 ms",
+                    args0 = new[]
+                    {
+                        new
+                        {
+                            type = "field_number",
+                            name = "DURATION_MS",
+                            value = 100,
+                            min = 0,
+                            precision = 1
+                        }
+                    },
                     previousStatement = (string?)null,
                     nextStatement = (string?)null
                 },
-                pythonCodeTemplate
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = JsonNode.Parse(contract.CanonicalJson)
             });
         using var body = await ReadJsonAsync(response);
 
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.True(
+            response.StatusCode == HttpStatusCode.Created,
+            $"Expected custom block registration to return 201, received {(int)response.StatusCode}: {body.RootElement.GetRawText()}");
         Assert.Equal(blockType, body.RootElement.GetProperty("blockType").GetString());
         Assert.Equal(expectedVersion, body.RootElement.GetProperty("version").GetInt32());
         Assert.False(body.RootElement.GetProperty("isBuiltIn").GetBoolean());
+        AssertFixtureActionContract(body.RootElement);
     }
 
     private static async Task CreateApplicationEngineeringConfigurationAsync(
@@ -765,7 +791,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.True(File.Exists(absoluteManifestPath));
         using var manifest = JsonDocument.Parse(File.ReadAllText(absoluteManifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(3, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
 
         return new PublishedProjectRelease(relativeManifestPath, contentSha256, absoluteManifestPath);
@@ -884,6 +910,48 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             && block.GetProperty("version").GetInt32() == 1;
     }
 
+    private static JsonElement FindProcessNode(JsonDocument process, string nodeId)
+    {
+        return Assert.Single(
+            process.RootElement.GetProperty("nodes").EnumerateArray(),
+            node => node.GetProperty("nodeId").GetString() == nodeId);
+    }
+
+    private static void AssertFixtureActionContract(JsonElement block)
+    {
+        var expected = FixtureActionContractArtifact();
+        Assert.Equal(
+            ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            block.GetProperty("executionMode").GetString());
+        Assert.Equal(
+            expected.SchemaVersion,
+            block.GetProperty("runtimeActionContractSchemaVersion").GetString());
+        Assert.Equal(
+            expected.Sha256,
+            block.GetProperty("runtimeActionContractSha256").GetString());
+        Assert.True(JsonNode.DeepEquals(
+            JsonNode.Parse(expected.CanonicalJson),
+            JsonNode.Parse(block.GetProperty("runtimeActionContract").GetRawText())));
+    }
+
+    private static RuntimeActionContractCanonicalArtifact FixtureActionContractArtifact()
+    {
+        var result = new RuntimeActionContractCanonicalSerializer().Serialize(
+            new RuntimeActionContract(
+                RuntimeActionContractSchemaVersions.V1,
+                "fixture.wait",
+                new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
+                {
+                    ["DURATION_MS"] = new RuntimeActionFieldDefinition(
+                        RuntimeActionFieldType.WholeNumber,
+                        Required: true,
+                        Minimum: 0)
+                },
+                new RuntimeDelayEmit(new RuntimeActionFieldValue("DURATION_MS"))));
+        Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
+        return result.Value;
+    }
+
     private sealed record PublishedProjectRelease(
         string RelativeManifestPath,
         string ContentSha256,
@@ -909,20 +977,29 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     CommandName: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
-                    ScriptEditorMode: null,
                     BlocklyWorkspaceJson: null,
+                    ScriptSourceCode: null,
+                    ScriptVersion: null),
+                new ApiCreateProcessNodeRequest(
+                    "blockly",
+                    "Blockly",
+                    "Blockly Flow",
+                    RequiredCapability: null,
+                    CommandName: null,
+                    TimeoutSeconds: 10,
+                    InputPayload: null,
+                    BlocklyWorkspaceJson: blocklyWorkspaceJson,
                     ScriptSourceCode: null,
                     ScriptVersion: null),
                 new ApiCreateProcessNodeRequest(
                     "script",
                     "PythonScript",
-                    "Blockly Script",
+                    "Python Script",
                     RequiredCapability: null,
                     CommandName: null,
                     TimeoutSeconds: 10,
                     InputPayload: null,
-                    ScriptEditorMode: "Blockly",
-                    BlocklyWorkspaceJson: blocklyWorkspaceJson,
+                    BlocklyWorkspaceJson: null,
                     ScriptSourceCode: sourceCode,
                     ScriptVersion: "1"),
                 new ApiCreateProcessNodeRequest(
@@ -933,15 +1010,21 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     CommandName: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
-                    ScriptEditorMode: null,
                     BlocklyWorkspaceJson: null,
                     ScriptSourceCode: null,
                     ScriptVersion: null)
             ],
             [
                 new ApiCreateProcessTransitionRequest(
-                    "start-to-script",
+                    "start-to-blockly",
                     "start",
+                    "blockly",
+                    Label: null,
+                    LoopPolicy: null,
+                    MaxTraversals: null),
+                new ApiCreateProcessTransitionRequest(
+                    "blockly-to-script",
+                    "blockly",
                     "script",
                     Label: null,
                     LoopPolicy: null,

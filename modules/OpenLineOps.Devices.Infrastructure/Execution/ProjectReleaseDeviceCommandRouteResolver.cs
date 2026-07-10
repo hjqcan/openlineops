@@ -1,8 +1,6 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Engineering.Application.Persistence;
-using OpenLineOps.Plugins.Application.Capabilities;
-using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Domain.Identifiers;
@@ -17,21 +15,15 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
     private readonly IAutomationProjectRepository _projectRepository;
     private readonly IProjectReleaseArtifactStore _releaseStore;
     private readonly IProjectEngineeringConfigurationRepository _configurationRepository;
-    private readonly IPluginCapabilityInventory? _capabilityInventory;
-    private readonly IPluginDeviceCommandInventory? _commandInventory;
 
     public ProjectReleaseDeviceCommandRouteResolver(
         IAutomationProjectRepository projectRepository,
         IProjectReleaseArtifactStore releaseStore,
-        IProjectEngineeringConfigurationRepository configurationRepository,
-        IPluginCapabilityInventory? capabilityInventory = null,
-        IPluginDeviceCommandInventory? commandInventory = null)
+        IProjectEngineeringConfigurationRepository configurationRepository)
     {
         _projectRepository = projectRepository;
         _releaseStore = releaseStore;
         _configurationRepository = configurationRepository;
-        _capabilityInventory = capabilityInventory;
-        _commandInventory = commandInventory;
     }
 
     public async ValueTask<DeviceCommandRoute?> ResolveAsync(
@@ -73,9 +65,21 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
             project.ProjectPath,
             application.ProjectFilePath);
 
-        var release = await _releaseStore
-            .OpenAsync(scope, snapshot.Id.Value, snapshot.ReleaseContentSha256, cancellationToken)
-            .ConfigureAwait(false);
+        OpenedProjectReleaseArtifact? release;
+        try
+        {
+            release = await _releaseStore
+                .OpenAsync(scope, snapshot.Id.Value, snapshot.ReleaseContentSha256, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidDataException
+                                          or IOException
+                                          or UnauthorizedAccessException
+                                          or NotSupportedException)
+        {
+            return null;
+        }
+
         if (release is null
             || !string.Equals(
                 release.Metadata.ConfigurationSnapshotId,
@@ -96,6 +100,8 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         {
             return null;
         }
+
+        var topologyBinding = resolvedTopologyBindings[0];
 
         var releaseScope = new ProjectApplicationWorkspaceScope(
             release.ProjectId,
@@ -136,29 +142,63 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         }
 
         var deviceBinding = deviceBindings[0];
-        if (_commandInventory is not null)
+        if (string.Equals(topologyBinding.ProviderKind, "PluginCommand", StringComparison.OrdinalIgnoreCase))
         {
-            var command = await _commandInventory
-                .FindDeviceCommandAsync(
-                    deviceBinding.CapabilityId.Value,
-                    request.CommandName,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (command is null)
+            var packageMatches = release.Metadata.PackageDependencies
+                .Where(dependency => string.Equals(
+                                         dependency.CapabilityId,
+                                         topologyBinding.CapabilityId,
+                                         StringComparison.Ordinal)
+                                     && string.Equals(
+                                         dependency.BindingId,
+                                         topologyBinding.BindingId,
+                                         StringComparison.Ordinal)
+                                     && string.Equals(
+                                         dependency.ProviderKind,
+                                         topologyBinding.ProviderKind,
+                                         StringComparison.Ordinal)
+                                     && string.Equals(
+                                         dependency.ProviderKey,
+                                         topologyBinding.ProviderKey,
+                                         StringComparison.Ordinal))
+                .SelectMany(dependency => dependency.Commands
+                    .Where(command => string.Equals(command.Kind, "Device", StringComparison.Ordinal)
+                                      && string.Equals(
+                                          command.CapabilityId,
+                                          request.CapabilityId.Value,
+                                          StringComparison.Ordinal)
+                                      && string.Equals(
+                                          command.CommandName,
+                                          request.CommandName,
+                                          StringComparison.OrdinalIgnoreCase))
+                    .Select(command => new { Dependency = dependency, Command = command }))
+                .Take(2)
+                .ToArray();
+            if (packageMatches.Length != 1)
             {
                 return null;
             }
 
+            var packageMatch = packageMatches[0];
             return new DeviceCommandRoute(
                 new DeviceInstanceId(deviceBinding.DeviceKey),
-                new DeviceCommandDefinitionId(command.CommandDefinitionId),
-                new DeviceCapabilityId(deviceBinding.CapabilityId.Value));
+                new DeviceCommandDefinitionId(packageMatch.Command.CommandDefinitionId),
+                new DeviceCapabilityId(deviceBinding.CapabilityId.Value),
+                new DevicePluginPackageIdentity(
+                    packageMatch.Dependency.PluginId,
+                    packageMatch.Dependency.PackageVersion,
+                    packageMatch.Dependency.PackageContentSha256,
+                    packageMatch.Dependency.ManifestSha256,
+                    packageMatch.Dependency.EntryAssemblySha256,
+                    packageMatch.Dependency.ContractVersion,
+                    packageMatch.Dependency.RuntimeIdentifier,
+                    packageMatch.Dependency.AbiVersion));
         }
 
-        if (_capabilityInventory is not null
-            && !await _capabilityInventory
-                .HasCapabilityAsync(deviceBinding.CapabilityId.Value, cancellationToken)
-                .ConfigureAwait(false))
+        if (string.Equals(
+                topologyBinding.ProviderKind,
+                "ProcessCommandProvider",
+                StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }

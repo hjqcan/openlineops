@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.Json;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Processes.Application.Persistence;
+using OpenLineOps.Processes.Application.Scripting;
 
 namespace OpenLineOps.Processes.Infrastructure.Persistence;
 
@@ -80,7 +81,10 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         string category,
         string displayName,
         string blocklyJson,
-        string pythonCodeTemplate,
+        string executionMode,
+        string runtimeActionContractSchemaVersion,
+        string runtimeActionContractJson,
+        string runtimeActionContractSha256,
         DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken = default)
     {
@@ -116,7 +120,10 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
                 category,
                 displayName,
                 blocklyJson,
-                pythonCodeTemplate,
+                executionMode,
+                runtimeActionContractSchemaVersion,
+                runtimeActionContractJson,
+                runtimeActionContractSha256,
                 createdAtUtc,
                 recordedAtUtc);
             var versionPath = ProjectProcessResourcePath.GetCustomBlockVersionPath(
@@ -229,7 +236,13 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         if (string.IsNullOrWhiteSpace(document.Category)
             || string.IsNullOrWhiteSpace(document.DisplayName)
             || string.IsNullOrWhiteSpace(document.BlocklyJson)
-            || string.IsNullOrWhiteSpace(document.PythonCodeTemplate))
+            || !string.Equals(
+                document.ExecutionMode,
+                ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+                StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(document.RuntimeActionContractSchemaVersion)
+            || string.IsNullOrWhiteSpace(document.RuntimeActionContractJson)
+            || string.IsNullOrWhiteSpace(document.RuntimeActionContractSha256))
         {
             throw InvalidResource(versionPath, "required block definition content is empty");
         }
@@ -240,6 +253,27 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         }
 
         ValidateBlocklyJson(versionPath, document.BlockType, document.BlocklyJson);
+        ValidateRuntimeActionContract(versionPath, document);
+    }
+
+    private static void ValidateRuntimeActionContract(
+        string versionPath,
+        ProjectProcessBlocklyBlockVersionDocument document)
+    {
+        var serializer = new RuntimeActionContractCanonicalSerializer();
+        var contract = serializer.Deserialize(document.RuntimeActionContractJson);
+        if (contract.IsFailure)
+        {
+            throw InvalidResource(versionPath, $"contains invalid Runtime Action Contract: {contract.Error.Message}");
+        }
+
+        var artifact = serializer.Serialize(contract.Value);
+        if (artifact.IsFailure
+            || !string.Equals(artifact.Value.SchemaVersion, document.RuntimeActionContractSchemaVersion, StringComparison.Ordinal)
+            || !string.Equals(artifact.Value.Sha256, document.RuntimeActionContractSha256, StringComparison.Ordinal))
+        {
+            throw InvalidResource(versionPath, "Runtime Action Contract metadata does not match its canonical content");
+        }
     }
 
     private static void ValidateBlocklyJson(string versionPath, string blockType, string blocklyJson)
@@ -287,7 +321,10 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
             document.Category,
             document.DisplayName,
             document.BlocklyJson,
-            document.PythonCodeTemplate,
+            document.ExecutionMode,
+            document.RuntimeActionContractSchemaVersion,
+            document.RuntimeActionContractJson,
+            document.RuntimeActionContractSha256,
             document.Version,
             document.CreatedAtUtc,
             document.UpdatedAtUtc);

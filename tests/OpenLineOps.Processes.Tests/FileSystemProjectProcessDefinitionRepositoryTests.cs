@@ -5,6 +5,7 @@ using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Transitions;
+using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 
 namespace OpenLineOps.Processes.Tests;
@@ -46,15 +47,11 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         Assert.Equal("Application A Flow", restoredA.DisplayName);
         Assert.Equal(ProcessDefinitionStatus.Published, restoredA.Status);
         Assert.Equal(4, restoredA.Nodes.Count);
-        Assert.Equal(
-            "result = {'application': 'A', 'mode': 'blockly'}\n",
-            restoredA.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
+        Assert.Null(restoredA.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
         Assert.Equal(
             """{"blocks":{"languageVersion":0,"blocks":[{"type":"controls_if"}]}}""",
             restoredA.Nodes.Single(node => node.Id.Value == "blockly").BlocklyWorkspaceJson);
-        Assert.Equal(
-            ProcessScriptEditorMode.ManualCode,
-            restoredA.Nodes.Single(node => node.Id.Value == "manual").ScriptEditorMode);
+        Assert.Null(restoredA.Nodes.Single(node => node.Id.Value == "manual").BlocklyWorkspaceJson);
         Assert.Equal(
             "result = {'application': 'A', 'mode': 'manual'}\n",
             restoredA.Nodes.Single(node => node.Id.Value == "manual").ScriptSourceCode);
@@ -62,13 +59,11 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         Assert.NotNull(restoredB);
         Assert.Equal("Application B Flow", restoredB.DisplayName);
         Assert.Equal(ProcessDefinitionStatus.Draft, restoredB.Status);
-        Assert.Equal(
-            "result = {'application': 'B', 'mode': 'blockly'}\n",
-            restoredB.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
+        Assert.Null(restoredB.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
 
         Assert.Equal(2, Directory.GetFiles(_projectDirectory, "flow.json", SearchOption.AllDirectories).Length);
         Assert.Equal(2, Directory.GetFiles(_projectDirectory, "workspace.*.blockly.json", SearchOption.AllDirectories).Length);
-        Assert.Equal(2, Directory.GetFiles(_projectDirectory, "generated.*.py", SearchOption.AllDirectories).Length);
+        Assert.Empty(Directory.GetFiles(_projectDirectory, "generated.*.py", SearchOption.AllDirectories));
         Assert.Equal(2, Directory.GetFiles(_projectDirectory, "source.*.py", SearchOption.AllDirectories).Length);
     }
 
@@ -86,9 +81,9 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
                 "result = {'trusted': True}\n",
                 "result = {'manual': True}\n"));
 
-        var generatedSourcePath = Assert.Single(
-            Directory.GetFiles(_projectDirectory, "generated.*.py", SearchOption.AllDirectories));
-        await File.AppendAllTextAsync(generatedSourcePath, "# tampered\n");
+        var sourcePath = Assert.Single(
+            Directory.GetFiles(_projectDirectory, "source.*.py", SearchOption.AllDirectories));
+        await File.AppendAllTextAsync(sourcePath, "# tampered\n");
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await new FileSystemProjectProcessDefinitionRepository().GetByIdAsync(scope, definitionId));
@@ -174,13 +169,17 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
                 "Portable Process",
                 "result = {'portable': 'blockly'}\n",
                 "result = {'portable': 'manual'}\n"));
+        var contract = CreateWaitContractArtifact();
         await blockRepository.SaveNewVersionAsync(
             sourceScope,
             blockType,
             "Fixture",
             "Portable Fixture",
             $$"""{"type":"{{blockType}}","message0":"portable fixture","previousStatement":null,"nextStatement":null}""",
-            "automation_plan.append({'portable': True})",
+            ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            contract.SchemaVersion,
+            contract.CanonicalJson,
+            contract.Sha256,
             new DateTimeOffset(2026, 7, 10, 7, 0, 0, TimeSpan.Zero));
 
         var jsonPaths = Directory.GetFiles(
@@ -196,14 +195,14 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         using (var flowDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
                    Directory.GetFiles(sourceScope.ApplicationRootPath, "flow.json", SearchOption.AllDirectories)))))
         {
-            Assert.Equal(2, flowDocument.RootElement.GetProperty("formatVersion").GetInt32());
+            Assert.Equal(3, flowDocument.RootElement.GetProperty("formatVersion").GetInt32());
         }
 
         using (var blockDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
                    jsonPaths,
                    path => Path.GetFileName(path).StartsWith("version-", StringComparison.Ordinal)))))
         {
-            Assert.Equal(2, blockDocument.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(3, blockDocument.RootElement.GetProperty("schemaVersion").GetInt32());
         }
 
         CopyDirectory(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
@@ -216,9 +215,7 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
 
         Assert.NotNull(restoredProcess);
         Assert.Equal("Portable Process", restoredProcess.DisplayName);
-        Assert.Equal(
-            "result = {'portable': 'blockly'}\n",
-            restoredProcess.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
+        Assert.Null(restoredProcess.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
         Assert.Equal(
             """{"blocks":{"languageVersion":0,"blocks":[{"type":"controls_if"}]}}""",
             restoredProcess.Nodes.Single(node => node.Id.Value == "blockly").BlocklyWorkspaceJson);
@@ -227,7 +224,7 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             restoredProcess.Nodes.Single(node => node.Id.Value == "manual").ScriptSourceCode);
         Assert.NotNull(restoredBlock);
         Assert.Equal("Portable Fixture", restoredBlock.DisplayName);
-        Assert.Contains("'portable': True", restoredBlock.PythonCodeTemplate, StringComparison.Ordinal);
+        Assert.Equal(contract.Sha256, restoredBlock.RuntimeActionContractSha256);
     }
 
     [Fact]
@@ -260,10 +257,10 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             Path.Combine(scope.ApplicationRootPath, "flows"),
             Directory.GetParent(flowDirectory)!.FullName);
         Assert.StartsWith("process-process.custom-root--", Path.GetFileName(flowDirectory));
-        Assert.Equal(2, Directory.GetFiles(
+        Assert.Single(Directory.GetFiles(
             flowDirectory,
             "*.py",
-            SearchOption.AllDirectories).Length);
+            SearchOption.AllDirectories));
     }
 
     public void Dispose()
@@ -296,20 +293,15 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             new DateTimeOffset(2026, 7, 10, 4, 0, 0, TimeSpan.Zero));
 
         AddNode(definition, ProcessNode.Start(new ProcessNodeId("start"), "Start"));
-        AddNode(definition, ProcessNode.PythonScript(
+        AddNode(definition, ProcessNode.Blockly(
             new ProcessNodeId("blockly"),
             "Blockly Step",
-            ProcessScriptEditorMode.Blockly,
             """{"blocks":{"languageVersion":0,"blocks":[{"type":"controls_if"}]}}""",
-            blocklySource,
-            scriptVersion: "1",
-            scriptTimeout: TimeSpan.FromSeconds(10),
+            executionTimeout: TimeSpan.FromSeconds(10),
             inputPayload: "{\"serial\":\"SN-1\"}"));
         AddNode(definition, ProcessNode.PythonScript(
             new ProcessNodeId("manual"),
             "Manual Step",
-            ProcessScriptEditorMode.ManualCode,
-            blocklyWorkspaceJson: null,
             sourceCode: manualSource,
             scriptVersion: "2",
             scriptTimeout: TimeSpan.FromSeconds(20)));
@@ -319,6 +311,24 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         AddTransition(definition, "manual-to-end", "manual", "end");
 
         return definition;
+    }
+
+    private static RuntimeActionContractCanonicalArtifact CreateWaitContractArtifact()
+    {
+        var contract = new RuntimeActionContract(
+            RuntimeActionContractSchemaVersions.V1,
+            "fixture.wait",
+            new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
+            {
+                ["DURATION_MS"] = new(
+                    RuntimeActionFieldType.WholeNumber,
+                    Required: true,
+                    Minimum: 0)
+            },
+            new RuntimeDelayEmit(new RuntimeActionFieldValue("DURATION_MS")));
+        var result = new RuntimeActionContractCanonicalSerializer().Serialize(contract);
+        Assert.True(result.IsSuccess, result.Error.Message);
+        return result.Value;
     }
 
     private static void AddNode(ProcessDefinition definition, ProcessNode node)

@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Domain.Identifiers;
@@ -66,6 +69,11 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             processDefinitionId,
             processVersionId,
             capabilityId));
+        var packagePath = Path.Combine(_projectPath, "plugin-source");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.scanner\"}");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "scanner.dll"), "scanner-plugin-binary");
+        var packageDependency = CreatePackageDependency(packagePath, capabilityId);
 
         var releaseStore = new FileSystemProjectReleaseArtifactStore();
         var release = await releaseStore.PublishAsync(
@@ -84,10 +92,11 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                 [new ProjectReleaseCapabilityBinding(
                     capabilityId,
                     "binding.scanner",
-                    "Device",
-                    "scanner-provider")],
+                    "PluginCommand",
+                    "plugin.scanner")],
                 [new ProjectReleaseTargetReference("EquipmentNode", "station-eol")],
-                ["openlineops_device_command@1"]));
+                ["openlineops_device_command@1"],
+                [packageDependency]));
 
         var project = AutomationProject.Create(
             new ProjectId(projectId),
@@ -114,8 +123,8 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             [new SnapshotCapabilityBinding(
                 capabilityId,
                 "binding.scanner",
-                "Device",
-                "scanner-provider")],
+                "PluginCommand",
+                "plugin.scanner")],
             [new ProjectTargetReference("EquipmentNode", "station-eol")],
             ["openlineops_device_command@1"],
             Path.GetRelativePath(_projectPath, release.ManifestPath).Replace('\\', '/'),
@@ -131,7 +140,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             projectRepository,
             releaseStore,
             engineeringRepository);
-        var route = await resolver.ResolveAsync(new DeviceCommandRouteRequest(
+        var request = new DeviceCommandRouteRequest(
             "session-release",
             "step-release",
             "command-release",
@@ -142,12 +151,26 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "Scan",
             projectId,
             applicationId,
-            snapshotId));
+            snapshotId);
+        var route = await resolver.ResolveAsync(request);
 
         Assert.NotNull(route);
         Assert.Equal("scanner-01", route.DeviceInstanceId.Value);
         Assert.Equal(capabilityId, route.CapabilityId.Value);
-        Assert.Equal("device.scanner:Scan", route.CommandDefinitionId.Value);
+        Assert.Equal("device.scanner:scan.v2", route.CommandDefinitionId.Value);
+        Assert.NotNull(route.PluginPackage);
+        Assert.Equal("plugin.scanner", route.PluginPackage.PluginId);
+        Assert.Equal("2.0.0", route.PluginPackage.Version);
+        Assert.Equal(packageDependency.PackageContentSha256, route.PluginPackage.PackageContentSha256);
+
+        await File.WriteAllTextAsync(
+            Path.Combine(
+                release.ReleaseRootPath,
+                packageDependency.PackageRelativePath.Replace('/', Path.DirectorySeparatorChar),
+                "scanner.dll"),
+            "tampered-plugin-binary");
+
+        Assert.Null(await resolver.ResolveAsync(request));
     }
 
     public void Dispose()
@@ -192,5 +215,60 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             CreatedAtUtc.AddSeconds(2)).Succeeded);
 
         return project;
+    }
+
+    private static ProjectReleasePackageDependencyLock CreatePackageDependency(
+        string packagePath,
+        string capabilityId)
+    {
+        var files = Directory.EnumerateFiles(packagePath, "*", SearchOption.AllDirectories)
+            .Select(path =>
+            {
+                var bytes = File.ReadAllBytes(path);
+                return new ProjectReleasePackageFile(
+                    Path.GetRelativePath(packagePath, path).Replace('\\', '/'),
+                    bytes.LongLength,
+                    Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant());
+            })
+            .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        var canonical = new StringBuilder();
+        foreach (var file in files)
+        {
+            canonical.Append(file.RelativePath)
+                .Append('\0')
+                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append('\0')
+                .Append(file.Sha256)
+                .Append('\n');
+        }
+
+        var contentSha256 = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+        return new ProjectReleasePackageDependencyLock(
+            capabilityId,
+            "binding.scanner",
+            "PluginCommand",
+            "plugin.scanner",
+            "plugin.scanner",
+            "plugin.scanner",
+            "2.0.0",
+            contentSha256,
+            files.Single(file => file.RelativePath == "manifest.json").Sha256,
+            files.Single(file => file.RelativePath == "scanner.dll").Sha256,
+            "1.0.0",
+            "win-x64",
+            "openlineops.plugin-abi/1",
+            $"packages/{contentSha256}",
+            "manifest.json",
+            "scanner.dll",
+            [new ProjectReleasePackageCommandLock(
+                "Device",
+                "device.scanner:scan.v2",
+                capabilityId,
+                "Scan")],
+            files,
+            packagePath);
     }
 }

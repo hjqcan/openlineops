@@ -37,7 +37,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json::text,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json::text,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -71,7 +74,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json::text,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json::text,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -104,7 +110,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json::text,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json::text,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -129,7 +138,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
         string category,
         string displayName,
         string blocklyJson,
-        string pythonCodeTemplate,
+        string executionMode,
+        string runtimeActionContractSchemaVersion,
+        string runtimeActionContractJson,
+        string runtimeActionContractSha256,
         DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken = default)
     {
@@ -152,7 +164,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
             category,
             displayName,
             blocklyJson,
-            pythonCodeTemplate,
+            executionMode,
+            runtimeActionContractSchemaVersion,
+            runtimeActionContractJson,
+            runtimeActionContractSha256,
             latest?.Version + 1 ?? 1,
             latest?.CreatedAtUtc ?? recordedAtUtc,
             recordedAtUtc);
@@ -166,7 +181,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json,
+                runtime_action_contract_sha256,
                 created_at_utc,
                 updated_at_utc)
             VALUES (
@@ -175,7 +193,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 @category,
                 @display_name,
                 @blockly_json::jsonb,
-                @python_code_template,
+                @execution_mode,
+                @runtime_action_contract_schema_version,
+                @runtime_action_contract_json::jsonb,
+                @runtime_action_contract_sha256,
                 @created_at_utc,
                 @updated_at_utc);
             """;
@@ -184,7 +205,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
         command.Parameters.AddWithValue("category", record.Category);
         command.Parameters.AddWithValue("display_name", record.DisplayName);
         command.Parameters.AddWithValue("blockly_json", record.BlocklyJson);
-        command.Parameters.AddWithValue("python_code_template", record.PythonCodeTemplate);
+        command.Parameters.AddWithValue("execution_mode", record.ExecutionMode);
+        command.Parameters.AddWithValue("runtime_action_contract_schema_version", record.RuntimeActionContractSchemaVersion);
+        command.Parameters.AddWithValue("runtime_action_contract_json", record.RuntimeActionContractJson);
+        command.Parameters.AddWithValue("runtime_action_contract_sha256", record.RuntimeActionContractSha256);
         command.Parameters.AddWithValue("created_at_utc", record.CreatedAtUtc);
         command.Parameters.AddWithValue("updated_at_utc", record.UpdatedAtUtc);
 
@@ -220,7 +244,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                     category text NOT NULL,
                     display_name text NOT NULL,
                     blockly_json jsonb NOT NULL,
-                    python_code_template text NOT NULL,
+                    execution_mode text NOT NULL,
+                    runtime_action_contract_schema_version text NOT NULL,
+                    runtime_action_contract_json jsonb NOT NULL,
+                    runtime_action_contract_sha256 text NOT NULL,
                     created_at_utc timestamptz NOT NULL,
                     updated_at_utc timestamptz NOT NULL,
                     PRIMARY KEY (block_type, version)
@@ -253,7 +280,10 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
                 category,
                 display_name,
                 blockly_json::text,
-                python_code_template,
+                execution_mode,
+                runtime_action_contract_schema_version,
+                runtime_action_contract_json::text,
+                runtime_action_contract_sha256,
                 version,
                 created_at_utc,
                 updated_at_utc
@@ -279,9 +309,12 @@ public sealed class PostgresProcessBlocklyBlockDefinitionRepository :
             reader.GetString(2),
             reader.GetString(3),
             reader.GetString(4),
-            reader.GetInt32(5),
-            reader.GetFieldValue<DateTimeOffset>(6),
-            reader.GetFieldValue<DateTimeOffset>(7));
+            reader.GetString(5),
+            reader.GetString(6),
+            reader.GetString(7),
+            reader.GetInt32(8),
+            reader.GetFieldValue<DateTimeOffset>(9),
+            reader.GetFieldValue<DateTimeOffset>(10));
     }
 
     public void Dispose()

@@ -8,4 +8,5 @@ public sealed record DeviceCommandExecutionRequest(
     DeviceCapabilityId CapabilityId,
     string CommandName,
     string? InputPayload,
-    TimeSpan Timeout);
+    TimeSpan Timeout,
+    DevicePluginPackageIdentity? PluginPackage = null);

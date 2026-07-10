@@ -16,7 +16,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
         TimeSpan? commandTimeout,
         string? inputPayload,
         string? scriptLanguage,
-        ProcessScriptEditorMode? scriptEditorMode,
         string? blocklyWorkspaceJson,
         string? scriptSourceCode,
         string? scriptSourceHash,
@@ -31,7 +30,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
         CommandTimeout = commandTimeout;
         InputPayload = NormalizeOptional(inputPayload);
         ScriptLanguage = NormalizeOptional(scriptLanguage);
-        ScriptEditorMode = scriptEditorMode;
         BlocklyWorkspaceJson = NormalizeOptional(blocklyWorkspaceJson);
         ScriptSourceCode = NormalizeOptionalPreservingContent(scriptSourceCode);
         ScriptSourceHash = NormalizeOptional(scriptSourceHash);
@@ -53,8 +51,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
 
     public string? ScriptLanguage { get; }
 
-    public ProcessScriptEditorMode? ScriptEditorMode { get; }
-
     public string? BlocklyWorkspaceJson { get; }
 
     public string? ScriptSourceCode { get; }
@@ -69,6 +65,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
 
     public bool IsPythonScript => Kind == ProcessNodeKind.PythonScript;
 
+    public bool IsBlockly => Kind == ProcessNodeKind.Blockly;
+
     public static ProcessNode Start(ProcessNodeId id, string displayName)
     {
         return new ProcessNode(
@@ -80,7 +78,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout: null,
             inputPayload: null,
             scriptLanguage: null,
-            scriptEditorMode: null,
             blocklyWorkspaceJson: null,
             scriptSourceCode: null,
             scriptSourceHash: null,
@@ -105,7 +102,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout,
             inputPayload,
             scriptLanguage: null,
-            scriptEditorMode: null,
             blocklyWorkspaceJson: null,
             scriptSourceCode: null,
             scriptSourceHash: null,
@@ -116,8 +112,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
     public static ProcessNode PythonScript(
         ProcessNodeId id,
         string displayName,
-        ProcessScriptEditorMode? editorMode,
-        string? blocklyWorkspaceJson,
         string? sourceCode,
         string? scriptVersion = null,
         TimeSpan? scriptTimeout = null,
@@ -134,14 +128,36 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout: null,
             inputPayload: inputPayload,
             scriptLanguage: "Python",
-            scriptEditorMode: editorMode,
-            blocklyWorkspaceJson: blocklyWorkspaceJson,
+            blocklyWorkspaceJson: null,
             scriptSourceCode: normalizedSourceCode,
             scriptSourceHash: normalizedSourceCode is null
                 ? null
                 : ComputeSha256(normalizedSourceCode),
             scriptVersion: scriptVersion ?? "1",
             scriptTimeout: scriptTimeout);
+    }
+
+    public static ProcessNode Blockly(
+        ProcessNodeId id,
+        string displayName,
+        string? workspaceJson,
+        TimeSpan? executionTimeout = null,
+        string? inputPayload = null)
+    {
+        return new ProcessNode(
+            id,
+            ProcessNodeKind.Blockly,
+            displayName,
+            requiredCapability: null,
+            commandName: null,
+            commandTimeout: executionTimeout,
+            inputPayload: inputPayload,
+            scriptLanguage: null,
+            blocklyWorkspaceJson: workspaceJson,
+            scriptSourceCode: null,
+            scriptSourceHash: null,
+            scriptVersion: null,
+            scriptTimeout: null);
     }
 
     public static ProcessNode Decision(ProcessNodeId id, string displayName)
@@ -155,7 +171,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout: null,
             inputPayload: null,
             scriptLanguage: null,
-            scriptEditorMode: null,
             blocklyWorkspaceJson: null,
             scriptSourceCode: null,
             scriptSourceHash: null,
@@ -174,7 +189,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout: null,
             inputPayload: null,
             scriptLanguage: null,
-            scriptEditorMode: null,
             blocklyWorkspaceJson: null,
             scriptSourceCode: null,
             scriptSourceHash: null,
@@ -193,7 +207,6 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             commandTimeout: null,
             inputPayload: null,
             scriptLanguage: null,
-            scriptEditorMode: null,
             blocklyWorkspaceJson: null,
             scriptSourceCode: null,
             scriptSourceHash: null,

@@ -23,6 +23,16 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
         AddRequiredStringIssue(issues, manifest.Version, "Plugin.VersionRequired", "Plugin version is required.");
         AddRequiredStringIssue(issues, manifest.EntryAssembly, "Plugin.EntryAssemblyRequired", "Plugin entry assembly is required.");
         AddRequiredStringIssue(issues, manifest.EntryType, "Plugin.EntryTypeRequired", "Plugin entry type is required.");
+        AddRequiredStringIssue(
+            issues,
+            manifest.RuntimeIdentifier,
+            "Plugin.RuntimeIdentifierRequired",
+            "Plugin runtime identifier is required.");
+        AddRequiredStringIssue(
+            issues,
+            manifest.AbiVersion,
+            "Plugin.AbiVersionRequired",
+            "Plugin ABI version is required.");
 
         if (!Enum.IsDefined(manifest.Kind))
         {

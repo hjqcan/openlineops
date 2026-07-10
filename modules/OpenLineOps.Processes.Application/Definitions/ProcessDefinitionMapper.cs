@@ -71,7 +71,6 @@ public static class ProcessDefinitionMapper
                 : Convert.ToInt32(node.CommandTimeout.Value.TotalSeconds),
             node.InputPayload,
             node.ScriptLanguage,
-            node.ScriptEditorMode?.ToString(),
             node.BlocklyWorkspaceJson,
             node.ScriptSourceCode,
             node.ScriptSourceHash,

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -84,6 +85,11 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     sourceTree,
                     files,
                     sourceApplicationRelativePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await CopyPackagesAsync(
+                    stagingRootPath,
+                    normalizedMetadata.PackageDependencies,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -211,6 +217,80 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .ToArray();
     }
 
+    private static async ValueTask CopyPackagesAsync(
+        string releaseRootPath,
+        IReadOnlyCollection<ProjectReleasePackageDependencyLock> dependencies,
+        CancellationToken cancellationToken)
+    {
+        foreach (var dependency in dependencies
+                     .GroupBy(item => item.PackageContentSha256, StringComparer.Ordinal)
+                     .Select(group => group.First())
+                     .OrderBy(item => item.PackageContentSha256, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(dependency.SourcePackagePath))
+            {
+                throw new ArgumentException(
+                    $"Package dependency {dependency.PackageId} does not contain a source package path.",
+                    nameof(dependencies));
+            }
+
+            var sourcePackagePath = Path.GetFullPath(dependency.SourcePackagePath);
+            var sourceTree = InspectFileTree(sourcePackagePath);
+            var expectedFiles = dependency.Files
+                .Select(file => file.RelativePath)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            if (!sourceTree.Files.SequenceEqual(expectedFiles, StringComparer.Ordinal))
+            {
+                throw new IOException(
+                    $"Plugin package {dependency.PackageId} changed before it could be frozen into the release.");
+            }
+
+            var targetPackagePath = ProjectReleaseArtifactPath.ResolveRelativePath(
+                releaseRootPath,
+                dependency.PackageRelativePath);
+            Directory.CreateDirectory(targetPackagePath);
+            foreach (var file in dependency.Files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var sourcePath = ProjectReleaseArtifactPath.ResolveRelativePath(sourcePackagePath, file.RelativePath);
+                var targetPath = ProjectReleaseArtifactPath.ResolveRelativePath(targetPackagePath, file.RelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+
+                await using (var sourceStream = new FileStream(
+                                 sourcePath,
+                                 FileMode.Open,
+                                 FileAccess.Read,
+                                 FileShare.Read,
+                                 FileBufferSize,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await using (var targetStream = new FileStream(
+                                 targetPath,
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None,
+                                 FileBufferSize,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    await sourceStream.CopyToAsync(targetStream, cancellationToken).ConfigureAwait(false);
+                    await targetStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                var targetInfo = new FileInfo(targetPath);
+                var targetSha256 = await ComputeFileSha256Async(targetPath, cancellationToken).ConfigureAwait(false);
+                var sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken).ConfigureAwait(false);
+                if (targetInfo.Length != file.SizeBytes
+                    || !string.Equals(targetSha256, file.Sha256, StringComparison.Ordinal)
+                    || !string.Equals(sourceSha256, file.Sha256, StringComparison.Ordinal))
+                {
+                    throw new IOException(
+                        $"Plugin package {dependency.PackageId} file '{file.RelativePath}' changed while it was being frozen.");
+                }
+            }
+        }
+    }
+
     private static async ValueTask VerifySourceUnchangedAsync(
         string sourceApplicationPath,
         FileTreeSnapshot initialTree,
@@ -293,7 +373,10 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         var releaseTree = InspectFileTree(releaseRootPath);
         var expectedReleaseFiles = manifest.Files
             .Select(file => $"source/{file.RelativePath}")
+            .Concat(normalizedMetadata.PackageDependencies.SelectMany(dependency =>
+                dependency.Files.Select(file => $"{dependency.PackageRelativePath}/{file.RelativePath}")))
             .Append(ProjectReleaseArtifactManifest.FileName)
+            .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
         if (!releaseTree.Files.SequenceEqual(expectedReleaseFiles, StringComparer.Ordinal))
@@ -335,6 +418,41 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             if (!string.Equals(actualSha256, file.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 throw InvalidRelease(manifestPath, $"source file '{file.RelativePath}' SHA-256 does not match");
+            }
+        }
+
+        foreach (var dependency in normalizedMetadata.PackageDependencies)
+        {
+            var packageRootPath = ProjectReleaseArtifactPath.ResolveRelativePath(
+                releaseRootPath,
+                dependency.PackageRelativePath);
+            if (!Directory.Exists(packageRootPath))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"plugin package {dependency.PackageId} content directory is missing");
+            }
+
+            foreach (var file in dependency.Files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var path = ProjectReleaseArtifactPath.ResolveRelativePath(packageRootPath, file.RelativePath);
+                if (!File.Exists(path))
+                {
+                    throw InvalidRelease(
+                        manifestPath,
+                        $"plugin package {dependency.PackageId} file '{file.RelativePath}' is missing");
+                }
+
+                var fileInfo = new FileInfo(path);
+                var actualSha256 = await ComputeFileSha256Async(path, cancellationToken).ConfigureAwait(false);
+                if (fileInfo.Length != file.SizeBytes
+                    || !string.Equals(actualSha256, file.Sha256, StringComparison.Ordinal))
+                {
+                    throw InvalidRelease(
+                        manifestPath,
+                        $"plugin package {dependency.PackageId} file '{file.RelativePath}' integrity does not match");
+                }
             }
         }
 
@@ -494,6 +612,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
 
         var layoutIds = NormalizeIdentifiers(metadata.LayoutIds, nameof(metadata.LayoutIds));
         var blockVersionIds = NormalizeIdentifiers(metadata.BlockVersionIds, nameof(metadata.BlockVersionIds));
+        var packageDependencies = NormalizePackageDependencies(metadata.PackageDependencies);
         var capabilityBindings = (metadata.CapabilityBindings
                 ?? throw new ArgumentException("CapabilityBindings collection is required.", nameof(metadata)))
             .Select(binding => binding is null
@@ -522,6 +641,16 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .ToArray();
 
         var flowIr = NormalizeFlowIr(metadata);
+        if (packageDependencies.Any(dependency => capabilityBindings.Count(binding =>
+                string.Equals(dependency.CapabilityId, binding.CapabilityId, StringComparison.Ordinal)
+                && string.Equals(dependency.BindingId, binding.BindingId, StringComparison.Ordinal)
+                && string.Equals(dependency.ProviderKind, binding.ProviderKind, StringComparison.Ordinal)
+                && string.Equals(dependency.ProviderKey, binding.ProviderKey, StringComparison.Ordinal)) != 1))
+        {
+            throw new ArgumentException(
+                "Every package dependency lock must match exactly one capability binding.",
+                nameof(metadata));
+        }
 
         return new ProjectReleaseSourceMetadata(
             RequireValue(metadata.TopologyId, nameof(metadata.TopologyId)),
@@ -534,7 +663,227 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             RequireValue(metadata.ConfigurationSnapshotId, nameof(metadata.ConfigurationSnapshotId)),
             capabilityBindings,
             targetReferences,
-            blockVersionIds);
+            blockVersionIds,
+            packageDependencies);
+    }
+
+    private static ProjectReleasePackageDependencyLock[] NormalizePackageDependencies(
+        IReadOnlyCollection<ProjectReleasePackageDependencyLock>? dependencies)
+    {
+        if (dependencies is null)
+        {
+            throw new ArgumentException("PackageDependencies collection is required.", nameof(dependencies));
+        }
+
+        var normalized = dependencies.Select(dependency =>
+        {
+            ArgumentNullException.ThrowIfNull(dependency);
+            var packageContentSha256 = NormalizeSha256(
+                dependency.PackageContentSha256,
+                nameof(dependency.PackageContentSha256));
+            var manifestSha256 = NormalizeSha256(
+                dependency.ManifestSha256,
+                nameof(dependency.ManifestSha256));
+            var entryAssemblySha256 = NormalizeSha256(
+                dependency.EntryAssemblySha256,
+                nameof(dependency.EntryAssemblySha256));
+            var packageRelativePath = RequireValue(
+                dependency.PackageRelativePath,
+                nameof(dependency.PackageRelativePath));
+            if (!string.Equals(
+                    packageRelativePath,
+                    $"packages/{packageContentSha256}",
+                    StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "PackageRelativePath must be the content-addressed packages/<package SHA-256> path.",
+                    nameof(dependencies));
+            }
+
+            var commands = (dependency.Commands
+                    ?? throw new ArgumentException("Package dependency commands are required.", nameof(dependencies)))
+                .Select(command => command is null
+                    ? throw new ArgumentException("Package dependency commands cannot contain null.", nameof(dependencies))
+                    : new ProjectReleasePackageCommandLock(
+                        RequireValue(command.Kind, nameof(command.Kind)),
+                        RequireValue(command.CommandDefinitionId, nameof(command.CommandDefinitionId)),
+                        RequireValue(command.CapabilityId, nameof(command.CapabilityId)),
+                        RequireValue(command.CommandName, nameof(command.CommandName))))
+                .Distinct()
+                .OrderBy(command => command.Kind, StringComparer.Ordinal)
+                .ThenBy(command => command.CommandDefinitionId, StringComparer.Ordinal)
+                .ToArray();
+            if (commands.Length == 0)
+            {
+                throw new ArgumentException("Package dependency must lock at least one command.", nameof(dependencies));
+            }
+
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var files = (dependency.Files
+                    ?? throw new ArgumentException("Package dependency files are required.", nameof(dependencies)))
+                .Select(file =>
+                {
+                    if (file is null)
+                    {
+                        throw new ArgumentException("Package dependency files cannot contain null.", nameof(dependencies));
+                    }
+
+                    var relativePath = NormalizePackageFilePath(file.RelativePath);
+                    if (!paths.Add(relativePath))
+                    {
+                        throw new ArgumentException(
+                            $"Package file path '{relativePath}' is duplicated.",
+                            nameof(dependencies));
+                    }
+
+                    if (file.SizeBytes < 0)
+                    {
+                        throw new ArgumentException(
+                            $"Package file '{relativePath}' has a negative size.",
+                            nameof(dependencies));
+                    }
+
+                    return new ProjectReleasePackageFile(
+                        relativePath,
+                        file.SizeBytes,
+                        NormalizeSha256(file.Sha256, $"package file '{relativePath}' SHA-256"));
+                })
+                .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+                .ToArray();
+            if (files.Length == 0)
+            {
+                throw new ArgumentException("Package dependency must contain at least one file.", nameof(dependencies));
+            }
+
+            var computedContentSha256 = ComputePackageContentSha256(files);
+            if (!string.Equals(computedContentSha256, packageContentSha256, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "PackageContentSha256 does not match the canonical package file inventory.",
+                    nameof(dependencies));
+            }
+
+            var manifestRelativePath = NormalizePackageFilePath(dependency.ManifestRelativePath);
+            var entryAssemblyRelativePath = NormalizePackageFilePath(dependency.EntryAssemblyRelativePath);
+            var manifestFile = files.SingleOrDefault(file => string.Equals(
+                file.RelativePath,
+                manifestRelativePath,
+                StringComparison.Ordinal));
+            var entryAssemblyFile = files.SingleOrDefault(file => string.Equals(
+                file.RelativePath,
+                entryAssemblyRelativePath,
+                StringComparison.Ordinal));
+            if (manifestFile is null || !string.Equals(manifestFile.Sha256, manifestSha256, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "ManifestSha256 does not match the locked manifest file.",
+                    nameof(dependencies));
+            }
+
+            if (entryAssemblyFile is null
+                || !string.Equals(entryAssemblyFile.Sha256, entryAssemblySha256, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "EntryAssemblySha256 does not match the locked entry assembly file.",
+                    nameof(dependencies));
+            }
+
+            return new ProjectReleasePackageDependencyLock(
+                RequireValue(dependency.CapabilityId, nameof(dependency.CapabilityId)),
+                RequireValue(dependency.BindingId, nameof(dependency.BindingId)),
+                RequireValue(dependency.ProviderKind, nameof(dependency.ProviderKind)),
+                RequireValue(dependency.ProviderKey, nameof(dependency.ProviderKey)),
+                RequireValue(dependency.PackageId, nameof(dependency.PackageId)),
+                RequireValue(dependency.PluginId, nameof(dependency.PluginId)),
+                RequireValue(dependency.PackageVersion, nameof(dependency.PackageVersion)),
+                packageContentSha256,
+                manifestSha256,
+                entryAssemblySha256,
+                RequireValue(dependency.ContractVersion, nameof(dependency.ContractVersion)),
+                RequireValue(dependency.RuntimeIdentifier, nameof(dependency.RuntimeIdentifier)),
+                RequireValue(dependency.AbiVersion, nameof(dependency.AbiVersion)),
+                packageRelativePath,
+                manifestRelativePath,
+                entryAssemblyRelativePath,
+                commands,
+                files,
+                string.IsNullOrWhiteSpace(dependency.SourcePackagePath)
+                    ? null
+                    : Path.GetFullPath(dependency.SourcePackagePath));
+        })
+        .OrderBy(dependency => dependency.CapabilityId, StringComparer.Ordinal)
+        .ThenBy(dependency => dependency.BindingId, StringComparer.Ordinal)
+        .ToArray();
+
+        if (normalized
+            .GroupBy(dependency => $"{dependency.CapabilityId}\u001f{dependency.BindingId}", StringComparer.Ordinal)
+            .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "Package dependency capability/binding identities must be unique.",
+                nameof(dependencies));
+        }
+
+        foreach (var contentGroup in normalized.GroupBy(
+                     dependency => dependency.PackageContentSha256,
+                     StringComparer.Ordinal))
+        {
+            var canonicalFiles = contentGroup.First().Files;
+            if (contentGroup.Skip(1).Any(item => !item.Files.SequenceEqual(canonicalFiles)))
+            {
+                throw new ArgumentException(
+                    "Dependencies sharing a package content SHA-256 must have the same file inventory.",
+                    nameof(dependencies));
+            }
+        }
+
+        return normalized;
+    }
+
+    private static string ComputePackageContentSha256(
+        IReadOnlyCollection<ProjectReleasePackageFile> files)
+    {
+        var canonical = new StringBuilder();
+        foreach (var file in files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        {
+            canonical.Append(file.RelativePath)
+                .Append('\0')
+                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append('\0')
+                .Append(file.Sha256)
+                .Append('\n');
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
+            .ToLowerInvariant();
+    }
+
+    private static string NormalizePackageFilePath(string value)
+    {
+        var relativePath = RequireValue(value, "package file relative path");
+        if (Path.IsPathRooted(relativePath)
+            || relativePath.Contains('\\', StringComparison.Ordinal)
+            || relativePath.Any(char.IsControl)
+            || relativePath.Split('/').Any(segment => segment is "" or "." or ".."))
+        {
+            throw new ArgumentException(
+                $"Package file path '{relativePath}' is not canonical.",
+                nameof(value));
+        }
+
+        return relativePath;
+    }
+
+    private static string NormalizeSha256(string value, string fieldName)
+    {
+        var sha256 = RequireValue(value, fieldName);
+        ValidateSha256(sha256, fieldName, argumentError: true);
+        if (!string.Equals(sha256, sha256.ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException($"{fieldName} must be lowercase.", fieldName);
+        }
+
+        return sha256;
     }
 
     private static (string SchemaVersion, string Sha256, string CanonicalJson) NormalizeFlowIr(

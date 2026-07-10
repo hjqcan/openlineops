@@ -14,7 +14,7 @@ internal sealed record ProjectProcessFlowDocument(
     ProjectProcessNodeDocument[] Nodes,
     ProjectProcessTransitionDocument[] Transitions)
 {
-    public const int CurrentFormatVersion = 2;
+    public const int CurrentFormatVersion = 3;
 
     public const string Kind = "OpenLineOps.ProcessFlow";
 }
@@ -28,7 +28,6 @@ internal sealed record ProjectProcessNodeDocument(
     long? CommandTimeoutTicks,
     string? InputPayload,
     string? ScriptLanguage,
-    string? ScriptEditorMode,
     string? ScriptVersion,
     long? ScriptTimeoutTicks,
     ProjectProcessScriptArtifactsDocument? ScriptArtifacts);

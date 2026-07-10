@@ -18,7 +18,10 @@ public interface IProcessBlocklyBlockDefinitionRepository
         string category,
         string displayName,
         string blocklyJson,
-        string pythonCodeTemplate,
+        string executionMode,
+        string runtimeActionContractSchemaVersion,
+        string runtimeActionContractJson,
+        string runtimeActionContractSha256,
         DateTimeOffset recordedAtUtc,
         CancellationToken cancellationToken = default);
 }

@@ -184,7 +184,6 @@ public sealed class ProcessDefinitionsController : ControllerBase
                     node.CommandName,
                     node.TimeoutSeconds,
                     node.InputPayload,
-                    node.ScriptEditorMode,
                     node.BlocklyWorkspaceJson,
                     node.ScriptSourceCode,
                     node.ScriptVersion))
@@ -235,7 +234,6 @@ public sealed class ProcessDefinitionsController : ControllerBase
             node.TimeoutSeconds,
             node.InputPayload,
             node.ScriptLanguage,
-            node.ScriptEditorMode,
             node.BlocklyWorkspaceJson,
             node.ScriptSourceCode,
             node.ScriptSourceHash,

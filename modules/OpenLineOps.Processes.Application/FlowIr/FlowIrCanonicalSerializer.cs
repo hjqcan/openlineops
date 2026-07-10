@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Runtime.Application.Scripting;
 
 namespace OpenLineOps.Processes.Application.FlowIr;
@@ -99,6 +100,9 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 .ToImmutableArray(),
             Transitions = document.Transitions
                 .OrderBy(transition => transition.TransitionId, StringComparer.Ordinal)
+                .ToImmutableArray(),
+            BlockDependencies = document.BlockDependencies
+                .OrderBy(dependency => dependency.BlockType, StringComparer.Ordinal)
                 .ToImmutableArray()
         };
     }
@@ -126,6 +130,32 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         if (document.Transitions.IsDefault)
         {
             return Invalid("Transitions collection is required.");
+        }
+
+        if (document.BlockDependencies.IsDefault)
+        {
+            return Invalid("Block dependencies collection is required.");
+        }
+
+        var dependencyTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var dependency in document.BlockDependencies)
+        {
+            if (dependency is null
+                || !IsCanonicalValue(dependency.BlockType)
+                || dependency.Version <= 0
+                || !string.Equals(
+                    dependency.ContractSchemaVersion,
+                    RuntimeActionContractSchemaVersions.V1,
+                    StringComparison.Ordinal)
+                || !IsSha256(dependency.ContractSha256))
+            {
+                return Invalid("Every Blockly dependency must have a canonical type, positive version, supported contract schema, and SHA-256 hash.");
+            }
+
+            if (!dependencyTypes.Add(dependency.BlockType))
+            {
+                return Invalid($"Blockly dependency '{dependency.BlockType}' is duplicated.");
+            }
         }
 
         var nodesById = new Dictionary<string, FlowIrNode>(StringComparer.Ordinal);
@@ -173,9 +203,21 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
             return Invalid($"Start node '{document.StartNodeId}' is missing or is not a Start node.");
         }
 
-        if (!document.Nodes.Any(node => node.Kind is FlowIrNodeKind.Command or FlowIrNodeKind.PythonScript))
+        if (!document.Nodes.Any(node => node.Kind is FlowIrNodeKind.Command
+                or FlowIrNodeKind.PythonScript
+                or FlowIrNodeKind.Blockly))
         {
             return Invalid("Flow IR must contain at least one executable action node.");
+        }
+
+        var blockActionHashes = document.Nodes
+            .Where(node => node.Kind == FlowIrNodeKind.Blockly)
+            .SelectMany(node => node.Actions)
+            .Select(action => action.Source.ContentHash)
+            .ToHashSet(StringComparer.Ordinal);
+        if (document.BlockDependencies.Any(dependency => !blockActionHashes.Contains(dependency.ContractSha256)))
+        {
+            return Invalid("Flow IR contains a Blockly dependency that is not used by a compiled Blockly action.");
         }
 
         var transitionIds = new HashSet<string>(StringComparer.Ordinal);
@@ -263,7 +305,9 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static ApplicationError? ValidateNode(FlowIrDocument document, FlowIrNode node)
     {
-        var isExecutable = node.Kind is FlowIrNodeKind.Command or FlowIrNodeKind.PythonScript;
+        var isExecutable = node.Kind is FlowIrNodeKind.Command
+            or FlowIrNodeKind.PythonScript
+            or FlowIrNodeKind.Blockly;
         if (!isExecutable)
         {
             return node.Actions.Length == 0 && node.Source.ContentHash is null
@@ -271,36 +315,54 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 : Invalid($"Routing node {node.NodeId} cannot contain actions or a content hash.");
         }
 
-        if (node.Actions.Length != 1)
+        if (node.Kind != FlowIrNodeKind.Blockly && node.Actions.Length != 1)
         {
             return Invalid($"Executable node {node.NodeId} must contain exactly one action in Flow IR v1.");
         }
 
-        var action = node.Actions[0];
-        if (action is null)
+        if (node.Kind == FlowIrNodeKind.Blockly && node.Actions.IsDefaultOrEmpty)
         {
-            return Invalid($"Executable node {node.NodeId} cannot contain a null action.");
+            return Invalid($"Blockly node {node.NodeId} must contain at least one statically compiled action.");
         }
 
-        if (action.Target is null
-            || action.Execution is null
-            || action.Source is null
-            || !string.Equals(action.ActionId, $"{node.NodeId}:action:1", StringComparison.Ordinal)
-            || !string.Equals(action.DisplayName, node.DisplayName, StringComparison.Ordinal)
-            || !IsCanonicalValue(action.RequiredCapability)
-            || !IsCanonicalValue(action.CommandName)
+        for (var index = 0; index < node.Actions.Length; index += 1)
+        {
+            var compiledAction = node.Actions[index];
+            if (compiledAction is null
+                || compiledAction.Target is null
+                || compiledAction.Execution is null
+                || compiledAction.Source is null
+                || !string.Equals(compiledAction.ActionId, $"{node.NodeId}:action:{index + 1}", StringComparison.Ordinal)
+                || !IsCanonicalValue(compiledAction.DisplayName)
+                || !IsCanonicalValue(compiledAction.RequiredCapability)
+                || !IsCanonicalValue(compiledAction.CommandName)
+                || !Enum.IsDefined(compiledAction.Target.Kind)
+                || !IsCanonicalValue(compiledAction.Target.Reference))
+            {
+                return Invalid($"Action {index + 1} on node {node.NodeId} has invalid identity, command, or target metadata.");
+            }
+
+            if (compiledAction.Execution.TimeoutMilliseconds <= 0
+                || compiledAction.Execution.TimeoutMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond
+                || compiledAction.Execution.RetryLimit != 0
+                || compiledAction.Execution.CancellationMode != FlowIrCancellationMode.Cooperative)
+            {
+                return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by Flow IR v1.");
+            }
+
+        }
+
+        if (node.Kind == FlowIrNodeKind.Blockly)
+        {
+            return ValidateBlocklyNode(document, node);
+        }
+
+        var action = node.Actions[0];
+        if (!string.Equals(action.DisplayName, node.DisplayName, StringComparison.Ordinal)
             || action.Target.Kind != FlowIrTargetReferenceKind.Capability
             || !string.Equals(action.Target.Reference, action.RequiredCapability, StringComparison.Ordinal))
         {
-            return Invalid($"Action on node {node.NodeId} has invalid identity, command, or target metadata.");
-        }
-
-        if (action.Execution.TimeoutMilliseconds <= 0
-            || action.Execution.TimeoutMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond
-            || action.Execution.RetryLimit != 0
-            || action.Execution.CancellationMode != FlowIrCancellationMode.Cooperative)
-        {
-            return Invalid($"Action {action.ActionId} execution policy is not supported by Flow IR v1.");
+            return Invalid($"Action on node {node.NodeId} does not match its executable node metadata.");
         }
 
         var sourceError = ValidateSource(
@@ -333,13 +395,51 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         };
     }
 
+    private static ApplicationError? ValidateBlocklyNode(FlowIrDocument document, FlowIrNode node)
+    {
+        if (!IsSha256(node.Source.ContentHash ?? string.Empty))
+        {
+            return Invalid($"Blockly node {node.NodeId} must carry its workspace SHA-256 hash.");
+        }
+
+        var dependencyHashes = document.BlockDependencies
+            .Select(dependency => dependency.ContractSha256)
+            .ToHashSet(StringComparer.Ordinal);
+        var blockIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var action in node.Actions)
+        {
+            if (action.Kind != FlowIrActionKind.DeviceCommand
+                || action.PythonScript is not null
+                || action.DynamicChildren is not null
+                || action.Source.ElementKind != FlowIrSourceElementKind.BlocklyBlock
+                || !IsCanonicalValue(action.Source.ElementId)
+                || !blockIds.Add(action.Source.ElementId)
+                || !IsSha256(action.Source.ContentHash ?? string.Empty)
+                || !dependencyHashes.Contains(action.Source.ContentHash!))
+            {
+                return Invalid($"Blockly action {action.ActionId} has invalid static action or block source metadata.");
+            }
+
+            var sourceError = ValidateSource(
+                document,
+                action.Source,
+                FlowIrSourceElementKind.BlocklyBlock,
+                action.Source.ElementId);
+            if (sourceError is not null)
+            {
+                return sourceError;
+            }
+        }
+
+        return null;
+    }
+
     private static ApplicationError? ValidatePythonAction(FlowIrNode node, FlowIrAction action)
     {
         var script = action.PythonScript;
         var slot = action.DynamicChildren;
         if (script is null
             || !string.Equals(script.Language, "Python", StringComparison.Ordinal)
-            || (script.EditorMode is not "Blockly" and not "ManualCode")
             || string.IsNullOrWhiteSpace(script.SourceCode)
             || !IsCanonicalValue(script.SourceHash)
             || !IsSha256(script.SourceHash)
@@ -349,31 +449,12 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
             return Invalid($"Python action {action.ActionId} has invalid source metadata.");
         }
 
-        if (string.Equals(script.EditorMode, "Blockly", StringComparison.Ordinal)
-            && string.IsNullOrWhiteSpace(script.BlocklyWorkspaceJson))
-        {
-            return Invalid($"Python action {action.ActionId} Blockly workspace JSON is required.");
-        }
-
         var computedSourceHash = Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(script.SourceCode)))
             .ToLowerInvariant();
         if (!string.Equals(script.SourceHash, computedSourceHash, StringComparison.Ordinal))
         {
             return Invalid($"Python action {action.ActionId} source hash does not match its UTF-8 source code.");
-        }
-
-        if (script.BlocklyWorkspaceJson is not null)
-        {
-            try
-            {
-                using var _ = JsonDocument.Parse(script.BlocklyWorkspaceJson);
-            }
-            catch (JsonException exception)
-            {
-                return Invalid(
-                    $"Python action {action.ActionId} Blockly workspace JSON is invalid: {exception.Message}");
-            }
         }
 
         if (slot is null
@@ -466,6 +547,19 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         }
 
         writer.WriteEndArray();
+        writer.WritePropertyName("blockDependencies");
+        writer.WriteStartArray();
+        foreach (var dependency in document.BlockDependencies)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("blockType", dependency.BlockType);
+            writer.WriteNumber("version", dependency.Version);
+            writer.WriteString("contractSchemaVersion", dependency.ContractSchemaVersion);
+            writer.WriteString("contractSha256", dependency.ContractSha256);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
         writer.WriteEndObject();
     }
 
@@ -537,11 +631,9 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
     {
         writer.WriteStartObject();
         writer.WriteString("language", script.Language);
-        writer.WriteString("editorMode", script.EditorMode);
         writer.WriteString("sourceCode", script.SourceCode);
         writer.WriteString("sourceHash", script.SourceHash);
         writer.WriteString("version", script.Version);
-        WriteNullableString(writer, "blocklyWorkspaceJson", script.BlocklyWorkspaceJson);
         writer.WriteEndObject();
     }
 
@@ -612,6 +704,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         FlowIrNodeKind.Delay => "delay",
         FlowIrNodeKind.End => "end",
         FlowIrNodeKind.PythonScript => "pythonScript",
+        FlowIrNodeKind.Blockly => "blockly",
         _ => throw new InvalidOperationException($"Unsupported Flow IR node kind {value}.")
     };
 
@@ -624,7 +717,14 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static string TargetKind(FlowIrTargetReferenceKind value) => value switch
     {
+        FlowIrTargetReferenceKind.AutomationModule => "automationModule",
+        FlowIrTargetReferenceKind.EquipmentNode => "equipmentNode",
+        FlowIrTargetReferenceKind.SlotGroup => "slotGroup",
+        FlowIrTargetReferenceKind.Slot => "slot",
+        FlowIrTargetReferenceKind.Dut => "dut",
+        FlowIrTargetReferenceKind.System => "system",
         FlowIrTargetReferenceKind.Capability => "capability",
+        FlowIrTargetReferenceKind.Driver => "driver",
         _ => throw new InvalidOperationException($"Unsupported Flow IR target kind {value}.")
     };
 
@@ -643,6 +743,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
     private static string SourceMappingMode(FlowIrChildSourceMappingMode value) => value switch
     {
         FlowIrChildSourceMappingMode.ContainerOnly => "containerOnly",
+        FlowIrChildSourceMappingMode.ExactBlock => "exactBlock",
         _ => throw new InvalidOperationException($"Unsupported Flow IR source mapping mode {value}.")
     };
 
@@ -657,6 +758,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
     {
         FlowIrSourceElementKind.ProcessNode => "processNode",
         FlowIrSourceElementKind.ProcessTransition => "processTransition",
+        FlowIrSourceElementKind.BlocklyBlock => "blocklyBlock",
         _ => throw new InvalidOperationException($"Unsupported Flow IR source element kind {value}.")
     };
 }
