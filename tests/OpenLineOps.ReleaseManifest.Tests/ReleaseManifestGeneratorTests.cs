@@ -55,7 +55,7 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
 
         var manifestJson = File.ReadAllText(manifestPath);
         using var manifest = JsonDocument.Parse(manifestJson);
-        Assert.Equal(2, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("0.1.0", manifest.RootElement.GetProperty("version").GetString());
         Assert.Equal("abc123", manifest.RootElement.GetProperty("commit").GetString());
         Assert.Equal(2, manifest.RootElement.GetProperty("artifacts").GetArrayLength());

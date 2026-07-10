@@ -24,6 +24,7 @@ import type {
   AutomationTopologyResponse,
   ProjectApplicationResponse,
   RuntimeStationStatus,
+  RuntimeTargetStatus,
   SiteLayoutElementResponse,
   SiteLayoutResponse,
   UpdateSiteLayoutElementGeometryRequest
@@ -60,6 +61,7 @@ interface TopologyDesignerProps {
   workspaceMode: WorkspaceMode;
   runtimeConnected: boolean;
   stations: RuntimeStationStatus[];
+  targetStatuses: RuntimeTargetStatus[];
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
@@ -135,6 +137,7 @@ export function TopologyDesigner({
   workspaceMode,
   runtimeConnected,
   stations,
+  targetStatuses,
   onWorkspaceChanged,
   onMessage
 }: TopologyDesignerProps): React.ReactElement {
@@ -164,8 +167,14 @@ export function TopologyDesigner({
     () => layout?.elements.find(element => element.elementId === selectedElementId) ?? null,
     [layout, selectedElementId]);
   const stationStatuses = useMemo(
-    () => new Map(stations.map(status => [status.stationId, status])),
+    () => new Map(stations.map(status => [status.stationSystemId, status])),
     [stations]);
+  const targetStatusByKey = useMemo(
+    () => new Map(targetStatuses.map(status => [
+      runtimeTargetStatusKey(status.stationSystemId, status.targetKind, status.targetId),
+      status
+    ])),
+    [targetStatuses]);
 
   const refresh = useCallback(async () => {
     if (!activeApplication || !apiScope) {
@@ -215,6 +224,7 @@ export function TopologyDesigner({
     setBusy(true);
     try {
       let nextTopology = topology;
+      let linkedWorkspace: AutomationProjectWorkspaceResponse | null = null;
       if (!nextTopology) {
         const topologyId = activeApplication.topologyId
           ?? createTopologyId(activeApplication.applicationId);
@@ -237,7 +247,7 @@ export function TopologyDesigner({
         if (!savedWorkspace.ok || !savedWorkspace.body) {
           throw new Error(`Save manifest failed: ${savedWorkspace.status} ${savedWorkspace.text}`);
         }
-        onWorkspaceChanged(savedWorkspace.body);
+        linkedWorkspace = savedWorkspace.body;
       }
 
       const nextLayout = layout ?? await requireBody(
@@ -254,6 +264,9 @@ export function TopologyDesigner({
       setTopology(nextTopology);
       setLayout(nextLayout);
       setSelectedElementId(nextLayout.elements[0]?.elementId ?? null);
+      if (linkedWorkspace) {
+        onWorkspaceChanged(linkedWorkspace);
+      }
       onMessage(`2D layout ready ${nextLayout.layoutId}`);
     } catch (error) {
       onMessage(String(error));
@@ -531,7 +544,9 @@ export function TopologyDesigner({
         nextTopology = await requireBody(
           updateAutomationSystem(topology.topologyId, element.target.targetId, {
             displayName: requireText(draft.displayName, 'Display Name'),
-            systemType: requireText(draft.systemType, 'System Type')
+            systemType: requireText(draft.systemType, 'System Type'),
+            metadata: topology.systems.find(
+              system => system.systemId === element.target.targetId)?.metadata ?? {}
           }, apiScope),
           `Save System ${element.target.targetId}`);
       } else if (element.target.kind === 'SlotGroup') {
@@ -727,6 +742,7 @@ export function TopologyDesigner({
                   layout={layout}
                   topology={topology}
                   stationStatuses={stationStatuses}
+                  targetStatusByKey={targetStatusByKey}
                   runtimeConnected={runtimeConnected}
                   selectedElementId={selectedElementId}
                   editable={editable}
@@ -772,6 +788,7 @@ export function TopologyDesigner({
           topology={topology}
           selectedElement={selectedElement}
           stationStatuses={stationStatuses}
+          targetStatusByKey={targetStatusByKey}
           runtimeConnected={runtimeConnected}
           editable={editable}
           deleteConfirming={deleteConfirmElementId === selectedElement?.elementId}
@@ -853,6 +870,7 @@ function TopologyElementTree({
   layout,
   topology,
   stationStatuses,
+  targetStatusByKey,
   runtimeConnected,
   selectedElementId,
   editable,
@@ -863,6 +881,7 @@ function TopologyElementTree({
   layout: SiteLayoutResponse;
   topology: AutomationTopologyResponse;
   stationStatuses: Map<string, RuntimeStationStatus>;
+  targetStatusByKey: Map<string, RuntimeTargetStatus>;
   runtimeConnected: boolean;
   selectedElementId: string | null;
   editable: boolean;
@@ -891,12 +910,22 @@ function TopologyElementTree({
     parentElementId: string | null,
     containerWidth: number,
     containerHeight: number,
-    inheritedState: OperationalState = 'Idle'
+    stationSystemId: string | null = null
   ): React.ReactNode => (childrenByParent.get(parentElementId) ?? []).map(element => {
     const descriptor = describeElement(element, topology);
-    const state = element.kind === 'SystemShape' && descriptor.system?.kind === 'Station'
+    const elementStationSystemId = descriptor.system?.kind === 'Station'
+      ? descriptor.system.systemId
+      : stationSystemId;
+    const state = descriptor.system?.kind === 'Station'
       ? toOperationalState(stationStatuses.get(descriptor.system.systemId), runtimeConnected)
-      : inheritedState;
+      : toTargetOperationalState(
+        elementStationSystemId
+          ? targetStatusByKey.get(runtimeTargetStatusKey(
+            elementStationSystemId,
+            element.target.kind,
+            element.target.targetId))
+          : undefined,
+        runtimeConnected);
     return (
       <TopologyCanvasElement
         key={element.elementId}
@@ -911,7 +940,7 @@ function TopologyElementTree({
         onPreviewGeometry={onPreviewGeometry}
         onCommitGeometry={onCommitGeometry}
       >
-        {renderBranch(element.elementId, element.width, element.height, state)}
+        {renderBranch(element.elementId, element.width, element.height, elementStationSystemId)}
       </TopologyCanvasElement>
     );
   });
@@ -1048,6 +1077,7 @@ function TopologyCanvasElement({
       tabIndex={editable ? 0 : -1}
       aria-label={`${descriptor.displayName}, ${state}`}
       aria-pressed={selected}
+      data-operational-state={state}
       onClick={event => {
         event.stopPropagation();
         onSelect(element.elementId);
@@ -1083,6 +1113,7 @@ function ElementFace({
             <strong>{descriptor.displayName}</strong>
             <span>{descriptor.system?.systemType ?? 'System'}</span>
           </div>
+          <i className={`topology-inline-status status-${state.toLowerCase()}`} title={state} />
         </div>
       );
     }
@@ -1103,12 +1134,13 @@ function ElementFace({
       <div className="topology-group-face">
         <Grid2X2 size={12} />
         <strong>{descriptor.displayName}</strong>
+        <i className={`topology-inline-status status-${state.toLowerCase()}`} title={state} />
       </div>
     );
   }
 
   return (
-    <div className="topology-slot-face" title={descriptor.detail}>
+    <div className="topology-slot-face" title={`${descriptor.detail} - ${state}`}>
       <i />
       <strong>{descriptor.displayName}</strong>
     </div>
@@ -1120,6 +1152,7 @@ function InspectorPanel({
   topology,
   selectedElement,
   stationStatuses,
+  targetStatusByKey,
   runtimeConnected,
   editable,
   deleteConfirming,
@@ -1132,6 +1165,7 @@ function InspectorPanel({
   topology: AutomationTopologyResponse | null;
   selectedElement: SiteLayoutElementResponse | null;
   stationStatuses: Map<string, RuntimeStationStatus>;
+  targetStatusByKey: Map<string, RuntimeTargetStatus>;
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
@@ -1155,6 +1189,7 @@ function InspectorPanel({
         topology={topology}
         element={selectedElement}
         stationStatuses={stationStatuses}
+        targetStatusByKey={targetStatusByKey}
         runtimeConnected={runtimeConnected}
         editable={editable}
         deleteConfirming={deleteConfirming}
@@ -1185,6 +1220,7 @@ function GeometryProperties({
   topology,
   element,
   stationStatuses,
+  targetStatusByKey,
   runtimeConnected,
   editable,
   deleteConfirming,
@@ -1196,6 +1232,7 @@ function GeometryProperties({
   topology: AutomationTopologyResponse | null;
   element: SiteLayoutElementResponse | null;
   stationStatuses: Map<string, RuntimeStationStatus>;
+  targetStatusByKey: Map<string, RuntimeTargetStatus>;
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
@@ -1227,9 +1264,18 @@ function GeometryProperties({
   }
 
   const descriptor = describeElement(element, topology);
+  const stationElement = resolveStationElement(element, layout, topology);
+  const stationSystemId = stationElement?.target.targetId ?? null;
   const operationalState = descriptor.system?.kind === 'Station'
     ? toOperationalState(stationStatuses.get(descriptor.system.systemId), runtimeConnected)
-    : null;
+    : toTargetOperationalState(
+      stationSystemId
+        ? targetStatusByKey.get(runtimeTargetStatusKey(
+          stationSystemId,
+          element.target.kind,
+          element.target.targetId))
+        : undefined,
+      runtimeConnected);
   const parent = element.parentElementId
     ? layout.elements.find(candidate => candidate.elementId === element.parentElementId) ?? null
     : null;
@@ -1239,13 +1285,13 @@ function GeometryProperties({
       <div className="topology-selected-summary">
         <strong>{descriptor.displayName}</strong>
         <span>{descriptor.detail}</span>
-        {operationalState ? <em className={`topology-status-badge status-${operationalState.toLowerCase()}`}><i />{operationalState}</em> : null}
+        <em className={`topology-status-badge status-${operationalState.toLowerCase()}`}><i />{operationalState}</em>
       </div>
       <dl className="topology-target-facts">
         <dt>Target</dt><dd>{element.target.kind}</dd>
         <dt>ID</dt><dd title={element.target.targetId}>{element.target.targetId}</dd>
         <dt>Parent</dt><dd title={element.parentElementId ?? 'Canvas'}>{element.parentElementId ?? 'Canvas'}</dd>
-        <dt>Rotate</dt><dd>0° (locked)</dd>
+        <dt>Rotate</dt><dd>0 deg (locked)</dd>
       </dl>
       <form
         className="topology-semantic-form"
@@ -1551,6 +1597,39 @@ function resolveGroupElement(
       : null;
   }
   return null;
+}
+
+function runtimeTargetStatusKey(
+  stationSystemId: string,
+  targetKind: string,
+  targetId: string
+): string {
+  return `${stationSystemId}\u0000${targetKind}\u0000${targetId}`;
+}
+
+function toTargetOperationalState(
+  status: RuntimeTargetStatus | undefined,
+  runtimeConnected: boolean
+): OperationalState {
+  if (!runtimeConnected) {
+    return 'Offline';
+  }
+
+  switch (status?.commandStatus) {
+    case 'Pending':
+    case 'Accepted':
+    case 'InProgress':
+      return 'Running';
+    case 'Completed':
+      return 'Completed';
+    case 'Failed':
+    case 'TimedOut':
+    case 'Rejected':
+    case 'Canceled':
+      return 'Failed';
+    default:
+      return 'Idle';
+  }
 }
 
 function toOperationalState(

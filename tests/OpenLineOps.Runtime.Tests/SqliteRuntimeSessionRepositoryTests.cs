@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -106,6 +108,47 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         Assert.Equal("APPLICATION-TRACE", restored.TraceMetadata.ApplicationId);
         Assert.Equal("PROJECT-SNAPSHOT-TRACE", restored.TraceMetadata.ProjectSnapshotId);
         Assert.Equal("TOPOLOGY-TRACE", restored.TraceMetadata.TopologyId);
+    }
+
+    [Theory]
+    [InlineData("$metadata")]
+    [InlineData("projectId")]
+    [InlineData("applicationId")]
+    [InlineData("projectSnapshotId")]
+    [InlineData("topologyId")]
+    public async Task GetByIdAsyncRejectsPersistedSessionsWithoutCompleteReleaseIdentity(string missingField)
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("missing-release-identity", BaseTimeUtc);
+        await repository.SaveAsync(session);
+
+        await using (var connection = new SqliteConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var select = connection.CreateCommand();
+            select.CommandText = "SELECT document_json FROM runtime_sessions WHERE session_id = $session_id;";
+            select.Parameters.AddWithValue("$session_id", session.Id.Value.ToString("D"));
+            var document = JsonNode.Parse((string)(await select.ExecuteScalarAsync())!)!.AsObject();
+            if (string.Equals(missingField, "$metadata", StringComparison.Ordinal))
+            {
+                document["traceMetadata"] = null;
+            }
+            else
+            {
+                document["traceMetadata"]!.AsObject()[missingField] = null;
+            }
+
+            await using var update = connection.CreateCommand();
+            update.CommandText = "UPDATE runtime_sessions SET document_json = $document WHERE session_id = $session_id;";
+            update.Parameters.AddWithValue("$document", document.ToJsonString());
+            update.Parameters.AddWithValue("$session_id", session.Id.Value.ToString("D"));
+            await update.ExecuteNonQueryAsync();
+        }
+
+        using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            async () => await restartedRepository.GetByIdAsync(session.Id));
     }
 
     [Fact]

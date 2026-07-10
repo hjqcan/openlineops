@@ -50,7 +50,6 @@ async function main() {
         OPENLINEOPS_API_BASE_URL: apiBaseUrl,
         OPENLINEOPS_REPO_ROOT: repoRoot,
         VITE_DEV_SERVER_URL: previewUrl,
-        OpenLineOps__Runtime__DevelopmentStarts__Enabled: 'true',
         OpenLineOps__Desktop__AllowedOrigins__0: previewUrl,
         OpenLineOps__Desktop__AllowedOrigins__1: previewUrl.replace('127.0.0.1', 'localhost')
       }
@@ -505,7 +504,8 @@ async function main() {
         && workbench?.textContent?.includes('Station 01')
         && workbench?.textContent?.includes('Completed')
         && (events.RuntimeEvent ?? 0) > 0
-        && (events.StationStatusChanged ?? 0) > 0;
+        && (events.StationStatusChanged ?? 0) > 0
+        && (events.TargetStatusChanged ?? 0) > 0;
     })()`,
     45000,
     'formal project snapshot runtime to open the topology Monitor view');

@@ -51,7 +51,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(["capability.a", "capability.b"], opened.Metadata.CapabilityBindings
             .Select(binding => binding.CapabilityId));
         Assert.Equal(["Slot", "System"], opened.Metadata.TargetReferences.Select(target => target.Kind));
-        Assert.Equal("openlineops.flow-ir/v2", opened.Metadata.FlowIrSchemaVersion);
+        Assert.Equal("openlineops.flow-ir/v1", opened.Metadata.FlowIrSchemaVersion);
         Assert.Equal("{}", opened.Metadata.FlowIrCanonicalJson);
         Assert.Equal(
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -72,7 +72,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             "openlineops.project-release-artifact",
             manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
     }
 
@@ -337,7 +337,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task OpenRejectsPriorReleaseSchemaVersion()
+    public async Task OpenRejectsUnsupportedReleaseSchemaVersion()
     {
         var scope = CreateScope("project.old-release", "application.main");
         WriteTopologyResources(scope);
@@ -348,13 +348,13 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             PublishedAtUtc,
             CreateMetadata());
         var manifest = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
-        manifest["schemaVersion"] = 4;
+        manifest["schemaVersion"] = 99;
         await File.WriteAllTextAsync(descriptor.ManifestPath, manifest.ToJsonString());
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
 
-        Assert.Contains("schema version 4", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("schema version 99", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -491,7 +491,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ["layout.main"],
             "process.main",
             "process.main@1.0.0",
-            "openlineops.flow-ir/v2",
+            "openlineops.flow-ir/v1",
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             "{}",
             "configuration.main.v1",
@@ -509,7 +509,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ["layout.b", " layout.a ", "layout.b"],
             " process.main ",
             " process.main@1.0.0 ",
-            " openlineops.flow-ir/v2 ",
+            " openlineops.flow-ir/v1 ",
             " 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a ",
             "{}",
             " configuration.main.v1 ",

@@ -62,8 +62,8 @@ Failed, and Offline. A future 3D renderer must project the same System/Group/
 Slot identities and runtime state; it must not introduce another topology
 model.
 
-Topology and layout persistence use schema version 2. Older documents are
-rejected. Published releases freeze the exact topology, hierarchical layout,
+Topology and layout persistence use their single current schema. Published
+releases freeze the exact topology, hierarchical layout,
 processes, bindings, and provider artifacts used by Runtime.
 
 ## Consequences
@@ -78,5 +78,5 @@ processes, bindings, and provider artifacts used by Runtime.
   layout and differ only by the runtime-state overlay.
 - Third-party systems remain replaceable through capability contracts and
   frozen driver/provider bindings.
-- Existing topology, layout, production-line, and Flow IR resources using the
-  removed identities are intentionally incompatible and must be recreated.
+- Topology, layout, production-line, and Flow IR resources have one canonical
+  System identity model and no compatibility representations.

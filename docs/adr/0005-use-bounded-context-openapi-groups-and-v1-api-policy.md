@@ -11,9 +11,8 @@ Accepted
 ## Context
 
 OpenLineOps exposes APIs from multiple bounded contexts through one ASP.NET
-Core host. Current APIs include platform information, process definitions, and
-runtime sessions. More APIs will be added for engineering projects, recipes,
-stations, devices, traces, and plugins.
+Core host. Current APIs cover project/application authoring, engineering,
+production, runtime, devices, traces, and plugins.
 
 The backend is consumed by Electron locally and may also be deployed as a
 server-side API. API contracts need to remain discoverable and stable while the
@@ -22,8 +21,8 @@ pre-1.0 platform is still evolving quickly.
 ## Decision Drivers
 
 - Keep API documentation grouped by bounded context.
-- Avoid breaking existing local and integration-test URLs while early clients
-  are being built.
+- Keep one correct current contract while the product is unreleased; breaking
+  clean cutovers are preferred to compatibility layers.
 - Make the current public API generation explicit as `v1`.
 - Keep versioning policy lightweight until external compatibility pressure
   requires full URL or media-type versioning.
@@ -53,10 +52,10 @@ pre-1.0 platform is still evolving quickly.
 OpenLineOps will use bounded-context OpenAPI groups named
 `{bounded-context}-v1`, with the current document version named `v1`.
 
-Routes remain stable at the existing `/api/...` shape during the pre-1.0
-platform phase. A future breaking public API version will introduce a deliberate
-parallel strategy, such as `/api/v2/...`, only when external compatibility
-requirements justify it.
+Routes use the current `/api/...` shape during the unreleased platform phase.
+Contract changes replace that surface atomically across backend, desktop,
+tests, and documentation. Parallel public contracts require a new decision
+after an actual compatibility promise exists.
 
 API metadata constants live in `shared/OpenLineOps.Api.Abstractions` so module
 API projects and tests use the same group and version names.
@@ -74,14 +73,14 @@ new modules arrive.
 
 - API Explorer groups match platform, process, runtime, and future bounded
   contexts.
-- Existing routes and tests remain stable.
+- Backend, desktop, tests, and documentation share one current route surface.
 - The current OpenAPI document has an explicit `v1` name.
 - Group/version names can be tested through shared constants.
 
 ### Negative
 
 - Route URLs do not visibly include `/v1`.
-- A future breaking version will require an explicit migration ADR and route
+- Any post-release parallel contract will require an explicit ADR and route
   strategy.
 
 ### Risks And Mitigations
@@ -90,10 +89,9 @@ new modules arrive.
 - Mitigation: Keep group constants in `OpenLineOps.Api.Abstractions` and add API
   metadata tests as controller count grows.
 
-- Risk: Early unversioned routes leak into public clients as permanent
-  contracts.
-- Mitigation: Treat pre-1.0 route stability as local/API-test stability only and
-  document any public compatibility promise separately.
+- Risk: An unreleased route is accidentally treated as a compatibility promise.
+- Mitigation: Permit atomic breaking changes before release and document a
+  public compatibility promise only when the product actually makes one.
 
 ## Implementation Notes
 

@@ -24,7 +24,7 @@ npm install
 
 - The renderer has no Node.js access; backend lifecycle and HTTP access cross the preload `contextBridge`.
 - Authoring APIs are always scoped to one Automation Project and one portable Application.
-- Blockly workspaces compile server-side directly to immutable Flow IR v2 actions. Python is a separate, explicit action type and cannot return a runtime execution plan.
+- Blockly workspaces compile server-side directly to immutable Flow IR actions. Python is a separate, explicit action type and cannot return a runtime execution plan.
 - Runtime starts only from a published project release snapshot. There is no simulated-session endpoint or direct ProcessDefinition launch path.
 - Runtime commands, steps, monitoring, and trace records carry required ActionId, TargetKind, and TargetId identities.
 - SignalR monitoring connects at `/hubs/runtime-progress`.

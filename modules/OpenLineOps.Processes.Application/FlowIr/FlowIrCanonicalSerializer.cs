@@ -103,7 +103,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static ApplicationError? Validate(FlowIrDocument document)
     {
-        if (!string.Equals(document.SchemaVersion, FlowIrSchemaVersions.V2, StringComparison.Ordinal))
+        if (!string.Equals(document.SchemaVersion, FlowIrSchemaVersions.V1, StringComparison.Ordinal))
         {
             return Invalid($"Schema version '{document.SchemaVersion}' is not supported.");
         }
@@ -311,7 +311,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
         if (node.Kind != FlowIrNodeKind.Blockly && node.Actions.Length != 1)
         {
-            return Invalid($"Executable node {node.NodeId} must contain exactly one action in Flow IR v2.");
+            return Invalid($"Executable node {node.NodeId} must contain exactly one action in Flow IR v1.");
         }
 
         if (node.Kind == FlowIrNodeKind.Blockly && node.Actions.IsDefaultOrEmpty)
@@ -341,7 +341,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 || compiledAction.Execution.RetryLimit != 0
                 || compiledAction.Execution.CancellationMode != FlowIrCancellationMode.Cooperative)
             {
-                return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by Flow IR v2.");
+                return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by Flow IR v1.");
             }
 
         }

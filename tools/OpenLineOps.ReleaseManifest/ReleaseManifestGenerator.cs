@@ -46,7 +46,7 @@ public static class ReleaseManifestGenerator
         ValidateRequiredArtifactKinds(options, artifacts);
 
         var document = new ReleaseManifestDocument(
-            SchemaVersion: 2,
+            SchemaVersion: 1,
             Product: options.Product.Trim(),
             Version: options.Version.Trim(),
             GeneratedAtUtc: options.GeneratedAtUtc.ToUniversalTime().ToString("O"),

@@ -2453,12 +2453,7 @@ function createDefaultManualPythonSource(): string {
 }
 
 function createEmptyBlocklyWorkspaceJson(): string {
-  return JSON.stringify({
-    blocks: {
-      languageVersion: 0,
-      blocks: []
-    }
-  });
+  return '{}';
 }
 
 function normalizeBlocklyWorkspaceJson(value: string | null): string {
@@ -2468,9 +2463,12 @@ function normalizeBlocklyWorkspaceJson(value: string | null): string {
 
   try {
     const parsed = JSON.parse(value) as unknown;
+    if (!isRecord(parsed)) {
+      throw new Error('Blockly workspace JSON must be an object');
+    }
     return JSON.stringify(parsed);
-  } catch {
-    return createEmptyBlocklyWorkspaceJson();
+  } catch (error) {
+    throw new Error(`Blockly workspace JSON is invalid: ${String(error)}`);
   }
 }
 
@@ -2484,10 +2482,20 @@ function appendBlocklyBlock(
     throw new Error('Workspace JSON must be an object');
   }
 
-  const blocksContainer = workspace.blocks;
-  if (!isRecord(blocksContainer)
-    || blocksContainer.languageVersion !== 0
-    || !Array.isArray(blocksContainer.blocks)) {
+  let blocksContainer = workspace.blocks;
+  if (!Object.hasOwn(workspace, 'blocks')) {
+    blocksContainer = {
+      languageVersion: 0,
+      blocks: []
+    };
+    workspace.blocks = blocksContainer;
+  } else if (!isRecord(blocksContainer)
+      || blocksContainer.languageVersion !== 0
+      || !Array.isArray(blocksContainer.blocks)) {
+    throw new Error('Workspace must use the current Blockly serialization shape');
+  }
+
+  if (!isRecord(blocksContainer) || !Array.isArray(blocksContainer.blocks)) {
     throw new Error('Workspace must use the current Blockly serialization shape');
   }
 
@@ -2593,13 +2601,7 @@ function loadWorkspaceState(
   workspaceJson: string,
   workspace: Blockly.Workspace | Blockly.WorkspaceSvg
 ): void {
-  try {
-    Blockly.serialization.workspaces.load(JSON.parse(workspaceJson), workspace);
-  } catch {
-    Blockly.serialization.workspaces.load(
-      JSON.parse(createEmptyBlocklyWorkspaceJson()),
-      workspace);
-  }
+  Blockly.serialization.workspaces.load(JSON.parse(workspaceJson), workspace);
 }
 
 function registerProcessBlocklyBlocks(blockCatalog: ProcessBlocklyBlockDefinition[]): void {

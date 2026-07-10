@@ -519,8 +519,8 @@ if ($metadataFilesExist) {
 
 if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-    if ($manifest.schemaVersion -ne 2) {
-        Add-Failure "Expected release manifest schemaVersion 2, found $($manifest.schemaVersion)."
+    if ($manifest.schemaVersion -ne 1) {
+        Add-Failure "Expected release manifest schemaVersion 1, found $($manifest.schemaVersion)."
     }
 
     if ($manifest.product -ne "OpenLineOps") {

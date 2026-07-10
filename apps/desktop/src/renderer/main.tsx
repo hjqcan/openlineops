@@ -32,6 +32,7 @@ import type {
   PublishedProjectSnapshotResponse,
   RuntimeAlarm,
   RuntimeStationStatus,
+  RuntimeTargetStatus,
   RuntimeTimelineEntry,
   StartedProjectSnapshotRuntimeSessionResponse,
   TraceRecordSummary
@@ -44,6 +45,7 @@ import {
   getHealth,
   getPlatform,
   getStationStatuses,
+  getTargetStatuses,
   getTimeline,
   getTraceRecords,
   startProjectSnapshotRuntimeSession
@@ -101,6 +103,7 @@ function App(): React.ReactElement {
   const [healthStatus, setHealthStatus] = useState('Unknown');
   const [hubState, setHubState] = useState<HubState>('Disconnected');
   const [stations, setStations] = useState<RuntimeStationStatus[]>([]);
+  const [targetStatuses, setTargetStatuses] = useState<RuntimeTargetStatus[]>([]);
   const [timeline, setTimeline] = useState<RuntimeTimelineEntry[]>([]);
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
@@ -161,6 +164,8 @@ function App(): React.ReactElement {
       setStations(stationRows);
       setAlarms(alarmRows);
       setTraceRows(traceResponse?.items ?? []);
+      setTargetStatuses(await getTargetStatuses(
+        stationRows.map(station => station.stationSystemId)));
 
       const selectedSessionId = lastProjectRun?.sessionId ?? stationRows[0]?.latestSessionId;
       if (selectedSessionId) {
@@ -219,7 +224,11 @@ function App(): React.ReactElement {
 
     connection.on('StationStatusChanged', (status: RuntimeStationStatus) => {
       recordSmokeEvent('StationStatusChanged');
-      setStations(current => upsertBy(current, status, item => item.stationId));
+      setStations(current => upsertBy(current, status, item => item.stationSystemId));
+    });
+    connection.on('TargetStatusChanged', (status: RuntimeTargetStatus) => {
+      recordSmokeEvent('TargetStatusChanged');
+      setTargetStatuses(current => upsertRuntimeTargetStatus(current, status));
     });
     connection.on('RuntimeEvent', (entry: RuntimeTimelineEntry) => {
       recordSmokeEvent('RuntimeEvent');
@@ -385,6 +394,7 @@ function App(): React.ReactElement {
             workspaceMode={workspaceMode}
             runtimeConnected={hubState === 'Connected'}
             stations={stations}
+            targetStatuses={targetStatuses}
             onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
           />
@@ -485,7 +495,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, timeline, traceRows, workspaceMode]);
+  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, targetStatuses, timeline, traceRows, workspaceMode]);
 
   return (
     <main
@@ -883,8 +893,8 @@ function DashboardView({
           {stations.length === 0 ? (
             <EmptyState text="No runtime station state yet" />
           ) : stations.map(station => (
-            <div className="table-row" key={station.stationId}>
-              <strong>{station.stationId}</strong>
+            <div className="table-row" key={station.stationSystemId}>
+              <strong>{station.stationSystemId}</strong>
               <StatusPill label={station.sessionStatus} tone={station.sessionStatus === 'Completed' ? 'good' : station.sessionStatus === 'Failed' ? 'bad' : 'warn'} />
               <span>{station.completedStepCount}/{station.stepCount}</span>
               <span>{station.incidentCount}</span>
@@ -923,7 +933,7 @@ function DashboardView({
               <div>
                 <strong>{alarm.code}</strong>
                 <p>{alarm.message}</p>
-                <span>{alarm.stationId} - {formatTime(alarm.occurredAtUtc)}</span>
+                <span>{alarm.stationSystemId} - {formatTime(alarm.occurredAtUtc)}</span>
               </div>
               {alarm.isAcknowledged ? (
                 <CheckCircle2 size={19} />
@@ -977,8 +987,8 @@ function SecondaryView({
           </div>
           <div className="surface-list">
             {stations.slice(0, 3).map(station => (
-              <div className="surface-row" key={station.stationId}>
-                <span>{station.stationId}</span>
+              <div className="surface-row" key={station.stationSystemId}>
+                <span>{station.stationSystemId}</span>
                 <strong>{station.sessionStatus}</strong>
               </div>
             ))}
@@ -1073,6 +1083,18 @@ function upsertBy<T>(items: T[], item: T, keySelector: (item: T) => string): T[]
   const key = keySelector(item);
   const next = items.filter(candidate => keySelector(candidate) !== key);
   return [item, ...next].slice(0, 50);
+}
+
+function upsertRuntimeTargetStatus(
+  items: RuntimeTargetStatus[],
+  status: RuntimeTargetStatus
+): RuntimeTargetStatus[] {
+  const key = runtimeTargetStatusKey(status);
+  return [status, ...items.filter(candidate => runtimeTargetStatusKey(candidate) !== key)];
+}
+
+function runtimeTargetStatusKey(status: RuntimeTargetStatus): string {
+  return `${status.stationSystemId}\u0000${status.targetKind}\u0000${status.targetId}`;
 }
 
 function formatTime(value: string): string {

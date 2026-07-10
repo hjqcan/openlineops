@@ -18,5 +18,5 @@ internal sealed record ProjectProcessBlocklyBlockVersionDocument(
 {
     public const string CurrentSchema = "openlineops.process-blockly-block-version";
 
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 1;
 }

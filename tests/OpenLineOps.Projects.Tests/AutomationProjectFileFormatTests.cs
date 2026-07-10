@@ -110,14 +110,14 @@ public sealed class AutomationProjectFileFormatTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadRejectsObsoleteRootProjectFormat()
+    public async Task LoadRejectsUnsupportedRootProjectFormat()
     {
-        var projectRoot = Path.Combine(_testRoot, "obsolete-root");
+        var projectRoot = Path.Combine(_testRoot, "unsupported-root");
         var store = new FileSystemAutomationProjectManifestStore();
         await store.SaveAsync(CreateManifest(projectRoot));
         var projectFilePath = Path.Combine(projectRoot, "packaging-line.oloproj");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(projectFilePath))!.AsObject();
-        document["formatVersion"] = 2;
+        document["formatVersion"] = 99;
         await File.WriteAllTextAsync(projectFilePath, document.ToJsonString(JsonOptions));
 
         await Assert.ThrowsAsync<InvalidDataException>(async () =>

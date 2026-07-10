@@ -796,7 +796,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.True(File.Exists(absoluteManifestPath));
         using var manifest = JsonDocument.Parse(File.ReadAllText(absoluteManifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
 
         return new PublishedProjectRelease(relativeManifestPath, contentSha256, absoluteManifestPath);

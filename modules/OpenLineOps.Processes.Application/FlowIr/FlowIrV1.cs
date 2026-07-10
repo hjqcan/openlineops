@@ -4,7 +4,7 @@ namespace OpenLineOps.Processes.Application.FlowIr;
 
 public static class FlowIrSchemaVersions
 {
-    public const string V2 = "openlineops.flow-ir/v2";
+    public const string V1 = "openlineops.flow-ir/v1";
 }
 
 public sealed record FlowIrCompilation(

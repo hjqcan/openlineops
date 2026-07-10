@@ -132,9 +132,9 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
     }
 
     [Fact]
-    public async Task ObsoleteCustomBlockSchemaIsRejected()
+    public async Task UnsupportedCustomBlockSchemaIsRejected()
     {
-        const string blockType = "user_obsolete_schema";
+        const string blockType = "user_unsupported_schema";
         var scope = Scope("application.current-only", _projectDirectory);
         var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
         await SaveNewVersionAsync(
@@ -148,7 +148,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             FirstRecordedAtUtc);
         var path = FindBlockDocumentPath(_projectDirectory, blockType);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        document["schemaVersion"] = 1;
+        document["schemaVersion"] = 99;
         await File.WriteAllTextAsync(path, document.ToJsonString());
 
         await Assert.ThrowsAsync<InvalidDataException>(() =>

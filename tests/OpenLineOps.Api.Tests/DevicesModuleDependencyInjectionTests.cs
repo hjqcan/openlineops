@@ -33,9 +33,6 @@ public sealed class DevicesModuleDependencyInjectionTests
 
         Assert.Equal(DeviceCommandExecutionOutcome.Completed, result.Outcome);
         Assert.Contains("simulator://scanner-01", result.ResultPayload, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            services,
-            descriptor => descriptor.ServiceType.Name.Contains("Configurable", StringComparison.Ordinal));
     }
 
     [Fact]

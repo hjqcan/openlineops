@@ -32,10 +32,10 @@ public static class ReleaseManifestVerifier
         ValidateOptions(options);
 
         var document = LoadManifest(options.ManifestPath);
-        if (document.SchemaVersion != 2)
+        if (document.SchemaVersion != 1)
         {
             throw new InvalidOperationException(
-                $"Unsupported release manifest schemaVersion {document.SchemaVersion}. Expected 2.");
+                $"Unsupported release manifest schemaVersion {document.SchemaVersion}. Expected 1.");
         }
 
         if (document.Artifacts.Count == 0)

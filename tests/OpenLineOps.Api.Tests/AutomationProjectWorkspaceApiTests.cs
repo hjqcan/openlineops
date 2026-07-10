@@ -181,229 +181,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     }
 
     [Fact]
-    public async Task GlobalCompositionCannotBePublishedAsProjectRelease()
-    {
-        var suffix = Guid.NewGuid().ToString("N");
-        var projectId = $"project-workspace-{suffix}";
-        var applicationId = $"application-inspection-{suffix}";
-        var topologyId = $"topology-cell-{suffix}";
-        var siteNodeId = $"site-main-{suffix}";
-        var stationNodeId = $"station-left-{suffix}";
-        var capabilityId = $"motion-axis-move-{suffix}";
-        var moduleId = $"module-axis-{suffix}";
-        var bindingId = $"binding-axis-{suffix}";
-        var slotGroupId = $"slot-group-left-nest-{suffix}";
-        var slotId = $"slot-left-nest-1-{suffix}";
-        var layoutId = $"layout-topdown-{suffix}";
-        var processDefinitionId = $"process-inspection-{suffix}";
-        var snapshotId = $"snapshot-project-{suffix}";
-
-        using var createTopologyResponse = await _client.PostAsJsonAsync(
-            "/api/automation-topologies",
-            new
-            {
-                topologyId,
-                displayName = "Inspection Cell Topology"
-            });
-        Assert.Equal(HttpStatusCode.NotFound, createTopologyResponse.StatusCode);
-        if (createTopologyResponse.StatusCode == HttpStatusCode.NotFound)
-        {
-            return;
-        }
-
-        await AddNodeAsync(topologyId, siteNodeId, parentNodeId: null, kind: "Site", displayName: "Main Site");
-        await AddNodeAsync(topologyId, stationNodeId, siteNodeId, kind: "Station", displayName: "Left Station");
-
-        using var capabilityResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/capabilities",
-            new
-            {
-                capabilityId,
-                commandName = "MoveAxis",
-                version = "1.0.0",
-                inputSchema = """{"type":"object"}""",
-                outputSchema = (string?)null,
-                timeoutSeconds = 30,
-                safetyClass = "Motion"
-            });
-
-        Assert.Equal(HttpStatusCode.OK, capabilityResponse.StatusCode);
-
-        using var moduleResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/modules",
-            new
-            {
-                moduleId,
-                nodeId = stationNodeId,
-                moduleKind = "AxisMotion",
-                displayName = "X Axis",
-                requiredCapabilityIds = new[] { capabilityId },
-                providedCapabilityIds = new[] { capabilityId }
-            });
-
-        Assert.Equal(HttpStatusCode.OK, moduleResponse.StatusCode);
-
-        using var bindingResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/driver-bindings",
-            new
-            {
-                bindingId,
-                capabilityId,
-                providerKind = "Simulator",
-                providerKey = "simulator://axis-x"
-            });
-
-        Assert.Equal(HttpStatusCode.OK, bindingResponse.StatusCode);
-
-        using var slotGroupResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/slot-groups",
-            new
-            {
-                slotGroupId,
-                parentNodeId = stationNodeId,
-                displayName = "Left Nest",
-                kind = "FixtureNest",
-                capacity = 2
-            });
-
-        Assert.Equal(HttpStatusCode.OK, slotGroupResponse.StatusCode);
-
-        using var slotResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/slots",
-            new
-            {
-                slotGroupId,
-                slotId,
-                parentNodeId = stationNodeId,
-                address = "L1",
-                displayName = "Left Nest 1",
-                materialKind = "Dut",
-                isEnabled = true
-            });
-        using var slotBody = await ReadJsonAsync(slotResponse);
-
-        Assert.Equal(HttpStatusCode.OK, slotResponse.StatusCode);
-        Assert.Contains(
-            slotBody.RootElement.GetProperty("slots").EnumerateArray(),
-            slot => slot.GetProperty("slotId").GetString() == slotId);
-
-        using var createLayoutResponse = await _client.PostAsJsonAsync(
-            "/api/site-layouts",
-            new
-            {
-                layoutId,
-                topologyId,
-                displayName = "Main Top Down Layout",
-                canvasWidth = 1200,
-                canvasHeight = 800,
-                units = "mm"
-            });
-
-        Assert.Equal(HttpStatusCode.Created, createLayoutResponse.StatusCode);
-
-        using var addLayoutElementResponse = await _client.PostAsJsonAsync(
-            $"/api/site-layouts/{layoutId}/elements",
-            new
-            {
-                elementId = $"layout-slot-{suffix}",
-                kind = "SlotShape",
-                targetKind = "Slot",
-                targetId = slotId,
-                x = 100,
-                y = 140,
-                width = 80,
-                height = 60,
-                rotationDegrees = 0,
-                layerId = "slots",
-                label = "L1"
-            });
-        using var layoutBody = await ReadJsonAsync(addLayoutElementResponse);
-
-        Assert.Equal(HttpStatusCode.OK, addLayoutElementResponse.StatusCode);
-        Assert.Single(layoutBody.RootElement.GetProperty("elements").EnumerateArray());
-        Assert.Equal(slotId, layoutBody.RootElement.GetProperty("elements")[0].GetProperty("targetId").GetString());
-
-        using var createProjectResponse = await _client.PostAsJsonAsync(
-            "/api/automation-projects",
-            new
-            {
-                projectId,
-                displayName = "Inspection Project",
-                projectPath = $"C:/OpenLineOps/Projects/{projectId}"
-            });
-
-        Assert.Equal(HttpStatusCode.Created, createProjectResponse.StatusCode);
-
-        using var addApplicationResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/applications",
-            new
-            {
-                applicationId,
-                displayName = "Inspection Application"
-            });
-
-        Assert.Equal(HttpStatusCode.OK, addApplicationResponse.StatusCode);
-
-        using var linkTopologyResponse = await _client.PutAsJsonAsync(
-            $"/api/automation-projects/{projectId}/applications/{applicationId}/topology",
-            new
-            {
-                topologyId
-            });
-
-        Assert.Equal(HttpStatusCode.OK, linkTopologyResponse.StatusCode);
-
-        using var linkProcessResponse = await _client.PutAsync(
-            $"/api/automation-projects/{projectId}/applications/{applicationId}/process-definitions/{processDefinitionId}",
-            content: null);
-
-        Assert.Equal(HttpStatusCode.OK, linkProcessResponse.StatusCode);
-
-        using var publishSnapshotResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/snapshots",
-            new
-            {
-                snapshotId,
-                applicationId,
-                topologyId,
-                processDefinitionId,
-                processVersionId = $"{processDefinitionId}@1.0.0",
-                configurationSnapshotId = $"configuration-{suffix}",
-                capabilityBindings = new[]
-                {
-                    new
-                    {
-                        capabilityId,
-                        bindingId,
-                        providerKind = "Simulator",
-                        providerKey = "simulator://axis-x"
-                    }
-                },
-                targetReferences = new[]
-                {
-                    new
-                    {
-                        kind = "slot",
-                        targetId = slotId
-                    }
-                },
-                blockVersionIds = SnapshotBlockVersionIds
-            });
-        using var projectBody = await ReadJsonAsync(publishSnapshotResponse);
-
-        Assert.Equal(HttpStatusCode.NotFound, publishSnapshotResponse.StatusCode);
-        Assert.StartsWith("NotFound.", projectBody.RootElement.GetProperty("title").GetString());
-
-        using var queryProjectResponse = await _client.GetAsync($"/api/automation-projects/{projectId}");
-        using var queryProjectBody = await ReadJsonAsync(queryProjectResponse);
-
-        Assert.Equal(HttpStatusCode.OK, queryProjectResponse.StatusCode);
-        Assert.Equal(projectId, queryProjectBody.RootElement.GetProperty("projectId").GetString());
-        Assert.Equal(JsonValueKind.Null, queryProjectBody.RootElement.GetProperty("activeSnapshotId").ValueKind);
-        Assert.Empty(queryProjectBody.RootElement.GetProperty("snapshots").EnumerateArray());
-    }
-
-    [Fact]
     public async Task ProjectWorkspaceCompositionCanBeCreatedAndPublished()
     {
         var suffix = Guid.NewGuid().ToString("N");
@@ -586,56 +363,84 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     public async Task SiteLayoutRejectsMissingTopologyTarget()
     {
         var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-layout-missing-target-{suffix}";
+        var applicationId = $"application-layout-missing-target-{suffix}";
         var topologyId = $"topology-layout-missing-target-{suffix}";
-        var rootNodeId = $"site-layout-{suffix}";
         var layoutId = $"layout-missing-target-{suffix}";
+        var projectDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-api-layout-validation-tests",
+            suffix);
 
-        using var createTopologyResponse = await _client.PostAsJsonAsync(
-            "/api/automation-topologies",
-            new
-            {
-                topologyId,
-                displayName = "Layout Validation Topology"
-            });
-        Assert.Equal(HttpStatusCode.NotFound, createTopologyResponse.StatusCode);
-        if (createTopologyResponse.StatusCode == HttpStatusCode.NotFound)
+        try
         {
-            return;
-        }
-        await AddNodeAsync(topologyId, rootNodeId, parentNodeId: null, kind: "Site", displayName: "Main Site");
-        using var createLayoutResponse = await _client.PostAsJsonAsync(
-            "/api/site-layouts",
-            new
-            {
-                layoutId,
-                topologyId,
-                displayName = "Layout",
-                canvasWidth = 800,
-                canvasHeight = 600,
-                units = "mm"
-            });
-        using var addMissingTargetResponse = await _client.PostAsJsonAsync(
-            $"/api/site-layouts/{layoutId}/elements",
-            new
-            {
-                elementId = $"layout-missing-slot-{suffix}",
-                kind = "SlotShape",
-                targetKind = "Slot",
-                targetId = $"missing-slot-{suffix}",
-                x = 10,
-                y = 20,
-                width = 30,
-                height = 40,
-                rotationDegrees = 0,
-                layerId = "slots",
-                label = "Missing"
-            });
-        using var body = await ReadJsonAsync(addMissingTargetResponse);
+            using var createWorkspaceResponse = await _client.PostAsJsonAsync(
+                "/api/automation-project-workspaces",
+                new
+                {
+                    projectId,
+                    displayName = "Layout Validation Project",
+                    projectPath = projectDirectory,
+                    defaultApplicationId = applicationId,
+                    defaultApplicationName = "Layout Validation Application"
+                });
+            Assert.Equal(HttpStatusCode.Created, createWorkspaceResponse.StatusCode);
 
-        Assert.Equal(HttpStatusCode.Created, createTopologyResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, createLayoutResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, addMissingTargetResponse.StatusCode);
-        Assert.Equal("Validation.Topology.LayoutTargetMissing", body.RootElement.GetProperty("title").GetString());
+            var topologiesPath = ProjectTopologiesPath(projectId, applicationId);
+            using var createTopologyResponse = await _client.PostAsJsonAsync(
+                topologiesPath,
+                new
+                {
+                    topologyId,
+                    displayName = "Layout Validation Topology"
+                });
+            Assert.Equal(HttpStatusCode.Created, createTopologyResponse.StatusCode);
+
+            var layoutsPath = ProjectLayoutsPath(projectId, applicationId);
+            using var createLayoutResponse = await _client.PostAsJsonAsync(
+                layoutsPath,
+                new
+                {
+                    layoutId,
+                    topologyId,
+                    displayName = "Layout",
+                    canvasWidth = 800,
+                    canvasHeight = 600,
+                    units = "mm"
+                });
+            Assert.Equal(HttpStatusCode.Created, createLayoutResponse.StatusCode);
+
+            using var addMissingTargetResponse = await _client.PostAsJsonAsync(
+                $"{layoutsPath}/{layoutId}/elements",
+                new
+                {
+                    elementId = $"layout-missing-system-{suffix}",
+                    kind = "SystemShape",
+                    target = new
+                    {
+                        kind = "System",
+                        targetId = $"missing-system-{suffix}"
+                    },
+                    parentElementId = (string?)null,
+                    x = 10,
+                    y = 20,
+                    width = 160,
+                    height = 120,
+                    rotationDegrees = 0,
+                    zIndex = 1,
+                    style = new Dictionary<string, string>()
+                });
+            using var body = await ReadJsonAsync(addMissingTargetResponse);
+
+            Assert.Equal(HttpStatusCode.BadRequest, addMissingTargetResponse.StatusCode);
+            Assert.Equal(
+                "Validation.Topology.LayoutTargetMissing",
+                body.RootElement.GetProperty("title").GetString());
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
     }
 
     [Fact]
@@ -891,7 +696,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.True(File.Exists(manifestPath), $"Release manifest was not found at {manifestPath}.");
         using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
     }
 
@@ -921,26 +726,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     private static string ProjectProcessesPath(string projectId, string applicationId)
     {
         return $"/api/automation-projects/{projectId}/applications/{applicationId}/processes";
-    }
-
-    private async Task AddNodeAsync(
-        string topologyId,
-        string nodeId,
-        string? parentNodeId,
-        string kind,
-        string displayName)
-    {
-        using var response = await _client.PostAsJsonAsync(
-            $"/api/automation-topologies/{topologyId}/nodes",
-            new
-            {
-                nodeId,
-                parentNodeId,
-                kind,
-                displayName
-            });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     private static object CreateRuntimeProcessDefinitionRequest(

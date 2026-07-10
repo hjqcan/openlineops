@@ -12,7 +12,7 @@ export interface HealthResponse {
 }
 
 export interface RuntimeStationStatus {
-  stationId: string;
+  stationSystemId: string;
   latestSessionId: string;
   processDefinitionId: string;
   processVersionId: string;
@@ -36,13 +36,29 @@ export interface RuntimeStationStatusesResponse {
   items: RuntimeStationStatus[];
 }
 
+export interface RuntimeTargetStatus {
+  stationSystemId: string;
+  sessionId: string;
+  actionId: string;
+  targetKind: string;
+  targetId: string;
+  commandStatus: string;
+  lastTransitionAtUtc: string;
+  isTerminal: boolean;
+  failureReason: string | null;
+}
+
+export interface RuntimeTargetStatusesResponse {
+  items: RuntimeTargetStatus[];
+}
+
 export interface RuntimeTimelineEntry {
   sequence: number;
   eventId: string;
   occurredAtUtc: string;
   eventName: string;
   sessionId: string;
-  stationId: string;
+  stationSystemId: string;
   entityKind: string;
   entityId: string | null;
   fromStatus: string | null;
@@ -60,7 +76,7 @@ export interface RuntimeTimelineResponse {
 export interface RuntimeAlarm {
   alarmId: string;
   sessionId: string;
-  stationId: string;
+  stationSystemId: string;
   severity: string;
   code: string;
   message: string;

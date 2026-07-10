@@ -34,4 +34,4 @@ Compile Blockly server-side into versioned Flow IR. Every declarative block has 
 - Blockly is the primary statically analyzable authoring surface; Python remains an explicit advanced escape hatch.
 - External vendor programs and OpenLineOps-authored tests share one command lifecycle and trace model.
 - Releases can fail closed before runtime when a target, block contract, provider package, executable, or content hash is missing or inconsistent.
-- Existing Blockly-as-Python resources, legacy custom block documents, and older release artifacts are rejected. No migration or compatibility path is provided.
+- Blockly-as-Python, Python-backed custom blocks, and mutable release dependencies are not part of the persisted format. There are no compatibility readers or migrations.

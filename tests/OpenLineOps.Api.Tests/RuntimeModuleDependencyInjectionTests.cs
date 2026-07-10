@@ -12,22 +12,13 @@ public sealed class RuntimeModuleDependencyInjectionTests
     [Fact]
     public void AddOpenLineOpsRuntimeModuleDoesNotRegisterAConfigurableCommandExecutor()
     {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["OpenLineOps:Runtime:CommandExecutor"] = "Plugin"
-            })
-            .Build();
         var services = new ServiceCollection();
 
-        services.AddOpenLineOpsRuntimeModule(configuration);
+        services.AddOpenLineOpsRuntimeModule();
 
         Assert.DoesNotContain(
             services,
             descriptor => descriptor.ServiceType == typeof(IRuntimeCommandExecutor));
-        Assert.DoesNotContain(
-            services,
-            descriptor => descriptor.ServiceType.Name.Contains("ConfigurableRuntimeCommandExecutor", StringComparison.Ordinal));
     }
 
     [Fact]

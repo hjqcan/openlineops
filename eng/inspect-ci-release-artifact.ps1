@@ -350,8 +350,8 @@ $evidence = Read-JsonFile $evidencePath
 $preflight = Read-JsonFile $preflightPath
 
 if ($null -ne $manifest) {
-    if ($manifest.schemaVersion -ne 2) {
-        Add-Failure "Release manifest schemaVersion must be 2."
+    if ($manifest.schemaVersion -ne 1) {
+        Add-Failure "Release manifest schemaVersion must be 1."
     }
 
     if ($manifest.product -ne "OpenLineOps") {

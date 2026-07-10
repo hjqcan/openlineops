@@ -645,18 +645,24 @@
 
 .topology-element-children > .topology-layout-element { pointer-events: auto; }
 
-.topology-layout-element.component-system {
+.topology-layout-element.system-system {
   overflow: hidden;
   border-color: #527f96;
   border-radius: 3px;
   background: #2c414c;
 }
 
+.topology-layout-element.system-system.status-idle { border-color: var(--topology-idle); }
+.topology-layout-element.system-system.status-running { border-color: var(--topology-running); }
+.topology-layout-element.system-system.status-completed { border-color: var(--topology-completed); }
+.topology-layout-element.system-system.status-failed { border-color: var(--topology-failed); }
+.topology-layout-element.system-system.status-offline { border-color: var(--topology-offline); }
+
 .topology-component-face {
   position: absolute;
   inset: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   padding: 5px 7px;
@@ -667,12 +673,32 @@
 .topology-component-face strong { color: #e6f0f3; font-size: 9px; }
 .topology-component-face span { color: #83a4b0; font-size: 7px; }
 
+.topology-inline-status {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--topology-idle);
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 8%);
+}
+
+.topology-inline-status.status-running { background: var(--topology-running); }
+.topology-inline-status.status-completed { background: var(--topology-completed); }
+.topology-inline-status.status-failed { background: var(--topology-failed); }
+.topology-inline-status.status-offline { background: var(--topology-offline); }
+
 .topology-layout-element.group-region {
   overflow: visible;
   border: 1px dashed #b58b3d;
   border-radius: 3px;
   background: linear-gradient(135deg, rgb(192 145 58 / 7%) 25%, transparent 25%) 0 0 / 10px 10px, rgb(54 49 37 / 76%);
 }
+
+.topology-layout-element.group-region.status-idle { border-color: var(--topology-idle); }
+.topology-layout-element.group-region.status-running { border-color: var(--topology-running); }
+.topology-layout-element.group-region.status-completed { border-color: var(--topology-completed); }
+.topology-layout-element.group-region.status-failed { border-color: var(--topology-failed); }
+.topology-layout-element.group-region.status-offline { border-color: var(--topology-offline); }
 
 .topology-group-face {
   position: absolute;
@@ -705,6 +731,7 @@
 }
 
 .topology-layout-element.slot-shape.status-running { border-color: var(--topology-running); background: #514727; }
+.topology-layout-element.slot-shape.status-completed { border-color: var(--topology-completed); background: #29483a; }
 .topology-layout-element.slot-shape.status-failed { border-color: var(--topology-failed); background: #563331; }
 .topology-layout-element.slot-shape.status-offline { border-color: var(--topology-offline); background: #394246; }
 
@@ -725,6 +752,7 @@
 }
 
 .status-running .topology-slot-face i { background: var(--topology-running); }
+.status-completed .topology-slot-face i { background: var(--topology-completed); }
 .status-failed .topology-slot-face i { background: var(--topology-failed); }
 .status-offline .topology-slot-face i { background: var(--topology-offline); }
 

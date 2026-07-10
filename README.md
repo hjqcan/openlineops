@@ -15,7 +15,7 @@ This project is in early platform development.
   scoped to the active project and application after open. The independent 2D
   Layout workbench is a hierarchical drag editor in Edit mode and the default
   live production overview in Run mode.
-- Topology: strict Application-local topology v2 uses one canonical
+- Topology: the strict Application-local topology uses one canonical
   `AutomationSystem` identity. `StationSystem` derives from it; nested Systems,
   SlotGroups, and Slots share a parent-local 2D layout so moving a Station moves
   its complete visual subtree. Production, Flow, Runtime, and Trace use the same

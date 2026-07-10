@@ -135,7 +135,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
     }
 
     [Fact]
-    public async Task ObsoleteEngineeringResourceSchemaIsRejected()
+    public async Task UnsupportedEngineeringResourceSchemaIsRejected()
     {
         var scope = Scope("application.current-only", _projectDirectory);
         var configuration = CreateConfiguration(
@@ -153,7 +153,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         await repository.SaveAsync(scope, configuration.Workspace);
         var path = FindDocumentPath(_projectDirectory, "resourceId", WorkspaceIdValue);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        document["schemaVersion"] = 2;
+        document["schemaVersion"] = 99;
         await File.WriteAllTextAsync(path, document.ToJsonString());
 
         await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -270,7 +270,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             "*.json",
             SearchOption.AllDirectories);
         Assert.Equal(4, documents.Length);
-        Assert.All(documents, path => AssertPortableV3Document(path, applicationId));
+        Assert.All(documents, path => AssertPortableDocument(path, applicationId));
 
         CopyDirectoryByteForByte(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
         AssertApplicationFoldersHaveEqualBytes(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
@@ -499,7 +499,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         }
     }
 
-    private static void AssertPortableV3Document(string path, string applicationId)
+    private static void AssertPortableDocument(string path, string applicationId)
     {
         using var document = JsonDocument.Parse(File.ReadAllText(path));
         var root = document.RootElement;

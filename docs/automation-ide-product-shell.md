@@ -337,7 +337,7 @@ immutable `version-000001.json`-style artifact.
 The current release manifest records the exact Application project path plus
 Topology v1, hierarchical Layout v1, production definitions, process and
 version, Station-System configuration, capability bindings, target references,
-exact Blockly block versions and contract hashes, canonical Flow IR v2 JSON and
+exact Blockly block versions and contract hashes, canonical Flow IR JSON and
 SHA-256, complete content-addressed provider package locks, every copied file's
 size and SHA-256, and a release content digest. Package signatures and an
 active-release pointer remain future deployment outputs, never trusted editable
@@ -368,7 +368,7 @@ The implemented `ProjectReleasePublisher` performs this use case:
 4. Resolve topology targets and bindings plus the current catalog version for
    every Blockly block type found in the process workspace.
 5. Compile the published process graph to canonical
-   `openlineops.flow-ir/v2`, then record its schema, JSON, and SHA-256.
+   `openlineops.flow-ir/v1`, then record its schema, JSON, and SHA-256.
 6. Copy the complete application source into a staging release, write per-file
    size and SHA-256 records, and compute the release content digest.
 7. Verify the staged release, atomically move it into its immutable final

@@ -52,6 +52,8 @@ import type {
   RuntimeAlarmsResponse,
   RuntimeStationStatus,
   RuntimeStationStatusesResponse,
+  RuntimeTargetStatus,
+  RuntimeTargetStatusesResponse,
   RuntimeTimelineEntry,
   RuntimeTimelineResponse,
   SaveProductionLineRequest,
@@ -427,6 +429,21 @@ export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
   const response = await desktop.apiRequest<RuntimeStationStatusesResponse>(
     '/api/runtime/monitoring/stations');
   return response.body?.items ?? [];
+}
+
+export async function getTargetStatuses(
+  stationSystemIds?: readonly string[]
+): Promise<RuntimeTargetStatus[]> {
+  const uniqueStationSystemIds = [...new Set(
+    (stationSystemIds ?? []).filter(stationSystemId => stationSystemId.length > 0))];
+  const paths = uniqueStationSystemIds.length === 0
+    ? ['/api/runtime/monitoring/targets']
+    : uniqueStationSystemIds.map(stationSystemId =>
+      `/api/runtime/monitoring/targets?stationSystemId=${encodeURIComponent(stationSystemId)}`);
+  const responses = await Promise.all(paths.map(path =>
+    desktop.apiRequest<RuntimeTargetStatusesResponse>(path)));
+
+  return responses.flatMap(response => response.body?.items ?? []);
 }
 
 export async function getAlarms(includeAcknowledged = false): Promise<RuntimeAlarm[]> {

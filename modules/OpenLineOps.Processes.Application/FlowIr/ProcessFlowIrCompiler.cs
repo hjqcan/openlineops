@@ -105,7 +105,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             .ToImmutableArray();
 
         var document = new FlowIrDocument(
-            FlowIrSchemaVersions.V2,
+            FlowIrSchemaVersions.V1,
             definition.Id.Value,
             definition.VersionId.Value,
             definition.DisplayName,
@@ -229,7 +229,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             {
                 return ApplicationError.Validation(
                     "Processes.FlowIrTimeoutPrecisionUnsupported",
-                    $"Process node {node.Id} timeout must be representable as a whole number of milliseconds in Flow IR v2.");
+                    $"Process node {node.Id} timeout must be representable as a whole number of milliseconds in Flow IR v1.");
             }
 
             var timeoutMilliseconds = checked(timeout.Ticks / TimeSpan.TicksPerMillisecond);
@@ -237,7 +237,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             {
                 return ApplicationError.Validation(
                     "Processes.FlowIrTimeoutInvalid",
-                    $"Process node {node.Id} timeout must be at least one millisecond in Flow IR v2.");
+                    $"Process node {node.Id} timeout must be at least one millisecond in Flow IR v1.");
             }
         }
 

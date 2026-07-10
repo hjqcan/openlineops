@@ -6,5 +6,5 @@ public static class ApplicationResourceSchemaVersions
 
     public const string SiteLayout = "openlineops.site-layout/v1";
 
-    public const string ProductionLine = "openlineops.production-line/v2";
+    public const string ProductionLine = "openlineops.production-line/v1";
 }

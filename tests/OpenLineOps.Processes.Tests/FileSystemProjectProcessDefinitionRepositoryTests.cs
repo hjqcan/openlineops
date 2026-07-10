@@ -92,7 +92,7 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
     }
 
     [Fact]
-    public async Task ObsoleteFlowFormatIsRejected()
+    public async Task UnsupportedFlowFormatIsRejected()
     {
         var scope = Scope("application.current-only");
         var definitionId = new ProcessDefinitionId("process.current-only");
@@ -110,7 +110,7 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             "flow.json",
             SearchOption.AllDirectories));
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        document["formatVersion"] = 1;
+        document["formatVersion"] = 99;
         await File.WriteAllTextAsync(path, document.ToJsonString());
 
         await Assert.ThrowsAsync<InvalidDataException>(async () =>
@@ -195,14 +195,14 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         using (var flowDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
                    Directory.GetFiles(sourceScope.ApplicationRootPath, "flow.json", SearchOption.AllDirectories)))))
         {
-            Assert.Equal(3, flowDocument.RootElement.GetProperty("formatVersion").GetInt32());
+            Assert.Equal(1, flowDocument.RootElement.GetProperty("formatVersion").GetInt32());
         }
 
         using (var blockDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
                    jsonPaths,
                    path => Path.GetFileName(path).StartsWith("version-", StringComparison.Ordinal)))))
         {
-            Assert.Equal(3, blockDocument.RootElement.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal(1, blockDocument.RootElement.GetProperty("schemaVersion").GetInt32());
         }
 
         CopyDirectory(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);

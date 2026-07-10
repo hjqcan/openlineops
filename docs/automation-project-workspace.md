@@ -117,7 +117,7 @@ Returning to Edit mode never mutates or resumes a published snapshot.
 
 ## Application topology
 
-Topology schema v2 contains only:
+The topology schema contains only:
 
 - `systems`;
 - `capabilities`;
@@ -134,7 +134,7 @@ Removed node/module target kinds and fields are not accepted.
 
 ## 2D layout and future 3D
 
-Layout schema v2 is hierarchical. Each element has a semantic target and a
+The layout schema is hierarchical. Each element has a semantic target and a
 `parentElementId`; child coordinates are local to their parent. The editor
 supports drag, keyboard nudge, resize/geometry editing, and nested selection.
 Moving a Station carries its visual subtree automatically.

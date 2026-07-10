@@ -1,6 +1,6 @@
 # OpenLineOps Development Execution Plan
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 ## Product Positioning
 
@@ -1895,4 +1895,6 @@ Current result on 2026-07-09:
 
 ## Current-model note (2026-07-10)
 
-The dated delivery logs above are historical evidence, not current contracts. References in those logs to `automation_plan`, `RuntimeAutomationPlanDispatcher`, global `/api/process-definitions` or `/api/process-blocks` routes, simulated runtime starts, global process persistence, and legacy runtime configuration resolvers describe deleted implementations. The current model compiles Blockly directly to Flow IR v2, keeps Python as one controlled published action, scopes authoring to Project/Application resources, and starts runtime only from immutable project release snapshots. No compatibility path exists for those removed surfaces or for runtime snapshots missing ActionId, TargetKind, or TargetId.
+The dated delivery logs above are historical evidence, not current contracts. References in those logs to `automation_plan`, `RuntimeAutomationPlanDispatcher`, global `/api/process-definitions` or `/api/process-blocks` routes, simulated runtime starts, global process persistence, and obsolete runtime configuration resolvers describe deleted implementations. The current model compiles Blockly directly to the single Flow IR schema (`openlineops.flow-ir/v1`), keeps Python as one controlled published action, scopes authoring to Project/Application resources, and starts runtime only from immutable project release snapshots.
+
+Because the product has not shipped, the current persisted formats are their first and only schemas: Application topology, hierarchical layout, Production lines, Flow IR, Engineering configuration, Application-local Blockly block documents, immutable Project release artifacts, and the repository release-manifest tool all use schema version 1. There are no migration readers, version aliases, or compatibility mappings for discarded development formats.

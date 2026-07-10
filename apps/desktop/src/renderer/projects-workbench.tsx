@@ -77,7 +77,7 @@ interface StartProjectGroup {
 
 type StartDialog = 'new-project' | 'open-path' | null;
 
-const recentProjectsStorageKey = 'openlineops.recentProjects.v2';
+const recentProjectsStorageKey = 'openlineops.recentProjects.v1';
 
 export function ProjectsWorkbench({
   activeWorkspace,

@@ -118,8 +118,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.schemaVersion -ne 2) {
-    throw "Expected release manifest schemaVersion 2, found $($manifest.schemaVersion)."
+if ($manifest.schemaVersion -ne 1) {
+    throw "Expected release manifest schemaVersion 1, found $($manifest.schemaVersion)."
 }
 
 $actualKinds = @($manifest.artifacts | ForEach-Object { $_.kind } | Sort-Object -Unique)
