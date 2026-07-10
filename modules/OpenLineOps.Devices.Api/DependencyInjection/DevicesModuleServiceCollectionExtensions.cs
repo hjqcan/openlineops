@@ -12,6 +12,8 @@ using OpenLineOps.Devices.Infrastructure.Time;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Plugins.Application.Capabilities;
 using OpenLineOps.Plugins.Application.Commands;
+using OpenLineOps.Projects.Application.Persistence;
+using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -51,13 +53,20 @@ public static class DevicesModuleServiceCollectionExtensions
             serviceProvider.GetRequiredService<IEngineeringProjectRepository>(),
             serviceProvider.GetService<IPluginCapabilityInventory>(),
             serviceProvider.GetService<IPluginDeviceCommandInventory>()));
+        services.TryAddSingleton(serviceProvider => new ProjectReleaseDeviceCommandRouteResolver(
+            serviceProvider.GetRequiredService<IAutomationProjectRepository>(),
+            serviceProvider.GetRequiredService<IProjectReleaseArtifactStore>(),
+            serviceProvider.GetRequiredService<IProjectEngineeringConfigurationRepository>(),
+            serviceProvider.GetService<IPluginCapabilityInventory>(),
+            serviceProvider.GetService<IPluginDeviceCommandInventory>()));
         services.Replace(ServiceDescriptor.Singleton<IDeviceCommandRouteResolver, ConfigurableDeviceCommandRouteResolver>());
         services.TryAddSingleton<DeviceRuntimeCommandExecutor>();
         services.TryAddSingleton<SimulatedRuntimeCommandExecutor>();
+        services.TryAddSingleton<RuntimeFlowCommandExecutor>();
         services.TryAddSingleton<PythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<IRuntimeScriptExecutor, ConfigurableRuntimeScriptExecutor>();
-        services.TryAddSingleton<RuntimeAutomationPlanDispatcher>();
+        services.TryAddSingleton<RuntimeAutomationPlanExpander>();
         services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ConfigurableRuntimeCommandExecutor>());
         services.AddScoped<IDeviceConfigurationService, DeviceConfigurationService>();
 

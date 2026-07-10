@@ -40,6 +40,10 @@ public sealed class DeviceRuntimeCommandExecutorTests
         Assert.Equal("snapshot-001", routeRequest.ConfigurationSnapshotId);
         Assert.Equal("device.scanner", routeRequest.CapabilityId.Value);
         Assert.Equal("Scan", routeRequest.CommandName);
+        Assert.Equal("project-main", routeRequest.ProjectId);
+        Assert.Equal("application-main", routeRequest.ApplicationId);
+        Assert.Equal("project-snapshot-main", routeRequest.ProjectSnapshotId);
+        Assert.True(routeRequest.HasProjectReleaseIdentity);
 
         var deviceRequest = Assert.IsType<DeviceCommandExecutionRequest>(deviceExecutor.Request);
         Assert.Equal("scanner-01", deviceRequest.DeviceInstanceId.Value);
@@ -143,7 +147,10 @@ public sealed class DeviceRuntimeCommandExecutorTests
             new RuntimeCapabilityId("device.scanner"),
             commandName,
             inputPayload,
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            "project-main",
+            "application-main",
+            "project-snapshot-main");
     }
 
     private sealed class CapturingRouteResolver(DeviceCommandRoute? route) : IDeviceCommandRouteResolver

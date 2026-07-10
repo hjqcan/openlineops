@@ -27,13 +27,8 @@ public sealed record LinkProjectProcessDefinitionRequest(
 public sealed record PublishProjectSnapshotRequest(
     string? SnapshotId,
     string? ApplicationId,
-    string? TopologyId,
     string? ProcessDefinitionId,
-    string? ProcessVersionId,
-    string? ConfigurationSnapshotId,
-    IReadOnlyCollection<SnapshotCapabilityBindingRequest>? CapabilityBindings,
-    IReadOnlyCollection<ProjectTargetReferenceRequest>? TargetReferences,
-    IReadOnlyCollection<string>? BlockVersionIds);
+    string? ConfigurationSnapshotId);
 
 public sealed record StartProjectSnapshotRuntimeSessionRequest(
     string? SerialNumber = null,
@@ -88,39 +83,47 @@ public sealed record ProjectApplicationManifestResponse(
     string ApplicationId,
     string DisplayName,
     string? TopologyId,
-    IReadOnlyCollection<string> ProcessDefinitionIds);
+    IReadOnlyCollection<string> ProcessDefinitionIds,
+    string? ProjectFilePath);
 
 public sealed record ProjectApplicationResponse(
     string ApplicationId,
     string DisplayName,
     string? TopologyId,
-    IReadOnlyCollection<string> ProcessDefinitionIds);
+    IReadOnlyCollection<string> ProcessDefinitionIds,
+    string? ProjectFilePath);
 
 public sealed record PublishedProjectSnapshotResponse(
     string SnapshotId,
     string ProjectId,
     string ApplicationId,
     string TopologyId,
+    IReadOnlyCollection<string> LayoutIds,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     DateTimeOffset PublishedAtUtc,
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
-    IReadOnlyCollection<string> BlockVersionIds);
+    IReadOnlyCollection<string> BlockVersionIds,
+    string? ReleaseManifestPath,
+    string? ReleaseContentSha256);
 
 public sealed record PublishedProjectSnapshotManifestResponse(
     string SnapshotId,
     string ProjectId,
     string ApplicationId,
     string TopologyId,
+    IReadOnlyCollection<string> LayoutIds,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     DateTimeOffset PublishedAtUtc,
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
-    IReadOnlyCollection<string> BlockVersionIds);
+    IReadOnlyCollection<string> BlockVersionIds,
+    string? ReleaseManifestPath,
+    string? ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingResponse(
     string CapabilityId,

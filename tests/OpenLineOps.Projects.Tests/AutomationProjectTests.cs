@@ -28,6 +28,7 @@ public sealed class AutomationProjectTests
             snapshotId,
             applicationId,
             topologyId,
+            ["layout.main"],
             processDefinitionId,
             processVersionId,
             configurationSnapshotId,
@@ -40,6 +41,8 @@ public sealed class AutomationProjectTests
             ],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
             ["block.move-axis@1.0.0", "block.move-axis@1.0.0"],
+            "releases/release-main/release.json",
+            new string('a', 64),
             PublishedAtUtc);
 
         Assert.True(result.Succeeded);
@@ -48,12 +51,14 @@ public sealed class AutomationProjectTests
         Assert.Equal(project.Id, snapshot.ProjectId);
         Assert.Equal(applicationId, snapshot.ApplicationId);
         Assert.Equal(topologyId, snapshot.TopologyId);
+        Assert.Equal("layout.main", Assert.Single(snapshot.LayoutIds));
         Assert.Equal(processDefinitionId, snapshot.ProcessDefinitionId);
         Assert.Equal(processVersionId, snapshot.ProcessVersionId);
         Assert.Equal(configurationSnapshotId, snapshot.ConfigurationSnapshotId);
         Assert.Single(snapshot.CapabilityBindings);
         Assert.Single(snapshot.TargetReferences);
         Assert.Single(snapshot.BlockVersionIds);
+        Assert.True(snapshot.HasImmutableRelease);
         Assert.Contains(project.DomainEvents, domainEvent =>
             domainEvent is ProjectSnapshotPublishedDomainEvent published
             && published.ProjectId == project.Id
@@ -74,12 +79,15 @@ public sealed class AutomationProjectTests
             new PublishedProjectSnapshotId("snapshot.main.v1"),
             applicationId,
             new AutomationTopologyId("topology.main"),
+            ["layout.main"],
             processDefinitionId,
             new ProcessVersionId("process.main.v1"),
             new ConfigurationSnapshotId("configuration.main.v1"),
             [new SnapshotCapabilityBinding("motion.axis.move", "binding.axis.x.simulator", "Simulator", "simulator.axis.x")],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
             ["block.move-axis@1.0.0"],
+            "releases/release-main/release.json",
+            new string('a', 64),
             PublishedAtUtc);
 
         Assert.False(result.Succeeded);
@@ -100,16 +108,52 @@ public sealed class AutomationProjectTests
             new PublishedProjectSnapshotId("snapshot.main.v1"),
             applicationId,
             topologyId,
+            ["layout.main"],
             processDefinitionId,
             new ProcessVersionId("process.main.v1"),
             new ConfigurationSnapshotId("configuration.main.v1"),
             [],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
             ["block.move-axis@1.0.0"],
+            "releases/release-main/release.json",
+            new string('a', 64),
             PublishedAtUtc);
 
         Assert.False(result.Succeeded);
         Assert.Equal("Projects.NoCapabilityBindings", result.Code);
+    }
+
+    [Fact]
+    public void PublishSnapshotRejectsMissingFrozenLayouts()
+    {
+        var project = CreateProjectWithApplication(out var applicationId);
+        var topologyId = new AutomationTopologyId("topology.main");
+        var processDefinitionId = new ProcessDefinitionId("process.main");
+
+        Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
+        Assert.True(project.LinkProcessDefinition(applicationId, processDefinitionId).Succeeded);
+
+        var result = project.PublishSnapshot(
+            new PublishedProjectSnapshotId("snapshot.main.v1"),
+            applicationId,
+            topologyId,
+            [],
+            processDefinitionId,
+            new ProcessVersionId("process.main.v1"),
+            new ConfigurationSnapshotId("configuration.main.v1"),
+            [new SnapshotCapabilityBinding(
+                "motion.axis.move",
+                "binding.axis.x.simulator",
+                "Simulator",
+                "simulator.axis.x")],
+            [new ProjectTargetReference("slot", "slot.left-nest.1")],
+            ["block.move-axis@1.0.0"],
+            "releases/release-main/release.json",
+            new string('a', 64),
+            PublishedAtUtc);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("Projects.NoLayouts", result.Code);
     }
 
     [Fact]

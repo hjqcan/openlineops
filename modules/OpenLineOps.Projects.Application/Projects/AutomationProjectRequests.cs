@@ -21,12 +21,15 @@ public sealed record PublishProjectSnapshotRequest(
     string SnapshotId,
     string ApplicationId,
     string TopologyId,
+    IReadOnlyCollection<string> LayoutIds,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     IReadOnlyCollection<SnapshotCapabilityBindingRequest> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceRequest> TargetReferences,
-    IReadOnlyCollection<string> BlockVersionIds);
+    IReadOnlyCollection<string> BlockVersionIds,
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingRequest(
     string CapabilityId,

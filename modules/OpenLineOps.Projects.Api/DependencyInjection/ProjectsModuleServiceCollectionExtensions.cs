@@ -6,8 +6,10 @@ using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
+using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.Persistence;
 using OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
+using OpenLineOps.Projects.Infrastructure.Releases;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Projects.Api.DependencyInjection;
@@ -21,7 +23,11 @@ public static class ProjectsModuleServiceCollectionExtensions
         services.AddSingleton<IAutomationProjectRepository>(serviceProvider =>
             serviceProvider.GetRequiredService<InMemoryAutomationProjectRepository>());
         services.TryAddSingleton<IAutomationProjectManifestStore, FileSystemAutomationProjectManifestStore>();
+        services.TryAddSingleton<IProjectReleaseArtifactStore, FileSystemProjectReleaseArtifactStore>();
         services.TryAddScoped<IProjectApplicationWorkspaceScopeResolver, AutomationProjectWorkspaceScopeResolver>();
+        services.AddScoped<IProjectReleaseSourceResolver, ProjectReleaseSourceResolver>();
+        services.AddScoped<IProjectReleasePublisher, ProjectReleasePublisher>();
+        services.AddScoped<IProjectReleaseRuntimeSessionLauncher, ProjectReleaseRuntimeSessionLauncher>();
         services.AddScoped<IAutomationProjectService, AutomationProjectService>();
         services.AddScoped<IAutomationProjectWorkspaceService, AutomationProjectWorkspaceService>();
 

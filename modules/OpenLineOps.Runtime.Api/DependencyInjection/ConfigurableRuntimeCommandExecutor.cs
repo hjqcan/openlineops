@@ -12,29 +12,35 @@ internal sealed class ConfigurableRuntimeCommandExecutor : IRuntimeCommandExecut
     private readonly RuntimeCommandExecutorOptions _options;
     private readonly IServiceProvider _serviceProvider;
     private readonly SimulatedRuntimeCommandExecutor _simulatedExecutor;
+    private readonly RuntimeFlowCommandExecutor _flowExecutor;
     private readonly IRuntimeScriptExecutor _scriptExecutor;
-    private readonly RuntimeAutomationPlanDispatcher _automationPlanDispatcher;
 
     public ConfigurableRuntimeCommandExecutor(
         IConfiguration configuration,
         RuntimeCommandExecutorOptions options,
         IServiceProvider serviceProvider,
         SimulatedRuntimeCommandExecutor simulatedExecutor,
-        IRuntimeScriptExecutor scriptExecutor,
-        RuntimeAutomationPlanDispatcher automationPlanDispatcher)
+        RuntimeFlowCommandExecutor flowExecutor,
+        IRuntimeScriptExecutor scriptExecutor)
     {
         _configuration = configuration;
         _options = options;
         _serviceProvider = serviceProvider;
         _simulatedExecutor = simulatedExecutor;
+        _flowExecutor = flowExecutor;
         _scriptExecutor = scriptExecutor;
-        _automationPlanDispatcher = automationPlanDispatcher;
     }
 
     public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
         RuntimeCommandExecutionContext context,
         CancellationToken cancellationToken = default)
     {
+        if (RuntimeFlowCommand.IsWait(context))
+        {
+            return await _flowExecutor.ExecuteAsync(context, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (RuntimeScriptCommand.IsPythonScript(context))
         {
             if (!RuntimeScriptExecutionRequest.TryCreate(context, out var request, out var error))
@@ -43,14 +49,8 @@ internal sealed class ConfigurableRuntimeCommandExecutor : IRuntimeCommandExecut
                     error ?? "Python script command payload is invalid.");
             }
 
-            var scriptResult = await _scriptExecutor.ExecuteAsync(request!, cancellationToken)
+            return await _scriptExecutor.ExecuteAsync(request!, cancellationToken)
                 .ConfigureAwait(false);
-
-            return await _automationPlanDispatcher.DispatchAsync(
-                request!,
-                scriptResult,
-                ExecuteAsync,
-                cancellationToken).ConfigureAwait(false);
         }
 
         var executor = _configuration[$"{RuntimeCommandExecutorOptions.SectionName}:CommandExecutor"]

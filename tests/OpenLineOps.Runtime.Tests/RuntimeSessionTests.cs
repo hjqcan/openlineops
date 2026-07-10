@@ -102,6 +102,68 @@ public sealed class RuntimeSessionTests
         Assert.True(session.IsTerminal);
     }
 
+    [Fact]
+    public void ChildStepRequiresRunningParentAndCarriesSemanticIdentityToCommand()
+    {
+        var session = CreateRunningSession();
+        var parent = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node"),
+            "Script",
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("script-node:action:1"));
+        var child = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node:slot:node:1"),
+            "Move axis",
+            StartedAtUtc.AddSeconds(2),
+            new RuntimeActionId("script-node:action:1:child:1"),
+            parent.Id,
+            dynamicSequence: 1);
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            child.Id,
+            new RuntimeCapabilityId("motion.axis"),
+            "MoveAxis",
+            StartedAtUtc.AddSeconds(3),
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal(parent.Id, child.ParentStepId);
+        Assert.Equal(1, child.DynamicSequence);
+        Assert.Equal(child.ActionId, command.ActionId);
+        Assert.Throws<InvalidOperationException>(() => session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node:slot:different-node"),
+            "Duplicate sequence",
+            StartedAtUtc.AddSeconds(3),
+            new RuntimeActionId("script-node:action:1:different-action"),
+            parent.Id,
+            dynamicSequence: 1));
+        Assert.Throws<InvalidOperationException>(() => session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node:slot:different-node-2"),
+            "Duplicate action",
+            StartedAtUtc.AddSeconds(3),
+            child.ActionId,
+            parent.Id,
+            dynamicSequence: 2));
+
+        var parentCompletedEarly = session.CompleteStep(parent.Id, StartedAtUtc.AddSeconds(4));
+        Assert.False(parentCompletedEarly.Succeeded);
+        Assert.Equal("Runtime.StepChildrenStillRunning", parentCompletedEarly.Code);
+        Assert.True(session.CancelCommand(command.Id, StartedAtUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.CancelStep(child.Id, StartedAtUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.CompleteStep(parent.Id, StartedAtUtc.AddSeconds(6)).Succeeded);
+        Assert.Throws<InvalidOperationException>(() => session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node:slot:node:2"),
+            "Second child",
+            StartedAtUtc.AddSeconds(7),
+            new RuntimeActionId("script-node:action:1:child:2"),
+            parent.Id,
+            dynamicSequence: 2));
+    }
+
     private static RuntimeSession CreateRunningSession()
     {
         var session = CreateSession();

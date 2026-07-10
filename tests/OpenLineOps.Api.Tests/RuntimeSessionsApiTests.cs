@@ -5,16 +5,24 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class RuntimeSessionsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class RuntimeSessionsApiTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
 {
+    private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
 
     public RuntimeSessionsApiTests(WebApplicationFactory<Program> factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _factory = DevelopmentRuntimeStartTestHost.Create(factory);
+        _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
+    }
+
+    public void Dispose()
+    {
+        _client.Dispose();
+        _factory.Dispose();
     }
 
     [Fact]
@@ -43,6 +51,12 @@ public sealed class RuntimeSessionsApiTests : IClassFixture<WebApplicationFactor
         Assert.Equal(2, sessionBody.RootElement.GetProperty("steps").GetArrayLength());
         Assert.Equal(2, sessionBody.RootElement.GetProperty("commands").GetArrayLength());
         Assert.Equal(0, sessionBody.RootElement.GetProperty("incidents").GetArrayLength());
+        var firstStep = sessionBody.RootElement.GetProperty("steps")[0];
+        Assert.Equal("node-scan:action:1", firstStep.GetProperty("actionId").GetString());
+        Assert.Equal(JsonValueKind.Null, firstStep.GetProperty("parentStepId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, firstStep.GetProperty("dynamicSequence").ValueKind);
+        var firstCommand = sessionBody.RootElement.GetProperty("commands")[0];
+        Assert.Equal(firstStep.GetProperty("actionId").GetString(), firstCommand.GetProperty("actionId").GetString());
     }
 
     [Fact]

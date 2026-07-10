@@ -6,7 +6,8 @@ import type {
   DesktopConfig,
   OpenLineOpsDesktopApi,
   SelectDirectoryOptions,
-  SelectDirectoryResult
+  SelectDirectoryResult,
+  SelectProjectFileOptions
 } from '../shared/desktop-api.js';
 
 const desktopApi: OpenLineOpsDesktopApi = {
@@ -16,6 +17,8 @@ const desktopApi: OpenLineOpsDesktopApi = {
   stopBackend: () => ipcRenderer.invoke('backend:stop') as Promise<BackendStatus>,
   selectDirectory: (options?: SelectDirectoryOptions) =>
     ipcRenderer.invoke('desktop:select-directory', options) as Promise<SelectDirectoryResult>,
+  selectProjectFile: (options?: SelectProjectFileOptions) =>
+    ipcRenderer.invoke('desktop:select-project-file', options) as Promise<SelectDirectoryResult>,
   apiRequest: <T = unknown>(path: string, options?: ApiRequestOptions) =>
     ipcRenderer.invoke('api:request', path, options) as Promise<ApiResponse<T>>
 };

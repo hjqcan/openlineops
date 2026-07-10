@@ -1,9 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -219,6 +217,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task PublishedProcessDefinitionCanStartRuntimeSession()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-start");
         var suffix = Guid.NewGuid().ToString("N");
         var recipeId = $"recipe-process-runtime-{suffix}";
@@ -226,17 +229,18 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreateValidDefinitionRequest(processDefinitionId));
-        using var publishResponse = await _client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
+        using var publishResponse = await client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
         await CreatePublishedEngineeringSnapshotAsync(
             recipeId,
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            processDefinitionId);
-        using var startResponse = await _client.PostAsJsonAsync(
+            processDefinitionId,
+            client);
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {
@@ -254,7 +258,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         Assert.Equal(1, startBody.RootElement.GetProperty("completedSteps").GetInt32());
         Assert.Equal(1, startBody.RootElement.GetProperty("commandCount").GetInt32());
 
-        using var queryResponse = await _client.GetAsync($"/api/runtime/sessions/{sessionId}");
+        using var queryResponse = await client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var sessionBody = await ReadJsonAsync(queryResponse);
 
         Assert.Equal(HttpStatusCode.OK, queryResponse.StatusCode);
@@ -270,6 +274,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task PublishedProcessDefinitionWithDecisionBranchCanStartRuntimeSession()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-decision-branch");
         var suffix = Guid.NewGuid().ToString("N");
         var recipeId = $"recipe-process-runtime-branch-{suffix}";
@@ -277,17 +286,18 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-branch-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-branch-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreateBranchingDefinitionRequest(processDefinitionId));
-        using var publishResponse = await _client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
+        using var publishResponse = await client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
         await CreatePublishedEngineeringSnapshotAsync(
             recipeId,
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            processDefinitionId);
-        using var startResponse = await _client.PostAsJsonAsync(
+            processDefinitionId,
+            client);
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {
@@ -303,7 +313,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         Assert.Equal(2, startBody.RootElement.GetProperty("completedSteps").GetInt32());
         Assert.Equal(2, startBody.RootElement.GetProperty("commandCount").GetInt32());
 
-        using var queryResponse = await _client.GetAsync($"/api/runtime/sessions/{sessionId}");
+        using var queryResponse = await client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var sessionBody = await ReadJsonAsync(queryResponse);
         var commandNames = sessionBody.RootElement
             .GetProperty("commands")
@@ -319,6 +329,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task PublishedProcessDefinitionWithCountedLoopPolicyCanStartRuntimeSession()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-counted-loop");
         var suffix = Guid.NewGuid().ToString("N");
         var recipeId = $"recipe-process-runtime-loop-{suffix}";
@@ -326,18 +341,19 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-loop-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-loop-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreateCountedLoopDefinitionRequest(processDefinitionId));
         using var createBody = await ReadJsonAsync(createResponse);
-        using var publishResponse = await _client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
+        using var publishResponse = await client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
         await CreatePublishedEngineeringSnapshotAsync(
             recipeId,
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            processDefinitionId);
-        using var startResponse = await _client.PostAsJsonAsync(
+            processDefinitionId,
+            client);
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {
@@ -363,17 +379,13 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task DeviceBackedRuntimeExecutorUsesEngineeringSnapshotDeviceBinding()
     {
-        using var factory = _factory.WithWebHostBuilder(builder =>
-        {
-            builder.ConfigureAppConfiguration((_, configurationBuilder) =>
+        using var factory = DevelopmentRuntimeStartTestHost.Create(
+            _factory,
+            new Dictionary<string, string?>
             {
-                configurationBuilder.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["OpenLineOps:Runtime:CommandExecutor"] = "Device",
-                    ["OpenLineOps:Devices:CommandRouting:Provider"] = "Engineering"
-                });
+                ["OpenLineOps:Runtime:CommandExecutor"] = "Device",
+                ["OpenLineOps:Devices:CommandRouting:Provider"] = "Engineering"
             });
-        });
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
@@ -430,6 +442,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task DraftProcessDefinitionCannotStartRuntimeSession()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-draft");
         var suffix = Guid.NewGuid().ToString("N");
         var recipeId = $"recipe-process-runtime-draft-{suffix}";
@@ -437,7 +454,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-draft-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-draft-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreateValidDefinitionRequest(processDefinitionId));
         await CreatePublishedEngineeringSnapshotAsync(
@@ -445,8 +462,9 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            processDefinitionId);
-        using var startResponse = await _client.PostAsJsonAsync(
+            processDefinitionId,
+            client);
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {
@@ -460,6 +478,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task PythonScriptProcessDefinitionCanStartRuntimeSessionAndReturnsScriptResult()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-python-script");
         var suffix = Guid.NewGuid().ToString("N");
         var recipeId = $"recipe-process-runtime-python-{suffix}";
@@ -467,17 +490,18 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-python-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-python-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreatePythonScriptDefinitionRequest(processDefinitionId, scriptInputPayload: "scan-ok"));
-        using var publishResponse = await _client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
+        using var publishResponse = await client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
         await CreatePublishedEngineeringSnapshotAsync(
             recipeId,
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            processDefinitionId);
-        using var startResponse = await _client.PostAsJsonAsync(
+            processDefinitionId,
+            client);
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {
@@ -493,7 +517,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         Assert.Equal(1, startBody.RootElement.GetProperty("completedSteps").GetInt32());
         Assert.Equal(1, startBody.RootElement.GetProperty("commandCount").GetInt32());
 
-        using var queryResponse = await _client.GetAsync($"/api/runtime/sessions/{sessionId}");
+        using var queryResponse = await client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var sessionBody = await ReadJsonAsync(queryResponse);
         var command = sessionBody.RootElement.GetProperty("commands")[0];
 
@@ -510,6 +534,11 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     [Fact]
     public async Task ConfigurationSnapshotForDifferentProcessCannotStartRuntimeSession()
     {
+        using var factory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var processDefinitionId = NewProcessDefinitionId("runtime-snapshot-mismatch");
         var otherProcessDefinitionId = NewProcessDefinitionId("runtime-snapshot-other");
         var suffix = Guid.NewGuid().ToString("N");
@@ -518,18 +547,19 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
         var projectId = $"project-process-runtime-mismatch-{suffix}";
         var configurationSnapshotId = $"snapshot-process-runtime-mismatch-{suffix}";
 
-        using var createResponse = await _client.PostAsJsonAsync(
+        using var createResponse = await client.PostAsJsonAsync(
             "/api/process-definitions",
             CreateValidDefinitionRequest(processDefinitionId));
-        using var publishResponse = await _client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
+        using var publishResponse = await client.PostAsync($"/api/process-definitions/{processDefinitionId}/publish", content: null);
         await CreatePublishedEngineeringSnapshotAsync(
             recipeId,
             stationProfileId,
             projectId,
             configurationSnapshotId,
-            otherProcessDefinitionId);
+            otherProcessDefinitionId,
+            client);
 
-        using var startResponse = await _client.PostAsJsonAsync(
+        using var startResponse = await client.PostAsJsonAsync(
             $"/api/process-definitions/{processDefinitionId}/runtime-sessions",
             new
             {

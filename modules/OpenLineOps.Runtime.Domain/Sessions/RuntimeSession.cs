@@ -217,11 +217,47 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         RuntimeStepId stepId,
         RuntimeNodeId nodeId,
         string displayName,
-        DateTimeOffset startedAtUtc)
+        DateTimeOffset startedAtUtc,
+        RuntimeActionId? actionId = null,
+        RuntimeStepId? parentStepId = null,
+        int? dynamicSequence = null)
     {
         EnsureCanExecuteWork();
 
-        var step = RuntimeStep.Start(stepId, nodeId, displayName, startedAtUtc);
+        if (parentStepId is not null)
+        {
+            var parent = _steps.SingleOrDefault(candidate => candidate.Id == parentStepId.Value);
+            if (parent is null)
+            {
+                throw new InvalidOperationException(
+                    $"Parent runtime step {parentStepId} does not exist in session {Id}.");
+            }
+
+            if (parent.Status != RuntimeStepStatus.Running)
+            {
+                throw new InvalidOperationException(
+                    $"Parent runtime step {parentStepId} is not running in session {Id}.");
+            }
+
+            var resolvedActionId = actionId ?? new RuntimeActionId($"{nodeId.Value}:action:1");
+            if (_steps.Any(candidate =>
+                    candidate.ParentStepId == parentStepId
+                    && (candidate.ActionId == resolvedActionId
+                        || candidate.DynamicSequence == dynamicSequence)))
+            {
+                throw new InvalidOperationException(
+                    $"Dynamic action {resolvedActionId} or sequence {dynamicSequence} already exists under parent step {parentStepId}.");
+            }
+        }
+
+        var step = RuntimeStep.Start(
+            stepId,
+            nodeId,
+            displayName,
+            startedAtUtc,
+            actionId,
+            parentStepId,
+            dynamicSequence);
         _steps.Add(step);
 
         RaiseDomainEvent(new RuntimeStepStatusChangedDomainEvent(
@@ -235,6 +271,13 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
 
     public RuntimeOperationResult CompleteStep(RuntimeStepId stepId, DateTimeOffset completedAtUtc)
     {
+        if (_steps.Any(step => step.ParentStepId == stepId && !step.IsTerminal))
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.StepChildrenStillRunning",
+                $"Runtime step {stepId} cannot complete while a child step is still running.");
+        }
+
         return ChangeStepStatus(stepId, step => step.Complete(completedAtUtc));
     }
 
@@ -269,7 +312,8 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             targetCapability,
             commandName,
             createdAtUtc,
-            timeout);
+            timeout,
+            _steps.Single(step => step.Id == stepId).ActionId);
 
         _commands.Add(command);
 

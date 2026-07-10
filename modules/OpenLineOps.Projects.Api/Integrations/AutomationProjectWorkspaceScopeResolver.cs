@@ -26,8 +26,9 @@ public sealed class AutomationProjectWorkspaceScopeResolver : IProjectApplicatio
         var project = await _projectRepository
             .GetByIdAsync(new AutomationProjectId(projectId), cancellationToken)
             .ConfigureAwait(false);
-        if (project is null
-            || project.Applications.All(application => application.Id.Value != applicationId))
+        var application = project?.Applications.SingleOrDefault(candidate =>
+            candidate.Id.Value == applicationId);
+        if (project is null || application is null)
         {
             return null;
         }
@@ -35,6 +36,7 @@ public sealed class AutomationProjectWorkspaceScopeResolver : IProjectApplicatio
         return new ProjectApplicationWorkspaceScope(
             project.Id.Value,
             applicationId,
-            project.ProjectPath);
+            project.ProjectPath,
+            application.ProjectFilePath);
     }
 }

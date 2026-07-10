@@ -74,6 +74,24 @@ public sealed class RuntimeCommandLifecycleTests
     }
 
     [Fact]
+    public void BackendCanRejectCommandAfterRuntimeDispatchStarted()
+    {
+        var session = CreateRunningSession();
+        var command = CreateCommand(session);
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+
+        var rejected = session.RejectCommand(
+            command.Id,
+            "backend route unavailable",
+            StartedAtUtc.AddSeconds(4));
+
+        Assert.True(rejected.Succeeded);
+        Assert.Equal(RuntimeCommandStatus.Rejected, command.Status);
+        Assert.Equal("backend route unavailable", command.FailureReason);
+    }
+
+    [Fact]
     public void CommandLifecycleEmitsStatusChangedEventsInOrder()
     {
         var session = CreateRunningSession();

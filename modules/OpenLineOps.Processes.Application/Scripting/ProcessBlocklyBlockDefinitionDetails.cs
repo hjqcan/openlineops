@@ -9,4 +9,8 @@ public sealed record ProcessBlocklyBlockDefinitionDetails(
     bool IsBuiltIn,
     int Version,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string ExecutionMode = ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate,
+    string? RuntimeActionContractSchemaVersion = null,
+    string? RuntimeActionContractJson = null,
+    string? RuntimeActionContractSha256 = null);

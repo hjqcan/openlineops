@@ -1,0 +1,303 @@
+using System.Collections.Immutable;
+using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Domain.Definitions;
+using OpenLineOps.Processes.Domain.Nodes;
+using OpenLineOps.Processes.Domain.Transitions;
+using OpenLineOps.Processes.Domain.Validation;
+using OpenLineOps.Runtime.Application.Scripting;
+
+namespace OpenLineOps.Processes.Application.FlowIr;
+
+public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
+{
+    public Result<FlowIrCompilation> Compile(ProcessDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        if (!definition.IsPublished)
+        {
+            return Result.Failure<FlowIrCompilation>(ApplicationError.Conflict(
+                "Processes.FlowIrDefinitionNotPublished",
+                $"Process definition {definition.Id} must be published before it can be compiled to Flow IR."));
+        }
+
+        var graphReport = ProcessGraphValidator.Validate(definition);
+        if (!graphReport.IsValid)
+        {
+            var issueSummary = string.Join(
+                "; ",
+                graphReport.Issues
+                    .OrderBy(issue => issue.Code, StringComparer.Ordinal)
+                    .ThenBy(issue => issue.Message, StringComparer.Ordinal)
+                    .Select(issue => $"{issue.Code}: {issue.Message}"));
+
+            return Result.Failure<FlowIrCompilation>(ApplicationError.Validation(
+                "Processes.FlowIrGraphInvalid",
+                $"Published process definition {definition.Id} cannot be compiled because graph validation failed: {issueSummary}"));
+        }
+
+        var branchingError = ValidateBranching(definition);
+        if (branchingError is not null)
+        {
+            return Result.Failure<FlowIrCompilation>(branchingError);
+        }
+
+        var timeoutError = ValidateTimeouts(definition);
+        if (timeoutError is not null)
+        {
+            return Result.Failure<FlowIrCompilation>(timeoutError);
+        }
+
+        var executableNodeCount = definition.Nodes.Count(node =>
+            node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript);
+        if (executableNodeCount == 0)
+        {
+            return Result.Failure<FlowIrCompilation>(ApplicationError.Validation(
+                "Processes.FlowIrNoExecutableActions",
+                $"Process definition {definition.Id} does not contain an executable action."));
+        }
+
+        var startNode = definition.Nodes.Single(node => node.Kind == ProcessNodeKind.Start);
+        var diagnostics = ImmutableArray.CreateBuilder<FlowIrCompilationDiagnostic>();
+        var nodes = definition.Nodes
+            .OrderBy(node => node.Id.Value, StringComparer.Ordinal)
+            .Select(node => ToNode(definition, node, diagnostics))
+            .ToImmutableArray();
+        var transitions = definition.Transitions
+            .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
+            .Select(transition => ToTransition(definition, transition))
+            .ToImmutableArray();
+
+        var document = new FlowIrDocument(
+            FlowIrSchemaVersions.V1,
+            definition.Id.Value,
+            definition.VersionId.Value,
+            definition.DisplayName,
+            startNode.Id.Value,
+            nodes,
+            transitions);
+
+        return Result.Success(new FlowIrCompilation(document, diagnostics.ToImmutable()));
+    }
+
+    private static FlowIrNode ToNode(
+        ProcessDefinition definition,
+        ProcessNode node,
+        ImmutableArray<FlowIrCompilationDiagnostic>.Builder diagnostics)
+    {
+        var source = NodeSource(definition, node);
+        var actions = node.Kind switch
+        {
+            ProcessNodeKind.Command => ImmutableArray.Create(ToDeviceCommandAction(node, source)),
+            ProcessNodeKind.PythonScript => ImmutableArray.Create(ToPythonScriptAction(node, source, diagnostics)),
+            _ => ImmutableArray<FlowIrAction>.Empty
+        };
+
+        return new FlowIrNode(
+            node.Id.Value,
+            ToNodeKind(node.Kind),
+            node.DisplayName,
+            actions,
+            source);
+    }
+
+    private static FlowIrAction ToDeviceCommandAction(
+        ProcessNode node,
+        FlowIrSourceTrace source)
+    {
+        var capability = node.RequiredCapability!.Value;
+
+        return new FlowIrAction(
+            CreateActionId(node),
+            FlowIrActionKind.DeviceCommand,
+            node.DisplayName,
+            capability,
+            node.CommandName!,
+            new FlowIrTargetReference(FlowIrTargetReferenceKind.Capability, capability),
+            node.InputPayload,
+            CreateExecutionPolicy(node.CommandTimeout!.Value),
+            PythonScript: null,
+            DynamicChildren: null,
+            source);
+    }
+
+    private static FlowIrAction ToPythonScriptAction(
+        ProcessNode node,
+        FlowIrSourceTrace source,
+        ImmutableArray<FlowIrCompilationDiagnostic>.Builder diagnostics)
+    {
+        var actionId = CreateActionId(node);
+        var dynamicSlot = new FlowIrDynamicActionSlot(
+            $"{actionId}:automation-plan",
+            FlowIrDynamicActionExpansionKind.RuntimeAutomationPlan,
+            $"{actionId}:child:",
+            SequenceBase: 1,
+            IsCompileTimeResolved: false,
+            FlowIrChildSourceMappingMode.ContainerOnly,
+            source);
+
+        diagnostics.Add(new FlowIrCompilationDiagnostic(
+            FlowIrDiagnosticSeverity.Warning,
+            "Processes.FlowIrPythonChildActionsRuntimeResolved",
+            $"Python script node {node.Id} can emit automation_plan child actions only at runtime; Flow IR preserves a dynamic child slot with container-level source mapping.",
+            source));
+
+        return new FlowIrAction(
+            actionId,
+            FlowIrActionKind.PythonScript,
+            node.DisplayName,
+            RuntimeScriptCommand.PythonCapability,
+            RuntimeScriptCommand.PythonCommandName,
+            new FlowIrTargetReference(
+                FlowIrTargetReferenceKind.Capability,
+                RuntimeScriptCommand.PythonCapability),
+            node.InputPayload,
+            CreateExecutionPolicy(node.ScriptTimeout!.Value),
+            new FlowIrPythonScript(
+                node.ScriptLanguage!,
+                node.ScriptEditorMode!.Value.ToString(),
+                node.ScriptSourceCode!,
+                node.ScriptSourceHash!,
+                node.ScriptVersion!,
+                node.BlocklyWorkspaceJson),
+            dynamicSlot,
+            source);
+    }
+
+    private static FlowIrExecutionPolicy CreateExecutionPolicy(TimeSpan timeout)
+    {
+        return new FlowIrExecutionPolicy(
+            checked(timeout.Ticks / TimeSpan.TicksPerMillisecond),
+            RetryLimit: 0,
+            FlowIrCancellationMode.Cooperative);
+    }
+
+    private static ApplicationError? ValidateTimeouts(ProcessDefinition definition)
+    {
+        foreach (var node in definition.Nodes
+                     .Where(node => node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript)
+                     .OrderBy(node => node.Id.Value, StringComparer.Ordinal))
+        {
+            var timeout = node.Kind == ProcessNodeKind.Command
+                ? node.CommandTimeout!.Value
+                : node.ScriptTimeout!.Value;
+            if (timeout <= TimeSpan.Zero)
+            {
+                return ApplicationError.Validation(
+                    "Processes.FlowIrTimeoutInvalid",
+                    $"Process node {node.Id} must declare a positive timeout before Flow IR compilation.");
+            }
+
+            if (timeout.Ticks % TimeSpan.TicksPerMillisecond != 0)
+            {
+                return ApplicationError.Validation(
+                    "Processes.FlowIrTimeoutPrecisionUnsupported",
+                    $"Process node {node.Id} timeout must be representable as a whole number of milliseconds in Flow IR v1.");
+            }
+
+            var timeoutMilliseconds = checked(timeout.Ticks / TimeSpan.TicksPerMillisecond);
+            if (timeoutMilliseconds <= 0)
+            {
+                return ApplicationError.Validation(
+                    "Processes.FlowIrTimeoutInvalid",
+                    $"Process node {node.Id} timeout must be at least one millisecond in Flow IR v1.");
+            }
+        }
+
+        return null;
+    }
+
+    private static FlowIrTransition ToTransition(
+        ProcessDefinition definition,
+        ProcessTransition transition)
+    {
+        return new FlowIrTransition(
+            transition.Id.Value,
+            transition.FromNodeId.Value,
+            transition.ToNodeId.Value,
+            transition.Label,
+            transition.LoopPolicy == ProcessTransitionLoopPolicy.Counted
+                ? FlowIrLoopPolicy.Counted
+                : FlowIrLoopPolicy.None,
+            transition.MaxTraversals,
+            new FlowIrSourceTrace(
+                definition.Id.Value,
+                definition.VersionId.Value,
+                FlowIrSourceElementKind.ProcessTransition,
+                transition.Id.Value,
+                ContentHash: null));
+    }
+
+    private static FlowIrSourceTrace NodeSource(
+        ProcessDefinition definition,
+        ProcessNode node)
+    {
+        return new FlowIrSourceTrace(
+            definition.Id.Value,
+            definition.VersionId.Value,
+            FlowIrSourceElementKind.ProcessNode,
+            node.Id.Value,
+            node.ScriptSourceHash);
+    }
+
+    private static string CreateActionId(ProcessNode node)
+    {
+        return $"{node.Id.Value}:action:1";
+    }
+
+    private static FlowIrNodeKind ToNodeKind(ProcessNodeKind kind)
+    {
+        return kind switch
+        {
+            ProcessNodeKind.Start => FlowIrNodeKind.Start,
+            ProcessNodeKind.Command => FlowIrNodeKind.Command,
+            ProcessNodeKind.Decision => FlowIrNodeKind.Decision,
+            ProcessNodeKind.Delay => FlowIrNodeKind.Delay,
+            ProcessNodeKind.End => FlowIrNodeKind.End,
+            ProcessNodeKind.PythonScript => FlowIrNodeKind.PythonScript,
+            _ => throw new InvalidOperationException($"Unsupported process node kind {kind}.")
+        };
+    }
+
+    private static ApplicationError? ValidateBranching(ProcessDefinition definition)
+    {
+        var nodesById = definition.Nodes.ToDictionary(node => node.Id);
+        foreach (var transitionGroup in definition.Transitions
+                     .GroupBy(transition => transition.FromNodeId)
+                     .OrderBy(group => group.Key.Value, StringComparer.Ordinal))
+        {
+            var outgoingTransitions = transitionGroup
+                .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
+                .ToArray();
+            if (outgoingTransitions.Length <= 1)
+            {
+                continue;
+            }
+
+            if (!nodesById.TryGetValue(transitionGroup.Key, out var sourceNode)
+                || sourceNode.Kind != ProcessNodeKind.Decision)
+            {
+                return ApplicationError.Conflict(
+                    "Processes.FlowIrBranchingRequiresDecision",
+                    $"Process node {transitionGroup.Key} has multiple outgoing transitions; Flow IR branching must originate from a Decision node.");
+            }
+
+            var duplicateLabel = outgoingTransitions
+                .Select(transition => string.IsNullOrWhiteSpace(transition.Label)
+                    ? "default"
+                    : transition.Label.Trim())
+                .GroupBy(label => label, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(group => group.Count() > 1)
+                ?.Key;
+            if (duplicateLabel is not null)
+            {
+                return ApplicationError.Conflict(
+                    "Processes.FlowIrDecisionLabelDuplicate",
+                    $"Decision node {transitionGroup.Key} has duplicate outgoing transition label '{duplicateLabel}'.");
+            }
+        }
+
+        return null;
+    }
+}

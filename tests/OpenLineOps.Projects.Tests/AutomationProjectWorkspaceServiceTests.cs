@@ -44,6 +44,7 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
                 "snapshot.main.v1",
                 "application.main",
                 "topology.main",
+                ["layout.main"],
                 "process.main",
                 "process.main@1.0.0",
                 "configuration.main.v1",
@@ -55,7 +56,9 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
                         "simulator.axis.x")
                 ],
                 [new ProjectTargetReferenceRequest("slot", "slot.left.1")],
-                ["block.motion.axis.move@1.0.0"]));
+                ["block.motion.axis.move@1.0.0"],
+                "releases/release-main/release.json",
+                new string('a', 64)));
         var saved = await workspaceService.SaveManifestAsync("project.workspace");
 
         var openedRepository = new InMemoryAutomationProjectRepository();
@@ -76,6 +79,8 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
         Assert.Equal("snapshot.main.v1", opened.Value.Project.ActiveSnapshotId);
         Assert.Single(opened.Value.Project.Applications);
         Assert.Single(opened.Value.Project.Snapshots);
+        Assert.Equal("layout.main", Assert.Single(opened.Value.Project.Snapshots.Single().LayoutIds));
+        Assert.Equal(new string('a', 64), opened.Value.Project.Snapshots.Single().ReleaseContentSha256);
         Assert.Equal("topology.main", opened.Value.Project.Applications.Single().TopologyId);
         Assert.Contains("process.main", opened.Value.Project.Applications.Single().ProcessDefinitionIds);
         Assert.Equal("snapshot.main.v1", opened.Value.Manifest.ActiveSnapshotId);

@@ -32,8 +32,10 @@ public sealed class RuntimeSessionsController : ControllerBase
     }
 
     [HttpPost("simulated")]
+    [DevelopmentRuntimeStartOnly]
     [ProducesResponseType<RuntimeSessionRunResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<RuntimeSessionRunResponse>> StartSimulatedAsync(
         StartSimulatedRuntimeSessionRequest request,
@@ -175,7 +177,10 @@ public sealed class RuntimeSessionsController : ControllerBase
                     step.Status.ToString(),
                     step.StartedAtUtc,
                     step.CompletedAtUtc,
-                    step.FailureReason))
+                    step.FailureReason,
+                    step.ActionId.Value,
+                    step.ParentStepId?.Value,
+                    step.DynamicSequence))
                 .ToArray(),
             session.Commands
                 .Select(command => new RuntimeCommandResponse(
@@ -188,7 +193,8 @@ public sealed class RuntimeSessionsController : ControllerBase
                     command.DeadlineAtUtc,
                     command.CompletedAtUtc,
                     command.ResultPayload,
-                    command.FailureReason))
+                    command.FailureReason,
+                    command.ActionId.Value))
                 .ToArray(),
             session.Incidents
                 .Select(incident => new RuntimeIncidentResponse(

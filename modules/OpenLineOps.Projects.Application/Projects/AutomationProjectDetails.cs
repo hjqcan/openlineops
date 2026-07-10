@@ -19,20 +19,24 @@ public sealed record ProjectApplicationDetails(
     string ApplicationId,
     string DisplayName,
     string? TopologyId,
-    IReadOnlyCollection<string> ProcessDefinitionIds);
+    IReadOnlyCollection<string> ProcessDefinitionIds,
+    string? ProjectFilePath = null);
 
 public sealed record PublishedProjectSnapshotDetails(
     string SnapshotId,
     string ProjectId,
     string ApplicationId,
     string TopologyId,
+    IReadOnlyCollection<string> LayoutIds,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     DateTimeOffset PublishedAtUtc,
     IReadOnlyCollection<SnapshotCapabilityBindingDetails> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceDetails> TargetReferences,
-    IReadOnlyCollection<string> BlockVersionIds);
+    IReadOnlyCollection<string> BlockVersionIds,
+    string? ReleaseManifestPath,
+    string? ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingDetails(
     string CapabilityId,

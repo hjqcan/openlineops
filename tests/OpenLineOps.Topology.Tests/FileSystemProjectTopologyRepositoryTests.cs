@@ -97,6 +97,39 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
         Assert.Equal(2, Directory.GetFiles(_projectDirectory, "layout-*.json", SearchOption.AllDirectories).Length);
     }
 
+    [Fact]
+    public async Task EditableResourcesAreStoredBesideTheApplicationProjectFile()
+    {
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project.custom-root",
+            "application.id-does-not-name-the-folder",
+            _projectDirectory,
+            "applications/Operator Cell/Main Line.oloapp");
+        var topologyId = new AutomationTopologyId("topology.custom/root");
+        var layoutId = new SiteLayoutId("layout.custom/root");
+        var topology = CreateCompleteTopology(topologyId, "Custom Root Topology");
+        var layout = CreateCompleteLayout(layoutId, topologyId, x: 240);
+
+        await new FileSystemProjectAutomationTopologyRepository().SaveAsync(scope, topology);
+        await new FileSystemProjectSiteLayoutRepository().SaveAsync(scope, layout);
+
+        var topologyPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(scope.ApplicationRootPath, "topology"),
+            "topology-*.json"));
+        var layoutPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(scope.ApplicationRootPath, "layouts"),
+            "layout-*.json"));
+
+        Assert.Equal(
+            Path.Combine(scope.ApplicationRootPath, "topology"),
+            Path.GetDirectoryName(topologyPath));
+        Assert.Equal(
+            Path.Combine(scope.ApplicationRootPath, "layouts"),
+            Path.GetDirectoryName(layoutPath));
+        Assert.StartsWith("topology-topology.custom-root--", Path.GetFileName(topologyPath));
+        Assert.StartsWith("layout-layout.custom-root--", Path.GetFileName(layoutPath));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))

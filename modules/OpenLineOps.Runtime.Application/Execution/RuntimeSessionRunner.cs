@@ -8,6 +8,7 @@ using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
@@ -19,25 +20,30 @@ namespace OpenLineOps.Runtime.Application.Execution;
 public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 {
     private static readonly StringComparer BranchLabelComparer = StringComparer.OrdinalIgnoreCase;
+    private static readonly TimeSpan MaximumDynamicContainerTimeout =
+        TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
 
     private readonly IRuntimeSessionRepository _sessionRepository;
     private readonly IRuntimeDomainEventPublisher _domainEventPublisher;
     private readonly IRuntimeCommandExecutor _commandExecutor;
     private readonly IRuntimeIdProvider _idProvider;
     private readonly IClock _clock;
+    private readonly RuntimeAutomationPlanExpander _automationPlanExpander;
 
     public RuntimeSessionRunner(
         IRuntimeSessionRepository sessionRepository,
         IRuntimeDomainEventPublisher domainEventPublisher,
         IRuntimeCommandExecutor commandExecutor,
         IRuntimeIdProvider idProvider,
-        IClock clock)
+        IClock clock,
+        RuntimeAutomationPlanExpander? automationPlanExpander = null)
     {
         _sessionRepository = sessionRepository;
         _domainEventPublisher = domainEventPublisher;
         _commandExecutor = commandExecutor;
         _idProvider = idProvider;
         _clock = clock;
+        _automationPlanExpander = automationPlanExpander ?? new RuntimeAutomationPlanExpander();
     }
 
     public async ValueTask<Result<RuntimeSessionRunResult>> RunAsync(
@@ -248,7 +254,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             _idProvider.NewStepId(),
             node.NodeId,
             node.DisplayName,
-            _clock.UtcNow);
+            _clock.UtcNow,
+            node.EffectiveActionId);
 
         await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
 
@@ -274,6 +281,16 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
 
+        using var containerTimeoutCancellation = node.DynamicChildren is null
+            ? null
+            : new CancellationTokenSource(node.Timeout);
+        using var containerLinkedCancellation = containerTimeoutCancellation is null
+            ? null
+            : CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                containerTimeoutCancellation.Token);
+        var executionCancellationToken = containerLinkedCancellation?.Token ?? cancellationToken;
+
         var executionContext = new RuntimeCommandExecutionContext(
             session.Id,
             session.StationId,
@@ -284,11 +301,183 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             node.TargetCapability,
             node.CommandName,
             node.InputPayload,
-            node.Timeout);
+            node.Timeout,
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            step.ActionId,
+            step.ParentStepId,
+            step.DynamicSequence);
 
-        var executionResult = await _commandExecutor
-            .ExecuteAsync(executionContext, cancellationToken)
+        var executionResult = await ExecuteCommandSafelyAsync(
+                executionContext,
+                executionCancellationToken)
             .ConfigureAwait(false);
+        executionResult = NormalizeContainerCancellation(
+            executionResult,
+            containerTimeoutCancellation,
+            cancellationToken);
+
+        if (executionResult.Outcome == RuntimeCommandExecutionOutcome.Completed
+            && node.DynamicChildren is not null)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    "Automation plan execution was canceled.",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (containerTimeoutCancellation!.IsCancellationRequested)
+            {
+                return await TimeoutNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    "Automation plan container timed out.",
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var expansionResult = _automationPlanExpander.Expand(node, executionResult.Payload);
+            if (expansionResult.IsFailure)
+            {
+                return await FailNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    "Runtime.AutomationPlanInvalid",
+                    expansionResult.Error.Message,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var dispatchResults = new List<RuntimeAutomationPlanActionResult>();
+            foreach (var action in expansionResult.Value.Actions)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return await CancelNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        "Automation plan execution was canceled.",
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                if (containerTimeoutCancellation.IsCancellationRequested)
+                {
+                    return await TimeoutNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        "Automation plan container timed out.",
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                Result<RuntimeAutomationPlanActionResult> childResult;
+                try
+                {
+                    childResult = await ExecuteChildActionAsync(
+                        session,
+                        step.Id,
+                        action,
+                        new DynamicContainerCancellation(
+                            containerTimeoutCancellation,
+                            executionCancellationToken),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is ArgumentException
+                                                   or InvalidOperationException)
+                {
+                    return await FailNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        "Runtime.ChildLifecycleFailed",
+                        exception.Message,
+                        cancellationToken.IsCancellationRequested
+                            ? CancellationToken.None
+                            : cancellationToken).ConfigureAwait(false);
+                }
+
+                if (childResult.IsFailure)
+                {
+                    return await FailNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        "Runtime.ChildLifecycleFailed",
+                        childResult.Error.Message,
+                        cancellationToken.IsCancellationRequested
+                            ? CancellationToken.None
+                            : cancellationToken).ConfigureAwait(false);
+                }
+
+                dispatchResults.Add(childResult.Value);
+                if (childResult.Value.Outcome == RuntimeCommandExecutionOutcome.Completed)
+                {
+                    continue;
+                }
+
+                var childReason = childResult.Value.Reason
+                    ?? $"Automation action {childResult.Value.ActionId} {childResult.Value.Outcome}.";
+                if (containerTimeoutCancellation.IsCancellationRequested
+                    && !cancellationToken.IsCancellationRequested)
+                {
+                    return await TimeoutNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        "Automation plan container timed out.",
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                if (childResult.Value.Outcome == RuntimeCommandExecutionOutcome.Canceled)
+                {
+                    return await CancelNodeAsync(
+                        session,
+                        step.Id,
+                        command.Id,
+                        childReason,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                return await FailNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    ToChildFailureCode(childResult.Value.Outcome),
+                    childReason,
+                    cancellationToken.IsCancellationRequested
+                        ? CancellationToken.None
+                        : cancellationToken).ConfigureAwait(false);
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    "Automation plan execution was canceled.",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (containerTimeoutCancellation.IsCancellationRequested)
+            {
+                return await TimeoutNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    "Automation plan container timed out.",
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            executionResult = RuntimeCommandExecutionResult.Completed(
+                expansionResult.Value.CreateCompletionPayload(dispatchResults));
+        }
 
         return executionResult.Outcome switch
         {
@@ -322,10 +511,239 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 step.Id,
                 command.Id,
                 executionResult.Reason ?? "Command canceled.",
-                cancellationToken).ConfigureAwait(false),
+                cancellationToken.IsCancellationRequested
+                    ? CancellationToken.None
+                    : cancellationToken).ConfigureAwait(false),
             _ => Result.Failure<RuntimeNodeExecutionResult>(ApplicationError.Conflict(
                 "Runtime.UnsupportedCommandOutcome",
                 $"Unsupported command outcome: {executionResult.Outcome}."))
+        };
+    }
+
+    private async ValueTask<Result<RuntimeAutomationPlanActionResult>> ExecuteChildActionAsync(
+        RuntimeSession session,
+        RuntimeStepId parentStepId,
+        RuntimeAutomationPlanAction action,
+        DynamicContainerCancellation containerCancellation,
+        CancellationToken externalCancellationToken)
+    {
+        var node = action.Node;
+        var step = session.StartStep(
+            _idProvider.NewStepId(),
+            node.NodeId,
+            node.DisplayName,
+            _clock.UtcNow,
+            node.EffectiveActionId,
+            parentStepId,
+            action.Sequence);
+
+        await PersistAndPublishAsync(session, externalCancellationToken).ConfigureAwait(false);
+
+        var command = session.CreateCommand(
+            _idProvider.NewCommandId(),
+            step.Id,
+            node.TargetCapability,
+            node.CommandName,
+            _clock.UtcNow,
+            node.Timeout);
+
+        var acceptResult = session.AcceptCommand(command.Id, _clock.UtcNow);
+        if (!acceptResult.Succeeded)
+        {
+            return Result.Failure<RuntimeAutomationPlanActionResult>(ApplicationError.Conflict(
+                acceptResult.Code,
+                acceptResult.Message));
+        }
+
+        var startResult = session.StartCommand(command.Id, _clock.UtcNow);
+        if (!startResult.Succeeded)
+        {
+            return Result.Failure<RuntimeAutomationPlanActionResult>(ApplicationError.Conflict(
+                startResult.Code,
+                startResult.Message));
+        }
+
+        await PersistAndPublishAsync(session, externalCancellationToken).ConfigureAwait(false);
+
+        var context = new RuntimeCommandExecutionContext(
+            session.Id,
+            session.StationId,
+            session.ConfigurationSnapshotId,
+            step.Id,
+            command.Id,
+            node.NodeId,
+            node.TargetCapability,
+            node.CommandName,
+            node.InputPayload,
+            node.Timeout,
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            step.ActionId,
+            step.ParentStepId,
+            step.DynamicSequence);
+
+        var executionResult = await ExecuteCommandSafelyAsync(
+                context,
+                containerCancellation.ExecutionToken)
+            .ConfigureAwait(false);
+        executionResult = NormalizeContainerCancellation(
+            executionResult,
+            containerCancellation.TimeoutCancellation,
+            externalCancellationToken);
+        var transitionResult = executionResult.Outcome switch
+        {
+            RuntimeCommandExecutionOutcome.Completed => CompleteChildAction(
+                session,
+                step.Id,
+                command.Id,
+                executionResult.Payload),
+            RuntimeCommandExecutionOutcome.Failed => FailChildAction(
+                session,
+                step.Id,
+                command.Id,
+                executionResult.Reason ?? "Command failed."),
+            RuntimeCommandExecutionOutcome.Rejected => RejectChildAction(
+                session,
+                step.Id,
+                command.Id,
+                executionResult.Reason ?? "Command rejected."),
+            RuntimeCommandExecutionOutcome.TimedOut => TimeoutChildAction(
+                session,
+                step.Id,
+                command.Id,
+                executionResult.Reason ?? "Command timed out."),
+            RuntimeCommandExecutionOutcome.Canceled => CancelChildAction(
+                session,
+                step.Id,
+                command.Id),
+            _ => RuntimeOperationResult.Rejected(
+                "Runtime.UnsupportedCommandOutcome",
+                $"Unsupported command outcome: {executionResult.Outcome}.")
+        };
+        if (!transitionResult.Succeeded)
+        {
+            return Result.Failure<RuntimeAutomationPlanActionResult>(ApplicationError.Conflict(
+                transitionResult.Code,
+                transitionResult.Message));
+        }
+
+        await PersistAndPublishAsync(
+                session,
+                externalCancellationToken.IsCancellationRequested
+                    ? CancellationToken.None
+                    : externalCancellationToken)
+            .ConfigureAwait(false);
+
+        return Result.Success(new RuntimeAutomationPlanActionResult(
+            action.Sequence,
+            step.ActionId.Value,
+            step.NodeId.Value,
+            action.ActionType,
+            executionResult.Outcome,
+            executionResult.Payload,
+            executionResult.Reason));
+    }
+
+    private RuntimeOperationResult CompleteChildAction(
+        RuntimeSession session,
+        RuntimeStepId stepId,
+        RuntimeCommandId commandId,
+        string? payload)
+    {
+        var commandResult = session.CompleteCommand(commandId, payload, _clock.UtcNow);
+        return commandResult.Succeeded
+            ? session.CompleteStep(stepId, _clock.UtcNow)
+            : commandResult;
+    }
+
+    private RuntimeOperationResult FailChildAction(
+        RuntimeSession session,
+        RuntimeStepId stepId,
+        RuntimeCommandId commandId,
+        string reason)
+    {
+        var commandResult = session.FailCommand(commandId, reason, _clock.UtcNow);
+        return commandResult.Succeeded
+            ? session.FailStep(stepId, reason, _clock.UtcNow)
+            : commandResult;
+    }
+
+    private RuntimeOperationResult RejectChildAction(
+        RuntimeSession session,
+        RuntimeStepId stepId,
+        RuntimeCommandId commandId,
+        string reason)
+    {
+        var commandResult = session.RejectCommand(commandId, reason, _clock.UtcNow);
+        return commandResult.Succeeded
+            ? session.FailStep(stepId, reason, _clock.UtcNow)
+            : commandResult;
+    }
+
+    private RuntimeOperationResult TimeoutChildAction(
+        RuntimeSession session,
+        RuntimeStepId stepId,
+        RuntimeCommandId commandId,
+        string reason)
+    {
+        var commandResult = session.TimeoutCommand(commandId, _clock.UtcNow);
+        return commandResult.Succeeded
+            ? session.FailStep(stepId, reason, _clock.UtcNow)
+            : commandResult;
+    }
+
+    private RuntimeOperationResult CancelChildAction(
+        RuntimeSession session,
+        RuntimeStepId stepId,
+        RuntimeCommandId commandId)
+    {
+        var commandResult = session.CancelCommand(commandId, _clock.UtcNow);
+        return commandResult.Succeeded
+            ? session.CancelStep(stepId, _clock.UtcNow)
+            : commandResult;
+    }
+
+    private async ValueTask<RuntimeCommandExecutionResult> ExecuteCommandSafelyAsync(
+        RuntimeCommandExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _commandExecutor.ExecuteAsync(context, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.Canceled("Command execution was canceled.");
+        }
+    }
+
+    private static RuntimeCommandExecutionResult NormalizeContainerCancellation(
+        RuntimeCommandExecutionResult result,
+        CancellationTokenSource? containerTimeoutCancellation,
+        CancellationToken externalCancellationToken)
+    {
+        if (result.Outcome != RuntimeCommandExecutionOutcome.Canceled
+            || externalCancellationToken.IsCancellationRequested
+            || containerTimeoutCancellation is null
+            || !containerTimeoutCancellation.IsCancellationRequested)
+        {
+            return result;
+        }
+
+        return RuntimeCommandExecutionResult.TimedOut(
+            "Automation plan container timed out.");
+    }
+
+    private static string ToChildFailureCode(RuntimeCommandExecutionOutcome outcome)
+    {
+        return outcome switch
+        {
+            RuntimeCommandExecutionOutcome.Failed => "Runtime.ChildCommandFailed",
+            RuntimeCommandExecutionOutcome.Rejected => "Runtime.ChildCommandRejected",
+            RuntimeCommandExecutionOutcome.TimedOut => "Runtime.ChildCommandTimedOut",
+            _ => "Runtime.ChildCommandFailed"
         };
     }
 
@@ -518,6 +936,16 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ApplicationError.Validation(
                 "Runtime.ProcessNodeInvalid",
                 $"Runtime node {invalidNode.NodeId} has invalid execution metadata.");
+        }
+
+        var unsupportedDynamicTimeout = request.Process.Nodes.FirstOrDefault(node =>
+            node.DynamicChildren is not null
+            && node.Timeout > MaximumDynamicContainerTimeout);
+        if (unsupportedDynamicTimeout is not null)
+        {
+            return ApplicationError.Validation(
+                "Runtime.DynamicContainerTimeoutUnsupported",
+                $"Runtime node {unsupportedDynamicTimeout.NodeId} dynamic container timeout exceeds the supported timer range.");
         }
 
         if (request.Process.UsesGraph)
@@ -781,4 +1209,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     private sealed record RuntimeNodeExecutionResult(
         RuntimeSessionRunResult RunResult,
         string? ResultPayload);
+
+    private sealed record DynamicContainerCancellation(
+        CancellationTokenSource? TimeoutCancellation,
+        CancellationToken ExecutionToken);
 }

@@ -33,6 +33,9 @@ internal static class RuntimeSessionSnapshotMapper
     {
         ArgumentNullException.ThrowIfNull(snapshot);
 
+        var steps = snapshot.Steps.Select(ToAggregate).ToArray();
+        var stepsById = steps.ToDictionary(step => step.Id.Value);
+
         return RuntimeSession.Restore(
             new RuntimeSessionId(snapshot.SessionId),
             new StationId(snapshot.StationId),
@@ -46,8 +49,8 @@ internal static class RuntimeSessionSnapshotMapper
             snapshot.StartedAtUtc,
             snapshot.PausedAtUtc,
             snapshot.CompletedAtUtc,
-            snapshot.Steps.Select(ToAggregate),
-            snapshot.Commands.Select(ToAggregate),
+            steps,
+            snapshot.Commands.Select(command => ToAggregate(command, stepsById)),
             snapshot.Incidents.Select(ToAggregate),
             ToAggregate(snapshot.TraceMetadata));
     }
@@ -75,7 +78,10 @@ internal static class RuntimeSessionSnapshotMapper
             step.Status.ToString(),
             step.StartedAtUtc,
             step.CompletedAtUtc,
-            step.FailureReason);
+            step.FailureReason,
+            step.ActionId.Value,
+            step.ParentStepId?.Value,
+            step.DynamicSequence);
     }
 
     private static PersistedRuntimeCommand ToSnapshot(RuntimeCommand command)
@@ -92,7 +98,8 @@ internal static class RuntimeSessionSnapshotMapper
             command.StartedAtUtc,
             command.CompletedAtUtc,
             command.ResultPayload,
-            command.FailureReason);
+            command.FailureReason,
+            command.ActionId.Value);
     }
 
     private static PersistedRuntimeIncident ToSnapshot(RuntimeIncident incident)
@@ -114,11 +121,25 @@ internal static class RuntimeSessionSnapshotMapper
             ParseEnum<RuntimeStepStatus>(step.Status, nameof(step.Status)),
             step.StartedAtUtc,
             step.CompletedAtUtc,
-            step.FailureReason);
+            step.FailureReason,
+            string.IsNullOrWhiteSpace(step.ActionId)
+                ? new RuntimeActionId($"{step.NodeId}:action:1")
+                : new RuntimeActionId(step.ActionId),
+            step.ParentStepId is null
+                ? null
+                : new RuntimeStepId(step.ParentStepId.Value),
+            step.DynamicSequence);
     }
 
-    private static RuntimeCommand ToAggregate(PersistedRuntimeCommand command)
+    private static RuntimeCommand ToAggregate(
+        PersistedRuntimeCommand command,
+        Dictionary<Guid, RuntimeStep> stepsById)
     {
+        var actionId = string.IsNullOrWhiteSpace(command.ActionId)
+            && stepsById.TryGetValue(command.StepId, out var step)
+                ? step.ActionId
+                : new RuntimeActionId(command.ActionId ?? $"legacy:command:{command.CommandId:D}");
+
         return RuntimeCommand.Restore(
             new RuntimeCommandId(command.CommandId),
             new RuntimeStepId(command.StepId),
@@ -131,7 +152,8 @@ internal static class RuntimeSessionSnapshotMapper
             command.StartedAtUtc,
             command.CompletedAtUtc,
             command.ResultPayload,
-            command.FailureReason);
+            command.FailureReason,
+            actionId);
     }
 
     private static RuntimeIncident ToAggregate(PersistedRuntimeIncident incident)
@@ -208,7 +230,10 @@ internal sealed record PersistedRuntimeStep(
     string Status,
     DateTimeOffset StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
-    string? FailureReason);
+    string? FailureReason,
+    string? ActionId = null,
+    Guid? ParentStepId = null,
+    int? DynamicSequence = null);
 
 internal sealed record PersistedRuntimeCommand(
     Guid CommandId,
@@ -222,7 +247,8 @@ internal sealed record PersistedRuntimeCommand(
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
     string? ResultPayload,
-    string? FailureReason);
+    string? FailureReason,
+    string? ActionId = null);
 
 internal sealed record PersistedRuntimeIncident(
     Guid IncidentId,

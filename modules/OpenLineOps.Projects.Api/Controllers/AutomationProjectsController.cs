@@ -3,22 +3,19 @@ using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Processes.Application.Runtime;
+using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Api.Models;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Projects.Application.Releases;
 using ApiAddApplicationRequest = OpenLineOps.Projects.Api.Models.AddProjectApplicationRequest;
 using ApiCreateProjectRequest = OpenLineOps.Projects.Api.Models.CreateAutomationProjectRequest;
 using ApiLinkProcessRequest = OpenLineOps.Projects.Api.Models.LinkProjectProcessDefinitionRequest;
 using ApiLinkTopologyRequest = OpenLineOps.Projects.Api.Models.LinkProjectTopologyRequest;
 using ApiPublishSnapshotRequest = OpenLineOps.Projects.Api.Models.PublishProjectSnapshotRequest;
-using ApiSnapshotCapabilityBindingRequest = OpenLineOps.Projects.Api.Models.SnapshotCapabilityBindingRequest;
-using ApiTargetReferenceRequest = OpenLineOps.Projects.Api.Models.ProjectTargetReferenceRequest;
 using AppAddApplicationRequest = OpenLineOps.Projects.Application.Projects.AddProjectApplicationRequest;
 using AppCreateProjectRequest = OpenLineOps.Projects.Application.Projects.CreateAutomationProjectRequest;
 using AppLinkProcessRequest = OpenLineOps.Projects.Application.Projects.LinkProjectProcessDefinitionRequest;
 using AppLinkTopologyRequest = OpenLineOps.Projects.Application.Projects.LinkProjectTopologyRequest;
-using AppPublishSnapshotRequest = OpenLineOps.Projects.Application.Projects.PublishProjectSnapshotRequest;
-using AppSnapshotCapabilityBindingRequest = OpenLineOps.Projects.Application.Projects.SnapshotCapabilityBindingRequest;
-using AppTargetReferenceRequest = OpenLineOps.Projects.Application.Projects.ProjectTargetReferenceRequest;
 using AppStartProcessRuntimeSessionRequest = OpenLineOps.Processes.Application.Runtime.StartProcessRuntimeSessionRequest;
 
 namespace OpenLineOps.Projects.Api.Controllers;
@@ -29,13 +26,16 @@ namespace OpenLineOps.Projects.Api.Controllers;
 public sealed class AutomationProjectsController : ControllerBase
 {
     private readonly IAutomationProjectService _projectService;
-    private readonly IProjectProcessRuntimeSessionLauncher _runtimeSessionLauncher;
+    private readonly IProjectReleasePublisher _releasePublisher;
+    private readonly IProjectReleaseRuntimeSessionLauncher _runtimeSessionLauncher;
 
     public AutomationProjectsController(
         IAutomationProjectService projectService,
-        IProjectProcessRuntimeSessionLauncher runtimeSessionLauncher)
+        IProjectReleasePublisher releasePublisher,
+        IProjectReleaseRuntimeSessionLauncher runtimeSessionLauncher)
     {
         _projectService = projectService;
+        _releasePublisher = releasePublisher;
         _runtimeSessionLauncher = runtimeSessionLauncher;
     }
 
@@ -188,8 +188,15 @@ public sealed class AutomationProjectsController : ControllerBase
             return BadRequest(new ValidationProblemDetails(validationErrors));
         }
 
-        var result = await _projectService
-            .PublishSnapshotAsync(projectId, ToApplicationRequest(request), cancellationToken)
+        var result = await _releasePublisher
+            .PublishAsync(
+                projectId,
+                new PublishProjectReleaseRequest(
+                    request.SnapshotId!,
+                    request.ApplicationId!,
+                    request.ProcessDefinitionId!,
+                    request.ConfigurationSnapshotId!),
+                cancellationToken)
             .ConfigureAwait(false);
 
         if (result.IsFailure)
@@ -239,12 +246,18 @@ public sealed class AutomationProjectsController : ControllerBase
                 $"Project snapshot {snapshotId} was not found in automation project {projectId}."));
         }
 
+        if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath)
+            || string.IsNullOrWhiteSpace(snapshot.ReleaseContentSha256))
+        {
+            return ToProblem(ApplicationError.Conflict(
+                "Projects.ProjectSnapshotReleaseRequired",
+                $"Project snapshot {snapshotId} was published without an immutable release and cannot be executed."));
+        }
+
         var startRequest = request!;
         var startResult = await _runtimeSessionLauncher
             .StartAsync(
-                snapshot.ProjectId,
-                snapshot.ApplicationId,
-                snapshot.ProcessDefinitionId,
+                snapshot,
                 new AppStartProcessRuntimeSessionRequest(
                     snapshot.ConfigurationSnapshotId,
                     startRequest.SerialNumber,
@@ -279,28 +292,6 @@ public sealed class AutomationProjectsController : ControllerBase
         return Created($"/api/runtime/sessions/{response.SessionId}", response);
     }
 
-    private static AppPublishSnapshotRequest ToApplicationRequest(ApiPublishSnapshotRequest request)
-    {
-        return new AppPublishSnapshotRequest(
-            request.SnapshotId!,
-            request.ApplicationId!,
-            request.TopologyId!,
-            request.ProcessDefinitionId!,
-            request.ProcessVersionId!,
-            request.ConfigurationSnapshotId!,
-            request.CapabilityBindings!
-                .Select(binding => new AppSnapshotCapabilityBindingRequest(
-                    binding.CapabilityId!,
-                    binding.BindingId!,
-                    binding.ProviderKind!,
-                    binding.ProviderKey!))
-                .ToArray(),
-            request.TargetReferences!
-                .Select(target => new AppTargetReferenceRequest(target.Kind!, target.TargetId!))
-                .ToArray(),
-            request.BlockVersionIds!);
-    }
-
     private static AutomationProjectResponse ToResponse(AutomationProjectDetails project)
     {
         return new AutomationProjectResponse(
@@ -328,7 +319,8 @@ public sealed class AutomationProjectsController : ControllerBase
             application.ApplicationId,
             application.DisplayName,
             application.TopologyId,
-            application.ProcessDefinitionIds);
+            application.ProcessDefinitionIds,
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshotResponse ToResponse(PublishedProjectSnapshotDetails snapshot)
@@ -338,6 +330,7 @@ public sealed class AutomationProjectsController : ControllerBase
             snapshot.ProjectId,
             snapshot.ApplicationId,
             snapshot.TopologyId,
+            snapshot.LayoutIds,
             snapshot.ProcessDefinitionId,
             snapshot.ProcessVersionId,
             snapshot.ConfigurationSnapshotId,
@@ -352,7 +345,9 @@ public sealed class AutomationProjectsController : ControllerBase
             snapshot.TargetReferences
                 .Select(target => new ProjectTargetReferenceResponse(target.Kind, target.TargetId))
                 .ToArray(),
-            snapshot.BlockVersionIds);
+            snapshot.BlockVersionIds,
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256);
     }
 
     private ObjectResult ToProblem(ApplicationError error)
@@ -426,18 +421,8 @@ public sealed class AutomationProjectsController : ControllerBase
 
         AddRequired(errors, nameof(request.SnapshotId), request.SnapshotId);
         AddRequired(errors, nameof(request.ApplicationId), request.ApplicationId);
-        AddRequired(errors, nameof(request.TopologyId), request.TopologyId);
         AddRequired(errors, nameof(request.ProcessDefinitionId), request.ProcessDefinitionId);
-        AddRequired(errors, nameof(request.ProcessVersionId), request.ProcessVersionId);
         AddRequired(errors, nameof(request.ConfigurationSnapshotId), request.ConfigurationSnapshotId);
-
-        ValidateCapabilityBindings(errors, request.CapabilityBindings);
-        ValidateTargetReferences(errors, request.TargetReferences);
-
-        if (request.BlockVersionIds is null)
-        {
-            errors[nameof(request.BlockVersionIds)] = ["BlockVersionIds collection is required."];
-        }
 
         return errors;
     }
@@ -451,48 +436,6 @@ public sealed class AutomationProjectsController : ControllerBase
         }
 
         return errors;
-    }
-
-    private static void ValidateCapabilityBindings(
-        Dictionary<string, string[]> errors,
-        IReadOnlyCollection<ApiSnapshotCapabilityBindingRequest>? bindings)
-    {
-        if (bindings is null)
-        {
-            errors["CapabilityBindings"] = ["CapabilityBindings collection is required."];
-            return;
-        }
-
-        var index = 0;
-        foreach (var binding in bindings)
-        {
-            var prefix = $"CapabilityBindings[{index}]";
-            AddRequired(errors, $"{prefix}.{nameof(binding.CapabilityId)}", binding.CapabilityId);
-            AddRequired(errors, $"{prefix}.{nameof(binding.BindingId)}", binding.BindingId);
-            AddRequired(errors, $"{prefix}.{nameof(binding.ProviderKind)}", binding.ProviderKind);
-            AddRequired(errors, $"{prefix}.{nameof(binding.ProviderKey)}", binding.ProviderKey);
-            index++;
-        }
-    }
-
-    private static void ValidateTargetReferences(
-        Dictionary<string, string[]> errors,
-        IReadOnlyCollection<ApiTargetReferenceRequest>? targets)
-    {
-        if (targets is null)
-        {
-            errors["TargetReferences"] = ["TargetReferences collection is required."];
-            return;
-        }
-
-        var index = 0;
-        foreach (var target in targets)
-        {
-            var prefix = $"TargetReferences[{index}]";
-            AddRequired(errors, $"{prefix}.{nameof(target.Kind)}", target.Kind);
-            AddRequired(errors, $"{prefix}.{nameof(target.TargetId)}", target.TargetId);
-            index++;
-        }
     }
 
     private static void AddRequired(

@@ -41,11 +41,18 @@ export interface SelectDirectoryResult {
   path: string | null;
 }
 
+export interface SelectProjectFileOptions {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+}
+
 export interface OpenLineOpsDesktopApi {
   getConfig(): Promise<DesktopConfig>;
   getBackendStatus(): Promise<BackendStatus>;
   startBackend(): Promise<BackendStatus>;
   stopBackend(): Promise<BackendStatus>;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
+  selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

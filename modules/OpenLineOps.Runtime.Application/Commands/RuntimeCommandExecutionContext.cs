@@ -12,4 +12,10 @@ public sealed record RuntimeCommandExecutionContext(
     RuntimeCapabilityId TargetCapability,
     string CommandName,
     string? InputPayload,
-    TimeSpan Timeout);
+    TimeSpan Timeout,
+    string? ProjectId = null,
+    string? ApplicationId = null,
+    string? ProjectSnapshotId = null,
+    RuntimeActionId? ActionId = null,
+    RuntimeStepId? ParentStepId = null,
+    int? DynamicSequence = null);

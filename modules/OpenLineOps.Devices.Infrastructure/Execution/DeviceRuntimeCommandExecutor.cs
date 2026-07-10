@@ -31,7 +31,10 @@ public sealed class DeviceRuntimeCommandExecutor : IRuntimeCommandExecutor
             context.StationId.Value,
             context.ConfigurationSnapshotId.Value,
             new DeviceCapabilityId(context.TargetCapability.Value),
-            context.CommandName);
+            context.CommandName,
+            context.ProjectId,
+            context.ApplicationId,
+            context.ProjectSnapshotId);
 
         var route = await _routeResolver
             .ResolveAsync(routeRequest, cancellationToken)

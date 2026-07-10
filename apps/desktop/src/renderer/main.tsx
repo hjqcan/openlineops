@@ -767,7 +767,7 @@ function ProjectExplorer({
                 <Blocks size={14} />
                 <span>
                   <strong>{candidate.displayName}</strong>
-                  <small>{candidate.applicationId}</small>
+                  <small>{candidate.projectFilePath ?? candidate.applicationId}</small>
                 </span>
               </button>
             ))}
@@ -793,7 +793,7 @@ function ProjectExplorer({
       <div className="ide-explorer-manifest">
         <FileSearch size={14} />
         <span>
-          <strong>openlineops.project.json</strong>
+          <strong>{workspace.manifestPath.split(/[\\/]/).pop() ?? 'project.oloproj'}</strong>
           <small>{workspace.project.projectPath}</small>
         </span>
       </div>

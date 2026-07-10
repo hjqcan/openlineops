@@ -124,8 +124,10 @@ public sealed class DevicesModuleDependencyInjectionTests
             })
             .Build();
         var services = new ServiceCollection();
+        const string scriptPayload =
+            "{\"automation_plan\":[{\"type\":\"flow.wait\",\"duration_ms\":0}]}";
         var scriptExecutor = new CapturingRuntimeScriptExecutor(
-            RuntimeCommandExecutionResult.Completed("{\"mode\":\"script\"}"));
+            RuntimeCommandExecutionResult.Completed(scriptPayload));
         services.AddSingleton<IRuntimeScriptExecutor>(scriptExecutor);
         services.AddOpenLineOpsDevicesModule(configuration);
 
@@ -136,10 +138,31 @@ public sealed class DevicesModuleDependencyInjectionTests
         var result = await executor.ExecuteAsync(CreateScriptRuntimeContext());
 
         Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
-        Assert.Equal("{\"mode\":\"script\"}", result.Payload);
+        Assert.Equal(scriptPayload, result.Payload);
         Assert.NotNull(scriptExecutor.Request);
         Assert.Equal("Python", scriptExecutor.Request.ScriptLanguage);
         Assert.Equal("scan-ok", scriptExecutor.Request.InputPayload);
+    }
+
+    [Fact]
+    public async Task AddOpenLineOpsDevicesModuleRoutesFlowWaitBeforeConfiguredDeviceExecutor()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Runtime:CommandExecutor"] = "Device"
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsDevicesModule(configuration);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var executor = serviceProvider.GetRequiredService<IRuntimeCommandExecutor>();
+        var result = await executor.ExecuteAsync(CreateFlowWaitRuntimeContext());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.Equal("{\"durationMilliseconds\":0}", result.Payload);
     }
 
     [Fact]
@@ -294,6 +317,21 @@ public sealed class DevicesModuleDependencyInjectionTests
                     "7",
                     "scan-ok"),
                 JsonOptions),
+            TimeSpan.FromSeconds(15));
+    }
+
+    private static RuntimeCommandExecutionContext CreateFlowWaitRuntimeContext()
+    {
+        return new RuntimeCommandExecutionContext(
+            new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
+            new StationId("station-a"),
+            new ConfigurationSnapshotId("snapshot-20260629-001"),
+            new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),
+            new RuntimeCommandId(Guid.Parse("00000000-0000-0000-0000-000000000003")),
+            new RuntimeNodeId("node-wait"),
+            new RuntimeCapabilityId(RuntimeFlowCommand.Capability),
+            RuntimeFlowCommand.WaitCommandName,
+            "{\"durationMilliseconds\":0}",
             TimeSpan.FromSeconds(15));
     }
 

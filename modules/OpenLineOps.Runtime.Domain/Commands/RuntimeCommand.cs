@@ -12,7 +12,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         RuntimeCapabilityId targetCapability,
         string commandName,
         DateTimeOffset createdAtUtc,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        RuntimeActionId? actionId)
         : base(id)
     {
         if (timeout <= TimeSpan.Zero)
@@ -21,6 +22,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         }
 
         StepId = stepId;
+        ActionId = actionId ?? new RuntimeActionId($"legacy:command:{id.Value:D}");
         TargetCapability = targetCapability;
         CommandName = string.IsNullOrWhiteSpace(commandName)
             ? throw new ArgumentException("Command name cannot be empty.", nameof(commandName))
@@ -32,6 +34,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
     }
 
     public RuntimeStepId StepId { get; }
+
+    public RuntimeActionId ActionId { get; }
 
     public RuntimeCapabilityId TargetCapability { get; }
 
@@ -67,9 +71,17 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         RuntimeCapabilityId targetCapability,
         string commandName,
         DateTimeOffset createdAtUtc,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        RuntimeActionId? actionId = null)
     {
-        return new RuntimeCommand(id, stepId, targetCapability, commandName, createdAtUtc, timeout);
+        return new RuntimeCommand(
+            id,
+            stepId,
+            targetCapability,
+            commandName,
+            createdAtUtc,
+            timeout,
+            actionId);
     }
 
     public static RuntimeCommand Restore(
@@ -84,9 +96,17 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset? startedAtUtc,
         DateTimeOffset? completedAtUtc,
         string? resultPayload,
-        string? failureReason)
+        string? failureReason,
+        RuntimeActionId? actionId = null)
     {
-        var command = new RuntimeCommand(id, stepId, targetCapability, commandName, createdAtUtc, timeout)
+        var command = new RuntimeCommand(
+            id,
+            stepId,
+            targetCapability,
+            commandName,
+            createdAtUtc,
+            timeout,
+            actionId)
         {
             Status = status,
             AcceptedAtUtc = acceptedAtUtc,
@@ -200,12 +220,14 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Accepted) => true,
             (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Rejected) => true,
             (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Canceled) => true,
+            (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.Rejected) => true,
             (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.InProgress) => true,
             (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.Canceled) => true,
             (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Completed) => true,
             (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Failed) => true,
             (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.TimedOut) => true,
             (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Canceled) => true,
+            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Rejected) => true,
             _ => false
         };
     }

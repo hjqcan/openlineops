@@ -42,7 +42,8 @@ public static class AutomationProjectMapper
             application.ProcessDefinitionIds
                 .Select(processId => processId.Value)
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshotDetails ToDetails(PublishedProjectSnapshot snapshot)
@@ -52,6 +53,7 @@ public static class AutomationProjectMapper
             snapshot.ProjectId.Value,
             snapshot.ApplicationId.Value,
             snapshot.TopologyId.Value,
+            snapshot.LayoutIds.Order(StringComparer.Ordinal).ToArray(),
             snapshot.ProcessDefinitionId.Value,
             snapshot.ProcessVersionId.Value,
             snapshot.ConfigurationSnapshotId.Value,
@@ -64,7 +66,9 @@ public static class AutomationProjectMapper
                 .ToArray(),
             snapshot.BlockVersionIds
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256);
     }
 
     private static SnapshotCapabilityBindingDetails ToDetails(SnapshotCapabilityBinding binding)

@@ -24,15 +24,20 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
     [Fact]
     public async Task MonitoringEndpointsExposeStationTimelineAndAlarmAcknowledgement()
     {
+        using var developmentFactory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = developmentFactory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var suffix = Guid.NewGuid().ToString("N");
         var stationId = $"station-monitoring-{suffix}";
-        using var startResponse = await _client.PostAsJsonAsync(
+        using var startResponse = await client.PostAsJsonAsync(
             "/api/runtime/sessions/simulated",
             CreateStartRequest(stationId, suffix, "fail", "should-not-run"));
         using var startBody = await ReadJsonAsync(startResponse);
         var sessionId = startBody.RootElement.GetProperty("sessionId").GetGuid();
 
-        using var stationResponse = await _client.GetAsync(
+        using var stationResponse = await client.GetAsync(
             $"/api/runtime/monitoring/stations?stationId={Uri.EscapeDataString(stationId)}");
         using var stationBody = await ReadJsonAsync(stationResponse);
         var station = Assert.Single(stationBody.RootElement.GetProperty("items").EnumerateArray());
@@ -45,7 +50,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal(1, station.GetProperty("incidentCount").GetInt32());
         Assert.True(station.GetProperty("isTerminal").GetBoolean());
 
-        using var timelineResponse = await _client.GetAsync(
+        using var timelineResponse = await client.GetAsync(
             $"/api/runtime/monitoring/sessions/{sessionId}/timeline");
         using var timelineBody = await ReadJsonAsync(timelineResponse);
         var timelineEvents = timelineBody.RootElement.GetProperty("items").EnumerateArray().ToArray();
@@ -56,7 +61,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             entry.GetProperty("eventName").GetString() == "RuntimeSession.StatusChanged"
             && entry.GetProperty("toStatus").GetString() == "Failed");
 
-        using var alarmsResponse = await _client.GetAsync(
+        using var alarmsResponse = await client.GetAsync(
             $"/api/runtime/monitoring/alarms?stationId={Uri.EscapeDataString(stationId)}");
         using var alarmsBody = await ReadJsonAsync(alarmsResponse);
         var alarm = Assert.Single(alarmsBody.RootElement.GetProperty("items").EnumerateArray());
@@ -66,7 +71,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal("Runtime.CommandFailed", alarm.GetProperty("code").GetString());
         Assert.False(alarm.GetProperty("isAcknowledged").GetBoolean());
 
-        using var acknowledgeResponse = await _client.PostAsJsonAsync(
+        using var acknowledgeResponse = await client.PostAsJsonAsync(
             $"/api/runtime/monitoring/alarms/{alarmId}/acknowledgements",
             new { acknowledgedBy = "operator-api" });
         using var acknowledgeBody = await ReadJsonAsync(acknowledgeResponse);
@@ -75,7 +80,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.True(acknowledgeBody.RootElement.GetProperty("isAcknowledged").GetBoolean());
         Assert.Equal("operator-api", acknowledgeBody.RootElement.GetProperty("acknowledgedBy").GetString());
 
-        using var acknowledgedAlarmsResponse = await _client.GetAsync(
+        using var acknowledgedAlarmsResponse = await client.GetAsync(
             $"/api/runtime/monitoring/alarms?stationId={Uri.EscapeDataString(stationId)}&includeAcknowledged=true");
         using var acknowledgedAlarmsBody = await ReadJsonAsync(acknowledgedAlarmsResponse);
         var acknowledgedAlarm = Assert.Single(acknowledgedAlarmsBody.RootElement.GetProperty("items").EnumerateArray());
@@ -87,6 +92,11 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
     [Fact]
     public async Task RuntimeProgressHubPublishesStationStatusAndTimelineEvents()
     {
+        using var developmentFactory = DevelopmentRuntimeStartTestHost.Create(_factory);
+        using var client = developmentFactory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
         var suffix = Guid.NewGuid().ToString("N");
         var stationId = $"station-realtime-{suffix}";
         var statusReceived = new TaskCompletionSource<RuntimeStationStatusSignal>(
@@ -94,7 +104,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         var eventReceived = new TaskCompletionSource<RuntimeTimelineSignal>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await using var connection = CreateHubConnection();
+        await using var connection = CreateHubConnection(developmentFactory, client);
         connection.On<RuntimeStationStatusSignal>("StationStatusChanged", status =>
         {
             if (status.StationId == stationId && status.SessionStatus == "Completed")
@@ -114,7 +124,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
 
         await connection.StartAsync();
 
-        using var response = await _client.PostAsJsonAsync(
+        using var response = await client.PostAsJsonAsync(
             "/api/runtime/sessions/simulated",
             CreateStartRequest(stationId, suffix, "scan-ok", "measure-ok"));
 
@@ -148,13 +158,15 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal("true", credentials.Single());
     }
 
-    private HubConnection CreateHubConnection()
+    private static HubConnection CreateHubConnection(
+        WebApplicationFactory<Program> factory,
+        HttpClient client)
     {
         return new HubConnectionBuilder()
-            .WithUrl(new Uri(_client.BaseAddress!, "/hubs/runtime-progress"), options =>
+            .WithUrl(new Uri(client.BaseAddress!, "/hubs/runtime-progress"), options =>
             {
                 options.Transports = HttpTransportType.LongPolling;
-                options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
             })
             .Build();
     }

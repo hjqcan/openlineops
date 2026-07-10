@@ -20,10 +20,32 @@ public sealed class ProcessBlocklyBlockCatalogTests
             block.IsBuiltIn
             && block.BlockType == "openlineops_move_axis"
             && block.Version == 1
-            && block.PythonCodeTemplate.Contains("automation_plan.append", StringComparison.Ordinal));
+            && block.PythonCodeTemplate.Contains("automation_plan.append", StringComparison.Ordinal)
+            && block.ExecutionMode == ProcessBlocklyBlockExecutionModes.DeclarativeActionContract
+            && block.RuntimeActionContractSchemaVersion == RuntimeActionContractSchemaVersions.V1
+            && block.RuntimeActionContractSha256 is { Length: 64 });
         Assert.Contains(result.Value, block =>
             block.IsBuiltIn
             && block.BlockType == "openlineops_result_from_input");
+        var builtIns = result.Value.Where(block => block.IsBuiltIn).ToArray();
+        Assert.Equal(5, builtIns.Length);
+        var serializer = new RuntimeActionContractCanonicalSerializer();
+        Assert.All(
+            builtIns,
+            block =>
+            {
+                Assert.Equal(
+                    ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+                    block.ExecutionMode);
+                Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+                Assert.NotNull(block.RuntimeActionContractJson);
+                Assert.NotNull(block.RuntimeActionContractSha256);
+                var contract = serializer.Deserialize(block.RuntimeActionContractJson);
+                Assert.True(contract.IsSuccess, contract.Error.Message);
+                Assert.Equal(
+                    block.RuntimeActionContractSha256,
+                    serializer.Serialize(contract.Value).Value.Sha256);
+            });
     }
 
     [Fact]
@@ -61,6 +83,10 @@ public sealed class ProcessBlocklyBlockCatalogTests
         Assert.Equal(1, result.Value.Version);
         Assert.Equal(RegisteredAtUtc, result.Value.CreatedAtUtc);
         Assert.Equal(RegisteredAtUtc, result.Value.UpdatedAtUtc);
+        Assert.Equal(ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate, result.Value.ExecutionMode);
+        Assert.Null(result.Value.RuntimeActionContractSchemaVersion);
+        Assert.Null(result.Value.RuntimeActionContractJson);
+        Assert.Null(result.Value.RuntimeActionContractSha256);
         Assert.Contains(list.Value, block =>
             block.BlockType == "user_open_clamp"
             && block.Category == "Fixture");
@@ -152,7 +178,9 @@ public sealed class ProcessBlocklyBlockCatalogTests
         Assert.Contains(result.Value, block =>
             block.BlockType == generatedBlock.BlockType
             && block.DisplayName == generatedBlock.DisplayName
-            && block.IsBuiltIn);
+            && block.IsBuiltIn
+            && block.ExecutionMode == ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate
+            && block.RuntimeActionContractJson is null);
     }
 
     [Fact]

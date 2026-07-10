@@ -106,6 +106,82 @@ public sealed class SqliteRuntimeSessionRepositoryTests
     }
 
     [Fact]
+    public async Task SaveAsyncRoundTripsDynamicStepAndActionIdentity()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("dynamic-identity", BaseTimeUtc);
+        var parent = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node"),
+            "Script",
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("script-node:action:1"));
+        var child = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("script-node:slot:node:4"),
+            "Child",
+            BaseTimeUtc.AddSeconds(3),
+            new RuntimeActionId("script-node:action:1:child:4"),
+            parent.Id,
+            dynamicSequence: 4);
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            child.Id,
+            new RuntimeCapabilityId("motion.axis"),
+            "MoveAxis",
+            BaseTimeUtc.AddSeconds(4),
+            TimeSpan.FromSeconds(5));
+
+        await repository.SaveAsync(session);
+
+        using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var restored = Assert.IsType<RuntimeSession>(await restartedRepository.GetByIdAsync(session.Id));
+        var restoredChild = restored.Steps.Single(step => step.Id == child.Id);
+        var restoredCommand = Assert.Single(restored.Commands);
+        Assert.Equal("script-node:action:1:child:4", restoredChild.ActionId.Value);
+        Assert.Equal(parent.Id, restoredChild.ParentStepId);
+        Assert.Equal(4, restoredChild.DynamicSequence);
+        Assert.Equal(restoredChild.ActionId, restoredCommand.ActionId);
+        Assert.Equal(command.Id, restoredCommand.Id);
+    }
+
+    [Fact]
+    public void SnapshotMapperDerivesLegacyCommandActionIdentityFromOwningStep()
+    {
+        var session = CreateRunningSession("legacy-action", BaseTimeUtc);
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("legacy-node"),
+            "Legacy",
+            BaseTimeUtc.AddSeconds(2));
+        session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("legacy.capability"),
+            "LegacyCommand",
+            BaseTimeUtc.AddSeconds(3),
+            TimeSpan.FromSeconds(5));
+        var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(session);
+        var legacySnapshot = snapshot with
+        {
+            Steps = snapshot.Steps
+                .Select(candidate => candidate with { ActionId = null })
+                .ToArray(),
+            Commands = snapshot.Commands
+                .Select(candidate => candidate with { ActionId = null })
+                .ToArray()
+        };
+
+        var restored = RuntimeSessionSnapshotMapper.ToAggregate(legacySnapshot);
+
+        var restoredStep = Assert.Single(restored.Steps);
+        var restoredCommand = Assert.Single(restored.Commands);
+        Assert.Equal("legacy-node:action:1", restoredStep.ActionId.Value);
+        Assert.Equal(restoredStep.ActionId, restoredCommand.ActionId);
+    }
+
+    [Fact]
     public async Task ListRecoverableAsyncReturnsOnlyNonTerminalSessionsInRecoveryOrder()
     {
         using var database = TemporarySqliteDatabase.Create();

@@ -78,7 +78,9 @@ public static class AutomationProjectManifestMapper
             application.ProcessDefinitionIds
                 .Select(processDefinitionId => processDefinitionId.Value)
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            application.ProjectFilePath
+                ?? AutomationProjectFileConvention.GetApplicationProjectRelativePath(application.Id.Value));
     }
 
     private static PublishedProjectSnapshotManifest ToManifest(PublishedProjectSnapshot snapshot)
@@ -88,6 +90,7 @@ public static class AutomationProjectManifestMapper
             snapshot.ProjectId.Value,
             snapshot.ApplicationId.Value,
             snapshot.TopologyId.Value,
+            snapshot.LayoutIds.Order(StringComparer.Ordinal).ToArray(),
             snapshot.ProcessDefinitionId.Value,
             snapshot.ProcessVersionId.Value,
             snapshot.ConfigurationSnapshotId.Value,
@@ -96,7 +99,9 @@ public static class AutomationProjectManifestMapper
             snapshot.TargetReferences.Select(ToManifest).ToArray(),
             snapshot.BlockVersionIds
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256);
     }
 
     private static SnapshotCapabilityBindingManifest ToManifest(SnapshotCapabilityBinding binding)
@@ -122,7 +127,9 @@ public static class AutomationProjectManifestMapper
                 ? null
                 : new AutomationTopologyId(application.TopologyId),
             (application.ProcessDefinitionIds ?? [])
-                .Select(processDefinitionId => new ProcessDefinitionId(processDefinitionId)));
+                .Select(processDefinitionId => new ProcessDefinitionId(processDefinitionId)),
+            application.ProjectFilePath
+                ?? AutomationProjectFileConvention.GetApplicationProjectRelativePath(application.ApplicationId));
     }
 
     private static PublishedProjectSnapshot ToSnapshot(
@@ -141,12 +148,15 @@ public static class AutomationProjectManifestMapper
             projectId,
             new ProjectApplicationId(snapshot.ApplicationId),
             new AutomationTopologyId(snapshot.TopologyId),
+            snapshot.LayoutIds ?? [],
             new ProcessDefinitionId(snapshot.ProcessDefinitionId),
             new ProcessVersionId(snapshot.ProcessVersionId),
             new ConfigurationSnapshotId(snapshot.ConfigurationSnapshotId),
             (snapshot.CapabilityBindings ?? []).Select(ToCapabilityBinding),
             (snapshot.TargetReferences ?? []).Select(ToTargetReference),
             snapshot.BlockVersionIds ?? [],
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256,
             snapshot.PublishedAtUtc);
     }
 

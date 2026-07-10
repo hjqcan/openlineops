@@ -6,6 +6,10 @@ namespace OpenLineOps.Engineering.Infrastructure.Persistence;
 
 internal static class ProjectEngineeringResourcePath
 {
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
     public static string GetWorkspacesDirectory(ProjectApplicationWorkspaceScope scope)
     {
         return GetResourceDirectory(scope, "workspaces");
@@ -70,12 +74,10 @@ internal static class ProjectEngineeringResourcePath
     {
         ArgumentNullException.ThrowIfNull(scope);
 
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
-                scope.ProjectPath,
-                "applications",
-                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                scope.ApplicationRootPath,
                 "configuration",
                 directoryName));
     }
@@ -91,7 +93,7 @@ internal static class ProjectEngineeringResourcePath
             throw new ArgumentException("Engineering resource id cannot be empty.", nameof(resourceId));
         }
 
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(directory, $"{resourceKind}-{ToSafeSegment(resourceId)}.json"));
     }
@@ -124,19 +126,19 @@ internal static class ProjectEngineeringResourcePath
         return $"{readable}--{hash}";
     }
 
-    private static string EnsureInsideProject(
+    private static string EnsureInsideApplication(
         ProjectApplicationWorkspaceScope scope,
         string path)
     {
-        var projectRoot = Path.GetFullPath(scope.ProjectPath)
+        var applicationRoot = Path.GetFullPath(scope.ApplicationRootPath)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
         var fullPath = Path.GetFullPath(path);
 
-        if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.StartsWith(applicationRoot, PathComparison))
         {
             throw new InvalidOperationException(
-                "Engineering configuration path must stay inside the project directory.");
+                "Engineering configuration path must stay inside the application directory.");
         }
 
         return fullPath;

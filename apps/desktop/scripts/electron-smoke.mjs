@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
@@ -47,6 +48,7 @@ async function main() {
         OPENLINEOPS_API_BASE_URL: apiBaseUrl,
         OPENLINEOPS_REPO_ROOT: repoRoot,
         VITE_DEV_SERVER_URL: previewUrl,
+        OpenLineOps__Runtime__DevelopmentStarts__Enabled: 'true',
         OpenLineOps__Desktop__AllowedOrigins__0: previewUrl,
         OpenLineOps__Desktop__AllowedOrigins__1: previewUrl.replace('127.0.0.1', 'localhost')
       }
@@ -102,9 +104,10 @@ async function main() {
   await clickByTestId('save-project-manifest');
   await waitForExpression(
     '(() => document.body.innerText.includes("Manifest saved")'
-    + ' && document.body.innerText.includes("openlineops.project.json"))()',
+    + ' && document.body.innerText.includes(".oloproj"))()',
     30000,
     'automation project manifest to save from desktop');
+  await assertProjectFileLayout(smokeProjectPath, 1);
   await clickByTestId('switch-project-workspace');
   await waitForExpression(
     '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
@@ -186,6 +189,7 @@ async function main() {
     + ' && document.body.innerText.includes("Application created"))()',
     30000,
     'secondary project application to be created and selected');
+  await assertProjectFileLayout(smokeProjectPath, 2);
   await setSelectByTestId('active-application-selector', openedApplication.applicationId);
   await waitForExpression(
     `(() => document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(openedApplication.applicationId)}`
@@ -257,7 +261,9 @@ async function main() {
   await clickByTestId('register-blockly-block');
   await waitForExpression(
     '(() => document.body.innerText.includes("Fixture Action")'
-    + ' && document.body.innerText.includes("1 custom"))()',
+    + ' && document.body.innerText.includes("1 custom")'
+    + ' && document.body.innerText.includes("Registered Blockly block user_fixture_action v1")'
+    + ' && !document.querySelector("[data-testid=\\"register-blockly-block\\"]")?.disabled)()',
     30000,
     'custom Blockly block to register from UI');
   await clickByTestId('register-blockly-block');
@@ -277,6 +283,11 @@ async function main() {
     '(() => Boolean(document.querySelector("[data-testid=\\"process-node-command-1\\"]")))()',
     15000,
     'process graph command node to be added');
+  await clickByTestId('apply-project-target-module-0');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Project target applied X Axis"))()',
+    15000,
+    'project topology target to apply to the command node');
   await clickByTestId('add-decision-node');
   await waitForExpression(
     '(() => Boolean(document.querySelector("[data-testid=\\"process-node-decision-1\\"]")))()',
@@ -605,6 +616,14 @@ async function createPublishedEngineeringSnapshot(definition) {
   const workspaceId = `workspace-desktop-process-${suffix}`;
   const projectId = `project-desktop-process-${suffix}`;
   const configurationSnapshotId = `snapshot-desktop-process-${suffix}`;
+  const requiredCapabilities = [...new Set(
+    (definition.nodes ?? [])
+      .filter(node => node.kind === 'Command' && node.requiredCapability)
+      .map(node => node.requiredCapability)
+  )];
+  if (requiredCapabilities.length === 0) {
+    throw new Error(`Published process has no command capability: ${JSON.stringify(definition)}`);
+  }
 
   await expectApiStatus(
     `${engineeringBasePath}/recipes`,
@@ -636,13 +655,11 @@ async function createPublishedEngineeringSnapshot(definition) {
       body: {
         stationProfileId,
         displayName: 'Desktop Process Runtime Station',
-        deviceBindings: [
-          {
-            deviceBindingId: 'loopback-primary',
-            capabilityId: 'device.loopback',
-            deviceKey: 'loopback-01'
-          }
-        ]
+        deviceBindings: requiredCapabilities.map((capabilityId, index) => ({
+          deviceBindingId: `runtime-primary-${index + 1}`,
+          capabilityId,
+          deviceKey: `desktop-smoke-device-${index + 1}`
+        }))
       }
     },
     201,
@@ -700,6 +717,31 @@ async function expectApiStatus(path, options, expectedStatus, description) {
 
 async function apiRequest(path, options = {}) {
   return evaluate(`window.openlineopsDesktop.apiRequest(${JSON.stringify(path)}, ${JSON.stringify(options)})`);
+}
+
+async function assertProjectFileLayout(projectPath, expectedApplicationCount) {
+  const rootEntries = await fs.readdir(projectPath, { withFileTypes: true });
+  const projectFiles = rootEntries.filter(entry =>
+    entry.isFile() && entry.name.toLowerCase().endsWith('.oloproj'));
+  if (projectFiles.length !== 1) {
+    throw new Error(
+      `Expected one .oloproj in ${projectPath}, found ${projectFiles.map(entry => entry.name).join(', ')}`);
+  }
+
+  const applicationsPath = path.join(projectPath, 'applications');
+  const applicationDirectories = (await fs.readdir(applicationsPath, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory());
+  let applicationFileCount = 0;
+  for (const directory of applicationDirectories) {
+    const entries = await fs.readdir(path.join(applicationsPath, directory.name), { withFileTypes: true });
+    applicationFileCount += entries.filter(entry =>
+      entry.isFile() && entry.name.toLowerCase().endsWith('.oloapp')).length;
+  }
+
+  if (applicationFileCount !== expectedApplicationCount) {
+    throw new Error(
+      `Expected ${expectedApplicationCount} .oloapp files in ${applicationsPath}, found ${applicationFileCount}`);
+  }
 }
 
 async function waitForExpression(expression, timeoutMs, description) {

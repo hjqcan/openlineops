@@ -6,38 +6,38 @@ namespace OpenLineOps.Topology.Infrastructure.Persistence;
 
 internal static class ProjectTopologyResourcePath
 {
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
     public static string GetTopologyDirectory(ProjectApplicationWorkspaceScope scope)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
-                scope.ProjectPath,
-                "applications",
-                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                scope.ApplicationRootPath,
                 "topology"));
     }
 
     public static string GetLayoutDirectory(ProjectApplicationWorkspaceScope scope)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
-                scope.ProjectPath,
-                "applications",
-                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                scope.ApplicationRootPath,
                 "layouts"));
     }
 
     public static string GetTopologyPath(ProjectApplicationWorkspaceScope scope, string topologyId)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(GetTopologyDirectory(scope), $"topology-{ToSafeSegment(topologyId)}.json"));
     }
 
     public static string GetLayoutPath(ProjectApplicationWorkspaceScope scope, string layoutId)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(GetLayoutDirectory(scope), $"layout-{ToSafeSegment(layoutId)}.json"));
     }
@@ -69,18 +69,19 @@ internal static class ProjectTopologyResourcePath
         return $"{readable}--{hash}";
     }
 
-    private static string EnsureInsideProject(
+    private static string EnsureInsideApplication(
         ProjectApplicationWorkspaceScope scope,
         string path)
     {
-        var projectRoot = Path.GetFullPath(scope.ProjectPath)
+        var applicationRoot = Path.GetFullPath(scope.ApplicationRootPath)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
         var fullPath = Path.GetFullPath(path);
 
-        if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.StartsWith(applicationRoot, PathComparison))
         {
-            throw new InvalidOperationException("Topology resource path must stay inside the project directory.");
+            throw new InvalidOperationException(
+                "Topology resource path must stay inside the application directory.");
         }
 
         return fullPath;

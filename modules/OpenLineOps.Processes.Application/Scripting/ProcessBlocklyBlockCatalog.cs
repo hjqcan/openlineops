@@ -9,6 +9,7 @@ namespace OpenLineOps.Processes.Application.Scripting;
 public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCatalog
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly RuntimeActionContractCanonicalSerializer ActionContractSerializer = new();
     private static readonly DateTimeOffset BuiltInRecordedAtUtc = new(2026, 6, 30, 0, 0, 0, TimeSpan.Zero);
 
     private readonly IProcessBlocklyBlockDefinitionRepository _repository;
@@ -193,7 +194,8 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             IsBuiltIn: false,
             record.Version,
             record.CreatedAtUtc,
-            record.UpdatedAtUtc);
+            record.UpdatedAtUtc,
+            ExecutionMode: ProcessBlocklyBlockExecutionModes.LegacyPythonTemplate);
     }
 
     private static ApplicationError? Validate(RegisterProcessBlocklyBlockDefinitionRequest request)
@@ -487,6 +489,15 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
         string blocklyJson,
         string pythonCodeTemplate)
     {
+        var contractResult = ActionContractSerializer.Serialize(
+            BuiltInRuntimeActionContracts.Get(blockType));
+        if (contractResult.IsFailure)
+        {
+            throw new InvalidOperationException(
+                $"Built-in Blockly block {blockType} has an invalid Runtime Action Contract: {contractResult.Error.Message}");
+        }
+
+        var contract = contractResult.Value;
         return new ProcessBlocklyBlockDefinitionDetails(
             blockType,
             category,
@@ -496,7 +507,11 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             IsBuiltIn: true,
             Version: 1,
             CreatedAtUtc: BuiltInRecordedAtUtc,
-            UpdatedAtUtc: BuiltInRecordedAtUtc);
+            UpdatedAtUtc: BuiltInRecordedAtUtc,
+            ExecutionMode: ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
+            RuntimeActionContractSchemaVersion: contract.SchemaVersion,
+            RuntimeActionContractJson: contract.CanonicalJson,
+            RuntimeActionContractSha256: contract.Sha256);
     }
 
     [GeneratedRegex("^[A-Za-z][A-Za-z0-9_:\\.-]*$", RegexOptions.CultureInvariant)]

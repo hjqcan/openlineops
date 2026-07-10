@@ -122,8 +122,10 @@ public sealed class ProcessDefinitionsController : ControllerBase
     }
 
     [HttpPost("{processDefinitionId}/runtime-sessions")]
+    [DevelopmentRuntimeStartOnly]
     [ProducesResponseType<StartedProcessRuntimeSessionResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<StartedProcessRuntimeSessionResponse>> StartRuntimeSessionAsync(

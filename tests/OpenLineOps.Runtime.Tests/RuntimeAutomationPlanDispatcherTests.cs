@@ -1,5 +1,6 @@
 using System.Text.Json;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Domain.Identifiers;
 
@@ -7,218 +8,152 @@ namespace OpenLineOps.Runtime.Tests;
 
 public sealed class RuntimeAutomationPlanDispatcherTests
 {
-    [Fact]
-    public async Task DispatchAsyncReturnsOriginalScriptResultWhenPayloadHasNoAutomationPlan()
-    {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed("""{"normalized":true}""");
-        var invoked = false;
-
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
-            {
-                invoked = true;
-                return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed());
-            });
-
-        Assert.Same(scriptResult, result);
-        Assert.False(invoked);
-    }
+    private readonly RuntimeAutomationPlanExpander _expander = new();
 
     [Fact]
-    public async Task DispatchAsyncMapsAutomationActionsToRuntimeCommands()
+    public void ExpandCreatesStableIrDerivedChildIdentitiesAndCommands()
     {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed(
+        var result = _expander.Expand(
+            CreateParent(),
             """
             {
               "automation_plan": [
-                {"type":"axis.move","axis":"x","distance":15,"unit":"mm"},
-                {"type":"io.light","channel":"lamp-main","state":true},
-                {"type":"motor.rotate","motor":"m1","degrees":90}
+                {"type":"axis.move","axis":"X","position":12},
+                {"type":"command.execute","capability":"vision.camera","command":"Capture","payload":{"mode":"fast"},"timeout_ms":1250}
               ]
             }
             """);
-        var commands = new List<RuntimeCommandExecutionContext>();
 
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
+        Assert.True(result.IsSuccess, result.Error.Message);
+        Assert.True(result.Value.HasAutomationPlan);
+        Assert.Collection(
+            result.Value.Actions,
+            first =>
             {
-                commands.Add(context);
-                return ValueTask.FromResult(
-                    RuntimeCommandExecutionResult.Completed(
-                        $$"""{"executed":"{{context.CommandName}}"}"""));
+                Assert.Equal(1, first.Sequence);
+                Assert.Equal("script-node:action:1:child:1", first.Node.EffectiveActionId.Value);
+                Assert.Equal("script-node:action:1:automation-plan:node:1", first.Node.NodeId.Value);
+                Assert.Equal("motion.axis", first.Node.TargetCapability.Value);
+                Assert.Equal("MoveAxis", first.Node.CommandName);
+            },
+            second =>
+            {
+                Assert.Equal(2, second.Sequence);
+                Assert.Equal("script-node:action:1:child:2", second.Node.EffectiveActionId.Value);
+                Assert.Equal("vision.camera", second.Node.TargetCapability.Value);
+                Assert.Equal("Capture", second.Node.CommandName);
+                Assert.Equal(TimeSpan.FromMilliseconds(1250), second.Node.Timeout);
+                Assert.Equal("{\"mode\":\"fast\"}", second.Node.InputPayload);
             });
-
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
-        Assert.Equal(3, commands.Count);
-        Assert.Equal("motion.axis", commands[0].TargetCapability.Value);
-        Assert.Equal("MoveAxis", commands[0].CommandName);
-        Assert.Equal("io.light", commands[1].TargetCapability.Value);
-        Assert.Equal("SetLight", commands[1].CommandName);
-        Assert.Equal("motion.motor", commands[2].TargetCapability.Value);
-        Assert.Equal("RotateMotor", commands[2].CommandName);
-        Assert.All(commands, command =>
-        {
-            Assert.Equal(request.CommandContext.SessionId, command.SessionId);
-            Assert.Equal(request.CommandContext.StationId, command.StationId);
-            Assert.Equal(request.CommandContext.ConfigurationSnapshotId, command.ConfigurationSnapshotId);
-            Assert.Equal(request.CommandContext.StepId, command.StepId);
-            Assert.StartsWith("node-script.automation.", command.NodeId.Value, StringComparison.Ordinal);
-        });
-
-        using var document = JsonDocument.Parse(result.Payload!);
-        var dispatch = document.RootElement.GetProperty("automation_dispatch");
-        Assert.Equal(3, dispatch.GetArrayLength());
-        Assert.Equal("Completed", dispatch[0].GetProperty("outcome").GetString());
     }
 
     [Fact]
-    public async Task DispatchAsyncMapsExplicitCommandExecuteActionsToRuntimeCommands()
+    public void ExpandPreflightsEntirePlanBeforeReturningAnyActions()
     {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed(
+        var result = _expander.Expand(
+            CreateParent(),
             """
             {
               "automation_plan": [
-                {
-                  "type": "command.execute",
-                  "capability": "device.loopback",
-                  "command": "Echo",
-                  "payload": {"message": "hello"},
-                  "timeout_ms": 2500
-                }
+                {"type":"axis.move","axis":"X","position":12},
+                {"type":"unsupported.custom"}
               ]
             }
             """);
-        var commands = new List<RuntimeCommandExecutionContext>();
 
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
-            {
-                commands.Add(context);
-                return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed());
-            });
-
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
-        var command = Assert.Single(commands);
-        Assert.Equal("device.loopback", command.TargetCapability.Value);
-        Assert.Equal("Echo", command.CommandName);
-        Assert.Equal("""{"message":"hello"}""", command.InputPayload);
-        Assert.Equal(TimeSpan.FromMilliseconds(2500), command.Timeout);
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Runtime.AutomationPlanInvalid", result.Error.Code);
+        Assert.Contains("action 2", result.Error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task DispatchAsyncExecutesWaitActionsLocally()
+    public void ExpandMapsWaitToInternalRuntimeCommand()
     {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed(
+        var result = _expander.Expand(
+            CreateParent(),
+            """{"automation_plan":[{"type":"flow.wait","duration_ms":25}]}""");
+
+        Assert.True(result.IsSuccess, result.Error.Message);
+        var action = Assert.Single(result.Value.Actions);
+        Assert.Equal(RuntimeFlowCommand.Capability, action.Node.TargetCapability.Value);
+        Assert.Equal(RuntimeFlowCommand.WaitCommandName, action.Node.CommandName);
+        using var payload = JsonDocument.Parse(action.Node.InputPayload!);
+        Assert.Equal(25, payload.RootElement.GetProperty("durationMilliseconds").GetDouble());
+    }
+
+    [Fact]
+    public void ExpandRejectsInvalidLaterWaitBeforeExecution()
+    {
+        var result = _expander.Expand(
+            CreateParent(),
+            """
+            {"automation_plan":[
+              {"type":"flow.wait","duration_ms":0},
+              {"type":"flow.wait","duration_ms":-1}
+            ]}
+            """);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("action 2", result.Error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ExpandRejectsNestedPythonExecution()
+    {
+        var result = _expander.Expand(
+            CreateParent(),
+            $$"""
+            {"automation_plan":[{
+              "type":"command.execute",
+              "capability":"{{RuntimeScriptCommand.PythonCapability}}",
+              "command":"{{RuntimeScriptCommand.PythonCommandName}}"
+            }]}
+            """);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("recursively", result.Error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CompletionPayloadIncludesStableChildIdentityAndOutcome()
+    {
+        var expansionResult = _expander.Expand(
+            CreateParent(),
             """{"automation_plan":[{"type":"flow.wait","duration_ms":0}]}""");
-        var invoked = false;
+        Assert.True(expansionResult.IsSuccess, expansionResult.Error.Message);
 
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
-            {
-                invoked = true;
-                return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed());
-            });
+        var payload = expansionResult.Value.CreateCompletionPayload(
+        [
+            new RuntimeAutomationPlanActionResult(
+                1,
+                "script-node:action:1:child:1",
+                "script-node:action:1:automation-plan:node:1",
+                "flow.wait",
+                RuntimeCommandExecutionOutcome.Completed,
+                "waited",
+                null)
+        ]);
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
-        Assert.False(invoked);
-
-        using var document = JsonDocument.Parse(result.Payload!);
-        var dispatch = document.RootElement.GetProperty("automation_dispatch");
-        Assert.Single(dispatch.EnumerateArray());
-        Assert.Equal("flow.wait", dispatch[0].GetProperty("type").GetString());
-        Assert.Equal("Completed", dispatch[0].GetProperty("outcome").GetString());
+        using var document = JsonDocument.Parse(payload!);
+        var dispatch = Assert.Single(document.RootElement.GetProperty("automation_dispatch").EnumerateArray());
+        Assert.Equal("script-node:action:1:child:1", dispatch.GetProperty("actionId").GetString());
+        Assert.Equal("Completed", dispatch.GetProperty("outcome").GetString());
     }
 
-    [Fact]
-    public async Task DispatchAsyncRejectsUnsupportedAutomationActionType()
+    private static ExecutableRuntimeNode CreateParent()
     {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed(
-            """{"automation_plan":[{"type":"camera.capture"}]}""");
-
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
-                ValueTask.FromResult(RuntimeCommandExecutionResult.Completed()));
-
-        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
-        Assert.Contains("camera.capture", result.Reason, StringComparison.Ordinal);
-        Assert.NotNull(result.Payload);
-        Assert.Contains("automation_dispatch", result.Payload, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task DispatchAsyncStopsWhenActionCommandIsRejected()
-    {
-        var dispatcher = new RuntimeAutomationPlanDispatcher();
-        var request = CreateRequest();
-        var scriptResult = RuntimeCommandExecutionResult.Completed(
-            """
-            {
-              "automation_plan": [
-                {"type":"axis.move","axis":"x","distance":15},
-                {"type":"motor.rotate","motor":"m1","degrees":90}
-              ]
-            }
-            """);
-        var commands = new List<RuntimeCommandExecutionContext>();
-
-        var result = await dispatcher.DispatchAsync(
-            request,
-            scriptResult,
-            (context, cancellationToken) =>
-            {
-                commands.Add(context);
-                return ValueTask.FromResult(
-                    RuntimeCommandExecutionResult.Rejected("Axis x is not homed."));
-            });
-
-        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
-        Assert.Single(commands);
-        Assert.Contains("Automation action 1 (axis.move) Rejected", result.Reason, StringComparison.Ordinal);
-        Assert.Contains("Axis x is not homed", result.Reason, StringComparison.Ordinal);
-    }
-
-    private static RuntimeScriptExecutionRequest CreateRequest()
-    {
-        return new RuntimeScriptExecutionRequest(
-            CreateContext(),
-            "Python",
-            "result = {'automation_plan': automation_plan}",
-            "1",
-            null);
-    }
-
-    private static RuntimeCommandExecutionContext CreateContext()
-    {
-        return new RuntimeCommandExecutionContext(
-            new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
-            new StationId("station-a"),
-            new ConfigurationSnapshotId("snapshot-20260630-001"),
-            new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),
-            new RuntimeCommandId(Guid.Parse("00000000-0000-0000-0000-000000000003")),
-            new RuntimeNodeId("node-script"),
+        return new ExecutableRuntimeNode(
+            new RuntimeNodeId("script-node"),
+            "Script node",
             new RuntimeCapabilityId(RuntimeScriptCommand.PythonCapability),
             RuntimeScriptCommand.PythonCommandName,
-            null,
-            TimeSpan.FromSeconds(15));
+            TimeSpan.FromSeconds(10),
+            InputPayload: null,
+            ActionId: new RuntimeActionId("script-node:action:1"),
+            DynamicChildren: new ExecutableRuntimeDynamicActionSlot(
+                "script-node:action:1:automation-plan",
+                "script-node:action:1:child:",
+                SequenceBase: 1,
+                SourceMappingMode: "ContainerOnly"));
     }
 }

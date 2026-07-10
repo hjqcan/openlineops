@@ -109,7 +109,9 @@ public sealed class AutomationProjectService : IAutomationProjectService
 
             var result = project.AddApplication(ProjectApplication.Create(
                 new ProjectApplicationId(request.ApplicationId),
-                request.DisplayName));
+                request.DisplayName,
+                ProjectWorkspaces.AutomationProjectFileConvention.GetApplicationProjectRelativePath(
+                    request.ApplicationId)));
             if (!result.Succeeded)
             {
                 return Result.Failure<AutomationProjectDetails>(ToConflict(result));
@@ -200,6 +202,7 @@ public sealed class AutomationProjectService : IAutomationProjectService
                 new PublishedProjectSnapshotId(request.SnapshotId),
                 new ProjectApplicationId(request.ApplicationId),
                 new AutomationTopologyId(request.TopologyId),
+                request.LayoutIds,
                 new ProcessDefinitionId(request.ProcessDefinitionId),
                 new ProcessVersionId(request.ProcessVersionId),
                 new ConfigurationSnapshotId(request.ConfigurationSnapshotId),
@@ -210,6 +213,8 @@ public sealed class AutomationProjectService : IAutomationProjectService
                     binding.ProviderKey)),
                 request.TargetReferences.Select(target => new ProjectTargetReference(target.Kind, target.TargetId)),
                 request.BlockVersionIds,
+                request.ReleaseManifestPath,
+                request.ReleaseContentSha256,
                 _clock.UtcNow);
             if (!result.Succeeded)
             {
@@ -303,6 +308,13 @@ public sealed class AutomationProjectService : IAutomationProjectService
             return Required("Projects.TopologyIdRequired", "TopologyId");
         }
 
+        if (request.LayoutIds is null || request.LayoutIds.Count == 0)
+        {
+            return ApplicationError.Validation(
+                "Projects.LayoutIdsRequired",
+                "At least one LayoutId is required.");
+        }
+
         if (string.IsNullOrWhiteSpace(request.ProcessDefinitionId))
         {
             return Required("Projects.ProcessDefinitionIdRequired", "ProcessDefinitionId");
@@ -332,10 +344,20 @@ public sealed class AutomationProjectService : IAutomationProjectService
                 "TargetReferences collection is required.");
         }
 
-        return request.BlockVersionIds is null
-            ? ApplicationError.Validation(
+        if (request.BlockVersionIds is null)
+        {
+            return ApplicationError.Validation(
                 "Projects.BlockVersionIdsRequired",
-                "BlockVersionIds collection is required.")
+                "BlockVersionIds collection is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ReleaseManifestPath))
+        {
+            return Required("Projects.ReleaseManifestPathRequired", "ReleaseManifestPath");
+        }
+
+        return string.IsNullOrWhiteSpace(request.ReleaseContentSha256)
+            ? Required("Projects.ReleaseContentSha256Required", "ReleaseContentSha256")
             : null;
     }
 

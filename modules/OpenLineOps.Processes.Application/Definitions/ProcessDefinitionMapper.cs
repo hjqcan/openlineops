@@ -5,7 +5,7 @@ using OpenLineOps.Processes.Domain.Validation;
 
 namespace OpenLineOps.Processes.Application.Definitions;
 
-internal static class ProcessDefinitionMapper
+public static class ProcessDefinitionMapper
 {
     public static ProcessDefinitionDetails ToDetails(ProcessDefinition definition)
     {

@@ -18,9 +18,9 @@ The detailed composable building block model is defined in
 `docs/composable-building-block-architecture.md`. This document focuses on the
 workspace workflow around that model.
 
-The IDE shell, Edit/Run mode boundary, immutable project release, deployable
-package, CLI, Runner, and Agent host model are defined in
-`docs/automation-ide-product-shell.md`.
+The IDE shell, Edit/Run mode boundary, immutable project release, implemented
+one-shot Runner, and future deployable package, service, queue, recovery, and
+Agent host model are defined in `docs/automation-ide-product-shell.md`.
 
 ## Product Workflow
 
@@ -38,6 +38,12 @@ The target workflow is:
 7. Publish an immutable project snapshot for runtime execution.
 8. Run, monitor, and trace sessions against that published snapshot.
 9. Export or share the project package and its trace evidence.
+
+Steps 1 through 8 now have an end-to-end local path: Studio provides the Start
+Center and project workbench, Publisher creates an immutable local release, and
+Studio or the one-shot headless Runner can execute its Project Snapshot. A
+signed deployable package and remote sharing/deployment workflow in step 9 are
+not implemented.
 
 This workflow is intentionally different from property-and-script-first test
 sequencers. OpenLineOps should be visual-first: the site model and Blockly flow
@@ -109,10 +115,12 @@ delays, and future human or measurement nodes.
 
 ### PublishedProjectSnapshot
 
-The immutable runtime handoff artifact. It freezes the project composition,
-site layout, engineering configuration snapshot, process versions, device
-bindings, block catalog versions, generated Python source, and trace identity
-metadata used by runtime sessions.
+The project manifest's immutable runtime handoff record. It identifies the
+application, topology, layouts, published process and version, published
+Engineering configuration snapshot, resolved capability bindings, runtime
+targets, Blockly block versions, release manifest path, and release content
+digest. The referenced release artifact contains the frozen application source,
+including the Blockly and Python artifacts used by the process.
 
 ## Bounded Context Ownership
 
@@ -165,12 +173,27 @@ through application ports and immutable published snapshots.
 
 ### Runtime
 
-Runtime executes published process versions against published configuration and
-project snapshots. It should consume a resolved execution plan rather than read
-draft project state.
+The Project Snapshot runtime path executes the published process and
+configuration loaded from the immutable release. It does not re-read the
+editable application source or fall back to the legacy global configuration
+store.
 
-Runtime maps Blockly-generated automation plans to normal command execution so
-hardware control remains traceable and cancelable.
+Publisher compiles the published process graph into canonical
+`openlineops.flow-ir/v1` JSON and freezes its schema, SHA-256, and content in
+release manifest schema v2. Project Snapshot launch validates that frozen Flow
+IR and maps it to the executable runtime process instead of reconstructing the
+runtime graph from client input.
+
+Python and current Blockly-authored Python nodes retain a Flow IR dynamic-action
+slot. When their `automation_plan` result is expanded, each child is created in
+the `RuntimeSession` aggregate as its own Runtime step and command. The child
+step records an explicit `ActionId`, parent step id, and dynamic sequence; its
+command shares the `ActionId`, and the execution context propagates the complete
+identity. Child failure, rejection, cancellation, or timeout is persisted and
+propagated to the container and session. This closes the former nested-command
+trace gap, but it is still runtime expansion with container-level source
+mapping, not the future server-side Blockly workspace compiler with
+block-id/type/version source maps.
 
 ### Traceability
 
@@ -194,9 +217,58 @@ session requires a published snapshot that freezes:
 - Site layout element references.
 - Engineering configuration snapshot id.
 - Process definition versions.
+- Canonical Flow IR schema, JSON, and SHA-256.
 - Block catalog versions used by Blockly nodes.
 - Generated or manually edited Python source and source hashes.
 - Capability contracts and driver bindings resolved for runtime.
+
+The implemented publish API accepts only publication intent: snapshot,
+application, process definition, and configuration snapshot ids. The server
+resolves topology, all layouts, the published process version, the unique
+published Engineering configuration snapshot, topology targets and bindings,
+and the current catalog version selected for every block type found in the
+Blockly workspace. It rejects a release when required process capabilities are
+not declared and bound in both Topology and the selected Engineering
+configuration.
+
+The release store copies the complete application source into a staging
+directory, records every file's size and SHA-256 digest plus canonical Flow IR
+metadata in schema-v2 `release.json`, computes a digest over the normalized
+manifest content, and verifies the staged artifact before an atomic directory
+move. An existing release id is never overwritten. The publisher then resolves
+the copied source again and requires its semantic metadata and Flow IR to match
+the source resolved before the copy. Only after those checks does the project
+manifest record the project-relative release manifest path and content digest.
+
+The current on-disk release shape is:
+
+```text
+project-root/
+  releases/
+    release-<safe-snapshot-id>/
+      release.json
+      source/
+        applications/
+          application-<safe-application-id>/
+            ...frozen application source...
+```
+
+Opening a release verifies its schema and identity, expected content digest,
+exact file set, per-file sizes and hashes, and safe paths before exposing its
+source root. The Project Snapshot runtime launcher verifies that the release
+metadata matches the snapshot, verifies the frozen Flow IR schema, canonical
+content, hash, and process identity, then loads validation source and
+configuration through project-scoped repositories rooted at that frozen source.
+Device commands that carry Project Snapshot identity resolve their topology
+capability and device binding from the same release; they do not silently fall
+back to mutable or global Engineering state.
+
+The legacy `POST /api/runtime/sessions/simulated` and
+`POST /api/process-definitions/{id}/runtime-sessions` surfaces are now explicitly
+development/test-only. They return `403` unless the host environment is
+`Development` or `Test` and
+`OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is also set. Production
+execution uses the immutable Project Snapshot route.
 
 ## API Shape
 
@@ -246,6 +318,7 @@ but Studio uses the scoped routes:
 - `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects/{engineeringProjectId}/configuration-snapshots/{fromSnapshotId}/diff/{toSnapshotId}`
 - `POST /api/automation-projects/{projectId}/publish`
 - `GET /api/automation-projects/{projectId}/snapshots`
+- `POST /api/automation-projects/{projectId}/snapshots/{snapshotId}/runtime-sessions`
 
 Desktop file operations such as choosing a folder or recent project path remain
 Electron responsibilities. The backend owns project state validation and
@@ -255,7 +328,11 @@ routes so identical resource ids in two applications do not collide.
 
 ## Electron Workbench
 
-The desktop shell should move toward a project-first experience:
+The desktop shell now uses a project-first experience. Before a project is
+open, a VS-inspired but OpenLineOps-specific Start Center presents searchable,
+time-grouped recent projects plus Create Project and Open Project Folder. It
+does not expose unrelated engineering or runtime dashboards. Opening a project
+transitions into the IDE workbench with explicit project and application state:
 
 - Start window with new project, open project, and recent projects.
 - Project explorer sidebar for applications, topology, equipment nodes, modules,
@@ -269,6 +346,9 @@ The desktop shell should move toward a project-first experience:
   primary workflow.
 - Runtime launch panel that selects a published project snapshot instead of
   asking users to manually provide unrelated ids.
+
+Richer editor-tab/dirty-state behavior, deeper topology editing, and additional
+IDE polish remain; the entry-to-workbench lifecycle itself is implemented.
 
 ## Site Layout Model
 
@@ -324,6 +404,48 @@ timeouts, failures, and trace records remain consistent.
 Manual Python editing remains available for advanced users, but it is not the
 primary product model.
 
+The Processes application layer now also defines strict
+`openlineops.runtime-action-contract/v1` typed contracts with deterministic
+canonical JSON and SHA-256. The five built-in blocks have declarative contracts
+for `deviceCommand`, `delay`, or `resultPatch` emits and safe literal, field,
+context, object, and array values. Unknown fields, scripts/templates/raw
+expressions, dynamic capability/command selection, duplicate JSON properties,
+non-finite numbers, hostile nulls, and non-canonical documents are rejected.
+
+This is a foundation, not yet the Blockly execution authority. Persisted custom
+blocks and plugin-generated blocks remain `LegacyPythonTemplate`; workspaces do
+not yet pin an exact block definition version plus contract hash; Publisher does
+not yet compile workspace block ids/fields into static child Flow IR actions;
+and releases do not yet lock plugin packages. Current Blockly execution still
+uses frozen Python plus the aggregate-aware dynamic action path described above.
+
+## One-Shot Headless Runner
+
+`src/OpenLineOps.Runner` can run an existing immutable release without opening
+Studio:
+
+```powershell
+dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
+  run C:\Projects\LineA --snapshot active `
+  --serial SN-001 --batch BATCH-001 --fixture fixture-a `
+  --device device-a --actor operator-a
+```
+
+The target can be a project directory or its `openlineops.project.json` file;
+`--snapshot` accepts an id or defaults to `active`. Runner opens the project,
+selects the snapshot, requires its immutable release descriptor, executes it
+through the same release-only launcher, writes one JSON result using Runner
+output schema v1, and returns a stable exit code: `0` success, `2` usage, `3`
+project open, `4` snapshot selection, `5` immutable release required, `6`
+start rejected, `7` non-completed runtime terminal state, `8` canceled, or `70`
+internal/configuration failure.
+
+The implemented Runner is deliberately one-shot and synchronous. It does not
+package or verify `.olopkg` files, deploy releases, host a service/API/operator
+UI, queue requests, acquire a station lease, persist durable recovery state,
+resume interrupted hardware work, sign packages, or freeze/verify complete
+plugin binaries. Those remain separate production-hardening phases.
+
 ## Implementation Slices
 
 ### Slice 1: Project Domain Skeleton
@@ -361,7 +483,7 @@ groups, slots, devices, labels, and zones on a top-down canvas.
 Publish project snapshots and update runtime launch so the desktop starts
 sessions from a published project snapshot instead of manually assembled ids.
 
-## Current Gap
+## Current State And Remaining Work
 
 The repository now has a project-first Studio shell plus durable project source
 for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python,
@@ -379,15 +501,32 @@ process, block, and Engineering ids are therefore valid in two applications.
 A cold-restart API test destroys the first host, moves the complete project
 folder, opens its manifest in a fresh host, and restores two isolated
 applications, including their custom blocks and Engineering configuration.
-Scoped runtime launch resolves the requested configuration snapshot from the
-application-local Engineering source before using the legacy global
-compatibility store. Persistence tests also reject a modified Python artifact
-whose digest no longer matches `flow.json`.
+Persistence tests also reject a modified Python artifact whose digest no longer
+matches `flow.json`.
 
-The remaining release gap is the cross-context immutable publisher: it must
-compile versioned Flow IR and freeze resolved capability, device, provider,
-plugin, station, and secret-reference bindings instead of trusting client input.
-The separate headless Runner, Agent, and CLI hosts must then verify and execute
-that same release. The desktop now has explicit Application selection and
-editable 2D layout geometry; it still needs full topology CRUD and richer
-editor-tab/dirty-state handling.
+The cross-context immutable publisher and artifact store are now implemented.
+A Project Snapshot launch verifies and reads its release rather than editable
+source, and release-identified device command routing reads release-frozen
+capability metadata and Engineering device bindings. Legacy snapshots without
+release metadata can still be opened for compatibility, but the Project
+Snapshot runtime endpoint rejects them.
+
+Release manifest schema v2 now freezes canonical Flow IR v1, and dynamic
+Python/Blockly child actions have aggregate Runtime action, parent, and sequence
+identity with persisted lifecycle propagation. The old direct-start endpoints
+are isolated behind the explicit Development/Test-only gate. A one-shot
+headless Runner now executes an immutable Project Snapshot and returns stable
+JSON/exit codes.
+
+The next Blockly boundary is to consume Runtime Action Contract v1 through a
+server-side workspace compiler, pin block version plus contract hash, emit
+static child action source maps, and freeze complete plugin/provider dependency
+locks. Longer-running execution still needs a host-neutral run service, durable
+queue/state, station lease, recovery policy, package signing/verification, and
+deployment tooling.
+
+Studio now has a project-first Start Center, explicit Application selection,
+and editable 2D layout geometry. It still needs richer topology editing,
+editor-tab and dirty-state behavior, and general IDE polish. Semantic 3D layout
+and rendering remain a later phase after the 2D, execution, and deployment
+boundaries are stable.

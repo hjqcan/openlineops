@@ -6,14 +6,16 @@ namespace OpenLineOps.Processes.Infrastructure.Persistence;
 
 internal static class ProjectProcessResourcePath
 {
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
     public static string GetFlowsDirectory(ProjectApplicationWorkspaceScope scope)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
-                scope.ProjectPath,
-                "applications",
-                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                scope.ApplicationRootPath,
                 "flows"));
     }
 
@@ -21,7 +23,7 @@ internal static class ProjectProcessResourcePath
         ProjectApplicationWorkspaceScope scope,
         string processDefinitionId)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(GetFlowsDirectory(scope), $"process-{ToSafeSegment(processDefinitionId)}"));
     }
@@ -30,17 +32,17 @@ internal static class ProjectProcessResourcePath
         ProjectApplicationWorkspaceScope scope,
         string processDefinitionId)
     {
-        return EnsureInsideProject(scope, Path.Combine(GetFlowDirectory(scope, processDefinitionId), "flow.json"));
+        return EnsureInsideApplication(
+            scope,
+            Path.Combine(GetFlowDirectory(scope, processDefinitionId), "flow.json"));
     }
 
     public static string GetCustomBlocksDirectory(ProjectApplicationWorkspaceScope scope)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
-                scope.ProjectPath,
-                "applications",
-                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                scope.ApplicationRootPath,
                 "blocks",
                 "custom"));
     }
@@ -49,7 +51,7 @@ internal static class ProjectProcessResourcePath
         ProjectApplicationWorkspaceScope scope,
         string blockType)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(GetCustomBlocksDirectory(scope), $"block-{ToSafeSegment(blockType)}"));
     }
@@ -58,7 +60,7 @@ internal static class ProjectProcessResourcePath
         ProjectApplicationWorkspaceScope scope,
         string blockType)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(GetCustomBlockDirectory(scope, blockType), "versions"));
     }
@@ -73,7 +75,7 @@ internal static class ProjectProcessResourcePath
             throw new ArgumentOutOfRangeException(nameof(version), "Blockly block version must be positive.");
         }
 
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
                 GetCustomBlockVersionsDirectory(scope, blockType),
@@ -85,7 +87,7 @@ internal static class ProjectProcessResourcePath
         string processDefinitionId,
         string nodeId)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
                 GetFlowDirectory(scope, processDefinitionId),
@@ -99,7 +101,7 @@ internal static class ProjectProcessResourcePath
         string nodeId,
         string sha256)
     {
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
                 GetNodeDirectory(scope, processDefinitionId, nodeId),
@@ -117,7 +119,7 @@ internal static class ProjectProcessResourcePath
             ? "source"
             : "generated";
 
-        return EnsureInsideProject(
+        return EnsureInsideApplication(
             scope,
             Path.Combine(
                 GetNodeDirectory(scope, processDefinitionId, nodeId),
@@ -135,12 +137,14 @@ internal static class ProjectProcessResourcePath
         }
 
         var normalizedRelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
-        var fullPath = EnsureInsideProject(scope, Path.Combine(flowDirectory, normalizedRelativePath));
+        var fullPath = EnsureInsideApplication(
+            scope,
+            Path.Combine(flowDirectory, normalizedRelativePath));
         var normalizedFlowDirectory = Path.GetFullPath(flowDirectory)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
 
-        if (!fullPath.StartsWith(normalizedFlowDirectory, StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.StartsWith(normalizedFlowDirectory, PathComparison))
         {
             throw new InvalidDataException(
                 $"Project process path '{relativePath}' escapes its flow directory.");
@@ -181,18 +185,19 @@ internal static class ProjectProcessResourcePath
         return $"{readable}--{hash}";
     }
 
-    private static string EnsureInsideProject(
+    private static string EnsureInsideApplication(
         ProjectApplicationWorkspaceScope scope,
         string path)
     {
-        var projectRoot = Path.GetFullPath(scope.ProjectPath)
+        var applicationRoot = Path.GetFullPath(scope.ApplicationRootPath)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
         var fullPath = Path.GetFullPath(path);
 
-        if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.StartsWith(applicationRoot, PathComparison))
         {
-            throw new InvalidOperationException("Process resource path must stay inside the project directory.");
+            throw new InvalidOperationException(
+                "Process resource path must stay inside the application directory.");
         }
 
         return fullPath;

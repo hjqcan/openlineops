@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Api.Scripting;
 using OpenLineOps.Processes.Application.Definitions;
+using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Application.ProjectWorkspaces;
 using OpenLineOps.Processes.Application.Runtime;
@@ -57,6 +58,11 @@ public static class ProcessesModuleServiceCollectionExtensions
             ServiceDescriptor.Singleton<IProcessBlocklyBlockCatalogSource, PluginCommandBlocklyBlockCatalogSource>());
         services.TryAddSingleton<IProcessBlocklyBlockCatalog, ProcessBlocklyBlockCatalog>();
         services.TryAddSingleton<IProcessScriptDefinitionValidator, PythonScriptDefinitionValidator>();
+        services.TryAddSingleton<IProcessFlowIrCompiler, ProcessFlowIrCompiler>();
+        services.TryAddSingleton<IFlowIrCanonicalSerializer, FlowIrCanonicalSerializer>();
+        services.TryAddSingleton<
+            IFlowIrExecutableRuntimeProcessMapper,
+            FlowIrExecutableRuntimeProcessMapper>();
         services.TryAddSingleton<IProjectProcessDefinitionRepository, FileSystemProjectProcessDefinitionRepository>();
         services.TryAddSingleton<
             IProjectProcessBlocklyBlockDefinitionRepository,

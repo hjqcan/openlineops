@@ -725,18 +725,8 @@ export function ProcessWorkbench({
       const publishResponse = await publishProjectSnapshot(activeWorkspace.project.projectId, {
         snapshotId,
         applicationId: activeApplication.applicationId,
-        topologyId: activeApplication.topologyId,
         processDefinitionId: selectedDefinition.processDefinitionId,
-        processVersionId: selectedDefinition.versionId,
-        configurationSnapshotId: launchDraft.configurationSnapshotId.trim(),
-        capabilityBindings: projectTopology.driverBindings.map(binding => ({
-          capabilityId: binding.capabilityId,
-          bindingId: binding.bindingId,
-          providerKind: binding.providerKind,
-          providerKey: binding.providerKey
-        })),
-        targetReferences: createProjectSnapshotTargetReferences(projectTopology),
-        blockVersionIds: blockCatalog.map(block => `${block.blockType}@${block.version}`)
+        configurationSnapshotId: launchDraft.configurationSnapshotId.trim()
       });
       if (!publishResponse.ok || !publishResponse.body) {
         onMessage(`Project snapshot publish failed: ${publishResponse.status} ${publishResponse.text}`);
@@ -762,7 +752,6 @@ export function ProcessWorkbench({
   }, [
     activeApplication,
     activeWorkspace,
-    blockCatalog,
     launchDraft.configurationSnapshotId,
     onMessage,
     onWorkspaceChanged,
@@ -2114,6 +2103,9 @@ function RuntimeLaunchPanel({
           <strong>{lastProjectSnapshot.snapshotId}</strong>
           <span>{lastProjectSnapshot.processVersionId}</span>
           <small>{lastProjectSnapshot.configurationSnapshotId}</small>
+          {lastProjectSnapshot.releaseContentSha256 ? (
+            <small>Release {lastProjectSnapshot.releaseContentSha256.slice(0, 12)}</small>
+          ) : null}
         </div>
       ) : null}
       {lastStartedSession ? (
@@ -2240,17 +2232,6 @@ function createProjectTargetOptions(
     ...slotGroupTargets,
     ...slotTargets,
     ...capabilityTargets
-  ];
-}
-
-function createProjectSnapshotTargetReferences(
-  topology: AutomationTopologyResponse
-): Array<{ kind: string; targetId: string }> {
-  return [
-    ...topology.nodes.map(node => ({ kind: 'EquipmentNode', targetId: node.nodeId })),
-    ...topology.modules.map(module => ({ kind: 'AutomationModule', targetId: module.moduleId })),
-    ...topology.slotGroups.map(group => ({ kind: 'SlotGroup', targetId: group.slotGroupId })),
-    ...topology.slots.map(slot => ({ kind: 'Slot', targetId: slot.slotId }))
   ];
 }
 

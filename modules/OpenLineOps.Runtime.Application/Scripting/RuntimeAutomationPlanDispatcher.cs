@@ -1,354 +1,284 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Domain.Identifiers;
 
 namespace OpenLineOps.Runtime.Application.Scripting;
 
-public sealed class RuntimeAutomationPlanDispatcher
+public sealed class RuntimeAutomationPlanExpander
 {
-    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    public const int MaximumActionCount = 1_000;
 
-    public async ValueTask<RuntimeCommandExecutionResult> DispatchAsync(
-        RuntimeScriptExecutionRequest request,
-        RuntimeCommandExecutionResult scriptResult,
-        Func<RuntimeCommandExecutionContext, CancellationToken, ValueTask<RuntimeCommandExecutionResult>> executeCommandAsync,
-        CancellationToken cancellationToken = default)
+    private const double MaximumWaitDurationMilliseconds = uint.MaxValue - 1d;
+
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly int _maximumActionCount;
+
+    public RuntimeAutomationPlanExpander()
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(executeCommandAsync);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (scriptResult.Outcome != RuntimeCommandExecutionOutcome.Completed
-            || string.IsNullOrWhiteSpace(scriptResult.Payload))
-        {
-            return scriptResult;
-        }
-
-        var root = TryParseObject(scriptResult.Payload);
-        if (root is null)
-        {
-            return scriptResult;
-        }
-
-        if (!root.TryGetPropertyValue("automation_plan", out var automationPlanNode))
-        {
-            return scriptResult;
-        }
-
-        if (automationPlanNode is not JsonArray automationPlan)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                "PythonScript automation_plan must be a JSON array.");
-        }
-
-        var dispatchResults = new JsonArray();
-        var sequence = 0;
-        foreach (var actionNode in automationPlan)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            sequence += 1;
-
-            if (actionNode is not JsonObject action)
-            {
-                return RuntimeCommandExecutionResult.Rejected(
-                    $"Automation action {sequence} must be a JSON object.");
-            }
-
-            var dispatchResult = await DispatchActionAsync(
-                request,
-                action,
-                sequence,
-                executeCommandAsync,
-                cancellationToken).ConfigureAwait(false);
-
-            dispatchResults.Add(ToJsonObject(sequence, action, dispatchResult));
-
-            if (dispatchResult.Outcome != RuntimeCommandExecutionOutcome.Completed)
-            {
-                root["automation_dispatch"] = dispatchResults;
-                return new RuntimeCommandExecutionResult(
-                    dispatchResult.Outcome,
-                    root.ToJsonString(_jsonOptions),
-                    $"Automation action {sequence} ({ReadActionType(action) ?? "unknown"}) {dispatchResult.Outcome}: {dispatchResult.Reason}");
-            }
-        }
-
-        root["automation_dispatch"] = dispatchResults;
-        return RuntimeCommandExecutionResult.Completed(root.ToJsonString(_jsonOptions));
+        _maximumActionCount = MaximumActionCount;
     }
 
-    private async ValueTask<RuntimeCommandExecutionResult> DispatchActionAsync(
-        RuntimeScriptExecutionRequest request,
-        JsonObject action,
-        int sequence,
-        Func<RuntimeCommandExecutionContext, CancellationToken, ValueTask<RuntimeCommandExecutionResult>> executeCommandAsync,
-        CancellationToken cancellationToken)
+    public Result<RuntimeAutomationPlanExpansion> Expand(
+        ExecutableRuntimeNode parentNode,
+        string? scriptPayload)
     {
-        var actionType = ReadActionType(action);
-        if (string.Equals(actionType, "flow.wait", StringComparison.OrdinalIgnoreCase))
+        ArgumentNullException.ThrowIfNull(parentNode);
+
+        if (parentNode.DynamicChildren is null || string.IsNullOrWhiteSpace(scriptPayload))
         {
-            return await ExecuteWaitAsync(action, cancellationToken).ConfigureAwait(false);
+            return Result.Success(RuntimeAutomationPlanExpansion.Empty(scriptPayload));
         }
 
-        if (!TryCreateActionCommandContext(request, action, sequence, out var context, out var error))
-        {
-            return RuntimeCommandExecutionResult.Rejected(error ?? "Automation action is invalid.");
-        }
-
-        return await executeCommandAsync(context!, cancellationToken).ConfigureAwait(false);
-    }
-
-    private bool TryCreateActionCommandContext(
-        RuntimeScriptExecutionRequest request,
-        JsonObject action,
-        int sequence,
-        out RuntimeCommandExecutionContext? context,
-        out string? error)
-    {
-        context = null;
-        error = null;
-
-        var actionType = ReadActionType(action);
-        if (string.IsNullOrWhiteSpace(actionType))
-        {
-            error = $"Automation action {sequence} must declare a type.";
-            return false;
-        }
-
-        if (!TryResolveActionCommand(action, actionType, sequence, out var command, out error))
-        {
-            return false;
-        }
-
-        var parent = request.CommandContext;
-        if (!TryReadActionTimeout(action, parent.Timeout, out var timeout, out error))
-        {
-            return false;
-        }
-
-        context = new RuntimeCommandExecutionContext(
-            parent.SessionId,
-            parent.StationId,
-            parent.ConfigurationSnapshotId,
-            parent.StepId,
-            RuntimeCommandId.New(),
-            new RuntimeNodeId($"{parent.NodeId.Value}.automation.{sequence}"),
-            new RuntimeCapabilityId(command!.Capability),
-            command.CommandName,
-            command.InputPayload,
-            timeout);
-        return true;
-    }
-
-    private bool TryResolveActionCommand(
-        JsonObject action,
-        string actionType,
-        int sequence,
-        out ResolvedActionCommand? command,
-        out string? error)
-    {
-        command = null;
-        error = null;
-
-        if (string.Equals(actionType, "command.execute", StringComparison.OrdinalIgnoreCase))
-        {
-            var capability = ReadString(action, "capability", "targetCapability");
-            if (string.IsNullOrWhiteSpace(capability))
-            {
-                error = $"Automation action {sequence} command.execute must declare a capability.";
-                return false;
-            }
-
-            var commandName = ReadString(action, "command", "commandName");
-            if (string.IsNullOrWhiteSpace(commandName))
-            {
-                error = $"Automation action {sequence} command.execute must declare a command.";
-                return false;
-            }
-
-            command = new ResolvedActionCommand(
-                capability.Trim(),
-                commandName.Trim(),
-                ReadActionInputPayload(action));
-            return true;
-        }
-
-        var mappedCommand = MapActionToCommand(actionType);
-        if (mappedCommand is null)
-        {
-            error = $"Automation action type '{actionType}' is not supported.";
-            return false;
-        }
-
-        command = new ResolvedActionCommand(
-            mappedCommand.Value.Capability,
-            mappedCommand.Value.CommandName,
-            action.ToJsonString(_jsonOptions));
-        return true;
-    }
-
-    private string? ReadActionInputPayload(JsonObject action)
-    {
-        if (!action.TryGetPropertyValue("payload", out var payloadNode))
-        {
-            return null;
-        }
-
-        if (payloadNode is null)
-        {
-            return null;
-        }
-
-        if (payloadNode is JsonValue payloadValue
-            && payloadValue.TryGetValue<string>(out var text))
-        {
-            return text;
-        }
-
-        return payloadNode.ToJsonString(_jsonOptions);
-    }
-
-    private async ValueTask<RuntimeCommandExecutionResult> ExecuteWaitAsync(
-        JsonObject action,
-        CancellationToken cancellationToken)
-    {
-        var durationMilliseconds = ReadNumber(action, "duration_ms")
-            ?? ReadNumber(action, "DURATION_MS")
-            ?? 0;
-        if (durationMilliseconds < 0)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                "Automation wait duration must be greater than or equal to zero.");
-        }
-
-        if (durationMilliseconds > 0)
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(durationMilliseconds), cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        return RuntimeCommandExecutionResult.Completed(action.ToJsonString(_jsonOptions));
-    }
-
-    private static (string Capability, string CommandName)? MapActionToCommand(string actionType)
-    {
-        return actionType.ToLowerInvariant() switch
-        {
-            "axis.move" => ("motion.axis", "MoveAxis"),
-            "io.light" => ("io.light", "SetLight"),
-            "motor.rotate" => ("motion.motor", "RotateMotor"),
-            _ => null
-        };
-    }
-
-    private static JsonObject? TryParseObject(string payload)
-    {
+        JsonObject? root;
         try
         {
-            return JsonNode.Parse(payload) as JsonObject;
+            root = JsonNode.Parse(scriptPayload) as JsonObject;
         }
         catch (JsonException)
         {
-            return null;
+            return Result.Success(RuntimeAutomationPlanExpansion.Empty(scriptPayload));
         }
+
+        if (root is null || !root.TryGetPropertyValue("automation_plan", out var planNode))
+        {
+            return Result.Success(RuntimeAutomationPlanExpansion.Empty(scriptPayload));
+        }
+
+        if (planNode is not JsonArray plan)
+        {
+            return Failure("PythonScript automation_plan must be a JSON array.");
+        }
+
+        if (plan.Count > _maximumActionCount)
+        {
+            return Failure(
+                $"PythonScript automation_plan contains {plan.Count} actions; the maximum is {_maximumActionCount}.");
+        }
+
+        var actions = new List<RuntimeAutomationPlanAction>(plan.Count);
+        for (var index = 0; index < plan.Count; index++)
+        {
+            if (plan[index] is not JsonObject action)
+            {
+                return Failure($"Automation action {index + 1} must be a JSON object.");
+            }
+
+            var expanded = ExpandAction(parentNode, action, index);
+            if (expanded.IsFailure)
+            {
+                return Result.Failure<RuntimeAutomationPlanExpansion>(expanded.Error);
+            }
+
+            actions.Add(expanded.Value);
+        }
+
+        return Result.Success(new RuntimeAutomationPlanExpansion(
+            scriptPayload,
+            HasAutomationPlan: true,
+            actions));
     }
 
-    private static JsonObject ToJsonObject(
-        int sequence,
+    private static Result<RuntimeAutomationPlanAction> ExpandAction(
+        ExecutableRuntimeNode parentNode,
         JsonObject action,
-        RuntimeCommandExecutionResult result)
+        int index)
     {
-        return new JsonObject
+        var slot = parentNode.DynamicChildren!;
+        int sequence;
+        try
         {
-            ["sequence"] = sequence,
-            ["type"] = ReadActionType(action),
-            ["outcome"] = result.Outcome.ToString(),
-            ["payload"] = result.Payload,
-            ["reason"] = result.Reason
+            sequence = checked(slot.SequenceBase + index);
+        }
+        catch (OverflowException)
+        {
+            return ActionFailure(index, "sequence is outside the supported range.");
+        }
+
+        var actionType = ReadString(action, "type")?.Trim();
+        if (string.IsNullOrWhiteSpace(actionType))
+        {
+            return ActionFailure(index, "must declare a type.");
+        }
+
+        var timeoutResult = ReadTimeout(action, parentNode.Timeout, index);
+        if (timeoutResult.IsFailure)
+        {
+            return Result.Failure<RuntimeAutomationPlanAction>(timeoutResult.Error);
+        }
+
+        var commandResult = ResolveCommand(action, actionType, index);
+        if (commandResult.IsFailure)
+        {
+            return Result.Failure<RuntimeAutomationPlanAction>(commandResult.Error);
+        }
+
+        var command = commandResult.Value;
+        if (string.Equals(command.Capability, RuntimeScriptCommand.PythonCapability, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(command.CommandName, RuntimeScriptCommand.PythonCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            return ActionFailure(index, "cannot recursively execute a Python automation plan in Flow IR v1.");
+        }
+
+        var actionId = $"{slot.ChildActionIdPrefix}{sequence}";
+        var nodeId = $"{slot.SlotId}:node:{sequence}";
+        var displayName = ReadString(action, "displayName", "display_name")?.Trim();
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            displayName = $"{parentNode.DisplayName} / {actionType} #{sequence}";
+        }
+
+        var node = new ExecutableRuntimeNode(
+            new RuntimeNodeId(nodeId),
+            displayName,
+            new RuntimeCapabilityId(command.Capability),
+            command.CommandName,
+            timeoutResult.Value,
+            command.InputPayload,
+            new RuntimeActionId(actionId));
+
+        return Result.Success(new RuntimeAutomationPlanAction(
+            sequence,
+            actionType,
+            node));
+    }
+
+    private static Result<ResolvedActionCommand> ResolveCommand(
+        JsonObject action,
+        string actionType,
+        int index)
+    {
+        if (string.Equals(actionType, "flow.wait", StringComparison.OrdinalIgnoreCase))
+        {
+            var duration = ReadNumber(action, "durationMilliseconds", "duration_ms", "DURATION_MS");
+            if (duration is null && HasAnyProperty(
+                    action,
+                    "durationMilliseconds",
+                    "duration_ms",
+                    "DURATION_MS"))
+            {
+                return ActionCommandFailure(index, "flow.wait duration must be numeric.");
+            }
+
+            var resolvedDuration = duration ?? 0;
+            if (!double.IsFinite(resolvedDuration)
+                || resolvedDuration < 0
+                || resolvedDuration > MaximumWaitDurationMilliseconds)
+            {
+                return ActionCommandFailure(
+                    index,
+                    "flow.wait duration must be a finite, non-negative value inside the supported timer range.");
+            }
+
+            var payload = new JsonObject
+            {
+                ["durationMilliseconds"] = resolvedDuration
+            }.ToJsonString(JsonOptions);
+
+            return Result.Success(new ResolvedActionCommand(
+                RuntimeFlowCommand.Capability,
+                RuntimeFlowCommand.WaitCommandName,
+                payload));
+        }
+
+        if (string.Equals(actionType, "command.execute", StringComparison.OrdinalIgnoreCase))
+        {
+            var capability = ReadString(action, "capability", "targetCapability")?.Trim();
+            if (string.IsNullOrWhiteSpace(capability))
+            {
+                return ActionCommandFailure(index, "command.execute must declare a capability.");
+            }
+
+            var commandName = ReadString(action, "command", "commandName")?.Trim();
+            if (string.IsNullOrWhiteSpace(commandName))
+            {
+                return ActionCommandFailure(index, "command.execute must declare a command.");
+            }
+
+            return Result.Success(new ResolvedActionCommand(
+                capability,
+                commandName,
+                ReadActionInputPayload(action)));
+        }
+
+        var mapped = actionType.ToLowerInvariant() switch
+        {
+            "axis.move" => new ResolvedActionCommand("motion.axis", "MoveAxis", action.ToJsonString(JsonOptions)),
+            "io.light" => new ResolvedActionCommand("io.light", "SetLight", action.ToJsonString(JsonOptions)),
+            "motor.rotate" => new ResolvedActionCommand("motion.motor", "RotateMotor", action.ToJsonString(JsonOptions)),
+            _ => null
         };
+
+        return mapped is null
+            ? ActionCommandFailure(index, $"type '{actionType}' is not supported.")
+            : Result.Success(mapped);
     }
 
-    private static string? ReadActionType(JsonObject action)
-    {
-        if (!action.TryGetPropertyValue("type", out var typeNode)
-            || typeNode is not JsonValue value)
-        {
-            return null;
-        }
-
-        return value.TryGetValue<string>(out var type)
-            ? type
-            : null;
-    }
-
-    private static double? ReadNumber(JsonObject action, string propertyName)
-    {
-        if (!action.TryGetPropertyValue(propertyName, out var valueNode)
-            || valueNode is not JsonValue value)
-        {
-            return null;
-        }
-
-        if (value.TryGetValue<double>(out var number))
-        {
-            return number;
-        }
-
-        return value.TryGetValue<string>(out var text)
-            && double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
-                ? parsed
-                : null;
-    }
-
-    private static bool TryReadActionTimeout(
+    private static Result<TimeSpan> ReadTimeout(
         JsonObject action,
         TimeSpan defaultTimeout,
-        out TimeSpan timeout,
-        out string? error)
+        int index)
     {
-        timeout = defaultTimeout;
-        error = null;
-
-        var timeoutMilliseconds = ReadNumber(action, "timeout_ms")
-            ?? ReadNumber(action, "timeoutMilliseconds")
-            ?? ReadNumber(action, "TIMEOUT_MS");
-        if (timeoutMilliseconds is null)
+        var timeoutMilliseconds = ReadNumber(
+            action,
+            "timeoutMilliseconds",
+            "timeout_ms",
+            "TIMEOUT_MS");
+        if (timeoutMilliseconds is null && HasAnyProperty(
+                action,
+                "timeoutMilliseconds",
+                "timeout_ms",
+                "TIMEOUT_MS"))
         {
-            return true;
+            return Result.Failure<TimeSpan>(Invalid(
+                $"Automation action {index + 1} timeout must be numeric."));
         }
 
-        if (!double.IsFinite(timeoutMilliseconds.Value)
-            || timeoutMilliseconds.Value <= 0)
+        if (timeoutMilliseconds is null)
         {
-            error = "Automation action timeout_ms must be greater than zero.";
-            return false;
+            return Result.Success(defaultTimeout);
+        }
+
+        if (!double.IsFinite(timeoutMilliseconds.Value) || timeoutMilliseconds.Value <= 0)
+        {
+            return Result.Failure<TimeSpan>(Invalid(
+                $"Automation action {index + 1} timeout must be a finite number greater than zero."));
         }
 
         try
         {
-            timeout = TimeSpan.FromMilliseconds(timeoutMilliseconds.Value);
-            return true;
+            return Result.Success(TimeSpan.FromMilliseconds(timeoutMilliseconds.Value));
         }
         catch (OverflowException)
         {
-            error = "Automation action timeout_ms is too large.";
-            return false;
+            return Result.Failure<TimeSpan>(Invalid(
+                $"Automation action {index + 1} timeout is outside the supported range."));
         }
+    }
+
+    private static string? ReadActionInputPayload(JsonObject action)
+    {
+        if (!action.TryGetPropertyValue("payload", out var payloadNode) || payloadNode is null)
+        {
+            return null;
+        }
+
+        return payloadNode is JsonValue payloadValue
+            && payloadValue.TryGetValue<string>(out var text)
+                ? text
+                : payloadNode.ToJsonString(JsonOptions);
     }
 
     private static string? ReadString(JsonObject action, params string[] propertyNames)
     {
         foreach (var propertyName in propertyNames)
         {
-            if (!action.TryGetPropertyValue(propertyName, out var valueNode)
-                || valueNode is not JsonValue value)
-            {
-                continue;
-            }
-
-            if (value.TryGetValue<string>(out var text))
+            if (action.TryGetPropertyValue(propertyName, out var node)
+                && node is JsonValue value
+                && value.TryGetValue<string>(out var text))
             {
                 return text;
             }
@@ -357,8 +287,113 @@ public sealed class RuntimeAutomationPlanDispatcher
         return null;
     }
 
+    private static double? ReadNumber(JsonObject action, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (!action.TryGetPropertyValue(propertyName, out var node) || node is not JsonValue value)
+            {
+                continue;
+            }
+
+            if (value.TryGetValue<double>(out var number))
+            {
+                return number;
+            }
+
+            if (value.TryGetValue<string>(out var text)
+                && double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasAnyProperty(JsonObject action, params string[] propertyNames)
+    {
+        return propertyNames.Any(action.ContainsKey);
+    }
+
+    private static Result<RuntimeAutomationPlanExpansion> Failure(string message)
+    {
+        return Result.Failure<RuntimeAutomationPlanExpansion>(Invalid(message));
+    }
+
+    private static Result<RuntimeAutomationPlanAction> ActionFailure(int index, string message)
+    {
+        return Result.Failure<RuntimeAutomationPlanAction>(Invalid(
+            $"Automation action {index + 1} {message}"));
+    }
+
+    private static Result<ResolvedActionCommand> ActionCommandFailure(int index, string message)
+    {
+        return Result.Failure<ResolvedActionCommand>(Invalid(
+            $"Automation action {index + 1} {message}"));
+    }
+
+    private static ApplicationError Invalid(string message)
+    {
+        return ApplicationError.Validation("Runtime.AutomationPlanInvalid", message);
+    }
+
     private sealed record ResolvedActionCommand(
         string Capability,
         string CommandName,
         string? InputPayload);
 }
+
+public sealed record RuntimeAutomationPlanExpansion(
+    string? SourcePayload,
+    bool HasAutomationPlan,
+    IReadOnlyList<RuntimeAutomationPlanAction> Actions)
+{
+    public static RuntimeAutomationPlanExpansion Empty(string? sourcePayload) =>
+        new(sourcePayload, HasAutomationPlan: false, []);
+
+    public string? CreateCompletionPayload(
+        IReadOnlyCollection<RuntimeAutomationPlanActionResult> results)
+    {
+        if (!HasAutomationPlan || string.IsNullOrWhiteSpace(SourcePayload))
+        {
+            return SourcePayload;
+        }
+
+        var root = JsonNode.Parse(SourcePayload) as JsonObject;
+        if (root is null)
+        {
+            return SourcePayload;
+        }
+
+        root["automation_dispatch"] = new JsonArray(results
+            .OrderBy(result => result.Sequence)
+            .Select(result => (JsonNode)new JsonObject
+            {
+                ["sequence"] = result.Sequence,
+                ["actionId"] = result.ActionId,
+                ["nodeId"] = result.NodeId,
+                ["type"] = result.ActionType,
+                ["outcome"] = result.Outcome.ToString(),
+                ["payload"] = result.Payload,
+                ["reason"] = result.Reason
+            })
+            .ToArray());
+
+        return root.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    }
+}
+
+public sealed record RuntimeAutomationPlanAction(
+    int Sequence,
+    string ActionType,
+    ExecutableRuntimeNode Node);
+
+public sealed record RuntimeAutomationPlanActionResult(
+    int Sequence,
+    string ActionId,
+    string NodeId,
+    string ActionType,
+    RuntimeCommandExecutionOutcome Outcome,
+    string? Payload,
+    string? Reason);

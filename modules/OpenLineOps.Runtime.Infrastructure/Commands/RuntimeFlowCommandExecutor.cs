@@ -1,0 +1,159 @@
+using System.Globalization;
+using System.Text.Json;
+using OpenLineOps.Runtime.Application.Commands;
+
+namespace OpenLineOps.Runtime.Infrastructure.Commands;
+
+public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
+{
+    private const double MaximumTimerDelayMilliseconds = uint.MaxValue - 1d;
+
+    public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+        RuntimeCommandExecutionContext context,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!RuntimeFlowCommand.IsWait(context))
+        {
+            return RuntimeCommandExecutionResult.Rejected(
+                $"Runtime flow command '{context.TargetCapability.Value}/{context.CommandName}' is not supported.");
+        }
+
+        if (!TryReadDuration(context.InputPayload, out var duration, out var error))
+        {
+            return RuntimeCommandExecutionResult.Rejected(
+                error ?? "Runtime flow wait payload is invalid.");
+        }
+
+        if (context.Timeout <= TimeSpan.Zero
+            || context.Timeout.TotalMilliseconds > MaximumTimerDelayMilliseconds)
+        {
+            return RuntimeCommandExecutionResult.Rejected(
+                "Runtime flow wait timeout must be positive and inside the supported timer range.");
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.Canceled("Runtime flow wait was canceled.");
+        }
+
+        if (duration == TimeSpan.Zero)
+        {
+            return RuntimeCommandExecutionResult.Completed(context.InputPayload);
+        }
+
+        using var timeoutCancellation = new CancellationTokenSource(context.Timeout);
+
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            timeoutCancellation.Token);
+
+        try
+        {
+            await Task.Delay(duration, linkedCancellation.Token).ConfigureAwait(false);
+            return RuntimeCommandExecutionResult.Completed(context.InputPayload);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.Canceled("Runtime flow wait was canceled.");
+        }
+        catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.TimedOut("Runtime flow wait timed out.");
+        }
+    }
+
+    private static bool TryReadDuration(
+        string? inputPayload,
+        out TimeSpan duration,
+        out string? error)
+    {
+        duration = TimeSpan.Zero;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(inputPayload))
+        {
+            error = "Runtime flow wait payload is required.";
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(inputPayload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                error = "Runtime flow wait payload must be a JSON object.";
+                return false;
+            }
+
+            if (!TryGetDurationMilliseconds(document.RootElement, out var durationMilliseconds))
+            {
+                error = "Runtime flow wait payload must declare durationMilliseconds.";
+                return false;
+            }
+
+            if (!double.IsFinite(durationMilliseconds) || durationMilliseconds < 0)
+            {
+                error = "Runtime flow wait durationMilliseconds must be a finite number greater than or equal to zero.";
+                return false;
+            }
+
+            if (durationMilliseconds > MaximumTimerDelayMilliseconds)
+            {
+                error = "Runtime flow wait durationMilliseconds is outside the supported timer range.";
+                return false;
+            }
+
+            try
+            {
+                duration = TimeSpan.FromMilliseconds(durationMilliseconds);
+                return true;
+            }
+            catch (OverflowException)
+            {
+                error = "Runtime flow wait durationMilliseconds is too large.";
+                return false;
+            }
+        }
+        catch (JsonException exception)
+        {
+            error = $"Runtime flow wait payload is invalid JSON: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool TryGetDurationMilliseconds(
+        JsonElement payload,
+        out double durationMilliseconds)
+    {
+        foreach (var propertyName in new[] { "durationMilliseconds", "duration_ms", "DURATION_MS" })
+        {
+            if (!payload.TryGetProperty(propertyName, out var value))
+            {
+                continue;
+            }
+
+            if (value.ValueKind == JsonValueKind.Number
+                && value.TryGetDouble(out durationMilliseconds))
+            {
+                return true;
+            }
+
+            if (value.ValueKind == JsonValueKind.String
+                && double.TryParse(
+                    value.GetString(),
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out durationMilliseconds))
+            {
+                return true;
+            }
+
+            break;
+        }
+
+        durationMilliseconds = default;
+        return false;
+    }
+}

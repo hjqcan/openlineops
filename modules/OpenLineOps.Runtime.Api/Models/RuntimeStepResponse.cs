@@ -7,4 +7,7 @@ public sealed record RuntimeStepResponse(
     string Status,
     DateTimeOffset StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
-    string? FailureReason);
+    string? FailureReason,
+    string ActionId,
+    Guid? ParentStepId,
+    int? DynamicSequence);

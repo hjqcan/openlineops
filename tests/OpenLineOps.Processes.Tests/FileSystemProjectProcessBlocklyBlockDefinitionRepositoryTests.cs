@@ -124,6 +124,40 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         Assert.Contains("JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task EditableCustomBlocksAreStoredBesideTheApplicationProjectFile()
+    {
+        const string blockType = "user/custom fixture action";
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project.process-blocks",
+            "application.id-does-not-name-the-folder",
+            _projectDirectory,
+            "applications/Operator Cell/Main Line.oloapp");
+        var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
+
+        await repository.SaveNewVersionAsync(
+            scope,
+            blockType,
+            "Fixture",
+            "Custom Root Fixture Action",
+            BlockJson(blockType, "custom root fixture action"),
+            "automation_plan.append({'custom_root': True})",
+            FirstRecordedAtUtc);
+
+        var versionPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(scope.ApplicationRootPath, "blocks", "custom"),
+            "version-*.json",
+            SearchOption.AllDirectories));
+        var versionsDirectory = Directory.GetParent(versionPath)!;
+        var blockDirectory = versionsDirectory.Parent!;
+
+        Assert.Equal("versions", versionsDirectory.Name);
+        Assert.Equal(
+            Path.Combine(scope.ApplicationRootPath, "blocks", "custom"),
+            blockDirectory.Parent!.FullName);
+        Assert.StartsWith("block-user-custom-fixture-action--", blockDirectory.Name);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))

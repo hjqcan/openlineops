@@ -1,5 +1,6 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
@@ -15,6 +16,8 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
     private readonly IRuntimeSessionRunner _sessionRunner;
     private readonly IProjectRuntimeConfigurationSnapshotResolver _projectConfigurationSnapshotResolver;
     private readonly IRuntimeConfigurationSnapshotResolver _legacyConfigurationSnapshotResolver;
+    private readonly IProcessFlowIrCompiler _flowIrCompiler;
+    private readonly IFlowIrExecutableRuntimeProcessMapper _flowIrMapper;
 
     public ProjectProcessRuntimeSessionLauncher(
         IProjectApplicationWorkspaceScopeResolver scopeResolver,
@@ -22,7 +25,9 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
         IProcessDefinitionRepository legacyRepository,
         IRuntimeSessionRunner sessionRunner,
         IProjectRuntimeConfigurationSnapshotResolver projectConfigurationSnapshotResolver,
-        IRuntimeConfigurationSnapshotResolver legacyConfigurationSnapshotResolver)
+        IRuntimeConfigurationSnapshotResolver legacyConfigurationSnapshotResolver,
+        IProcessFlowIrCompiler flowIrCompiler,
+        IFlowIrExecutableRuntimeProcessMapper flowIrMapper)
     {
         _scopeResolver = scopeResolver;
         _projectRepository = projectRepository;
@@ -30,6 +35,8 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
         _sessionRunner = sessionRunner;
         _projectConfigurationSnapshotResolver = projectConfigurationSnapshotResolver;
         _legacyConfigurationSnapshotResolver = legacyConfigurationSnapshotResolver;
+        _flowIrCompiler = flowIrCompiler;
+        _flowIrMapper = flowIrMapper;
     }
 
     public async ValueTask<Result<StartedProcessRuntimeSessionDetails>> StartAsync(
@@ -67,7 +74,9 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
             new ProjectFirstRuntimeConfigurationSnapshotResolver(
                 scope,
                 _projectConfigurationSnapshotResolver,
-                _legacyConfigurationSnapshotResolver));
+                _legacyConfigurationSnapshotResolver),
+            _flowIrCompiler,
+            _flowIrMapper);
 
         return await launcher
             .StartAsync(processDefinitionId, request, cancellationToken)

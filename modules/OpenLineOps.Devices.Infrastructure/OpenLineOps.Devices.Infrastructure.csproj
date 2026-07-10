@@ -24,6 +24,8 @@
     <ProjectReference Include="..\OpenLineOps.Engineering.Application\OpenLineOps.Engineering.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Engineering.Domain\OpenLineOps.Engineering.Domain.csproj" />
     <ProjectReference Include="..\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Projects.Domain\OpenLineOps.Projects.Domain.csproj" />
     <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Infrastructure.Data.Core\OpenLineOps.Infrastructure.Data.Core.csproj" />

@@ -33,6 +33,7 @@ public sealed class AutomationProjectServiceTests
                 "snapshot.main.v1",
                 "application.main",
                 "topology.main",
+                ["layout.main"],
                 "process.main",
                 "process.main.v1",
                 "configuration.main.v1",
@@ -44,7 +45,9 @@ public sealed class AutomationProjectServiceTests
                         "simulator.axis.x")
                 ],
                 [new ProjectTargetReferenceRequest("slot", "slot.left-nest.1")],
-                ["block.move-axis@1.0.0"]));
+                ["block.move-axis@1.0.0"],
+                "releases/release-main/release.json",
+                new string('a', 64)));
 
         Assert.True(created.IsSuccess);
         Assert.True(withApplication.IsSuccess);

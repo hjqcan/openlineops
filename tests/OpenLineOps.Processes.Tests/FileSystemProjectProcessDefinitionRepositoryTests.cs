@@ -94,6 +94,42 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
         Assert.Contains("digest", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task EditableFlowResourcesAreStoredBesideTheApplicationProjectFile()
+    {
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project.process",
+            "application.id-does-not-name-the-folder",
+            _projectDirectory,
+            "applications/Operator Cell/Main Line.oloapp");
+        var definitionId = new ProcessDefinitionId("process.custom/root");
+        var repository = new FileSystemProjectProcessDefinitionRepository();
+
+        await repository.SaveAsync(
+            scope,
+            CreateDefinition(
+                definitionId,
+                "Custom Root Flow",
+                "result = {'mode': 'blockly'}\n",
+                "result = {'mode': 'manual'}\n"));
+
+        var flowPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(scope.ApplicationRootPath, "flows"),
+            "flow.json",
+            SearchOption.AllDirectories));
+        var flowDirectory = Path.GetDirectoryName(flowPath);
+
+        Assert.NotNull(flowDirectory);
+        Assert.Equal(
+            Path.Combine(scope.ApplicationRootPath, "flows"),
+            Directory.GetParent(flowDirectory)!.FullName);
+        Assert.StartsWith("process-process.custom-root--", Path.GetFileName(flowDirectory));
+        Assert.Equal(2, Directory.GetFiles(
+            flowDirectory,
+            "*.py",
+            SearchOption.AllDirectories).Length);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))

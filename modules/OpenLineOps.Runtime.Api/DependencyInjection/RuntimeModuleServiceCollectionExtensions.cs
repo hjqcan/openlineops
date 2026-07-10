@@ -63,10 +63,11 @@ public static class RuntimeModuleServiceCollectionExtensions
             serviceProvider.GetRequiredService<InMemoryRuntimeDomainEventPublisher>());
 
         services.TryAddSingleton<SimulatedRuntimeCommandExecutor>();
+        services.TryAddSingleton<RuntimeFlowCommandExecutor>();
         services.TryAddSingleton<PythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<IRuntimeScriptExecutor, ConfigurableRuntimeScriptExecutor>();
-        services.TryAddSingleton<RuntimeAutomationPlanDispatcher>();
+        services.TryAddSingleton<RuntimeAutomationPlanExpander>();
         services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ConfigurableRuntimeCommandExecutor>());
         services.AddSingleton<RuntimeMonitoringProjection>();
         services.AddSingleton<IRuntimeMonitoringService>(serviceProvider =>

@@ -132,7 +132,8 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             application.ApplicationId,
             application.DisplayName,
             application.TopologyId,
-            application.ProcessDefinitionIds);
+            application.ProcessDefinitionIds,
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshotManifestResponse ToResponse(PublishedProjectSnapshotManifest snapshot)
@@ -142,13 +143,16 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             snapshot.ProjectId,
             snapshot.ApplicationId,
             snapshot.TopologyId,
+            snapshot.LayoutIds ?? [],
             snapshot.ProcessDefinitionId,
             snapshot.ProcessVersionId,
             snapshot.ConfigurationSnapshotId,
             snapshot.PublishedAtUtc,
-            snapshot.CapabilityBindings.Select(ToResponse).ToArray(),
-            snapshot.TargetReferences.Select(ToResponse).ToArray(),
-            snapshot.BlockVersionIds);
+            (snapshot.CapabilityBindings ?? []).Select(ToResponse).ToArray(),
+            (snapshot.TargetReferences ?? []).Select(ToResponse).ToArray(),
+            snapshot.BlockVersionIds ?? [],
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256);
     }
 
     private static AutomationProjectResponse ToResponse(AutomationProjectDetails project)
@@ -169,7 +173,8 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             application.ApplicationId,
             application.DisplayName,
             application.TopologyId,
-            application.ProcessDefinitionIds);
+            application.ProcessDefinitionIds,
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshotResponse ToResponse(PublishedProjectSnapshotDetails snapshot)
@@ -179,13 +184,16 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             snapshot.ProjectId,
             snapshot.ApplicationId,
             snapshot.TopologyId,
+            snapshot.LayoutIds,
             snapshot.ProcessDefinitionId,
             snapshot.ProcessVersionId,
             snapshot.ConfigurationSnapshotId,
             snapshot.PublishedAtUtc,
             snapshot.CapabilityBindings.Select(ToResponse).ToArray(),
             snapshot.TargetReferences.Select(ToResponse).ToArray(),
-            snapshot.BlockVersionIds);
+            snapshot.BlockVersionIds,
+            snapshot.ReleaseManifestPath,
+            snapshot.ReleaseContentSha256);
     }
 
     private static SnapshotCapabilityBindingResponse ToResponse(SnapshotCapabilityBindingDetails binding)

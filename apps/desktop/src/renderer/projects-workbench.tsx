@@ -193,7 +193,7 @@ export function ProjectsWorkbench({
 
   const rememberProject = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
     const next = rememberRecentProject({
-      projectPath: workspace.project.projectPath,
+      projectPath: workspace.manifestPath,
       projectId: workspace.project.projectId,
       displayName: workspace.project.displayName,
       activeSnapshotId: workspace.project.activeSnapshotId,
@@ -344,6 +344,18 @@ export function ProjectsWorkbench({
   const chooseAndOpenDirectory = useCallback(async () => {
     const result = await desktop.selectDirectory({
       title: 'Open automation project folder',
+      defaultPath: openPath || draft.projectPath,
+      buttonLabel: 'Open Project'
+    });
+    if (!result.canceled && result.path) {
+      setOpenPath(result.path);
+      await openWorkspace(result.path);
+    }
+  }, [draft.projectPath, openPath, openWorkspace]);
+
+  const chooseAndOpenProjectFile = useCallback(async () => {
+    const result = await desktop.selectProjectFile({
+      title: 'Open OpenLineOps project',
       defaultPath: openPath || draft.projectPath,
       buttonLabel: 'Open Project'
     });
@@ -565,6 +577,19 @@ export function ProjectsWorkbench({
               </button>
               <button
                 type="button"
+                onClick={() => { void chooseAndOpenProjectFile(); }}
+                disabled={!canCallBackend}
+                data-testid="start-open-project-file"
+              >
+                <FileJson size={20} />
+                <span>
+                  <strong>Open a project</strong>
+                  <small>Select an OpenLineOps .oloproj project file</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
+              <button
+                type="button"
                 onClick={() => { void chooseAndOpenDirectory(); }}
                 disabled={!canCallBackend}
                 data-testid="start-open-project-folder"
@@ -647,9 +672,9 @@ export function ProjectsWorkbench({
               <div className="project-start-dialog-body project-start-new-project">
                 <aside className="project-template-card selected">
                   <FolderKanban size={24} />
-                  <strong>Automation Line Project</strong>
-                  <span>Application, topology, 2D layout, Blockly/Python flows, configuration, and release source.</span>
-                  <small>OPENLINEOPS · PROJECT FORMAT V1</small>
+                <strong>Automation Line Project</strong>
+                  <span>Root .oloproj plus one isolated .oloapp folder for every Application.</span>
+                  <small>OPENLINEOPS · PROJECT FORMAT V2</small>
                 </aside>
                 <div className="project-start-dialog-form">
                   <TextField
@@ -687,7 +712,7 @@ export function ProjectsWorkbench({
               </div>
             ) : (
               <div className="project-start-dialog-body project-start-open-path">
-                <p>Open the folder that contains <code>openlineops.project.json</code>.</p>
+                <p>Open an <code>.oloproj</code> file, its containing folder, or a legacy <code>openlineops.project.json</code>.</p>
                 <PathField
                   label="Project Path"
                   value={openPath}
@@ -852,7 +877,7 @@ function ProjectApplications({
         >
           <strong>{application.displayName}</strong>
           <span>{application.applicationId}</span>
-          <small>{application.topologyId ?? `${application.processDefinitionIds.length} processes`}</small>
+          <small>{application.projectFilePath ?? `${application.processDefinitionIds.length} processes`}</small>
         </button>
       ))}
     </section>
@@ -876,8 +901,12 @@ function ProjectSnapshots({
       ) : snapshots.map(snapshot => (
         <article key={snapshot.snapshotId}>
           <strong>{snapshot.snapshotId}</strong>
-          <span>{snapshot.processVersionId}</span>
-          <small>{formatDate(snapshot.publishedAtUtc)}</small>
+          <span>{snapshot.processVersionId} · {snapshot.layoutIds.length} layouts</span>
+          <small>
+            {snapshot.releaseContentSha256
+              ? `Release ${snapshot.releaseContentSha256.slice(0, 12)}`
+              : `Legacy metadata · ${formatDate(snapshot.publishedAtUtc)}`}
+          </small>
         </article>
       ))}
     </section>
@@ -927,7 +956,9 @@ function buildStartProjectGroups(
 ): StartProjectGroup[] {
   const projectsByPath = new Map(
     projects.map(project => [normalizeProjectPath(project.projectPath), project] as const));
+  const projectsById = new Map(projects.map(project => [project.projectId, project] as const));
   const seenPaths = new Set<string>();
+  const seenProjectIds = new Set<string>();
   const items: StartProjectItem[] = [];
 
   for (const recent of recentProjects) {
@@ -937,10 +968,19 @@ function buildStartProjectGroups(
     }
 
     seenPaths.add(pathKey);
-    const project = projectsByPath.get(pathKey);
+    const project = (recent.projectId ? projectsById.get(recent.projectId) : undefined)
+      ?? projectsByPath.get(pathKey);
+    const projectId = project?.projectId ?? recent.projectId ?? null;
+    if (projectId && seenProjectIds.has(projectId)) {
+      continue;
+    }
+
+    if (projectId) {
+      seenProjectIds.add(projectId);
+    }
     items.push({
       projectPath: recent.projectPath,
-      projectId: project?.projectId ?? recent.projectId ?? null,
+      projectId,
       displayName: project?.displayName ?? recent.displayName ?? projectFolderName(recent.projectPath),
       activeSnapshotId: project?.activeSnapshotId ?? recent.activeSnapshotId ?? null,
       lastOpenedAtUtc: recent.lastOpenedAtUtc
@@ -949,11 +989,12 @@ function buildStartProjectGroups(
 
   for (const project of projects) {
     const pathKey = normalizeProjectPath(project.projectPath);
-    if (seenPaths.has(pathKey)) {
+    if (seenPaths.has(pathKey) || seenProjectIds.has(project.projectId)) {
       continue;
     }
 
     seenPaths.add(pathKey);
+    seenProjectIds.add(project.projectId);
     items.push({
       projectPath: project.projectPath,
       projectId: project.projectId,

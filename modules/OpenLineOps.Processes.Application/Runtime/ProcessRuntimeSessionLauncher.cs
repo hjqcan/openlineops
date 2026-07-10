@@ -1,20 +1,10 @@
-using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
-using OpenLineOps.Processes.Domain.Definitions;
-using OpenLineOps.Processes.Domain.Nodes;
-using OpenLineOps.Processes.Domain.Transitions;
-using OpenLineOps.Processes.Domain.Validation;
-using OpenLineOps.Runtime.Application.Processes;
-using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Domain.Sessions;
 using ProcessDefinitionId = OpenLineOps.Processes.Domain.Identifiers.ProcessDefinitionId;
-using RuntimeCapabilityId = OpenLineOps.Runtime.Domain.Identifiers.RuntimeCapabilityId;
 using RuntimeConfigurationSnapshotId = OpenLineOps.Runtime.Domain.Identifiers.ConfigurationSnapshotId;
-using RuntimeNodeId = OpenLineOps.Runtime.Domain.Identifiers.RuntimeNodeId;
-using RuntimeProcessDefinitionId = OpenLineOps.Runtime.Domain.Identifiers.ProcessDefinitionId;
-using RuntimeProcessVersionId = OpenLineOps.Runtime.Domain.Identifiers.ProcessVersionId;
 using RuntimeRecipeSnapshotId = OpenLineOps.Runtime.Domain.Identifiers.RecipeSnapshotId;
 using RuntimeStationId = OpenLineOps.Runtime.Domain.Identifiers.StationId;
 
@@ -22,20 +12,24 @@ namespace OpenLineOps.Processes.Application.Runtime;
 
 public sealed class ProcessRuntimeSessionLauncher : IProcessRuntimeSessionLauncher
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     private readonly IProcessDefinitionRepository _definitionRepository;
     private readonly IRuntimeSessionRunner _sessionRunner;
     private readonly IRuntimeConfigurationSnapshotResolver _configurationSnapshotResolver;
+    private readonly IProcessFlowIrCompiler _flowIrCompiler;
+    private readonly IFlowIrExecutableRuntimeProcessMapper _flowIrMapper;
 
     public ProcessRuntimeSessionLauncher(
         IProcessDefinitionRepository definitionRepository,
         IRuntimeSessionRunner sessionRunner,
-        IRuntimeConfigurationSnapshotResolver configurationSnapshotResolver)
+        IRuntimeConfigurationSnapshotResolver configurationSnapshotResolver,
+        IProcessFlowIrCompiler flowIrCompiler,
+        IFlowIrExecutableRuntimeProcessMapper flowIrMapper)
     {
         _definitionRepository = definitionRepository;
         _sessionRunner = sessionRunner;
         _configurationSnapshotResolver = configurationSnapshotResolver;
+        _flowIrCompiler = flowIrCompiler;
+        _flowIrMapper = flowIrMapper;
     }
 
     public async ValueTask<Result<StartedProcessRuntimeSessionDetails>> StartAsync(
@@ -94,7 +88,13 @@ public sealed class ProcessRuntimeSessionLauncher : IProcessRuntimeSessionLaunch
                     $"Configuration snapshot {configurationSnapshot.ConfigurationSnapshotId} references process version {configurationSnapshot.ProcessVersionId}, but the loaded definition is {definition.VersionId}."));
             }
 
-            var executableProcessResult = BuildExecutableProcess(definition);
+            var compilationResult = _flowIrCompiler.Compile(definition);
+            if (compilationResult.IsFailure)
+            {
+                return Result.Failure<StartedProcessRuntimeSessionDetails>(compilationResult.Error);
+            }
+
+            var executableProcessResult = _flowIrMapper.Map(compilationResult.Value.Document);
             if (executableProcessResult.IsFailure)
             {
                 return Result.Failure<StartedProcessRuntimeSessionDetails>(executableProcessResult.Error);
@@ -130,154 +130,6 @@ public sealed class ProcessRuntimeSessionLauncher : IProcessRuntimeSessionLaunch
                 "Processes.RuntimeStartInputInvalid",
                 exception.Message));
         }
-    }
-
-    private static Result<ExecutableRuntimeProcess> BuildExecutableProcess(ProcessDefinition definition)
-    {
-        if (!definition.IsPublished)
-        {
-            return Result.Failure<ExecutableRuntimeProcess>(ApplicationError.Conflict(
-                "Processes.DefinitionNotPublished",
-                $"Process definition {definition.Id} must be published before a runtime session can start."));
-        }
-
-        var graphReport = ProcessGraphValidator.Validate(definition);
-        if (!graphReport.IsValid)
-        {
-            return Result.Failure<ExecutableRuntimeProcess>(ApplicationError.Validation(
-                "Processes.PublishedGraphInvalid",
-                $"Published process definition {definition.Id} is not executable because graph validation failed."));
-        }
-
-        var runtimeBranchingError = ValidateRuntimeBranching(definition);
-        if (runtimeBranchingError is not null)
-        {
-            return Result.Failure<ExecutableRuntimeProcess>(runtimeBranchingError);
-        }
-
-        var runtimeNodes = definition.Nodes
-            .Where(node => node.Kind is ProcessNodeKind.Command or ProcessNodeKind.PythonScript)
-            .Select(ToRuntimeNode)
-            .ToArray();
-
-        if (runtimeNodes.Length == 0)
-        {
-            return Result.Failure<ExecutableRuntimeProcess>(ApplicationError.Validation(
-                "Processes.RuntimeBridgeNoExecutableCommands",
-                $"Process definition {definition.Id} does not contain executable command nodes."));
-        }
-
-        var startNode = definition.Nodes.Single(node => node.Kind == ProcessNodeKind.Start);
-        var routingNodes = definition.Nodes
-            .Where(node => node.Kind is ProcessNodeKind.Start or ProcessNodeKind.Decision or ProcessNodeKind.Delay or ProcessNodeKind.End)
-            .Select(ToRuntimeRoutingNode)
-            .ToArray();
-        var runtimeTransitions = definition.Transitions
-            .Select(ToRuntimeTransition)
-            .ToArray();
-
-        return Result.Success(new ExecutableRuntimeProcess(
-            new RuntimeProcessDefinitionId(definition.Id.Value),
-            new RuntimeProcessVersionId(definition.VersionId.Value),
-            runtimeNodes)
-        {
-            StartNodeId = new RuntimeNodeId(startNode.Id.Value),
-            RoutingNodes = routingNodes,
-            Transitions = runtimeTransitions
-        });
-    }
-
-    private static ExecutableRuntimeNode ToRuntimeNode(ProcessNode node)
-    {
-        if (node.Kind == ProcessNodeKind.PythonScript)
-        {
-            return new ExecutableRuntimeNode(
-                new RuntimeNodeId(node.Id.Value),
-                node.DisplayName,
-                new RuntimeCapabilityId(RuntimeScriptCommand.PythonCapability),
-                RuntimeScriptCommand.PythonCommandName,
-                node.ScriptTimeout!.Value,
-                JsonSerializer.Serialize(
-                    new RuntimeScriptCommandPayload(
-                        node.ScriptLanguage!,
-                        node.ScriptSourceCode!,
-                        node.ScriptVersion,
-                        node.InputPayload),
-                    JsonOptions));
-        }
-
-        return new ExecutableRuntimeNode(
-            new RuntimeNodeId(node.Id.Value),
-            node.DisplayName,
-            new RuntimeCapabilityId(node.RequiredCapability!.Value),
-            node.CommandName!,
-            node.CommandTimeout!.Value,
-            node.InputPayload);
-    }
-
-    private static ApplicationError? ValidateRuntimeBranching(ProcessDefinition definition)
-    {
-        var nodesById = definition.Nodes.ToDictionary(node => node.Id);
-        foreach (var transitionGroup in definition.Transitions.GroupBy(transition => transition.FromNodeId))
-        {
-            var outgoingTransitions = transitionGroup.ToArray();
-            if (outgoingTransitions.Length <= 1)
-            {
-                continue;
-            }
-
-            if (!nodesById.TryGetValue(transitionGroup.Key, out var sourceNode)
-                || sourceNode.Kind != ProcessNodeKind.Decision)
-            {
-                return ApplicationError.Conflict(
-                    "Processes.RuntimeBridgeBranchingRequiresDecision",
-                    $"Process node {transitionGroup.Key} has multiple outgoing transitions; branching must go through a Decision node.");
-            }
-
-            var duplicateLabel = outgoingTransitions
-                .Select(transition => string.IsNullOrWhiteSpace(transition.Label)
-                    ? "default"
-                    : transition.Label.Trim())
-                .GroupBy(label => label, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault(group => group.Count() > 1)
-                ?.Key;
-            if (duplicateLabel is not null)
-            {
-                return ApplicationError.Conflict(
-                    "Processes.RuntimeBridgeDecisionLabelDuplicate",
-                    $"Decision node {transitionGroup.Key} has duplicate outgoing transition label '{duplicateLabel}'.");
-            }
-        }
-
-        return null;
-    }
-
-    private static ExecutableRuntimeRoutingNode ToRuntimeRoutingNode(ProcessNode node)
-    {
-        var kind = node.Kind switch
-        {
-            ProcessNodeKind.Start => ExecutableRuntimeRoutingNodeKind.Start,
-            ProcessNodeKind.Decision => ExecutableRuntimeRoutingNodeKind.Decision,
-            ProcessNodeKind.Delay => ExecutableRuntimeRoutingNodeKind.Delay,
-            ProcessNodeKind.End => ExecutableRuntimeRoutingNodeKind.End,
-            _ => throw new InvalidOperationException($"Process node {node.Id} is executable, not a routing node.")
-        };
-
-        return new ExecutableRuntimeRoutingNode(
-            new RuntimeNodeId(node.Id.Value),
-            node.DisplayName,
-            kind);
-    }
-
-    private static ExecutableRuntimeTransition ToRuntimeTransition(ProcessTransition transition)
-    {
-        return new ExecutableRuntimeTransition(
-            new RuntimeNodeId(transition.FromNodeId.Value),
-            new RuntimeNodeId(transition.ToNodeId.Value),
-            transition.Label,
-            transition.LoopPolicy == ProcessTransitionLoopPolicy.Counted
-                ? transition.MaxTraversals
-                : null);
     }
 
     private static StartedProcessRuntimeSessionDetails ToDetails(RuntimeSessionRunResult runResult)

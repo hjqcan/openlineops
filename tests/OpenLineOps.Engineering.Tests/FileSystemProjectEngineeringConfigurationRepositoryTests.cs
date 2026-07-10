@@ -134,6 +134,54 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         Assert.Contains("JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task EditableConfigurationIsStoredBesideTheApplicationProjectFile()
+    {
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project.engineering",
+            "application.id-does-not-name-the-folder",
+            _projectDirectory,
+            "applications/Operator Cell/Main Line.oloapp");
+        var configuration = CreateConfiguration(
+            "Custom Root",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@custom-root",
+            "5.0",
+            "100",
+            "device.custom.primary",
+            "custom-primary",
+            "device.custom.secondary",
+            "custom-secondary");
+        var repository = new FileSystemProjectEngineeringConfigurationRepository();
+
+        await SaveAsync(repository, scope, configuration);
+
+        var configurationRoot = Path.Combine(scope.ApplicationRootPath, "configuration");
+        var documents = Directory.GetFiles(
+            configurationRoot,
+            "*.json",
+            SearchOption.AllDirectories);
+
+        Assert.Equal(4, documents.Length);
+        Assert.All(documents, path => Assert.StartsWith(
+            configurationRoot + Path.DirectorySeparatorChar,
+            path,
+            StringComparison.OrdinalIgnoreCase));
+        Assert.Single(Directory.GetFiles(
+            Path.Combine(configurationRoot, "workspaces"),
+            "workspace-*.json"));
+        Assert.Single(Directory.GetFiles(
+            Path.Combine(configurationRoot, "projects"),
+            "project-*.json"));
+        Assert.Single(Directory.GetFiles(
+            Path.Combine(configurationRoot, "recipes"),
+            "recipe-*.json"));
+        Assert.Single(Directory.GetFiles(
+            Path.Combine(configurationRoot, "station-profiles"),
+            "station-profile-*.json"));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))

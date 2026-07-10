@@ -12,7 +12,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 {
     private const string DefaultBlocklyWorkspaceJson = """{"blocks":{"languageVersion":0}}""";
     private const string ReplacementBlocklyWorkspaceJson =
-        """{"blocks":{"languageVersion":0,"blocks":[{"type":"flow_wait","id":"application-b-wait"}]}}""";
+        """{"blocks":{"languageVersion":0,"blocks":[{"type":"user_shared_fixture_action","id":"application-b-fixture"}]}}""";
     private const string ReplacementPythonSource =
         "result = {'application': 'B', 'revision': 2}\n";
 
@@ -38,6 +38,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         const string configurationSnapshotId = "snapshot.main";
         const string projectSnapshotA = "release.application-a";
         const string projectSnapshotB = "release.application-b";
+        PublishedProjectRelease? publishedReleaseA = null;
+        PublishedProjectRelease? publishedReleaseB = null;
 
         using (var firstFactory = new WebApplicationFactory<Program>())
         using (var client = firstFactory.CreateClient())
@@ -71,6 +73,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 layoutId,
                 "Application A Topology",
                 "Application A Site",
+                capabilityId: "device.scanner",
                 elementX: 25);
             await CreateApplicationTopologyAsync(
                 client,
@@ -80,6 +83,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 layoutId,
                 "Application B Topology",
                 "Application B Site",
+                capabilityId: "device.camera",
                 elementX: 425);
             await CreateApplicationProcessAsync(
                 client,
@@ -186,26 +190,34 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 Assert.Equal(HttpStatusCode.OK, linkProcess.StatusCode);
             }
 
-            await PublishApplicationProjectSnapshotAsync(
+            publishedReleaseA = await PublishApplicationProjectSnapshotAsync(
                 client,
                 projectId,
                 projectSnapshotA,
                 applicationA,
-                topologyId,
                 processDefinitionId,
-                $"{processDefinitionId}@1.0.0",
                 configurationSnapshotId,
-                blockVersionId: $"{customBlockType}@2");
-            await PublishApplicationProjectSnapshotAsync(
+                _projectDirectory);
+            publishedReleaseB = await PublishApplicationProjectSnapshotAsync(
                 client,
                 projectId,
                 projectSnapshotB,
                 applicationB,
-                topologyId,
                 processDefinitionId,
-                $"{processDefinitionId}@2.0.0",
                 configurationSnapshotId,
-                blockVersionId: $"{customBlockType}@1");
+                _projectDirectory);
+
+            using var mutateLiveLayout = await client.PutAsJsonAsync(
+                $"{ProjectLayoutPath(projectId, applicationA, layoutId)}/elements/element.site/geometry",
+                new
+                {
+                    x = 125,
+                    y = 40,
+                    width = 100,
+                    height = 80,
+                    rotationDegrees = 0
+                });
+            Assert.Equal(HttpStatusCode.OK, mutateLiveLayout.StatusCode);
 
             using var saveManifest = await client.PutAsync(
                 $"/api/automation-projects/{projectId}/manifest",
@@ -213,9 +225,25 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal(HttpStatusCode.OK, saveManifest.StatusCode);
         }
 
-        Assert.Equal(2, Directory.GetFiles(_projectDirectory, "topology-*.json", SearchOption.AllDirectories).Length);
-        Assert.Equal(2, Directory.GetFiles(_projectDirectory, "layout-*.json", SearchOption.AllDirectories).Length);
-        Assert.Equal(2, Directory.GetFiles(_projectDirectory, "flow.json", SearchOption.AllDirectories).Length);
+        var applicationsDirectory = Path.Combine(_projectDirectory, "applications");
+        Assert.Equal(2, Directory.GetFiles(applicationsDirectory, "topology-*.json", SearchOption.AllDirectories).Length);
+        Assert.Equal(2, Directory.GetFiles(applicationsDirectory, "layout-*.json", SearchOption.AllDirectories).Length);
+        Assert.Equal(2, Directory.GetFiles(applicationsDirectory, "flow.json", SearchOption.AllDirectories).Length);
+        Assert.Equal(2, Directory.GetFiles(
+            Path.Combine(_projectDirectory, "releases"),
+            "release.json",
+            SearchOption.AllDirectories).Length);
+        Assert.NotNull(publishedReleaseA);
+        Assert.NotNull(publishedReleaseB);
+        Assert.NotEqual(publishedReleaseA.ContentSha256, publishedReleaseB.ContentSha256);
+        var frozenLayoutPath = Assert.Single(Directory.GetFiles(
+            Path.GetDirectoryName(publishedReleaseA.AbsoluteManifestPath)!,
+            "layout-*.json",
+            SearchOption.AllDirectories));
+        using (var frozenLayout = JsonDocument.Parse(File.ReadAllText(frozenLayoutPath)))
+        {
+            Assert.Equal(25, frozenLayout.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
+        }
         Assert.True(
             Directory.GetFiles(_projectDirectory, "workspace.*.blockly.json", SearchOption.AllDirectories).Length >= 2);
         Assert.True(
@@ -253,8 +281,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal("Application A Site", topologyA.RootElement.GetProperty("nodes")[0].GetProperty("displayName").GetString());
             Assert.Equal("Application B Topology", topologyB.RootElement.GetProperty("displayName").GetString());
             Assert.Equal("Application B Site", topologyB.RootElement.GetProperty("nodes")[0].GetProperty("displayName").GetString());
-            Assert.Equal(25, layoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
+            Assert.Equal(125, layoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.Equal(425, layoutB.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
+            Assert.True(File.Exists(Path.Combine(
+                MovedProjectDirectory,
+                publishedReleaseA.RelativeManifestPath.Replace('/', Path.DirectorySeparatorChar))));
+            Assert.True(File.Exists(Path.Combine(
+                MovedProjectDirectory,
+                publishedReleaseB.RelativeManifestPath.Replace('/', Path.DirectorySeparatorChar))));
             Assert.Equal("Application A Flow", processA.RootElement.GetProperty("displayName").GetString());
             Assert.Equal($"{processDefinitionId}@1.0.0", processA.RootElement.GetProperty("versionId").GetString());
             Assert.Equal("Published", processA.RootElement.GetProperty("status").GetString());
@@ -454,6 +488,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string layoutId,
         string topologyName,
         string nodeName,
+        string capabilityId,
         double elementX)
     {
         var topologiesPath = ProjectTopologiesPath(projectId, applicationId);
@@ -474,6 +509,31 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 displayName = nodeName
             });
         Assert.Equal(HttpStatusCode.OK, addNode.StatusCode);
+
+        using var addCapability = await client.PostAsJsonAsync(
+            $"{topologiesPath}/{topologyId}/capabilities",
+            new
+            {
+                capabilityId,
+                commandName = "Execute",
+                version = "1.0.0",
+                inputSchema = """{"type":"object"}""",
+                outputSchema = (string?)null,
+                timeoutSeconds = 30,
+                safetyClass = "Normal"
+            });
+        Assert.Equal(HttpStatusCode.OK, addCapability.StatusCode);
+
+        using var addDriverBinding = await client.PostAsJsonAsync(
+            $"{topologiesPath}/{topologyId}/driver-bindings",
+            new
+            {
+                bindingId = "binding.primary",
+                capabilityId,
+                providerKind = "Simulator",
+                providerKey = $"simulator.{applicationId}"
+            });
+        Assert.Equal(HttpStatusCode.OK, addDriverBinding.StatusCode);
 
         using var createLayout = await client.PostAsJsonAsync(
             layoutsPath,
@@ -658,16 +718,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(snapshotId, snapshotBody.RootElement.GetProperty("activeSnapshotId").GetString());
     }
 
-    private static async Task PublishApplicationProjectSnapshotAsync(
+    private static async Task<PublishedProjectRelease> PublishApplicationProjectSnapshotAsync(
         HttpClient client,
         string projectId,
         string projectSnapshotId,
         string applicationId,
-        string topologyId,
         string processDefinitionId,
-        string processVersionId,
         string configurationSnapshotId,
-        string blockVersionId)
+        string projectDirectory)
     {
         using var response = await client.PostAsJsonAsync(
             $"/api/automation-projects/{projectId}/snapshots",
@@ -675,32 +733,42 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             {
                 snapshotId = projectSnapshotId,
                 applicationId,
-                topologyId,
                 processDefinitionId,
-                processVersionId,
-                configurationSnapshotId,
-                capabilityBindings = new[]
-                {
-                    new
-                    {
-                        capabilityId = "runtime.execute",
-                        bindingId = $"binding.{applicationId}",
-                        providerKind = "Simulator",
-                        providerKey = $"simulator.{applicationId}"
-                    }
-                },
-                targetReferences = new[]
-                {
-                    new
-                    {
-                        kind = "EquipmentNode",
-                        targetId = "site.main"
-                    }
-                },
-                blockVersionIds = new[] { blockVersionId }
+                configurationSnapshotId
             });
 
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.True(
+            response.StatusCode == HttpStatusCode.Created,
+            $"Project release publication returned {(int)response.StatusCode} {response.StatusCode}: {responseText}");
+
+        using var body = JsonDocument.Parse(responseText);
+        var snapshot = Assert.Single(
+            body.RootElement.GetProperty("snapshots").EnumerateArray(),
+            candidate => candidate.GetProperty("snapshotId").GetString() == projectSnapshotId);
+        var relativeManifestPath = snapshot.GetProperty("releaseManifestPath").GetString();
+        var contentSha256 = snapshot.GetProperty("releaseContentSha256").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(relativeManifestPath));
+        Assert.False(Path.IsPathRooted(relativeManifestPath));
+        Assert.DoesNotContain("..", relativeManifestPath, StringComparison.Ordinal);
+        Assert.NotNull(contentSha256);
+        Assert.Equal(64, contentSha256.Length);
+        Assert.All(contentSha256, character => Assert.True(Uri.IsHexDigit(character)));
+
+        var absoluteManifestPath = Path.GetFullPath(Path.Combine(
+            projectDirectory,
+            relativeManifestPath.Replace('/', Path.DirectorySeparatorChar)));
+        Assert.StartsWith(
+            Path.GetFullPath(projectDirectory) + Path.DirectorySeparatorChar,
+            absoluteManifestPath,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(absoluteManifestPath));
+        using var manifest = JsonDocument.Parse(File.ReadAllText(absoluteManifestPath));
+        Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
+        Assert.Equal(2, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
+
+        return new PublishedProjectRelease(relativeManifestPath, contentSha256, absoluteManifestPath);
     }
 
     private static async Task AssertProjectSnapshotStartsWithScopedConfigurationAsync(
@@ -815,6 +883,11 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             && block.GetProperty("isBuiltIn").GetBoolean()
             && block.GetProperty("version").GetInt32() == 1;
     }
+
+    private sealed record PublishedProjectRelease(
+        string RelativeManifestPath,
+        string ContentSha256,
+        string AbsoluteManifestPath);
 
     private static ApiCreateProcessDefinitionRequest CreateApplicationProcessRequest(
         string processDefinitionId,

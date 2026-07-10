@@ -65,6 +65,18 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
             throw new ArgumentException("Application ids must be unique.", nameof(applications));
         }
 
+        var applicationProjectPaths = applicationList
+            .Where(application => application.ProjectFilePath is not null)
+            .Select(application => application.ProjectFilePath!)
+            .ToArray();
+        if (applicationProjectPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count()
+            != applicationProjectPaths.Length)
+        {
+            throw new ArgumentException(
+                "Application project file paths must be unique ignoring case.",
+                nameof(applications));
+        }
+
         if (snapshotList.Select(snapshot => snapshot.Id).Distinct().Count() != snapshotList.Length)
         {
             throw new ArgumentException("Snapshot ids must be unique.", nameof(snapshots));
@@ -107,6 +119,17 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
                 $"Application name {application.DisplayName} already exists in project {Id}.");
         }
 
+        if (application.ProjectFilePath is not null
+            && _applications.Any(candidate => string.Equals(
+                candidate.ProjectFilePath,
+                application.ProjectFilePath,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return ProjectOperationResult.Rejected(
+                "Projects.ApplicationProjectPathAlreadyExists",
+                $"Application project path {application.ProjectFilePath} already exists in project {Id}.");
+        }
+
         _applications.Add(application);
 
         return ProjectOperationResult.Accepted("Application added.");
@@ -144,14 +167,18 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
         PublishedProjectSnapshotId snapshotId,
         ProjectApplicationId applicationId,
         AutomationTopologyId topologyId,
+        IEnumerable<string> layoutIds,
         ProcessDefinitionId processDefinitionId,
         ProcessVersionId processVersionId,
         ConfigurationSnapshotId configurationSnapshotId,
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
+        string releaseManifestPath,
+        string releaseContentSha256,
         DateTimeOffset publishedAtUtc)
     {
+        ArgumentNullException.ThrowIfNull(layoutIds);
         ArgumentNullException.ThrowIfNull(capabilityBindings);
         ArgumentNullException.ThrowIfNull(targetReferences);
         ArgumentNullException.ThrowIfNull(blockVersionIds);
@@ -185,6 +212,18 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
                 $"Process definition {processDefinitionId} is not linked to application {applicationId}.");
         }
 
+        var layouts = layoutIds
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (layouts.Length == 0)
+        {
+            return ProjectOperationResult.Rejected(
+                "Projects.NoLayouts",
+                "A project snapshot requires at least one frozen site layout.");
+        }
+
         var bindings = capabilityBindings.ToList();
         if (bindings.Count == 0)
         {
@@ -206,12 +245,15 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
             Id,
             applicationId,
             topologyId,
+            layouts,
             processDefinitionId,
             processVersionId,
             configurationSnapshotId,
             bindings,
             targets,
             blockVersionIds,
+            releaseManifestPath,
+            releaseContentSha256,
             publishedAtUtc);
 
         _snapshots.Add(snapshot);

@@ -9,7 +9,8 @@ import type {
   BackendStatus,
   DesktopConfig,
   SelectDirectoryOptions,
-  SelectDirectoryResult
+  SelectDirectoryResult,
+  SelectProjectFileOptions
 } from '../shared/desktop-api.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -123,6 +124,29 @@ ipcMain.handle('desktop:select-directory', async (
     defaultPath: options?.defaultPath,
     buttonLabel: options?.buttonLabel ?? 'Select',
     properties
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+
+  return {
+    canceled: result.canceled,
+    path: result.filePaths[0] ?? null
+  };
+});
+ipcMain.handle('desktop:select-project-file', async (
+  _event,
+  options?: SelectProjectFileOptions
+): Promise<SelectDirectoryResult> => {
+  const dialogOptions = {
+    title: options?.title ?? 'Open OpenLineOps project',
+    defaultPath: options?.defaultPath,
+    buttonLabel: options?.buttonLabel ?? 'Open Project',
+    properties: ['openFile'] as Array<'openFile'>,
+    filters: [
+      { name: 'OpenLineOps Projects', extensions: ['oloproj'] },
+      { name: 'Legacy OpenLineOps Projects', extensions: ['json'] }
+    ]
   };
   const result = mainWindow
     ? await dialog.showOpenDialog(mainWindow, dialogOptions)

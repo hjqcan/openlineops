@@ -345,6 +345,7 @@ export interface ProjectApplicationResponse {
   displayName: string;
   topologyId: string | null;
   processDefinitionIds: string[];
+  projectFilePath: string | null;
 }
 
 export interface AddProjectApplicationRequest {
@@ -357,6 +358,7 @@ export interface PublishedProjectSnapshotResponse {
   projectId: string;
   applicationId: string;
   topologyId: string;
+  layoutIds: string[];
   processDefinitionId: string;
   processVersionId: string;
   configurationSnapshotId: string;
@@ -364,6 +366,8 @@ export interface PublishedProjectSnapshotResponse {
   capabilityBindings: SnapshotCapabilityBindingResponse[];
   targetReferences: ProjectTargetReferenceResponse[];
   blockVersionIds: string[];
+  releaseManifestPath: string | null;
+  releaseContentSha256: string | null;
 }
 
 export interface SnapshotCapabilityBindingResponse {
@@ -381,13 +385,8 @@ export interface ProjectTargetReferenceResponse {
 export interface PublishProjectSnapshotRequest {
   snapshotId: string;
   applicationId: string;
-  topologyId: string;
   processDefinitionId: string;
-  processVersionId: string;
   configurationSnapshotId: string;
-  capabilityBindings: SnapshotCapabilityBindingRequest[];
-  targetReferences: ProjectTargetReferenceRequest[];
-  blockVersionIds: string[];
 }
 
 export interface SnapshotCapabilityBindingRequest {
@@ -447,6 +446,7 @@ export interface ProjectApplicationManifestResponse {
   displayName: string;
   topologyId: string | null;
   processDefinitionIds: string[];
+  projectFilePath: string | null;
 }
 
 export interface PublishedProjectSnapshotManifestResponse {
@@ -454,6 +454,7 @@ export interface PublishedProjectSnapshotManifestResponse {
   projectId: string;
   applicationId: string;
   topologyId: string;
+  layoutIds: string[];
   processDefinitionId: string;
   processVersionId: string;
   configurationSnapshotId: string;
@@ -461,6 +462,8 @@ export interface PublishedProjectSnapshotManifestResponse {
   capabilityBindings: SnapshotCapabilityBindingResponse[];
   targetReferences: ProjectTargetReferenceResponse[];
   blockVersionIds: string[];
+  releaseManifestPath: string | null;
+  releaseContentSha256: string | null;
 }
 
 export interface CreateAutomationProjectWorkspaceRequest {

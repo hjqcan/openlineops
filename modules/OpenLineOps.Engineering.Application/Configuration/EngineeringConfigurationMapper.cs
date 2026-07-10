@@ -6,7 +6,7 @@ using OpenLineOps.Engineering.Domain.Workspaces;
 
 namespace OpenLineOps.Engineering.Application.Configuration;
 
-internal static class EngineeringConfigurationMapper
+public static class EngineeringConfigurationMapper
 {
     public static WorkspaceDetails ToDetails(Workspace workspace)
     {
@@ -59,7 +59,7 @@ internal static class EngineeringConfigurationMapper
                 .ToArray());
     }
 
-    private static ConfigurationSnapshotDetails ToDetails(ConfigurationSnapshot snapshot)
+    public static ConfigurationSnapshotDetails ToDetails(ConfigurationSnapshot snapshot)
     {
         return new ConfigurationSnapshotDetails(
             snapshot.Id.Value,

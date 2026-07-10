@@ -8,28 +8,38 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
 {
     private readonly List<ProcessDefinitionId> _processDefinitionIds = [];
 
-    private ProjectApplication(ProjectApplicationId id, string displayName)
+    private ProjectApplication(
+        ProjectApplicationId id,
+        string displayName,
+        string? projectFilePath)
         : base(id)
     {
         DisplayName = ProjectIdGuard.NotBlank(displayName, nameof(displayName));
+        ProjectFilePath = NormalizeProjectFilePath(projectFilePath);
     }
 
     public string DisplayName { get; }
+
+    public string? ProjectFilePath { get; }
 
     public AutomationTopologyId? TopologyId { get; private set; }
 
     public IReadOnlyCollection<ProcessDefinitionId> ProcessDefinitionIds => _processDefinitionIds.AsReadOnly();
 
-    public static ProjectApplication Create(ProjectApplicationId id, string displayName)
+    public static ProjectApplication Create(
+        ProjectApplicationId id,
+        string displayName,
+        string? projectFilePath = null)
     {
-        return new ProjectApplication(id, displayName);
+        return new ProjectApplication(id, displayName, projectFilePath);
     }
 
     public static ProjectApplication Restore(
         ProjectApplicationId id,
         string displayName,
         AutomationTopologyId? topologyId,
-        IEnumerable<ProcessDefinitionId> processDefinitionIds)
+        IEnumerable<ProcessDefinitionId> processDefinitionIds,
+        string? projectFilePath = null)
     {
         ArgumentNullException.ThrowIfNull(processDefinitionIds);
 
@@ -43,7 +53,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
             throw new ArgumentException("Process definition ids must be unique.", nameof(processDefinitionIds));
         }
 
-        var application = new ProjectApplication(id, displayName)
+        var application = new ProjectApplication(id, displayName, projectFilePath)
         {
             TopologyId = topologyId
         };
@@ -72,5 +82,34 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
         _processDefinitionIds.Add(processDefinitionId);
 
         return ProjectOperationResult.Accepted("Process definition linked.");
+    }
+
+    private static string? NormalizeProjectFilePath(string? projectFilePath)
+    {
+        if (projectFilePath is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(projectFilePath)
+            || Path.IsPathRooted(projectFilePath)
+            || projectFilePath.Contains('\\')
+            || !string.Equals(projectFilePath, projectFilePath.Trim(), StringComparison.Ordinal)
+            || !projectFilePath.EndsWith(".oloapp", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "Application project file path must be a forward-slash relative .oloapp path.",
+                nameof(projectFilePath));
+        }
+
+        var segments = projectFilePath.Split('/');
+        if (segments.Any(segment => string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
+        {
+            throw new ArgumentException(
+                "Application project file path contains an invalid segment.",
+                nameof(projectFilePath));
+        }
+
+        return projectFilePath;
     }
 }

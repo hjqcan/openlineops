@@ -38,7 +38,7 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
 
         try
         {
-            var projectPath = NormalizeProjectPath(request.ProjectPath);
+            var projectPath = _manifestStore.GetProjectRootPath(request.ProjectPath);
             var existingManifest = await _manifestStore.LoadAsync(projectPath, cancellationToken).ConfigureAwait(false);
             if (existingManifest is not null)
             {
@@ -66,7 +66,9 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
             {
                 var addApplicationResult = project.AddApplication(ProjectApplication.Create(
                     new ProjectApplicationId(request.DefaultApplicationId),
-                    request.DefaultApplicationName!));
+                    request.DefaultApplicationName!,
+                    AutomationProjectFileConvention.GetApplicationProjectRelativePath(
+                        request.DefaultApplicationId)));
                 if (!addApplicationResult.Succeeded)
                 {
                     return Result.Failure<AutomationProjectWorkspaceDetails>(ApplicationError.Conflict(
@@ -115,8 +117,8 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
 
         try
         {
-            var projectPath = NormalizeProjectPath(request.ProjectPath);
-            var manifest = await _manifestStore.LoadAsync(projectPath, cancellationToken).ConfigureAwait(false);
+            var projectPath = _manifestStore.GetProjectRootPath(request.ProjectPath);
+            var manifest = await _manifestStore.LoadAsync(request.ProjectPath, cancellationToken).ConfigureAwait(false);
             if (manifest is null)
             {
                 return Result.Failure<AutomationProjectWorkspaceDetails>(ApplicationError.NotFound(
@@ -200,7 +202,7 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
     {
         return new AutomationProjectWorkspaceDetails(
             AutomationProjectMapper.ToDetails(project),
-            _manifestStore.GetManifestPath(project.ProjectPath),
+            _manifestStore.GetManifestPath(project.ProjectPath, project.Id.Value),
             manifest);
     }
 
@@ -234,11 +236,6 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
         }
 
         return null;
-    }
-
-    private static string NormalizeProjectPath(string projectPath)
-    {
-        return Path.GetFullPath(projectPath.Trim());
     }
 
     private static ApplicationError Required(string code, string fieldName)
