@@ -25,6 +25,7 @@ import type {
 import {
   addProjectApplication,
   createAutomationProjectWorkspace,
+  importProjectApplication,
   listAutomationProjects,
   openAutomationProjectWorkspace,
   saveAutomationProjectManifest
@@ -78,7 +79,6 @@ interface StartProjectGroup {
 type StartDialog = 'new-project' | 'open-path' | null;
 
 const recentProjectsStorageKey = 'openlineops.recentProjects.v2';
-const legacyRecentProjectsStorageKey = 'openlineops.recentProjectPaths.v1';
 
 export function ProjectsWorkbench({
   activeWorkspace,
@@ -318,6 +318,43 @@ export function ProjectsWorkbench({
     }
   }, [activeWorkspace, applicationDraft, onActiveApplicationChanged, onMessage, onWorkspaceChanged]);
 
+  const importApplication = useCallback(async () => {
+    if (!activeWorkspace) {
+      return;
+    }
+
+    const selected = await desktop.selectApplicationProjectFile({
+      title: 'Add existing OpenLineOps Application',
+      defaultPath: `${activeWorkspace.project.projectPath}\\applications`,
+      buttonLabel: 'Add Application'
+    });
+    if (selected.canceled || !selected.path) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const existingIds = new Set(activeWorkspace.project.applications.map(application => application.applicationId));
+      const response = await importProjectApplication(
+        activeWorkspace.project.projectId,
+        { projectFilePath: selected.path });
+      if (!response.ok || !response.body) {
+        onMessage(`Application import failed: ${response.status} ${response.text}`);
+        return;
+      }
+
+      const imported = response.body.project.applications.find(application => !existingIds.has(application.applicationId));
+      onWorkspaceChanged(response.body);
+      rememberProject(response.body);
+      if (imported) {
+        onActiveApplicationChanged(imported.applicationId);
+      }
+      onMessage(`Application imported ${imported?.applicationId ?? selected.path}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [activeWorkspace, onActiveApplicationChanged, onMessage, onWorkspaceChanged, rememberProject]);
+
   const chooseCreateDirectory = useCallback(async () => {
     const result = await desktop.selectDirectory({
       title: 'Select project folder',
@@ -444,6 +481,17 @@ export function ProjectsWorkbench({
                 >
                   <FolderPlus size={14} />
                   Add Application
+                </button>
+                <button
+                  type="button"
+                  className="button ghost"
+                  onClick={() => { void importApplication(); }}
+                  disabled={!canCallBackend}
+                  title="Copy an Application folder into this project's applications directory, then add its .oloapp file"
+                  data-testid="import-project-application"
+                >
+                  <FolderOpen size={14} />
+                  Add Existing .oloapp
                 </button>
               </div>
               <ProjectSnapshots snapshots={activeSnapshots} />
@@ -672,9 +720,9 @@ export function ProjectsWorkbench({
               <div className="project-start-dialog-body project-start-new-project">
                 <aside className="project-template-card selected">
                   <FolderKanban size={24} />
-                <strong>Automation Line Project</strong>
+                  <strong>Automation Line Project</strong>
                   <span>Root .oloproj plus one isolated .oloapp folder for every Application.</span>
-                  <small>OPENLINEOPS · PROJECT FORMAT V2</small>
+                  <small>OPENLINEOPS · PORTABLE PROJECT FORMAT</small>
                 </aside>
                 <div className="project-start-dialog-form">
                   <TextField
@@ -712,7 +760,7 @@ export function ProjectsWorkbench({
               </div>
             ) : (
               <div className="project-start-dialog-body project-start-open-path">
-                <p>Open an <code>.oloproj</code> file, its containing folder, or a legacy <code>openlineops.project.json</code>.</p>
+                <p>Open an <code>.oloproj</code> file or its containing project folder.</p>
                 <PathField
                   label="Project Path"
                   value={openPath}
@@ -903,9 +951,7 @@ function ProjectSnapshots({
           <strong>{snapshot.snapshotId}</strong>
           <span>{snapshot.processVersionId} · {snapshot.layoutIds.length} layouts</span>
           <small>
-            {snapshot.releaseContentSha256
-              ? `Release ${snapshot.releaseContentSha256.slice(0, 12)}`
-              : `Legacy metadata · ${formatDate(snapshot.publishedAtUtc)}`}
+            Release {snapshot.releaseContentSha256.slice(0, 12)} · {formatDate(snapshot.publishedAtUtc)}
           </small>
         </article>
       ))}
@@ -1086,21 +1132,10 @@ function readRecentProjects(): RecentProjectEntry[] {
         .slice(0, 12);
     }
   } catch {
-    // Fall through to the v1 migration path.
-  }
-
-  try {
-    const legacyValue = window.localStorage.getItem(legacyRecentProjectsStorageKey);
-    const legacy = legacyValue ? JSON.parse(legacyValue) as unknown : [];
-    return Array.isArray(legacy)
-      ? legacy
-        .filter((item): item is string => typeof item === 'string')
-        .slice(0, 12)
-        .map(projectPath => ({ projectPath, lastOpenedAtUtc: null }))
-      : [];
-  } catch {
     return [];
   }
+
+  return [];
 }
 
 function rememberRecentProject(entry: RecentProjectEntry): RecentProjectEntry[] {
@@ -1112,7 +1147,9 @@ function rememberRecentProject(entry: RecentProjectEntry): RecentProjectEntry[] 
   const pathKey = normalizeProjectPath(trimmedPath);
   const next = [
     { ...entry, projectPath: trimmedPath },
-    ...readRecentProjects().filter(item => normalizeProjectPath(item.projectPath) !== pathKey)
+    ...readRecentProjects().filter(item =>
+      normalizeProjectPath(item.projectPath) !== pathKey
+      && (!entry.projectId || item.projectId !== entry.projectId))
   ].slice(0, 12);
 
   try {

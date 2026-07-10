@@ -49,7 +49,9 @@ Ideas that must not be copied:
 - A global mutable Kernel as the active project.
 - An `EditMode` flag that only hides IDE windows.
 - Loading the same project into multiple independent object graphs.
-- Serializing a complete CLR object graph as the project format.
+- Serializing a complete CLR object graph as the project format. SmartMatriX
+  `.ak` is prior-art reference only; it is not accepted OpenLineOps project
+  input or source format.
 - Running the mutable editing state directly.
 - Writing runtime databases, recovery state, and logs back into source project
   files.
@@ -77,8 +79,11 @@ Deployable .olopkg -- submit to station (future) ---------> RuntimeSession
 ### Editable Project Folder
 
 The version-controllable engineering source opened by Studio. It contains
-applications, topology, layouts, flows, Blockly workspaces, Python sources,
-configuration, binding requirements, and project settings.
+one root `<projectId>.oloproj` and independently movable application directories.
+Each application directory has its own `.oloapp`, topology, layouts, flows,
+Blockly workspaces, Python sources, configuration, binding requirements,
+scripts, and custom blocks. The root project composes applications by relative
+reference.
 
 It is allowed to be incomplete and invalid while the user is editing it. A
 Runner never executes it directly.
@@ -118,7 +123,7 @@ When no project is open, Studio now focuses on:
 
 - searchable recent projects grouped by recency;
 - Create Project;
-- Open Project Folder;
+- Open Project (`.oloproj`) or Open Project Folder;
 - keyboard-safe Create/Open dialogs and recent-project activation.
 
 This is a VS-inspired but independently designed OpenLineOps Start Center. The
@@ -147,6 +152,11 @@ activeRuntimeSessionId
 `activeProjectId` and `activeApplicationId` are implemented boundaries;
 editor-tab and dirty-resource state still need further work. Code must not
 silently use `applications[0]`.
+
+Adding an existing application is an explicit composition operation. The user
+copies the complete application directory under the open project's
+`applications` directory and imports its `.oloapp`; Studio then adds the
+project-relative reference without rewriting the application's internal files.
 
 ### Edit Mode
 
@@ -234,10 +244,10 @@ The editable project remains text-based and reviewable:
 
 ```text
 project-root/
-  openlineops.project.json
+  <project-id>.oloproj
   applications/
-    application-main--<stable-hash>/
-      application.json
+    <application-directory>/
+      <application-name>.oloapp
       topology/
         topology-main--<stable-hash>.json
       layouts/
@@ -267,25 +277,40 @@ project-root/
           block-user-inspect--<stable-hash>/
             versions/
               version-000001.json
-  scripts/
-    project_helpers.py
+      scripts/
+        application_helpers.py
   releases/
     release-<safe-snapshot-id>/
       release.json
       source/
         applications/
-          application-<safe-application-id>/
+          <application-folder>/
+            <name>.oloapp
             ...frozen application source...
 ```
 
-The project manifest stores project and application identity, linked resources,
-snapshot publication history, and the selected snapshot id. Each immutable
-snapshot records its release manifest path and digest; there is no separately
-managed deployment-ready active-release pointer yet. The project manifest must
-not be the only file containing project data.
+The `.oloproj` is the IDE entrypoint for one automation project. It stores
+project identity and settings, project-relative `.oloapp` references, snapshot
+publication history, and the selected snapshot id. Each immutable snapshot
+records its release manifest path and digest; there is no separately managed
+deployment-ready active-release pointer yet.
+
+Each `.oloapp` stores application identity, display metadata, and relative links
+to application-local resources. Every file below the application root retains
+`ApplicationId` and its own resource identity but must not persist the host
+`ProjectId`. This is the portability boundary: copy the complete directory into
+another project's `applications` directory, import the `.oloapp`, and use it
+without recursively rewriting topology, layouts, flows, Blockly/Python,
+configuration, bindings, scripts, or custom blocks.
+
+The current `.oloproj` is a single automation project, not a multi-project
+solution, so it is intentionally not named `.olosln`. A future solution layer
+can compose multiple `.oloproj` files without changing this application
+boundary. Obsolete project filenames and schema versions are rejected; there is
+no compatibility reader or automatic migration branch.
 
 Save operations use staging files followed by atomic replacement. Every schema
-has an explicit version and migration path.
+has one exact accepted version. A format change is an explicit breaking cutover.
 
 For flow source, content-addressed Blockly and Python files are written first;
 `flow.json` is atomically replaced last and acts as the commit pointer. It
@@ -294,14 +319,17 @@ complete flow and manual file tampering is detected on open.
 
 Engineering workspaces, engineering projects and their configuration snapshots,
 recipes, station profiles, and custom Blockly block histories are application-
-local source. Their repositories use the same explicit project/application
-scope as topology, layout, and flows, so moving a project folder or reusing a
-local id in another application does not redirect the resource to a global
-database. Engineering JSON is schema-versioned and atomically replaced; each
-custom block version is an immutable `version-000001.json`-style artifact.
+local source. Repositories receive explicit project/application scope to resolve
+the application root, but persisted application-local documents do not retain
+the host project identity. Moving a project folder, copying an application to a
+different project, or reusing a local id in another application therefore does
+not redirect the resource to a global database. Engineering JSON is
+schema-versioned and atomically replaced; each custom block version is an
+immutable `version-000001.json`-style artifact.
 
-Release manifest schema v2 records the selected topology, layouts, process and
-version, Engineering configuration snapshot, capability bindings, target
+Release manifest schema v3 records the exact Application project path plus the
+selected topology, layouts, process and version, Engineering configuration
+snapshot, capability bindings, target
 references, publish-selected Blockly block versions, canonical Flow IR schema,
 JSON and SHA-256, every copied file's size and SHA-256, and a content digest.
 The block version is currently the catalog version selected at publish time for
@@ -312,8 +340,11 @@ deployment outputs, never trusted editable-source inputs.
 
 Physical resource keys use a readable slug plus a stable hash. User-provided
 ids are data inside the document and are never used as unchecked path segments.
-All resource paths stay relative to the opened project root, so moving the
-folder does not change the project identity.
+All application references stay relative to the opened project root and all
+application resource links stay relative to the application root. Import
+rejects traversal, reparse-point escapes, duplicate identity, and path
+collisions; the `.oloapp` must already be inside the target project's
+`applications` directory.
 
 ## Release Publishing
 
@@ -355,9 +386,9 @@ This is a local immutable release boundary. It does not yet create an
 pointer, or provide package/deployment verification. The current one-shot
 Runner consumes this local release boundary; it is not an `.olopkg` verifier.
 
-The legacy `POST /api/runtime/sessions/simulated` and
+The development-only `POST /api/runtime/sessions/simulated` and
 `POST /api/process-definitions/{id}/runtime-sessions` endpoints are isolated as
-Development/Test compatibility surfaces. They return `403` unless the host
+Development/Test diagnostics. They return `403` unless the host
 environment is `Development` or `Test` and
 `OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is explicitly enabled.
 Project Snapshot launch is the production execution route.
@@ -463,11 +494,11 @@ The current synchronous HTTP request model must evolve to submit-and-observe:
 ## Runner And CLI
 
 `src/OpenLineOps.Runner` is an implemented one-shot headless executable. It
-opens a project directory or `openlineops.project.json`, selects an explicit or
-active Project Snapshot, requires an immutable release descriptor, runs it
-through `ProjectReleaseRuntimeSessionLauncher`, writes one JSON result using
-Runner output schema v1 to standard output, and exits after the session reaches
-a terminal state.
+opens a project directory or `<projectId>.oloproj`, selects an explicit or active
+Project Snapshot, requires an immutable release descriptor, runs it through
+`ProjectReleaseRuntimeSessionLauncher`, writes one JSON result using Runner
+output schema v1 to standard output, and exits after the session reaches a
+terminal state. All non-`.oloproj` project formats are rejected.
 
 Current command:
 
@@ -479,7 +510,7 @@ dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
 ```
 
 `--snapshot` defaults to `active`; the remaining options are optional runtime
-trace inputs. Runner rejects draft-only projects and legacy snapshots without a
+trace inputs. Runner rejects draft-only projects and snapshots without a
 release. Runtime configuration comes from `appsettings.json`,
 `appsettings.<environment>.json`, and environment variables.
 
@@ -555,7 +586,7 @@ Future production policy requires:
 - immutable event evidence and default log redaction;
 - explicit Simulator profiles with no silent real-device fallback.
 
-## Migration Plan
+## Delivery Plan
 
 ### Phase 0: Product Shell
 
@@ -572,7 +603,12 @@ Future production policy requires:
   Blocks, and Engineering Configuration by explicit project/application scope.
 - Implemented: text project-folder source, content-addressed flow artifacts,
   schema-versioned resources, immutable custom-block versions, and atomic save.
-- Remaining: broader migration tooling and complete IDE dirty-resource UX.
+- Implemented: root `.oloproj` composition plus independent `.oloapp`
+  application directories whose internal files do not persist host `ProjectId`;
+  copied in-workspace applications can be imported explicitly.
+- Implemented breaking cutover: obsolete project and Application resource
+  versions are rejected, with no compatibility DTOs or migration branches.
+- Remaining: complete IDE dirty-resource UX.
 
 ### Phase 2: Release Publisher
 
@@ -581,8 +617,9 @@ Future production policy requires:
   and Project Snapshot release-only runtime loading.
 - Implemented: route release-identified device commands through release
   capability metadata and frozen Engineering device bindings.
-- Implemented: release manifest schema v2 freezes canonical Flow IR v1; dynamic
-  Python/Blockly children execute as aggregate Runtime steps/commands with
+- Implemented: release manifest schema v3 freezes the exact Application project
+  path plus canonical Flow IR v1; dynamic Python/Blockly children execute as
+  aggregate Runtime steps/commands with
   action/parent/sequence identity and terminal propagation.
 - Implemented: direct simulated/process-definition starts are gated to an
   explicitly enabled Development/Test host.

@@ -3,7 +3,6 @@ namespace OpenLineOps.Processes.Infrastructure.Persistence;
 internal sealed record ProjectProcessBlocklyBlockVersionDocument(
     string Schema,
     int SchemaVersion,
-    string ProjectId,
     string ApplicationId,
     string BlockType,
     int Version,
@@ -16,5 +15,5 @@ internal sealed record ProjectProcessBlocklyBlockVersionDocument(
 {
     public const string CurrentSchema = "openlineops.process-blockly-block-version";
 
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 }

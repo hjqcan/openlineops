@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Projects.Tests;
@@ -10,29 +8,6 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
         Path.GetTempPath(),
         "openlineops-application-scope-tests",
         Guid.NewGuid().ToString("N"));
-
-    [Fact]
-    public void DefaultScopePreservesLegacyHashedApplicationDirectory()
-    {
-        var projectPath = Path.Combine(_testRoot, "project");
-        const string applicationId = " application/main ";
-
-        var scope = new ProjectApplicationWorkspaceScope(
-            "project.main",
-            applicationId,
-            projectPath);
-
-        var safeSegment = LegacySafeSegment(applicationId);
-        Assert.Equal(
-            $"applications/application-{safeSegment}/application.oloapp",
-            scope.ApplicationProjectRelativePath);
-        Assert.Equal(
-            Path.Combine(projectPath, "applications", $"application-{safeSegment}"),
-            scope.ApplicationRootPath);
-        Assert.Equal(
-            Path.Combine(scope.ApplicationRootPath, "application.oloapp"),
-            scope.ApplicationProjectFilePath);
-    }
 
     [Fact]
     public void ExplicitApplicationProjectPathDefinesApplicationRoot()
@@ -62,6 +37,7 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
     [InlineData("applications\\Main\\Main.oloapp")]
     [InlineData("C:/applications/Main/Main.oloapp")]
     [InlineData("applications/Main/Main.json")]
+    [InlineData("applications/Nested/Deeper/Main.oloapp")]
     [InlineData("Main.oloapp")]
     [InlineData("applications//Main.oloapp")]
     [InlineData("")]
@@ -153,32 +129,5 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
         {
             Directory.Delete(_testRoot, recursive: true);
         }
-    }
-
-    private static string LegacySafeSegment(string value)
-    {
-        var normalized = value.Trim();
-        var builder = new StringBuilder(normalized.Length);
-        foreach (var character in normalized)
-        {
-            builder.Append(char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_'
-                ? character
-                : '-');
-        }
-
-        var readable = builder.ToString().Trim('.', '-', '_');
-        if (string.IsNullOrEmpty(readable))
-        {
-            readable = "resource";
-        }
-
-        if (readable.Length > 64)
-        {
-            readable = readable[..64];
-        }
-
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
-            .ToLowerInvariant()[..12];
-        return $"{readable}--{hash}";
     }
 }

@@ -15,4 +15,9 @@ public interface IAutomationProjectWorkspaceService
     Task<Result<AutomationProjectWorkspaceDetails>> SaveManifestAsync(
         string projectId,
         CancellationToken cancellationToken = default);
+
+    Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+        string projectId,
+        ImportAutomationProjectApplicationRequest request,
+        CancellationToken cancellationToken = default);
 }

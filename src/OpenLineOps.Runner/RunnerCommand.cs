@@ -28,10 +28,10 @@ public sealed class RunnerCommand
         ArgumentException.ThrowIfNullOrWhiteSpace(currentDirectory);
         ArgumentNullException.ThrowIfNull(output);
 
-        string projectDirectory;
+        string projectTarget;
         try
         {
-            projectDirectory = RunnerProjectPathResolver.ResolveProjectDirectory(
+            projectTarget = RunnerProjectPathResolver.ResolveProjectTarget(
                 options.ProjectTarget,
                 currentDirectory);
         }
@@ -54,7 +54,7 @@ public sealed class RunnerCommand
         try
         {
             openResult = await _workspaceService
-                .OpenAsync(new OpenAutomationProjectWorkspaceRequest(projectDirectory), cancellationToken)
+                .OpenAsync(new OpenAutomationProjectWorkspaceRequest(projectTarget), cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is ArgumentException
@@ -65,7 +65,7 @@ public sealed class RunnerCommand
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.ProjectOpenFailed,
-                projectDirectory,
+                projectTarget,
                 "Runner.ProjectOpenFailed",
                 exception.Message,
                 output).ConfigureAwait(false);
@@ -75,7 +75,7 @@ public sealed class RunnerCommand
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.ProjectOpenFailed,
-                projectDirectory,
+                projectTarget,
                 openResult.Error.Code,
                 openResult.Error.Message,
                 output).ConfigureAwait(false);
@@ -87,26 +87,13 @@ public sealed class RunnerCommand
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.SnapshotSelectionFailed,
-                projectDirectory,
+                projectTarget,
                 selection.ErrorCode!,
                 selection.ErrorMessage!,
                 output).ConfigureAwait(false);
         }
 
         var snapshot = selection.Snapshot!;
-        if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath)
-            || string.IsNullOrWhiteSpace(snapshot.ReleaseContentSha256))
-        {
-            return await WriteFailureAsync(
-                RunnerExitCodes.ImmutableReleaseRequired,
-                projectDirectory,
-                "Runner.ImmutableReleaseRequired",
-                $"Snapshot {snapshot.SnapshotId} has no immutable release descriptor and cannot be executed by the Runner.",
-                output,
-                workspace,
-                snapshot).ConfigureAwait(false);
-        }
-
         var runResult = await _runtimeLauncher
             .StartAsync(
                 snapshot,
@@ -123,7 +110,7 @@ public sealed class RunnerCommand
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.RuntimeStartRejected,
-                projectDirectory,
+                projectTarget,
                 runResult.Error.Code,
                 runResult.Error.Message,
                 output,
@@ -136,7 +123,7 @@ public sealed class RunnerCommand
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.RuntimeExecutionFailed,
-                projectDirectory,
+                projectTarget,
                 "Runner.RuntimeExecutionFailed",
                 $"Runtime session {session.SessionId} ended with status {session.Status}.",
                 output,
@@ -146,7 +133,7 @@ public sealed class RunnerCommand
         }
 
         await RunnerJsonOutputWriter
-            .WriteAsync(output, RunnerJsonOutput.Succeeded(projectDirectory, workspace, snapshot, session))
+            .WriteAsync(output, RunnerJsonOutput.Succeeded(projectTarget, workspace, snapshot, session))
             .ConfigureAwait(false);
 
         return RunnerExitCodes.Success;

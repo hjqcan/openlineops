@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
 
@@ -16,8 +17,9 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     private static readonly JsonSerializerOptions ManifestJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        WriteIndented = true
+        PropertyNameCaseInsensitive = false,
+        WriteIndented = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
     private static readonly JsonSerializerOptions CanonicalJsonOptions = new()
@@ -63,7 +65,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         {
             var sourceRootPath = ProjectReleaseArtifactPath.GetSourceRootPath(stagingRootPath);
             var sourceApplicationRelativePath = ProjectReleaseArtifactPath
-                .GetSourceApplicationRelativePath(scope.ApplicationId);
+                .GetSourceApplicationRelativePath(scope);
             var stagedApplicationPath = ProjectReleaseArtifactPath.ResolveRelativePath(
                 sourceRootPath,
                 sourceApplicationRelativePath);
@@ -93,6 +95,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 scope.ApplicationId,
                 publishedAtUtc.ToUniversalTime(),
                 sourceApplicationRelativePath,
+                scope.ApplicationProjectRelativePath,
                 normalizedMetadata,
                 files,
                 string.Empty);
@@ -255,7 +258,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     {
         var manifestPath = ProjectReleaseArtifactPath.GetManifestPath(releaseRootPath);
         var manifest = await ReadManifestAsync(manifestPath, cancellationToken).ConfigureAwait(false);
-        ValidateManifestIdentity(scope, snapshotId, manifest, manifestPath);
+        ValidateManifestIdentity(scope, snapshotId, manifest, manifestPath, releaseRootPath);
 
         ProjectReleaseSourceMetadata normalizedMetadata;
         try
@@ -343,6 +346,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             manifest.ContentSha256,
             releaseRootPath,
             sourceRootPath,
+            manifest.ApplicationProjectRelativePath,
             manifestPath,
             normalizedMetadata,
             manifest.Files);
@@ -352,7 +356,8 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         ProjectApplicationWorkspaceScope scope,
         string snapshotId,
         ProjectReleaseArtifactManifest manifest,
-        string manifestPath)
+        string manifestPath,
+        string releaseRootPath)
     {
         if (!string.Equals(
                 manifest.Schema,
@@ -382,8 +387,22 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 $"scope is {manifest.ProjectId}/{manifest.ApplicationId}, expected {scope.ProjectId}/{scope.ApplicationId}");
         }
 
+        ProjectApplicationWorkspaceScope releaseScope;
+        try
+        {
+            releaseScope = new ProjectApplicationWorkspaceScope(
+                manifest.ProjectId,
+                manifest.ApplicationId,
+                ProjectReleaseArtifactPath.GetSourceRootPath(releaseRootPath),
+                manifest.ApplicationProjectRelativePath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidDataException)
+        {
+            throw InvalidRelease(manifestPath, "contains an invalid Application project path", exception);
+        }
+
         var expectedApplicationPath = ProjectReleaseArtifactPath
-            .GetSourceApplicationRelativePath(scope.ApplicationId);
+            .GetSourceApplicationRelativePath(releaseScope);
         if (!string.Equals(
                 manifest.SourceApplicationRelativePath,
                 expectedApplicationPath,
@@ -739,6 +758,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             manifest.ContentSha256,
             releaseRootPath,
             ProjectReleaseArtifactPath.GetSourceRootPath(releaseRootPath),
+            manifest.ApplicationProjectRelativePath,
             ProjectReleaseArtifactPath.GetManifestPath(releaseRootPath),
             manifest.Files);
     }

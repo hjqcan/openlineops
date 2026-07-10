@@ -1133,45 +1133,42 @@ selection, and trace records are consistent.
 
 ## Project Package Shape
 
-The desktop should eventually open a folder or package with a predictable
-manifest-driven shape:
+Studio opens a folder through its single `.oloproj` entrypoint. Every
+Application is a self-contained, copyable directory with its own `.oloapp`:
 
 ```text
 project-root/
-  openlineops.project.json
+  line-a.oloproj
   applications/
-    inspection-cell.application.json
-  topology/
-    topology.json
-    module-templates/
-    capability-contracts/
-  layouts/
-    main-floor.layout.json
-  processes/
-    inspect-left-nest/
-      process.json
-      workspace.blockly.json
-      generated.py
-      source.hash
-  blocks/
-    custom/
-      motion-axis-move.block.json
-  bindings/
-    driver-bindings.json
-  snapshots/
-    2026-07-09T120000Z/
-      snapshot.json
-      topology.json
-      layout.json
-      processes/
+    inspection-cell/
+      inspection-cell.oloapp
+      topology/
+      layouts/
+      flows/
+        inspect-left-nest/
+          flow.json
+          artifacts/
+      configuration/
+      bindings/
+      blocks/
       scripts/
-      hashes.json
+  releases/
+    release-<snapshot-id>/
+      release.json
+      source/
+        applications/
+          inspection-cell/
+            ...frozen Application source...
 ```
 
 Rules:
 
-- package files are user assets, not runtime mutable state
-- snapshots are append-only runtime handoff artifacts
+- `.oloproj` composes Applications but does not embed their editable resources
+- no file under an Application root contains the host automation `ProjectId`
+- copying the complete Application directory and importing its `.oloapp` does
+  not rewrite its resources
+- only exact current schema versions are accepted; obsolete formats are rejected
+- release files are immutable runtime handoff artifacts
 - generated files include hashes and source metadata
 - provider packages can be referenced, but executable provider binaries should
   follow plugin package policy

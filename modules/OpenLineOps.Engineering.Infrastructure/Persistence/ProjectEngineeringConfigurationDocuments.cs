@@ -4,7 +4,7 @@ internal static class ProjectEngineeringConfigurationDocumentSchema
 {
     public const string CurrentSchema = "openlineops.engineering-configuration-resource";
 
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 }
 
 internal static class ProjectEngineeringResourceKinds
@@ -18,7 +18,6 @@ internal static class ProjectEngineeringResourceKinds
 internal sealed record ProjectEngineeringConfigurationDocument<TSnapshot>(
     string Schema,
     int SchemaVersion,
-    string ProjectId,
     string ApplicationId,
     string ResourceKind,
     string ResourceId,

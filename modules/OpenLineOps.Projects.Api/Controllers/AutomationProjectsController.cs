@@ -246,14 +246,6 @@ public sealed class AutomationProjectsController : ControllerBase
                 $"Project snapshot {snapshotId} was not found in automation project {projectId}."));
         }
 
-        if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath)
-            || string.IsNullOrWhiteSpace(snapshot.ReleaseContentSha256))
-        {
-            return ToProblem(ApplicationError.Conflict(
-                "Projects.ProjectSnapshotReleaseRequired",
-                $"Project snapshot {snapshotId} was published without an immutable release and cannot be executed."));
-        }
-
         var startRequest = request!;
         var startResult = await _runtimeSessionLauncher
             .StartAsync(

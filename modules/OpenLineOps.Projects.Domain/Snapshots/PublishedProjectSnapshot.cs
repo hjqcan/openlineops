@@ -22,8 +22,8 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
-        string? releaseManifestPath,
-        string? releaseContentSha256,
+        string releaseManifestPath,
+        string releaseContentSha256,
         DateTimeOffset publishedAtUtc)
         : base(id)
     {
@@ -41,8 +41,8 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
             .Select(value => value.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        ReleaseManifestPath = NormalizeOptional(releaseManifestPath);
-        ReleaseContentSha256 = NormalizeOptional(releaseContentSha256);
+        ReleaseManifestPath = NormalizeReleaseManifestPath(releaseManifestPath);
+        ReleaseContentSha256 = NormalizeReleaseContentSha256(releaseContentSha256);
         PublishedAtUtc = publishedAtUtc;
     }
 
@@ -68,11 +68,9 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
 
     public IReadOnlyCollection<string> BlockVersionIds => _blockVersionIds.AsReadOnly();
 
-    public string? ReleaseManifestPath { get; }
+    public string ReleaseManifestPath { get; }
 
-    public string? ReleaseContentSha256 { get; }
-
-    public bool HasImmutableRelease => ReleaseManifestPath is not null && ReleaseContentSha256 is not null;
+    public string ReleaseContentSha256 { get; }
 
     public static PublishedProjectSnapshot Publish(
         PublishedProjectSnapshotId id,
@@ -134,8 +132,8 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
-        string? releaseManifestPath,
-        string? releaseContentSha256,
+        string releaseManifestPath,
+        string releaseContentSha256,
         DateTimeOffset publishedAtUtc)
     {
         ArgumentNullException.ThrowIfNull(layoutIds);
@@ -170,8 +168,35 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
             .ToList();
     }
 
-    private static string? NormalizeOptional(string? value)
+    private static string NormalizeReleaseManifestPath(string value)
     {
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        if (string.IsNullOrWhiteSpace(value)
+            || Path.IsPathRooted(value)
+            || value.Contains('\\')
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            || value.Split('/').Any(segment =>
+                string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
+        {
+            throw new ArgumentException(
+                "Release manifest path must be a canonical forward-slash relative path.",
+                nameof(value));
+        }
+
+        return value;
+    }
+
+    private static string NormalizeReleaseContentSha256(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length != 64
+            || !value.All(Uri.IsHexDigit)
+            || !string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Release content SHA-256 must be a lowercase 64-character value.",
+                nameof(value));
+        }
+
+        return value;
     }
 }

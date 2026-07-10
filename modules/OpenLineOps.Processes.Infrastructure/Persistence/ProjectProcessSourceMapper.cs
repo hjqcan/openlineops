@@ -93,7 +93,6 @@ internal static class ProjectProcessSourceMapper
         var document = new ProjectProcessFlowDocument(
             ProjectProcessFlowDocument.CurrentFormatVersion,
             ProjectProcessFlowDocument.Kind,
-            scope.ProjectId,
             scope.ApplicationId,
             snapshot.DefinitionId,
             snapshot.VersionId,
@@ -217,11 +216,10 @@ internal static class ProjectProcessSourceMapper
                 $"Project process resource kind '{document.ResourceKind}' is not supported.");
         }
 
-        if (!string.Equals(document.ProjectId, scope.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
+        if (!string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Project process belongs to {document.ProjectId}/{document.ApplicationId}, not {scope.ProjectId}/{scope.ApplicationId}.");
+                $"Project process belongs to application {document.ApplicationId}, not {scope.ApplicationId}.");
         }
 
         var expectedRevision = ComputeSourceRevision(document with { SourceRevision = string.Empty });

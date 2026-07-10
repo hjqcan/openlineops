@@ -7,7 +7,6 @@ public static class AutomationProjectFileConvention
 {
     public const string ProjectFileExtension = ".oloproj";
     public const string ApplicationProjectFileExtension = ".oloapp";
-    public const string LegacyProjectFileName = "openlineops.project.json";
     public const string ApplicationsDirectoryName = "applications";
 
     private static readonly HashSet<string> WindowsReservedFileNames = new(
@@ -27,12 +26,6 @@ public static class AutomationProjectFileConvention
     {
         var stem = ToPortableFileStem(applicationId, "application");
         return $"{ApplicationsDirectoryName}/{stem}/{stem}{ApplicationProjectFileExtension}";
-    }
-
-    public static string GetLegacyApplicationProjectRelativePath(string applicationId)
-    {
-        var stem = ToPortableFileStem(applicationId, "application");
-        return $"{ApplicationsDirectoryName}/application-{ToStableHashedSegment(applicationId)}/{stem}{ApplicationProjectFileExtension}";
     }
 
     public static string GetApplicationRootRelativePath(string applicationProjectRelativePath)
@@ -56,7 +49,7 @@ public static class AutomationProjectFileConvention
             throw new ArgumentException("Project root path cannot be empty.", nameof(projectRootPath));
         }
 
-        ValidateCanonicalRelativePath(relativePath, nameof(relativePath));
+        ValidateCanonicalRelativePath(relativePath);
 
         var root = Path.GetFullPath(projectRootPath.Trim())
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -78,7 +71,7 @@ public static class AutomationProjectFileConvention
 
     public static void ValidateApplicationProjectRelativePath(string projectFilePath)
     {
-        ValidateCanonicalRelativePath(projectFilePath, nameof(projectFilePath));
+        ValidateCanonicalRelativePath(projectFilePath);
 
         var segments = projectFilePath.Split('/');
         if (segments.Length != 3
@@ -97,7 +90,7 @@ public static class AutomationProjectFileConvention
             .Replace(Path.AltDirectorySeparatorChar, '/');
     }
 
-    private static void ValidateCanonicalRelativePath(string relativePath, string parameterName)
+    private static void ValidateCanonicalRelativePath(string relativePath)
     {
         if (string.IsNullOrWhiteSpace(relativePath)
             || Path.IsPathRooted(relativePath)
@@ -149,33 +142,6 @@ public static class AutomationProjectFileConvention
         if (readable.Length > 48)
         {
             readable = readable[..48].TrimEnd('.', '-', '_');
-        }
-
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
-            .ToLowerInvariant()[..12];
-        return $"{readable}--{hash}";
-    }
-
-    private static string ToStableHashedSegment(string value)
-    {
-        var normalized = value.Trim();
-        var builder = new StringBuilder(normalized.Length);
-        foreach (var character in normalized)
-        {
-            builder.Append(char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_'
-                ? character
-                : '-');
-        }
-
-        var readable = builder.ToString().Trim('.', '-', '_');
-        if (string.IsNullOrEmpty(readable))
-        {
-            readable = "resource";
-        }
-
-        if (readable.Length > 64)
-        {
-            readable = readable[..64];
         }
 
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))

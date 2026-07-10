@@ -36,6 +36,7 @@ public sealed record ProjectReleaseArtifactDescriptor(
     string ContentSha256,
     string ReleaseRootPath,
     string SourceRootPath,
+    string ApplicationProjectRelativePath,
     string ManifestPath,
     IReadOnlyCollection<ProjectReleaseSourceFile> Files);
 
@@ -47,6 +48,7 @@ public sealed record OpenedProjectReleaseArtifact(
     string ContentSha256,
     string ReleaseRootPath,
     string SourceRootPath,
+    string ApplicationProjectRelativePath,
     string ManifestPath,
     ProjectReleaseSourceMetadata Metadata,
     IReadOnlyCollection<ProjectReleaseSourceFile> Files);

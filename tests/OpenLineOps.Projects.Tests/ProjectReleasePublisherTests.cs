@@ -9,6 +9,7 @@ namespace OpenLineOps.Projects.Tests;
 
 public sealed class ProjectReleasePublisherTests
 {
+    private const string ApplicationProjectPath = "applications/application.main/application.main.oloapp";
     private static readonly DateTimeOffset PublishedAtUtc =
         new(2026, 7, 10, 8, 30, 0, TimeSpan.Zero);
 
@@ -22,7 +23,7 @@ public sealed class ProjectReleasePublisherTests
         var projectService = new RecordingProjectService(project, calls);
         var workspaceService = new RecordingWorkspaceService(project, calls);
         var scopeResolver = new RecordingScopeResolver(
-            new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath),
+            new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath, ApplicationProjectPath),
             calls);
         var sourceResolver = new RecordingSourceResolver(Result.Success(metadata), calls);
         var artifactStore = new RecordingArtifactStore(
@@ -87,7 +88,7 @@ public sealed class ProjectReleasePublisherTests
             projectService,
             new RecordingWorkspaceService(project, calls),
             new RecordingScopeResolver(
-                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath),
+                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath, ApplicationProjectPath),
                 calls),
             new RecordingSourceResolver(
                 Result.Failure<ProjectReleaseSourceMetadata>(expectedError),
@@ -125,7 +126,7 @@ public sealed class ProjectReleasePublisherTests
             projectService,
             new RecordingWorkspaceService(project, calls),
             new RecordingScopeResolver(
-                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath),
+                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath, ApplicationProjectPath),
                 calls),
             new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
             new RecordingArtifactStore(artifact, calls),
@@ -165,7 +166,7 @@ public sealed class ProjectReleasePublisherTests
             projectService,
             new RecordingWorkspaceService(project, calls),
             new RecordingScopeResolver(
-                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath),
+                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath, ApplicationProjectPath),
                 calls),
             sourceResolver,
             new RecordingArtifactStore(CreateArtifact(projectPath), calls),
@@ -206,7 +207,7 @@ public sealed class ProjectReleasePublisherTests
             projectService,
             workspaceService,
             new RecordingScopeResolver(
-                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath),
+                new ProjectApplicationWorkspaceScope("project.main", "application.main", projectPath, ApplicationProjectPath),
                 calls),
             new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
             new RecordingArtifactStore(CreateArtifact(projectPath), calls),
@@ -253,7 +254,8 @@ public sealed class ProjectReleasePublisherTests
                     "application.main",
                     "Main Application",
                     "topology.main",
-                    ["process.main"])
+                    ["process.main"],
+                    ApplicationProjectPath)
             ],
             Snapshots: []);
     }
@@ -291,6 +293,7 @@ public sealed class ProjectReleasePublisherTests
             new string('a', 64),
             releaseRoot,
             Path.Combine(releaseRoot, "source"),
+            ApplicationProjectPath,
             Path.Combine(releaseRoot, "release.json"),
             Files: []);
     }
@@ -472,6 +475,11 @@ public sealed class ProjectReleasePublisherTests
         public Task<Result<AutomationProjectWorkspaceDetails>> OpenAsync(
             OpenAutomationProjectWorkspaceRequest request,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+            string projectId,
+            ImportAutomationProjectApplicationRequest request,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
     private sealed class FailingManifestWorkspaceService(
@@ -504,6 +512,11 @@ public sealed class ProjectReleasePublisherTests
 
         public Task<Result<AutomationProjectWorkspaceDetails>> CreateAsync(
             CreateAutomationProjectWorkspaceRequest request,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+            string projectId,
+            ImportAutomationProjectApplicationRequest request,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }

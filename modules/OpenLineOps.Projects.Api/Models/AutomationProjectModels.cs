@@ -14,6 +14,8 @@ public sealed record CreateAutomationProjectWorkspaceRequest(
 
 public sealed record OpenAutomationProjectWorkspaceRequest(string? ProjectPath);
 
+public sealed record ImportProjectApplicationRequest(string ProjectFilePath);
+
 public sealed record AddProjectApplicationRequest(
     string? ApplicationId,
     string? DisplayName);
@@ -84,14 +86,14 @@ public sealed record ProjectApplicationManifestResponse(
     string DisplayName,
     string? TopologyId,
     IReadOnlyCollection<string> ProcessDefinitionIds,
-    string? ProjectFilePath);
+    string ProjectFilePath);
 
 public sealed record ProjectApplicationResponse(
     string ApplicationId,
     string DisplayName,
     string? TopologyId,
     IReadOnlyCollection<string> ProcessDefinitionIds,
-    string? ProjectFilePath);
+    string ProjectFilePath);
 
 public sealed record PublishedProjectSnapshotResponse(
     string SnapshotId,
@@ -106,8 +108,8 @@ public sealed record PublishedProjectSnapshotResponse(
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
     IReadOnlyCollection<string> BlockVersionIds,
-    string? ReleaseManifestPath,
-    string? ReleaseContentSha256);
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record PublishedProjectSnapshotManifestResponse(
     string SnapshotId,
@@ -122,8 +124,8 @@ public sealed record PublishedProjectSnapshotManifestResponse(
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
     IReadOnlyCollection<string> BlockVersionIds,
-    string? ReleaseManifestPath,
-    string? ReleaseContentSha256);
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingResponse(
     string CapabilityId,

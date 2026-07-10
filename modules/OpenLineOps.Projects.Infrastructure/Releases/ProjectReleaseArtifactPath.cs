@@ -19,11 +19,10 @@ internal static class ProjectReleaseArtifactPath
         return EnsureInsideProject(scope, scope.ApplicationRootPath);
     }
 
-    public static string GetSourceApplicationRelativePath(string applicationId)
+    public static string GetSourceApplicationRelativePath(ProjectApplicationWorkspaceScope scope)
     {
-        return NormalizeDocumentPath(Path.Combine(
-            "applications",
-            $"application-{ToSafeSegment(applicationId, nameof(applicationId))}"));
+        ArgumentNullException.ThrowIfNull(scope);
+        return scope.ApplicationProjectRelativePath[..scope.ApplicationProjectRelativePath.LastIndexOf('/')];
     }
 
     public static string GetReleasesPath(ProjectApplicationWorkspaceScope scope)
@@ -130,7 +129,7 @@ internal static class ProjectReleaseArtifactPath
         var readable = builder.ToString().Trim('.', '-', '_');
         if (string.IsNullOrEmpty(readable))
         {
-            readable = "resource";
+            readable = "release";
         }
 
         if (readable.Length > 64)
@@ -140,7 +139,6 @@ internal static class ProjectReleaseArtifactPath
 
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
             .ToLowerInvariant()[..12];
-
         return $"{readable}--{hash}";
     }
 

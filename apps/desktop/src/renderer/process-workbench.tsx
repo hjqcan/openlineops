@@ -2103,9 +2103,7 @@ function RuntimeLaunchPanel({
           <strong>{lastProjectSnapshot.snapshotId}</strong>
           <span>{lastProjectSnapshot.processVersionId}</span>
           <small>{lastProjectSnapshot.configurationSnapshotId}</small>
-          {lastProjectSnapshot.releaseContentSha256 ? (
-            <small>Release {lastProjectSnapshot.releaseContentSha256.slice(0, 12)}</small>
-          ) : null}
+          <small>Release {lastProjectSnapshot.releaseContentSha256.slice(0, 12)}</small>
         </div>
       ) : null}
       {lastStartedSession ? (
@@ -2645,10 +2643,6 @@ function normalizeBlocklyWorkspaceJson(value: string | null, inputPayload: strin
 
   try {
     const parsed = JSON.parse(value) as unknown;
-    if (isLegacyBlocklyResultState(parsed)) {
-      return createDefaultBlocklyWorkspaceJson(getLegacyInputPayload(parsed) ?? inputPayload);
-    }
-
     return JSON.stringify(parsed);
   } catch {
     return createDefaultBlocklyWorkspaceJson(inputPayload);
@@ -2682,7 +2676,6 @@ function getWorkspaceInputPayload(workspaceJson: string): string {
     };
     const resultBlock = findWorkspaceBlock(parsed.blocks?.blocks ?? [], openLineOpsResultBlockType);
     return getTextField(resultBlock, 'INPUT_PAYLOAD')
-      ?? getTextField(resultBlock, 'inputPayload')
       ?? defaultInputPayload('PythonScript');
   } catch {
     return defaultInputPayload('PythonScript');
@@ -2792,25 +2785,6 @@ interface WorkspaceBlockState {
   next?: {
     block?: WorkspaceBlockState;
   };
-}
-
-function isLegacyBlocklyResultState(value: unknown): value is {
-  blocks: {
-    blocks: WorkspaceBlockState[];
-  };
-} {
-  const blocks = (value as { blocks?: { blocks?: WorkspaceBlockState[] } }).blocks?.blocks;
-  const firstBlock = blocks?.[0];
-  return firstBlock?.type === openLineOpsResultBlockType
-    && getTextField(firstBlock, 'inputPayload') !== null;
-}
-
-function getLegacyInputPayload(value: {
-  blocks: {
-    blocks: WorkspaceBlockState[];
-  };
-}): string | null {
-  return getTextField(value.blocks.blocks[0], 'inputPayload');
 }
 
 function findWorkspaceBlock(

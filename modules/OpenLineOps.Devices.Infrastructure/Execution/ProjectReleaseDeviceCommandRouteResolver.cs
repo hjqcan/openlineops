@@ -55,13 +55,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         var snapshot = project.Snapshots.SingleOrDefault(candidate =>
             string.Equals(candidate.Id.Value, request.ProjectSnapshotId, StringComparison.Ordinal)
             && string.Equals(candidate.ApplicationId.Value, request.ApplicationId, StringComparison.Ordinal));
-        if (snapshot?.ReleaseContentSha256 is null)
+        if (snapshot is null)
         {
             return null;
         }
 
-        if (project.Applications.All(candidate =>
-                !string.Equals(candidate.Id.Value, request.ApplicationId, StringComparison.Ordinal)))
+        var application = project.Applications.SingleOrDefault(candidate =>
+            string.Equals(candidate.Id.Value, request.ApplicationId, StringComparison.Ordinal));
+        if (application is null)
         {
             return null;
         }
@@ -69,7 +70,8 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         var scope = new ProjectApplicationWorkspaceScope(
             project.Id.Value,
             request.ApplicationId!,
-            project.ProjectPath);
+            project.ProjectPath,
+            application.ProjectFilePath);
 
         var release = await _releaseStore
             .OpenAsync(scope, snapshot.Id.Value, snapshot.ReleaseContentSha256, cancellationToken)
@@ -98,7 +100,8 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         var releaseScope = new ProjectApplicationWorkspaceScope(
             release.ProjectId,
             release.ApplicationId,
-            release.SourceRootPath);
+            release.SourceRootPath,
+            release.ApplicationProjectRelativePath);
         var projects = await _configurationRepository
             .ListProjectsAsync(releaseScope, cancellationToken)
             .ConfigureAwait(false);

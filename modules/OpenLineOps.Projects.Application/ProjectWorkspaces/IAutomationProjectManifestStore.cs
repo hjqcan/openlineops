@@ -13,4 +13,9 @@ public interface IAutomationProjectManifestStore
     ValueTask<AutomationProjectManifest?> LoadAsync(
         string projectTarget,
         CancellationToken cancellationToken = default);
+
+    ValueTask<ProjectApplicationManifest?> LoadApplicationProjectAsync(
+        string projectRootPath,
+        string applicationProjectTarget,
+        CancellationToken cancellationToken = default);
 }

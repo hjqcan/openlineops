@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -179,6 +180,19 @@ async function main() {
   if (layoutResponse.status !== 200 || editedElement?.x !== 160) {
     throw new Error(`Edited layout geometry was not persisted: ${layoutResponse.text}`);
   }
+
+  const portableTarget = await copyAndImportPortableApplication(
+    smokeProjectPath,
+    openedProject,
+    openedApplication);
+  await openProjectByPathFromWorkbench(
+    portableTarget.projectPath,
+    portableTarget.projectId,
+    openedApplication.applicationId);
+  await openProjectByPathFromWorkbench(
+    smokeProjectPath,
+    openedProject.projectId,
+    openedApplication.applicationId);
 
   const secondaryApplicationId = `${openedApplication.applicationId}-secondary`;
   await setInputByTestId('new-application-id', secondaryApplicationId);
@@ -601,6 +615,134 @@ async function getAutomationProjectByPath(projectPath) {
   }
 
   return detailResponse.body;
+}
+
+async function copyAndImportPortableApplication(sourceProjectPath, sourceProject, sourceApplication) {
+  if (!sourceApplication.projectFilePath || !sourceApplication.topologyId) {
+    throw new Error(
+      `Portable Application source is incomplete: ${JSON.stringify(sourceApplication)}`);
+  }
+
+  const targetProjectPath = `${sourceProjectPath}-portable-target`;
+  const targetProjectId = `${sourceProject.projectId}-portable-target`;
+  await expectApiStatus(
+    '/api/automation-project-workspaces',
+    {
+      method: 'POST',
+      body: {
+        projectId: targetProjectId,
+        displayName: 'Portable Application Target',
+        projectPath: targetProjectPath,
+        defaultApplicationId: null,
+        defaultApplicationName: null
+      }
+    },
+    201,
+    'create portable Application target project');
+
+  const sourceApplicationFile = path.join(
+    sourceProjectPath,
+    ...sourceApplication.projectFilePath.split('/'));
+  const sourceApplicationRoot = path.dirname(sourceApplicationFile);
+  const copiedApplicationRoot = path.join(
+    targetProjectPath,
+    'applications',
+    'copied-primary-application');
+  await fs.mkdir(path.dirname(copiedApplicationRoot), { recursive: true });
+  await fs.cp(sourceApplicationRoot, copiedApplicationRoot, { recursive: true });
+  const copiedApplicationFile = path.join(
+    copiedApplicationRoot,
+    path.basename(sourceApplicationFile));
+  const sourceFingerprint = await fingerprintDirectory(sourceApplicationRoot);
+  const copiedApplicationWriteTime = (await fs.stat(
+    copiedApplicationFile,
+    { bigint: true })).mtimeNs;
+
+  const importResponse = await expectApiStatus(
+    `/api/automation-projects/${encodeURIComponent(targetProjectId)}/applications/import`,
+    {
+      method: 'POST',
+      body: { projectFilePath: copiedApplicationFile }
+    },
+    200,
+    'import copied portable Application');
+  const importedApplication = importResponse.body?.project?.applications?.find(
+    application => application.applicationId === sourceApplication.applicationId);
+  if (!importedApplication
+      || importedApplication.projectFilePath
+        !== `applications/copied-primary-application/${path.basename(sourceApplicationFile)}`) {
+    throw new Error(`Copied Application was not linked by its .oloapp: ${importResponse.text}`);
+  }
+
+  const copiedFingerprint = await fingerprintDirectory(copiedApplicationRoot);
+  if (copiedFingerprint !== sourceFingerprint) {
+    throw new Error('Import rewrote files inside the copied portable Application directory.');
+  }
+  const importedApplicationWriteTime = (await fs.stat(
+    copiedApplicationFile,
+    { bigint: true })).mtimeNs;
+  if (importedApplicationWriteTime !== copiedApplicationWriteTime) {
+    throw new Error('Import replaced an unchanged copied .oloapp file.');
+  }
+
+  const topologyResponse = await apiRequest(
+    `/api/automation-projects/${encodeURIComponent(targetProjectId)}`
+    + `/applications/${encodeURIComponent(sourceApplication.applicationId)}`
+    + `/topologies/${encodeURIComponent(sourceApplication.topologyId)}`);
+  if (topologyResponse.status !== 200
+      || topologyResponse.body?.topologyId !== sourceApplication.topologyId) {
+    throw new Error(`Copied Application topology cannot be restored: ${topologyResponse.text}`);
+  }
+
+  await assertProjectFileLayout(targetProjectPath, 1);
+  return {
+    projectId: targetProjectId,
+    projectPath: targetProjectPath
+  };
+}
+
+async function openProjectByPathFromWorkbench(projectPath, projectId, applicationId) {
+  await clickByTestId('switch-project-workspace');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
+    15000,
+    'start center to render for portable Application project switch');
+  await clickByTestId('start-open-project-by-path');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"open-project-path-input\\"]")))()',
+    15000,
+    'open project path dialog to render for portable Application project switch');
+  await setInputByTestId('open-project-path-input', projectPath);
+  await clickByTestId('open-project-workspace');
+  await waitForExpression(
+    `(() => document.body.innerText.includes(${JSON.stringify(`Project opened ${projectId}`)})`
+    + ` && document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(applicationId)}`
+    + ' && Boolean(document.querySelector("[data-testid=\\"new-application-id\\"]")))()',
+    30000,
+    `portable Application project ${projectId} to open`);
+}
+
+async function fingerprintDirectory(directory) {
+  const hash = createHash('sha256');
+
+  async function append(current, relativeRoot) {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativePath = path.posix.join(relativeRoot, entry.name);
+      const fullPath = path.join(current, entry.name);
+      hash.update(relativePath);
+      hash.update(entry.isDirectory() ? 'directory' : 'file');
+      if (entry.isDirectory()) {
+        await append(fullPath, relativePath);
+      } else {
+        hash.update(await fs.readFile(fullPath));
+      }
+    }
+  }
+
+  await append(directory, '');
+  return hash.digest('hex');
 }
 
 async function createPublishedEngineeringSnapshot(definition) {

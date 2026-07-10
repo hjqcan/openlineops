@@ -241,7 +241,6 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
         var document = new ProjectEngineeringConfigurationDocument<TSnapshot>(
             ProjectEngineeringConfigurationDocumentSchema.CurrentSchema,
             ProjectEngineeringConfigurationDocumentSchema.CurrentSchemaVersion,
-            scope.ProjectId,
             scope.ApplicationId,
             resourceKind,
             resourceId,
@@ -366,12 +365,11 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
             throw InvalidResource(path, $"schema version {document.SchemaVersion} is not supported");
         }
 
-        if (!string.Equals(document.ProjectId, scope.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
+        if (!string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
         {
             throw InvalidResource(
                 path,
-                $"scope is {document.ProjectId}/{document.ApplicationId}, expected {scope.ProjectId}/{scope.ApplicationId}");
+                $"application is {document.ApplicationId}, expected {scope.ApplicationId}");
         }
 
         if (!string.Equals(document.ResourceKind, expectedResourceKind, StringComparison.Ordinal))

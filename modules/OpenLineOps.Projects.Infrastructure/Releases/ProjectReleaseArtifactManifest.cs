@@ -10,13 +10,14 @@ internal sealed record ProjectReleaseArtifactManifest(
     string ApplicationId,
     DateTimeOffset PublishedAtUtc,
     string SourceApplicationRelativePath,
+    string ApplicationProjectRelativePath,
     ProjectReleaseSourceMetadata Metadata,
     ProjectReleaseSourceFile[] Files,
     string ContentSha256)
 {
     public const string CurrentSchema = "openlineops.project-release-artifact";
 
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     public const string FileName = "release.json";
 }

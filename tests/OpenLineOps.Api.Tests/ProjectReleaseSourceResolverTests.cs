@@ -26,7 +26,8 @@ public sealed class ProjectReleaseSourceResolverTests
             new ProjectApplicationWorkspaceScope(
                 "project.main",
                 "application.main",
-                Path.Combine(Path.GetTempPath(), "openlineops-release-source-error")),
+                Path.Combine(Path.GetTempPath(), "openlineops-release-source-error"),
+                "applications/application.main/application.main.oloapp"),
             "topology.main",
             "process.main",
             "configuration.main");

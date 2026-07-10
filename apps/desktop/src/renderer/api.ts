@@ -8,6 +8,7 @@ import type {
   AddEquipmentNodeRequest,
   AddSiteLayoutElementRequest,
   AddProjectApplicationRequest,
+  ImportProjectApplicationRequest,
   AddSlotDefinitionRequest,
   AddSlotGroupRequest,
   AutomationProjectSummaryResponse,
@@ -122,6 +123,19 @@ export async function addProjectApplication(
       method: 'POST',
       body: request
     });
+}
+
+export async function importProjectApplication(
+  projectId: string,
+  request: ImportProjectApplicationRequest
+): Promise<ApiResponse<AutomationProjectWorkspaceResponse>> {
+  return desktop.apiRequest<AutomationProjectWorkspaceResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/applications/import`,
+    {
+      method: 'POST',
+      body: request
+    }
+  );
 }
 
 export async function linkProjectTopology(

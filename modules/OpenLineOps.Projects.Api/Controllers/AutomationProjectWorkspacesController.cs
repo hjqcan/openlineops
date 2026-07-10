@@ -99,6 +99,36 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             : Ok(ToResponse(result.Value));
     }
 
+    [HttpPost("~/" + OpenLineOpsApiRoutes.AutomationProjects + "/{projectId}/applications/import")]
+    [ProducesResponseType<AutomationProjectWorkspaceResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<AutomationProjectWorkspaceResponse>> ImportApplicationAsync(
+        string projectId,
+        ImportProjectApplicationRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.ProjectFilePath))
+        {
+            return BadRequest(new ValidationProblemDetails(new Dictionary<string, string[]>
+            {
+                [nameof(request.ProjectFilePath)] = ["Value is required."]
+            }));
+        }
+
+        var result = await _workspaceService
+            .ImportApplicationAsync(
+                projectId,
+                new ImportAutomationProjectApplicationRequest(request.ProjectFilePath),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(ToResponse(result.Value));
+    }
+
     private static AutomationProjectWorkspaceResponse ToResponse(AutomationProjectWorkspaceDetails workspace)
     {
         return new AutomationProjectWorkspaceResponse(

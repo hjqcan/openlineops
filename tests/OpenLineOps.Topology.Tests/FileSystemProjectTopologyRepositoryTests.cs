@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
@@ -24,11 +26,13 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
         var applicationA = new ProjectApplicationWorkspaceScope(
             "project.shared",
             "application.a",
-            _projectDirectory);
+            _projectDirectory,
+            "applications/application.a/application.a.oloapp");
         var applicationB = new ProjectApplicationWorkspaceScope(
             "project.shared",
             "application.b",
-            _projectDirectory);
+            _projectDirectory,
+            "applications/application.b/application.b.oloapp");
         var topologyId = new AutomationTopologyId("topology.main");
         var layoutId = new SiteLayoutId("layout.main");
 
@@ -128,6 +132,140 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             Path.GetDirectoryName(layoutPath));
         Assert.StartsWith("topology-topology.custom-root--", Path.GetFileName(topologyPath));
         Assert.StartsWith("layout-layout.custom-root--", Path.GetFileName(layoutPath));
+    }
+
+    [Fact]
+    public async Task CompleteApplicationFolderCanBeCopiedBetweenProjectsWithoutRewritingTopologyResources()
+    {
+        const string applicationId = "application.portable";
+        var sourceScope = new ProjectApplicationWorkspaceScope(
+            "project-a",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-a"),
+            "applications/Authoring Cell/application.oloapp");
+        var targetScope = new ProjectApplicationWorkspaceScope(
+            "project-b",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-b"),
+            "applications/Portable Cell/application.oloapp");
+        var topologyId = new AutomationTopologyId("topology.portable");
+        var layoutId = new SiteLayoutId("layout.portable");
+
+        Directory.CreateDirectory(sourceScope.ApplicationRootPath);
+        await File.WriteAllBytesAsync(sourceScope.ApplicationProjectFilePath, [0x4f, 0x4c, 0x4f]);
+
+        await new FileSystemProjectAutomationTopologyRepository().SaveAsync(
+            sourceScope,
+            CreateCompleteTopology(topologyId, "Portable Topology"));
+        await new FileSystemProjectSiteLayoutRepository().SaveAsync(
+            sourceScope,
+            CreateCompleteLayout(layoutId, topologyId, x: 360));
+
+        var topologyPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(sourceScope.ApplicationRootPath, "topology"),
+            "topology-*.json"));
+        var layoutPath = Assert.Single(Directory.GetFiles(
+            Path.Combine(sourceScope.ApplicationRootPath, "layouts"),
+            "layout-*.json"));
+        AssertPortableV2Document(topologyPath, applicationId);
+        AssertPortableV2Document(layoutPath, applicationId);
+
+        CopyDirectoryByteForByte(sourceScope.ApplicationRootPath, targetScope.ApplicationRootPath);
+        AssertApplicationFoldersHaveEqualBytes(sourceScope.ApplicationRootPath, targetScope.ApplicationRootPath);
+
+        var restoredTopology = await new FileSystemProjectAutomationTopologyRepository()
+            .GetByIdAsync(targetScope, topologyId);
+        var restoredLayout = await new FileSystemProjectSiteLayoutRepository()
+            .GetByIdAsync(targetScope, layoutId);
+
+        Assert.NotNull(restoredTopology);
+        Assert.Equal("Portable Topology", restoredTopology.DisplayName);
+        Assert.Equal(3, restoredTopology.Nodes.Count);
+        Assert.Single(restoredTopology.Modules);
+        Assert.Single(restoredTopology.DriverBindings);
+        Assert.Single(restoredTopology.Slots);
+        Assert.NotNull(restoredLayout);
+        Assert.Equal(2, restoredLayout.Elements.Count);
+        Assert.Equal(360, restoredLayout.Elements.Single(element => element.Id.Value == "element.station").X);
+    }
+
+    [Fact]
+    public async Task PortableResourcesStillRejectADifferentApplicationIdentity()
+    {
+        var writerScope = new ProjectApplicationWorkspaceScope(
+            "project-a",
+            "application-a",
+            _projectDirectory,
+            "applications/Shared Cell/application.oloapp");
+        var wrongApplicationScope = new ProjectApplicationWorkspaceScope(
+            "project-b",
+            "application-b",
+            _projectDirectory,
+            "applications/Shared Cell/application.oloapp");
+        var topologyId = new AutomationTopologyId("topology.identity");
+        var layoutId = new SiteLayoutId("layout.identity");
+
+        await new FileSystemProjectAutomationTopologyRepository().SaveAsync(
+            writerScope,
+            CreateCompleteTopology(topologyId, "Identity Topology"));
+        await new FileSystemProjectSiteLayoutRepository().SaveAsync(
+            writerScope,
+            CreateCompleteLayout(layoutId, topologyId, x: 600));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await new FileSystemProjectAutomationTopologyRepository()
+                .GetByIdAsync(wrongApplicationScope, topologyId));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await new FileSystemProjectSiteLayoutRepository()
+                .GetByIdAsync(wrongApplicationScope, layoutId));
+    }
+
+    [Fact]
+    public async Task ObsoleteTopologyFormatIsRejected()
+    {
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project-current-only",
+            "application-current-only",
+            _projectDirectory,
+            "applications/current-only/current-only.oloapp");
+        var topologyId = new AutomationTopologyId("topology.current-only");
+        var repository = new FileSystemProjectAutomationTopologyRepository();
+        await repository.SaveAsync(scope, CreateCompleteTopology(topologyId, "Current Only"));
+
+        var path = Assert.Single(Directory.GetFiles(
+            scope.ApplicationRootPath,
+            "topology-*.json",
+            SearchOption.AllDirectories));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["formatVersion"] = 1;
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, topologyId));
+    }
+
+    [Fact]
+    public async Task RemovedHostProjectIdFieldIsRejectedFromTopologyResource()
+    {
+        var scope = new ProjectApplicationWorkspaceScope(
+            "project-strict",
+            "application-strict",
+            _projectDirectory,
+            "applications/strict/strict.oloapp");
+        var topologyId = new AutomationTopologyId("topology.strict");
+        var repository = new FileSystemProjectAutomationTopologyRepository();
+        await repository.SaveAsync(scope, CreateCompleteTopology(topologyId, "Strict"));
+
+        var path = Assert.Single(Directory.GetFiles(
+            scope.ApplicationRootPath,
+            "topology-*.json",
+            SearchOption.AllDirectories));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["projectId"] = "removed-host-project";
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, topologyId));
     }
 
     public void Dispose()
@@ -231,5 +369,69 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             "L1")).Succeeded);
 
         return layout;
+    }
+
+    private static void AssertPortableV2Document(string path, string applicationId)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var root = document.RootElement;
+
+        Assert.Equal(2, root.GetProperty("formatVersion").GetInt32());
+        Assert.Equal(applicationId, root.GetProperty("applicationId").GetString());
+        Assert.False(root.TryGetProperty("projectId", out _));
+    }
+
+    private static void CopyDirectoryByteForByte(string sourceDirectory, string targetDirectory)
+    {
+        foreach (var directory in Directory.EnumerateDirectories(
+                     sourceDirectory,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                targetDirectory,
+                Path.GetRelativePath(sourceDirectory, directory)));
+        }
+
+        Directory.CreateDirectory(targetDirectory);
+        foreach (var sourcePath in Directory.EnumerateFiles(
+                     sourceDirectory,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            var targetPath = Path.Combine(
+                targetDirectory,
+                Path.GetRelativePath(sourceDirectory, sourcePath));
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            File.Copy(sourcePath, targetPath);
+        }
+    }
+
+    private static void AssertApplicationFoldersHaveEqualBytes(
+        string sourceDirectory,
+        string targetDirectory)
+    {
+        var relativePaths = Directory.EnumerateFiles(
+                sourceDirectory,
+                "*",
+                SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(sourceDirectory, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(relativePaths);
+        Assert.Equal(
+            relativePaths,
+            Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(targetDirectory, path))
+                .Order(StringComparer.Ordinal)
+                .ToArray());
+
+        foreach (var relativePath in relativePaths)
+        {
+            Assert.Equal(
+                File.ReadAllBytes(Path.Combine(sourceDirectory, relativePath)),
+                File.ReadAllBytes(Path.Combine(targetDirectory, relativePath)));
+        }
     }
 }

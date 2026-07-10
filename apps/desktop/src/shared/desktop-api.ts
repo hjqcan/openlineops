@@ -54,5 +54,6 @@ export interface OpenLineOpsDesktopApi {
   stopBackend(): Promise<BackendStatus>;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
+  selectApplicationProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

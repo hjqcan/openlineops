@@ -144,8 +144,29 @@ ipcMain.handle('desktop:select-project-file', async (
     buttonLabel: options?.buttonLabel ?? 'Open Project',
     properties: ['openFile'] as Array<'openFile'>,
     filters: [
-      { name: 'OpenLineOps Projects', extensions: ['oloproj'] },
-      { name: 'Legacy OpenLineOps Projects', extensions: ['json'] }
+      { name: 'OpenLineOps Projects', extensions: ['oloproj'] }
+    ]
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+
+  return {
+    canceled: result.canceled,
+    path: result.filePaths[0] ?? null
+  };
+});
+ipcMain.handle('desktop:select-application-project-file', async (
+  _event,
+  options?: SelectProjectFileOptions
+): Promise<SelectDirectoryResult> => {
+  const dialogOptions = {
+    title: options?.title ?? 'Add existing OpenLineOps Application',
+    defaultPath: options?.defaultPath,
+    buttonLabel: options?.buttonLabel ?? 'Add Application',
+    properties: ['openFile'] as Array<'openFile'>,
+    filters: [
+      { name: 'OpenLineOps Applications', extensions: ['oloapp'] }
     ]
   };
   const result = mainWindow

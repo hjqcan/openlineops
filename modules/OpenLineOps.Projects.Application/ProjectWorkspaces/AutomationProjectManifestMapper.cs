@@ -79,8 +79,7 @@ public static class AutomationProjectManifestMapper
                 .Select(processDefinitionId => processDefinitionId.Value)
                 .Order(StringComparer.Ordinal)
                 .ToArray(),
-            application.ProjectFilePath
-                ?? AutomationProjectFileConvention.GetApplicationProjectRelativePath(application.Id.Value));
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshotManifest ToManifest(PublishedProjectSnapshot snapshot)
@@ -126,10 +125,9 @@ public static class AutomationProjectManifestMapper
             string.IsNullOrWhiteSpace(application.TopologyId)
                 ? null
                 : new AutomationTopologyId(application.TopologyId),
-            (application.ProcessDefinitionIds ?? [])
+            application.ProcessDefinitionIds
                 .Select(processDefinitionId => new ProcessDefinitionId(processDefinitionId)),
-            application.ProjectFilePath
-                ?? AutomationProjectFileConvention.GetApplicationProjectRelativePath(application.ApplicationId));
+            application.ProjectFilePath);
     }
 
     private static PublishedProjectSnapshot ToSnapshot(
@@ -148,13 +146,13 @@ public static class AutomationProjectManifestMapper
             projectId,
             new ProjectApplicationId(snapshot.ApplicationId),
             new AutomationTopologyId(snapshot.TopologyId),
-            snapshot.LayoutIds ?? [],
+            snapshot.LayoutIds,
             new ProcessDefinitionId(snapshot.ProcessDefinitionId),
             new ProcessVersionId(snapshot.ProcessVersionId),
             new ConfigurationSnapshotId(snapshot.ConfigurationSnapshotId),
-            (snapshot.CapabilityBindings ?? []).Select(ToCapabilityBinding),
-            (snapshot.TargetReferences ?? []).Select(ToTargetReference),
-            snapshot.BlockVersionIds ?? [],
+            snapshot.CapabilityBindings.Select(ToCapabilityBinding),
+            snapshot.TargetReferences.Select(ToTargetReference),
+            snapshot.BlockVersionIds,
             snapshot.ReleaseManifestPath,
             snapshot.ReleaseContentSha256,
             snapshot.PublishedAtUtc);

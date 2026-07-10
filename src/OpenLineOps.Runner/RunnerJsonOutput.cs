@@ -83,7 +83,7 @@ public sealed record RunnerJsonOutput(
             snapshot.ProjectId,
             snapshot.ApplicationId,
             snapshot.SnapshotId,
-            snapshot.ReleaseContentSha256!);
+            snapshot.ReleaseContentSha256);
     }
 
     private static RunnerSessionOutput ToSession(StartedProcessRuntimeSessionDetails session)

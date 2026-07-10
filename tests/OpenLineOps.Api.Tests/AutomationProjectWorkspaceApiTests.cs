@@ -111,6 +111,76 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     }
 
     [Fact]
+    public async Task ExistingApplicationProjectInsideWorkspaceCanBeImported()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-import-{suffix}";
+        var applicationId = $"app-import-{suffix}";
+        var projectDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-api-application-import-tests",
+            suffix);
+
+        try
+        {
+            using var createResponse = await _client.PostAsJsonAsync(
+                "/api/automation-project-workspaces",
+                new
+                {
+                    projectId,
+                    displayName = "Import Target",
+                    projectPath = projectDirectory,
+                    defaultApplicationId = (string?)null,
+                    defaultApplicationName = (string?)null
+                });
+            Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+
+            var applicationDirectory = Path.Combine(
+                projectDirectory,
+                "applications",
+                "copied-app");
+            Directory.CreateDirectory(applicationDirectory);
+            var applicationFilePath = Path.Combine(applicationDirectory, "copied.oloapp");
+            await File.WriteAllTextAsync(
+                applicationFilePath,
+                $$"""
+                {
+                  "schemaVersion": "openlineops.automation-application/v1",
+                  "formatVersion": 1,
+                  "kind": "OpenLineOps.AutomationApplication",
+                  "product": "OpenLineOps",
+                  "applicationId": "{{applicationId}}",
+                  "displayName": "Copied Application",
+                  "resourceLayoutVersion": 1,
+                  "topologyId": null,
+                  "processDefinitionIds": []
+                }
+                """);
+
+            using var importResponse = await _client.PostAsJsonAsync(
+                $"/api/automation-projects/{projectId}/applications/import",
+                new { projectFilePath = applicationFilePath });
+            using var importBody = await ReadJsonAsync(importResponse);
+
+            Assert.Equal(HttpStatusCode.OK, importResponse.StatusCode);
+            var application = importBody.RootElement
+                .GetProperty("project")
+                .GetProperty("applications")[0];
+            Assert.Equal(applicationId, application.GetProperty("applicationId").GetString());
+            Assert.Equal(
+                "applications/copied-app/copied.oloapp",
+                application.GetProperty("projectFilePath").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(projectDirectory))
+            {
+                Directory.Delete(projectDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task GlobalCompositionCannotBePublishedAsProjectRelease()
     {
         var suffix = Guid.NewGuid().ToString("N");
@@ -893,7 +963,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.True(File.Exists(manifestPath), $"Release manifest was not found at {manifestPath}.");
         using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(2, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(3, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
     }
 

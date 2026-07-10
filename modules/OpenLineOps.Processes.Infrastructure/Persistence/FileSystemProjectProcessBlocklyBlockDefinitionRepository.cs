@@ -110,7 +110,6 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
             var document = new ProjectProcessBlocklyBlockVersionDocument(
                 ProjectProcessBlocklyBlockVersionDocument.CurrentSchema,
                 ProjectProcessBlocklyBlockVersionDocument.CurrentSchemaVersion,
-                scope.ProjectId,
                 scope.ApplicationId,
                 normalizedBlockType,
                 version,
@@ -190,12 +189,11 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
             throw InvalidResource(versionPath, $"schema version {document.SchemaVersion} is not supported");
         }
 
-        if (!string.Equals(document.ProjectId, scope.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
+        if (!string.Equals(document.ApplicationId, scope.ApplicationId, StringComparison.Ordinal))
         {
             throw InvalidResource(
                 versionPath,
-                $"scope is {document.ProjectId}/{document.ApplicationId}, expected {scope.ProjectId}/{scope.ApplicationId}");
+                $"application is {document.ApplicationId}, expected {scope.ApplicationId}");
         }
 
         if (string.IsNullOrWhiteSpace(document.BlockType))

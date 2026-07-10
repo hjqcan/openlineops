@@ -50,14 +50,6 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(request);
 
-        if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath)
-            || string.IsNullOrWhiteSpace(snapshot.ReleaseContentSha256))
-        {
-            return Failure(
-                "Projects.ProjectSnapshotReleaseRequired",
-                $"Project snapshot {snapshot.SnapshotId} has no immutable release descriptor and cannot be executed.");
-        }
-
         try
         {
             // The live scope is used only to locate the immutable release directory.
@@ -97,7 +89,8 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
             var releaseScope = new ProjectApplicationWorkspaceScope(
                 snapshot.ProjectId,
                 snapshot.ApplicationId,
-                release.SourceRootPath);
+                release.SourceRootPath,
+                release.ApplicationProjectRelativePath);
             var processDefinitionId = new ProcessDefinitionId(snapshot.ProcessDefinitionId);
             var processDefinition = await _processRepository
                 .GetByIdAsync(releaseScope, processDefinitionId, cancellationToken)
@@ -306,7 +299,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
         PublishedProjectSnapshotDetails snapshot,
         OpenedProjectReleaseArtifact release)
     {
-        var declaredPath = snapshot.ReleaseManifestPath!;
+        var declaredPath = snapshot.ReleaseManifestPath;
         if (Path.IsPathRooted(declaredPath) || declaredPath.Contains('\\'))
         {
             return "release manifest path is not a canonical project-relative path";

@@ -12,9 +12,7 @@ public sealed record AutomationProjectManifest(
     ProjectApplicationManifest[] Applications,
     PublishedProjectSnapshotManifest[] Snapshots)
 {
-    public const int CurrentFormatVersion = 2;
-
-    public const int LegacyFormatVersion = 1;
+    public const int CurrentFormatVersion = 1;
 
     public const string ProductName = "OpenLineOps";
 }
@@ -24,7 +22,7 @@ public sealed record ProjectApplicationManifest(
     string DisplayName,
     string? TopologyId,
     string[] ProcessDefinitionIds,
-    string? ProjectFilePath = null);
+    string ProjectFilePath);
 
 public sealed record AutomationProjectFile(
     string SchemaVersion,
@@ -39,7 +37,7 @@ public sealed record AutomationProjectFile(
     AutomationProjectApplicationReference[] Applications,
     AutomationProjectSnapshotFile[] Snapshots)
 {
-    public const string CurrentSchemaVersion = "openlineops.automation-project/v2";
+    public const string CurrentSchemaVersion = "openlineops.automation-project/v1";
 
     public const string KindName = "OpenLineOps.AutomationProject";
 }
@@ -60,8 +58,8 @@ public sealed record AutomationProjectSnapshotFile(
     SnapshotCapabilityBindingManifest[] CapabilityBindings,
     ProjectTargetReferenceManifest[] TargetReferences,
     string[] BlockVersionIds,
-    string? ReleaseManifestPath,
-    string? ReleaseContentSha256);
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record AutomationApplicationProjectFile(
     string SchemaVersion,
@@ -96,8 +94,8 @@ public sealed record PublishedProjectSnapshotManifest(
     SnapshotCapabilityBindingManifest[] CapabilityBindings,
     ProjectTargetReferenceManifest[] TargetReferences,
     string[] BlockVersionIds,
-    string? ReleaseManifestPath,
-    string? ReleaseContentSha256);
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingManifest(
     string CapabilityId,

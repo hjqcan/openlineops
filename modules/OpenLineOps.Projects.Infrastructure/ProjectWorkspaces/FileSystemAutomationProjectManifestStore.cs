@@ -36,7 +36,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         if (File.Exists(fullPath))
         {
             throw new InvalidDataException(
-                $"Project target '{fullPath}' must be a directory, {AutomationProjectFileConvention.ProjectFileExtension}, or {AutomationProjectFileConvention.LegacyProjectFileName} file.");
+                $"Project target '{fullPath}' must be a directory or a {AutomationProjectFileConvention.ProjectFileExtension} file.");
         }
 
         return fullPath;
@@ -44,9 +44,23 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
 
     public string GetManifestPath(string projectTarget, string? projectId = null)
     {
+        if (string.IsNullOrWhiteSpace(projectTarget))
+        {
+            throw new ArgumentException("Project target cannot be empty.", nameof(projectTarget));
+        }
+
         var fullTarget = Path.GetFullPath(projectTarget.Trim());
         if (IsProjectFilePath(fullTarget))
         {
+            var explicitRoot = Path.GetDirectoryName(fullTarget)
+                ?? throw new InvalidDataException($"Project file '{fullTarget}' has no parent directory.");
+            var explicitRootFiles = FindProjectFiles(explicitRoot);
+            if (explicitRootFiles.Length > 1)
+            {
+                throw new InvalidDataException(
+                    $"Project directory '{explicitRoot}' contains multiple {AutomationProjectFileConvention.ProjectFileExtension} files: {string.Join(", ", explicitRootFiles.Select(Path.GetFileName))}.");
+            }
+
             return fullTarget;
         }
 
@@ -61,12 +75,6 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         if (projectFiles.Length == 1)
         {
             return projectFiles[0];
-        }
-
-        var legacyPath = Path.Combine(projectRoot, AutomationProjectFileConvention.LegacyProjectFileName);
-        if (File.Exists(legacyPath))
-        {
-            return legacyPath;
         }
 
         var fileName = string.IsNullOrWhiteSpace(projectId)
@@ -104,8 +112,8 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             cancellationToken.ThrowIfCancellationRequested();
             var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
                 projectRoot,
-                application.ProjectFilePath!);
-            EnsureProjectPathHasNoReparsePoints(projectRoot, application.ProjectFilePath!);
+                application.ProjectFilePath);
+            EnsureProjectPathHasNoReparsePoints(projectRoot, application.ProjectFilePath);
             CreateApplicationDirectories(Path.GetDirectoryName(applicationFilePath)!);
 
             var applicationFile = new AutomationApplicationProjectFile(
@@ -137,7 +145,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 .OrderBy(application => application.ApplicationId, StringComparer.Ordinal)
                 .Select(application => new AutomationProjectApplicationReference(
                     application.ApplicationId,
-                    application.ProjectFilePath!))
+                    application.ProjectFilePath))
                 .ToArray(),
             normalized.Snapshots
                 .OrderBy(snapshot => snapshot.PublishedAtUtc)
@@ -164,12 +172,42 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
 
         EnsureDirectoryIsNotReparsePoint(projectRoot, "Project root");
-        return string.Equals(
-            Path.GetFileName(projectFilePath),
-            AutomationProjectFileConvention.LegacyProjectFileName,
-            StringComparison.OrdinalIgnoreCase)
-            ? await LoadLegacyAsync(projectRoot, projectFilePath, cancellationToken).ConfigureAwait(false)
-            : await LoadCurrentAsync(projectRoot, projectFilePath, cancellationToken).ConfigureAwait(false);
+        return await LoadCurrentAsync(projectRoot, projectFilePath, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ProjectApplicationManifest?> LoadApplicationProjectAsync(
+        string projectRootPath,
+        string applicationProjectTarget,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var projectRoot = GetProjectRootPath(projectRootPath);
+        var relativePath = GetApplicationProjectRelativePath(projectRoot, applicationProjectTarget);
+        AutomationProjectFileConvention.ValidateApplicationProjectRelativePath(relativePath);
+        EnsureProjectPathHasNoReparsePoints(projectRoot, relativePath);
+        var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
+            projectRoot,
+            relativePath);
+        if (!File.Exists(applicationFilePath))
+        {
+            return null;
+        }
+
+        var applicationFile = await ReadAsync<AutomationApplicationProjectFile>(
+                applicationFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var reference = new AutomationProjectApplicationReference(
+            applicationFile.ApplicationId,
+            relativePath);
+        ValidateApplicationFile(reference, applicationFile, applicationFilePath);
+
+        return new ProjectApplicationManifest(
+            applicationFile.ApplicationId,
+            applicationFile.DisplayName,
+            applicationFile.TopologyId,
+            NormalizeStrings(applicationFile.ProcessDefinitionIds),
+            relativePath);
     }
 
     private static async ValueTask<AutomationProjectManifest> LoadCurrentAsync(
@@ -181,7 +219,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             .ConfigureAwait(false);
         ValidateProjectFile(projectFile, projectFilePath);
 
-        var references = projectFile.Applications ?? [];
+        var references = projectFile.Applications;
         EnsureUnique(
             references.Select(reference => reference.ApplicationId),
             "Application ids",
@@ -209,7 +247,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                     applicationFilePath,
                     cancellationToken)
                 .ConfigureAwait(false);
-            ValidateApplicationFile(projectFile, reference, applicationFile, applicationFilePath);
+            ValidateApplicationFile(reference, applicationFile, applicationFilePath);
             applications.Add(new ProjectApplicationManifest(
                 applicationFile.ApplicationId,
                 applicationFile.DisplayName,
@@ -218,7 +256,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 reference.ProjectFile));
         }
 
-        var snapshots = (projectFile.Snapshots ?? [])
+        var snapshots = projectFile.Snapshots
             .Select(snapshot => FromProjectFileSnapshot(snapshot, projectFile.ProjectId))
             .ToArray();
 
@@ -233,43 +271,6 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             projectFile.ActiveSnapshotId,
             applications.ToArray(),
             snapshots);
-    }
-
-    private static async ValueTask<AutomationProjectManifest> LoadLegacyAsync(
-        string projectRoot,
-        string projectFilePath,
-        CancellationToken cancellationToken)
-    {
-        var legacy = await ReadAsync<LegacyAutomationProjectManifest>(projectFilePath, cancellationToken)
-            .ConfigureAwait(false);
-        if (legacy.FormatVersion != AutomationProjectManifest.LegacyFormatVersion
-            || !string.Equals(legacy.Product, AutomationProjectManifest.ProductName, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Legacy project manifest '{projectFilePath}' has an unsupported format or product.");
-        }
-
-        var applications = (legacy.Applications ?? [])
-            .Select(application => new ProjectApplicationManifest(
-                application.ApplicationId,
-                application.DisplayName,
-                application.TopologyId,
-                NormalizeStrings(application.ProcessDefinitionIds),
-                AutomationProjectFileConvention.GetLegacyApplicationProjectRelativePath(
-                    application.ApplicationId)))
-            .ToArray();
-
-        return new AutomationProjectManifest(
-            AutomationProjectManifest.CurrentFormatVersion,
-            AutomationProjectManifest.ProductName,
-            legacy.ProjectId,
-            legacy.DisplayName,
-            projectRoot,
-            legacy.CreatedAtUtc,
-            legacy.UpdatedAtUtc,
-            legacy.ActiveSnapshotId,
-            applications,
-            legacy.Snapshots ?? []);
     }
 
     private static AutomationProjectManifest NormalizeForSave(
@@ -287,12 +288,23 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             throw new InvalidDataException($"Project product '{manifest.Product}' is not supported.");
         }
 
-        var applications = (manifest.Applications ?? [])
+        if (manifest.Applications is null || manifest.Snapshots is null)
+        {
+            throw new InvalidDataException(
+                "Project manifest must contain applications and snapshots collections.");
+        }
+
+        var applications = manifest.Applications
             .Select(application =>
             {
-                var projectFilePath = application.ProjectFilePath
-                    ?? AutomationProjectFileConvention.GetApplicationProjectRelativePath(application.ApplicationId);
+                var projectFilePath = application.ProjectFilePath;
                 AutomationProjectFileConvention.ValidateApplicationProjectRelativePath(projectFilePath);
+                if (application.ProcessDefinitionIds is null)
+                {
+                    throw new InvalidDataException(
+                        $"Application {application.ApplicationId} must contain process definition ids.");
+                }
+
                 return application with
                 {
                     ProjectFilePath = projectFilePath,
@@ -307,15 +319,40 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             "Application ids",
             StringComparer.OrdinalIgnoreCase);
         EnsureUnique(
-            applications.Select(application => application.ProjectFilePath!),
+            applications.Select(application => application.ProjectFilePath),
             "Application project paths",
             StringComparer.OrdinalIgnoreCase);
+
+        foreach (var snapshot in manifest.Snapshots)
+        {
+            if (snapshot is null)
+            {
+                throw new InvalidDataException("Project manifest contains an empty snapshot entry.");
+            }
+
+            if (!string.Equals(snapshot.ProjectId, manifest.ProjectId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Snapshot {snapshot.SnapshotId} references project {snapshot.ProjectId}, not {manifest.ProjectId}.");
+            }
+
+            if (snapshot.LayoutIds is null
+                || snapshot.CapabilityBindings is null
+                || snapshot.TargetReferences is null
+                || snapshot.BlockVersionIds is null)
+            {
+                throw new InvalidDataException(
+                    $"Snapshot {snapshot.SnapshotId} must contain all frozen resource collections.");
+            }
+
+            ValidateSnapshotFile(ToProjectFileSnapshot(snapshot), manifest.ProjectPath);
+        }
 
         return manifest with
         {
             ProjectPath = projectRoot,
             Applications = applications,
-            Snapshots = manifest.Snapshots ?? []
+            Snapshots = manifest.Snapshots
         };
     }
 
@@ -338,10 +375,26 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         {
             throw new InvalidDataException($"Project file '{projectFilePath}' has an invalid identity.");
         }
+
+        if (projectFile.Applications is null || projectFile.Snapshots is null)
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' must contain applications and snapshots collections.");
+        }
+
+        foreach (var snapshot in projectFile.Snapshots)
+        {
+            if (snapshot is null)
+            {
+                throw new InvalidDataException(
+                    $"Project file '{projectFilePath}' contains an empty snapshot entry.");
+            }
+
+            ValidateSnapshotFile(snapshot, projectFilePath);
+        }
     }
 
     private static void ValidateApplicationFile(
-        AutomationProjectFile projectFile,
         AutomationProjectApplicationReference reference,
         AutomationApplicationProjectFile applicationFile,
         string applicationFilePath)
@@ -371,10 +424,65 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 $"Application project file '{applicationFilePath}' has an empty display name.");
         }
 
+        if (applicationFile.ProcessDefinitionIds is null)
+        {
+            throw new InvalidDataException(
+                $"Application project file '{applicationFilePath}' must contain processDefinitionIds.");
+        }
+
         EnsureUnique(
-            applicationFile.ProcessDefinitionIds ?? [],
+            applicationFile.ProcessDefinitionIds,
             $"Application {applicationFile.ApplicationId} process definition ids",
             StringComparer.Ordinal);
+    }
+
+    private static void ValidateSnapshotFile(
+        AutomationProjectSnapshotFile snapshot,
+        string projectFilePath)
+    {
+        if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath))
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' snapshot '{snapshot.SnapshotId}' is missing releaseManifestPath.");
+        }
+
+        if (snapshot.LayoutIds is null
+            || snapshot.CapabilityBindings is null
+            || snapshot.TargetReferences is null
+            || snapshot.BlockVersionIds is null)
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' snapshot '{snapshot.SnapshotId}' must contain all frozen resource collections.");
+        }
+
+        ValidateCanonicalProjectRelativePath(snapshot.ReleaseManifestPath, "releaseManifestPath", projectFilePath);
+        if (string.IsNullOrWhiteSpace(snapshot.ReleaseContentSha256)
+            || snapshot.ReleaseContentSha256.Length != 64
+            || !snapshot.ReleaseContentSha256.All(Uri.IsHexDigit)
+            || !string.Equals(
+                snapshot.ReleaseContentSha256,
+                snapshot.ReleaseContentSha256.ToLowerInvariant(),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' snapshot '{snapshot.SnapshotId}' releaseContentSha256 must be a lowercase 64-character SHA-256 value.");
+        }
+    }
+
+    private static void ValidateCanonicalProjectRelativePath(
+        string relativePath,
+        string fieldName,
+        string projectFilePath)
+    {
+        if (Path.IsPathRooted(relativePath)
+            || relativePath.Contains('\\')
+            || !string.Equals(relativePath, relativePath.Trim(), StringComparison.Ordinal)
+            || relativePath.Split('/').Any(segment =>
+                string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' field '{fieldName}' must be a canonical forward-slash relative path.");
+        }
     }
 
     private static AutomationProjectSnapshotFile ToProjectFileSnapshot(
@@ -389,8 +497,8 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             snapshot.ProcessVersionId,
             snapshot.ConfigurationSnapshotId,
             snapshot.PublishedAtUtc,
-            snapshot.CapabilityBindings ?? [],
-            snapshot.TargetReferences ?? [],
+            snapshot.CapabilityBindings,
+            snapshot.TargetReferences,
             NormalizeStrings(snapshot.BlockVersionIds),
             snapshot.ReleaseManifestPath,
             snapshot.ReleaseContentSha256);
@@ -410,8 +518,8 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             snapshot.ProcessVersionId,
             snapshot.ConfigurationSnapshotId,
             snapshot.PublishedAtUtc,
-            snapshot.CapabilityBindings ?? [],
-            snapshot.TargetReferences ?? [],
+            snapshot.CapabilityBindings,
+            snapshot.TargetReferences,
             NormalizeStrings(snapshot.BlockVersionIds),
             snapshot.ReleaseManifestPath,
             snapshot.ReleaseContentSha256);
@@ -450,6 +558,16 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidDataException($"Project file '{path}' has no parent directory.");
         Directory.CreateDirectory(directory);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
+        if (File.Exists(path))
+        {
+            var existingBytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+            if (existingBytes.AsSpan().SequenceEqual(bytes))
+            {
+                return;
+            }
+        }
+
         var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
 
         try
@@ -462,8 +580,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 bufferSize: 16 * 1024,
                 options: FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
-                await JsonSerializer.SerializeAsync(stream, value, JsonOptions, cancellationToken)
-                    .ConfigureAwait(false);
+                await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 stream.Flush(flushToDisk: true);
             }
@@ -497,12 +614,37 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
     private static bool IsProjectFilePath(string path)
     {
         return path.EndsWith(
-                   AutomationProjectFileConvention.ProjectFileExtension,
-                   StringComparison.OrdinalIgnoreCase)
-               || string.Equals(
-                   Path.GetFileName(path),
-                   AutomationProjectFileConvention.LegacyProjectFileName,
-                   StringComparison.OrdinalIgnoreCase);
+            AutomationProjectFileConvention.ProjectFileExtension,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetApplicationProjectRelativePath(
+        string projectRoot,
+        string applicationProjectTarget)
+    {
+        if (string.IsNullOrWhiteSpace(applicationProjectTarget))
+        {
+            throw new ArgumentException(
+                "Application project target cannot be empty.",
+                nameof(applicationProjectTarget));
+        }
+
+        var fullPath = Path.IsPathRooted(applicationProjectTarget)
+            ? Path.GetFullPath(applicationProjectTarget.Trim())
+            : Path.GetFullPath(Path.Combine(
+                projectRoot,
+                applicationProjectTarget.Trim().Replace('/', Path.DirectorySeparatorChar)));
+        var root = Path.GetFullPath(projectRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var rootPrefix = root + Path.DirectorySeparatorChar;
+        if (!fullPath.StartsWith(rootPrefix, PathComparison))
+        {
+            throw new InvalidDataException(
+                "An imported Application project must be copied inside the Automation Project directory first.");
+        }
+
+        return AutomationProjectFileConvention.NormalizeDocumentPath(
+            Path.GetRelativePath(root, fullPath));
     }
 
     private static void CreateApplicationDirectories(string applicationRoot)
@@ -539,9 +681,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
     }
 
-    private static string[] NormalizeStrings(IEnumerable<string>? values)
+    private static string[] NormalizeStrings(IEnumerable<string> values)
     {
-        return (values ?? [])
+        return values
             .Order(StringComparer.Ordinal)
             .ToArray();
     }
@@ -561,21 +703,4 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
     }
 
-    private sealed record LegacyAutomationProjectManifest(
-        int FormatVersion,
-        string Product,
-        string ProjectId,
-        string DisplayName,
-        string ProjectPath,
-        DateTimeOffset CreatedAtUtc,
-        DateTimeOffset UpdatedAtUtc,
-        string? ActiveSnapshotId,
-        LegacyProjectApplicationManifest[] Applications,
-        PublishedProjectSnapshotManifest[] Snapshots);
-
-    private sealed record LegacyProjectApplicationManifest(
-        string ApplicationId,
-        string DisplayName,
-        string? TopologyId,
-        string[] ProcessDefinitionIds);
 }

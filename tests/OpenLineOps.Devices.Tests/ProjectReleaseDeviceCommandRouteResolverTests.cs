@@ -52,8 +52,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         const string processDefinitionId = "process.release.route";
         const string processVersionId = "process.release.route@1.0.0";
         const string capabilityId = "device.scanner";
+        const string applicationProjectPath =
+            "applications/application.release.route/application.release.route.oloapp";
 
-        var scope = new ProjectApplicationWorkspaceScope(projectId, applicationId, _projectPath);
+        var scope = new ProjectApplicationWorkspaceScope(
+            projectId,
+            applicationId,
+            _projectPath,
+            applicationProjectPath);
         var engineeringRepository = new FileSystemProjectEngineeringConfigurationRepository();
         await engineeringRepository.SaveAsync(scope, CreateEngineeringProject(
             configurationSnapshotId,
@@ -93,7 +99,8 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         var projectProcessId = new ProjectDefinitionId(processDefinitionId);
         Assert.True(project.AddApplication(ProjectApplication.Create(
             projectApplicationId,
-            "Release Route Application")).Succeeded);
+            "Release Route Application",
+            applicationProjectPath)).Succeeded);
         Assert.True(project.LinkTopology(projectApplicationId, topologyId).Succeeded);
         Assert.True(project.LinkProcessDefinition(projectApplicationId, projectProcessId).Succeeded);
         Assert.True(project.PublishSnapshot(

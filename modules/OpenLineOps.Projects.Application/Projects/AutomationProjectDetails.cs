@@ -20,7 +20,7 @@ public sealed record ProjectApplicationDetails(
     string DisplayName,
     string? TopologyId,
     IReadOnlyCollection<string> ProcessDefinitionIds,
-    string? ProjectFilePath = null);
+    string ProjectFilePath);
 
 public sealed record PublishedProjectSnapshotDetails(
     string SnapshotId,
@@ -35,8 +35,8 @@ public sealed record PublishedProjectSnapshotDetails(
     IReadOnlyCollection<SnapshotCapabilityBindingDetails> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceDetails> TargetReferences,
     IReadOnlyCollection<string> BlockVersionIds,
-    string? ReleaseManifestPath,
-    string? ReleaseContentSha256);
+    string ReleaseManifestPath,
+    string ReleaseContentSha256);
 
 public sealed record SnapshotCapabilityBindingDetails(
     string CapabilityId,

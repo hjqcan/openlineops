@@ -4,7 +4,7 @@ namespace OpenLineOps.Runner;
 
 public static class RunnerProjectPathResolver
 {
-    public static string ResolveProjectDirectory(string projectTarget, string currentDirectory)
+    public static string ResolveProjectTarget(string projectTarget, string currentDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectTarget);
         ArgumentException.ThrowIfNullOrWhiteSpace(currentDirectory);
@@ -19,11 +19,10 @@ public static class RunnerProjectPathResolver
             if (!IsSupportedProjectFile(fullPath))
             {
                 throw new InvalidDataException(
-                    $"Project file must use {AutomationProjectFileConvention.ProjectFileExtension} or be named {AutomationProjectFileConvention.LegacyProjectFileName}.");
+                    $"Project file must use the {AutomationProjectFileConvention.ProjectFileExtension} extension.");
             }
 
-            return Path.GetDirectoryName(fullPath)
-                ?? throw new InvalidDataException("Project manifest path has no parent directory.");
+            return fullPath;
         }
 
         if (Directory.Exists(fullPath))
@@ -33,8 +32,13 @@ public static class RunnerProjectPathResolver
 
         if (IsSupportedProjectFile(fullPath))
         {
-            return Path.GetDirectoryName(fullPath)
-                ?? throw new InvalidDataException("Project manifest path has no parent directory.");
+            return fullPath;
+        }
+
+        if (Path.HasExtension(fullPath))
+        {
+            throw new InvalidDataException(
+                $"Project file must use the {AutomationProjectFileConvention.ProjectFileExtension} extension.");
         }
 
         return fullPath;
@@ -43,11 +47,7 @@ public static class RunnerProjectPathResolver
     private static bool IsSupportedProjectFile(string path)
     {
         return path.EndsWith(
-                   AutomationProjectFileConvention.ProjectFileExtension,
-                   StringComparison.OrdinalIgnoreCase)
-               || string.Equals(
-                   Path.GetFileName(path),
-                   AutomationProjectFileConvention.LegacyProjectFileName,
-                   StringComparison.OrdinalIgnoreCase);
+            AutomationProjectFileConvention.ProjectFileExtension,
+            StringComparison.OrdinalIgnoreCase);
     }
 }

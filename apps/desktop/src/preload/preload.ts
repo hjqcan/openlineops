@@ -19,6 +19,8 @@ const desktopApi: OpenLineOpsDesktopApi = {
     ipcRenderer.invoke('desktop:select-directory', options) as Promise<SelectDirectoryResult>,
   selectProjectFile: (options?: SelectProjectFileOptions) =>
     ipcRenderer.invoke('desktop:select-project-file', options) as Promise<SelectDirectoryResult>,
+  selectApplicationProjectFile: (options?: SelectProjectFileOptions) =>
+    ipcRenderer.invoke('desktop:select-application-project-file', options) as Promise<SelectDirectoryResult>,
   apiRequest: <T = unknown>(path: string, options?: ApiRequestOptions) =>
     ipcRenderer.invoke('api:request', path, options) as Promise<ApiResponse<T>>
 };

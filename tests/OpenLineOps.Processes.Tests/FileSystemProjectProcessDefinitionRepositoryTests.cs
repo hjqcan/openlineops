@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
@@ -95,6 +97,140 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
     }
 
     [Fact]
+    public async Task ObsoleteFlowFormatIsRejected()
+    {
+        var scope = Scope("application.current-only");
+        var definitionId = new ProcessDefinitionId("process.current-only");
+        var repository = new FileSystemProjectProcessDefinitionRepository();
+        await repository.SaveAsync(
+            scope,
+            CreateDefinition(
+                definitionId,
+                "Current Only",
+                "result = {'current': True}\n",
+                "result = {'manual': True}\n"));
+
+        var path = Assert.Single(Directory.GetFiles(
+            scope.ApplicationRootPath,
+            "flow.json",
+            SearchOption.AllDirectories));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["formatVersion"] = 1;
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, definitionId));
+    }
+
+    [Fact]
+    public async Task RemovedHostProjectIdFieldIsRejectedFromFlowResource()
+    {
+        var scope = Scope("application.strict");
+        var definitionId = new ProcessDefinitionId("process.strict");
+        var repository = new FileSystemProjectProcessDefinitionRepository();
+        await repository.SaveAsync(
+            scope,
+            CreateDefinition(
+                definitionId,
+                "Strict",
+                "result = {'strict': True}\n",
+                "result = {'manual': True}\n"));
+
+        var path = Assert.Single(Directory.GetFiles(
+            scope.ApplicationRootPath,
+            "flow.json",
+            SearchOption.AllDirectories));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["projectId"] = "removed-host-project";
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, definitionId));
+    }
+
+    [Fact]
+    public async Task CompleteApplicationProcessResourcesAreByteCopyableAcrossProjects()
+    {
+        const string applicationId = "application.portable";
+        const string blockType = "user_portable_fixture";
+        var sourceScope = new ProjectApplicationWorkspaceScope(
+            "project.source",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-source"),
+            "applications/Source Cell/Portable.oloapp");
+        var destinationScope = new ProjectApplicationWorkspaceScope(
+            "project.destination",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-destination"),
+            "applications/Imported Cell/Imported.oloapp");
+        var definitionId = new ProcessDefinitionId("process.portable");
+        var processRepository = new FileSystemProjectProcessDefinitionRepository();
+        var blockRepository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
+
+        await processRepository.SaveAsync(
+            sourceScope,
+            CreateDefinition(
+                definitionId,
+                "Portable Process",
+                "result = {'portable': 'blockly'}\n",
+                "result = {'portable': 'manual'}\n"));
+        await blockRepository.SaveNewVersionAsync(
+            sourceScope,
+            blockType,
+            "Fixture",
+            "Portable Fixture",
+            $$"""{"type":"{{blockType}}","message0":"portable fixture","previousStatement":null,"nextStatement":null}""",
+            "automation_plan.append({'portable': True})",
+            new DateTimeOffset(2026, 7, 10, 7, 0, 0, TimeSpan.Zero));
+
+        var jsonPaths = Directory.GetFiles(
+            sourceScope.ApplicationRootPath,
+            "*.json",
+            SearchOption.AllDirectories);
+        Assert.NotEmpty(jsonPaths);
+        Assert.All(jsonPaths, path =>
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            Assert.False(document.RootElement.TryGetProperty("projectId", out _));
+        });
+        using (var flowDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
+                   Directory.GetFiles(sourceScope.ApplicationRootPath, "flow.json", SearchOption.AllDirectories)))))
+        {
+            Assert.Equal(2, flowDocument.RootElement.GetProperty("formatVersion").GetInt32());
+        }
+
+        using (var blockDocument = JsonDocument.Parse(File.ReadAllText(Assert.Single(
+                   jsonPaths,
+                   path => Path.GetFileName(path).StartsWith("version-", StringComparison.Ordinal)))))
+        {
+            Assert.Equal(2, blockDocument.RootElement.GetProperty("schemaVersion").GetInt32());
+        }
+
+        CopyDirectory(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
+        AssertByteIdenticalTrees(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
+
+        var restoredProcess = await new FileSystemProjectProcessDefinitionRepository()
+            .GetByIdAsync(destinationScope, definitionId);
+        var restoredBlock = await new FileSystemProjectProcessBlocklyBlockDefinitionRepository()
+            .GetLatestAsync(destinationScope, blockType);
+
+        Assert.NotNull(restoredProcess);
+        Assert.Equal("Portable Process", restoredProcess.DisplayName);
+        Assert.Equal(
+            "result = {'portable': 'blockly'}\n",
+            restoredProcess.Nodes.Single(node => node.Id.Value == "blockly").ScriptSourceCode);
+        Assert.Equal(
+            """{"blocks":{"languageVersion":0,"blocks":[{"type":"controls_if"}]}}""",
+            restoredProcess.Nodes.Single(node => node.Id.Value == "blockly").BlocklyWorkspaceJson);
+        Assert.Equal(
+            "result = {'portable': 'manual'}\n",
+            restoredProcess.Nodes.Single(node => node.Id.Value == "manual").ScriptSourceCode);
+        Assert.NotNull(restoredBlock);
+        Assert.Equal("Portable Fixture", restoredBlock.DisplayName);
+        Assert.Contains("'portable': True", restoredBlock.PythonCodeTemplate, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task EditableFlowResourcesAreStoredBesideTheApplicationProjectFile()
     {
         var scope = new ProjectApplicationWorkspaceScope(
@@ -140,7 +276,11 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
 
     private ProjectApplicationWorkspaceScope Scope(string applicationId)
     {
-        return new ProjectApplicationWorkspaceScope("project.process", applicationId, _projectDirectory);
+        return new ProjectApplicationWorkspaceScope(
+            "project.process",
+            applicationId,
+            _projectDirectory,
+            $"applications/{applicationId}/{applicationId}.oloapp");
     }
 
     private static ProcessDefinition CreateDefinition(
@@ -198,5 +338,45 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             new ProcessNodeId(fromNodeId),
             new ProcessNodeId(toNodeId)));
         Assert.True(result.Succeeded, result.Message);
+    }
+
+    private static void CopyDirectory(string sourcePath, string destinationPath)
+    {
+        Directory.CreateDirectory(destinationPath);
+        foreach (var directory in Directory.EnumerateDirectories(
+                     sourcePath,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                destinationPath,
+                Path.GetRelativePath(sourcePath, directory)));
+        }
+
+        foreach (var file in Directory.EnumerateFiles(sourcePath, "*", SearchOption.AllDirectories))
+        {
+            var destinationFile = Path.Combine(
+                destinationPath,
+                Path.GetRelativePath(sourcePath, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            File.Copy(file, destinationFile);
+        }
+    }
+
+    private static void AssertByteIdenticalTrees(string expectedRoot, string actualRoot)
+    {
+        var expectedFiles = Directory.EnumerateFiles(expectedRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(expectedRoot, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var actualFiles = Directory.EnumerateFiles(actualRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(actualRoot, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expectedFiles, actualFiles);
+        Assert.All(expectedFiles, relativePath => Assert.Equal(
+            File.ReadAllBytes(Path.Combine(expectedRoot, relativePath)),
+            File.ReadAllBytes(Path.Combine(actualRoot, relativePath))));
     }
 }

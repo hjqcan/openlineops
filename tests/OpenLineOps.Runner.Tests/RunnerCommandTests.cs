@@ -60,34 +60,6 @@ public sealed class RunnerCommandTests
     }
 
     [Fact]
-    public async Task RunRejectsLegacySnapshotBeforeCallingLauncher()
-    {
-        var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot(
-            "snapshot.legacy",
-            releaseManifestPath: null,
-            releaseContentSha256: null);
-        var workspace = CreateWorkspace(
-            RunnerSnapshotSelectorTests.CreateProject("snapshot.legacy", [snapshot]),
-            snapshot);
-        var launcher = new CapturingRuntimeLauncher(Result.Success(
-            new StartedProcessRuntimeSessionDetails(Guid.Empty, "unused", "Completed", 0, 0, 0)));
-        var command = new RunnerCommand(new StubWorkspaceService(workspace), launcher);
-        var writer = new StringWriter();
-
-        var exitCode = await command.RunAsync(
-            new RunnerRunOptions("project", "active", null, null, null, null, null),
-            "C:/automation",
-            writer);
-
-        Assert.Equal(RunnerExitCodes.ImmutableReleaseRequired, exitCode);
-        Assert.Null(launcher.Snapshot);
-        using var document = JsonDocument.Parse(writer.ToString());
-        Assert.Equal(
-            "Runner.ImmutableReleaseRequired",
-            document.RootElement.GetProperty("error").GetProperty("code").GetString());
-    }
-
-    [Fact]
     public async Task RunReturnsRuntimeFailureExitCodeForFailedTerminalSession()
     {
         var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
@@ -110,7 +82,7 @@ public sealed class RunnerCommandTests
             "C:/automation",
             writer);
 
-        Assert.Equal(RunnerExitCodes.RuntimeExecutionFailed, exitCode);
+        Assert.Equal(6, exitCode);
         using var document = JsonDocument.Parse(writer.ToString());
         Assert.False(document.RootElement.GetProperty("success").GetBoolean());
         Assert.Equal("Failed", document.RootElement.GetProperty("session").GetProperty("status").GetString());
@@ -144,7 +116,12 @@ public sealed class RunnerCommandTests
             project.CreatedAtUtc,
             new DateTimeOffset(2026, 7, 10, 2, 0, 0, TimeSpan.Zero),
             project.ActiveSnapshotId,
-            [new ProjectApplicationManifest("application.main", "Main", "topology.main", ["process.main"])],
+            [new ProjectApplicationManifest(
+                "application.main",
+                "Main",
+                "topology.main",
+                ["process.main"],
+                "applications/application.main/application.main.oloapp")],
             [manifestSnapshot]);
 
         return new AutomationProjectWorkspaceDetails(
@@ -175,6 +152,14 @@ public sealed class RunnerCommandTests
 
         public Task<Result<AutomationProjectWorkspaceDetails>> SaveManifestAsync(
             string projectId,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+            string projectId,
+            ImportAutomationProjectApplicationRequest request,
             CancellationToken cancellationToken = default)
         {
             throw new NotSupportedException();

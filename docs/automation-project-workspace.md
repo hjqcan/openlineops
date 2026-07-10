@@ -55,14 +55,18 @@ hatch for advanced behavior.
 ### AutomationProject
 
 The root user-facing engineering asset. It owns project identity, display name,
-description, local project path or package identity, project settings, selected
-application model, layout model, draft status, and publication history.
+description, local project path or package identity, project settings, relative
+references to its applications, draft status, and publication history. Its
+editable root file is `<projectId>.oloproj`.
 
 ### ProjectApplication
 
-A logical application or automation scenario inside the project. It groups the
-systems, layouts, processes, and run targets needed for a specific production
-line, station family, or test application.
+An independently movable automation scenario composed by a project. Its
+application directory contains one `.oloapp` file and everything it owns:
+systems, topology, layouts, processes, Blockly/Python source, configuration,
+bindings, scripts, custom blocks, and run targets. The directory does not
+persist its host `ProjectId`, so it can be copied into another automation
+project and imported without rewriting its internal resources.
 
 ### AutomationTopology
 
@@ -128,7 +132,9 @@ including the Blockly and Python artifacts used by the process.
 
 The Projects bounded context should become the primary product shell. It owns
 automation project lifecycle, project manifests, project-local settings,
-application selection, package metadata, and publication history.
+relative application references, application selection, package metadata, and
+publication history. The root project composes application projects; it does
+not own their editable resource graphs.
 
 It should not execute hardware commands or validate Python syntax directly.
 Those responsibilities stay in Runtime, Devices, Processes, and Infrastructure
@@ -175,12 +181,12 @@ through application ports and immutable published snapshots.
 
 The Project Snapshot runtime path executes the published process and
 configuration loaded from the immutable release. It does not re-read the
-editable application source or fall back to the legacy global configuration
+editable application source or fall back to mutable global configuration
 store.
 
 Publisher compiles the published process graph into canonical
 `openlineops.flow-ir/v1` JSON and freezes its schema, SHA-256, and content in
-release manifest schema v2. Project Snapshot launch validates that frozen Flow
+release manifest schema v3. Project Snapshot launch validates that frozen Flow
 IR and maps it to the executable runtime process instead of reconstructing the
 runtime graph from client input.
 
@@ -200,6 +206,59 @@ block-id/type/version source maps.
 Traceability records runtime sessions, process versions, project snapshots,
 layout references, slot/group references, device command records, artifacts,
 measurements, and audit entries.
+
+## Editable Project And Application Format
+
+The editable source uses two explicit project boundaries:
+
+```text
+project-root/
+  <project-id>.oloproj
+  applications/
+    <application-directory>/
+      <application-name>.oloapp
+      topology/
+      layouts/
+      flows/
+      configuration/
+      bindings/
+      blocks/
+      scripts/
+  releases/
+    ...immutable project snapshots...
+```
+
+The `.oloproj` file is the automation project entrypoint. It owns project
+metadata, project-relative `.oloapp` references, publication snapshots, and the
+selected snapshot. Each `.oloapp` owns application identity, display metadata,
+and relative links to its application-local resources. Root and child files
+are separate aggregates, not fragments of one serialized in-memory object
+graph.
+
+Every persisted file under an application root retains `ApplicationId` and its
+own resource identity but must not retain the host `ProjectId`. This includes
+the `.oloapp`, topology, layout, process, Blockly/Python, Engineering
+configuration, binding, script, and custom-block documents. Cross-application
+integration must use explicit contracts or references rather than hidden paths
+into a sibling directory.
+
+To reuse an application, copy its complete directory from Project A into
+Project B's `applications` directory, then import its `.oloapp`. Import validates
+identity, relative paths, containment, duplicate ids, and path collisions before
+adding a relative reference to Project B's `.oloproj`; it does not recursively
+rewrite the copied resources. Requiring the directory to be inside the target
+workspace prevents a project from silently linking arbitrary mutable files
+elsewhere on disk.
+
+The current `.oloproj` represents one automation project. A future multi-project
+solution can add a separate solution artifact; calling this file `.olosln` now
+would incorrectly imply that extra aggregation level. Obsolete project
+filenames and schema versions are rejected; the format has no compatibility or
+automatic migration branch.
+
+SmartMatriX `.ak` files are prior-art reference only, not accepted OpenLineOps
+project input. OpenLineOps does not adopt their giant CLR object graph,
+absolute-path, or runtime-state serialization model.
 
 ## Draft And Publish Model
 
@@ -233,9 +292,10 @@ configuration.
 
 The release store copies the complete application source into a staging
 directory, records every file's size and SHA-256 digest plus canonical Flow IR
-metadata in schema-v2 `release.json`, computes a digest over the normalized
-manifest content, and verifies the staged artifact before an atomic directory
-move. An existing release id is never overwritten. The publisher then resolves
+metadata and the exact `.oloapp` path in schema-v3 `release.json`, computes a
+digest over the normalized manifest content, and verifies the staged artifact
+before an atomic directory move. An existing release id is never overwritten.
+The publisher then resolves
 the copied source again and requires its semantic metadata and Flow IR to match
 the source resolved before the copy. Only after those checks does the project
 manifest record the project-relative release manifest path and content digest.
@@ -249,7 +309,8 @@ project-root/
       release.json
       source/
         applications/
-          application-<safe-application-id>/
+          <application-folder>/
+            <name>.oloapp
             ...frozen application source...
 ```
 
@@ -263,7 +324,7 @@ Device commands that carry Project Snapshot identity resolve their topology
 capability and device binding from the same release; they do not silently fall
 back to mutable or global Engineering state.
 
-The legacy `POST /api/runtime/sessions/simulated` and
+The development-only `POST /api/runtime/sessions/simulated` and
 `POST /api/process-definitions/{id}/runtime-sessions` surfaces are now explicitly
 development/test-only. They return `403` unless the host environment is
 `Development` or `Test` and
@@ -272,14 +333,14 @@ execution uses the immutable Project Snapshot route.
 
 ## API Shape
 
-The project source API is explicitly scoped by project and application. The
-legacy global topology/layout endpoints remain temporarily for compatibility,
-but Studio uses the scoped routes:
+The project source API is explicitly scoped by project and application. Studio
+uses only the scoped routes:
 
 - `POST /api/automation-projects`
 - `GET /api/automation-projects`
 - `GET /api/automation-projects/{projectId}`
 - `PUT /api/automation-projects/{projectId}/manifest`
+- `POST /api/automation-projects/{projectId}/applications/import`
 - `PUT /api/automation-projects/{projectId}/applications/{applicationId}`
 - `POST /api/automation-projects/{projectId}/applications/{applicationId}/topologies`
 - `GET /api/automation-projects/{projectId}/applications/{applicationId}/topologies`
@@ -320,11 +381,12 @@ but Studio uses the scoped routes:
 - `GET /api/automation-projects/{projectId}/snapshots`
 - `POST /api/automation-projects/{projectId}/snapshots/{snapshotId}/runtime-sessions`
 
-Desktop file operations such as choosing a folder or recent project path remain
-Electron responsibilities. The backend owns project state validation and
-publication behavior. The legacy global Engineering and process-block routes
-remain compatibility surfaces; Studio uses the nested project/application
-routes so identical resource ids in two applications do not collide.
+Desktop file operations such as choosing a `.oloproj`, choosing a project
+folder, selecting an in-workspace `.oloapp` for import, or activating a recent
+project remain Electron responsibilities. The backend owns project and
+application-file validation, path containment, state validation, and
+publication behavior. Studio uses the nested project/application routes so
+identical resource ids in two applications do not collide.
 
 ## Electron Workbench
 
@@ -431,13 +493,14 @@ dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
   --device device-a --actor operator-a
 ```
 
-The target can be a project directory or its `openlineops.project.json` file;
-`--snapshot` accepts an id or defaults to `active`. Runner opens the project,
-selects the snapshot, requires its immutable release descriptor, executes it
-through the same release-only launcher, writes one JSON result using Runner
-output schema v1, and returns a stable exit code: `0` success, `2` usage, `3`
-project open, `4` snapshot selection, `5` immutable release required, `6`
-start rejected, `7` non-completed runtime terminal state, `8` canceled, or `70`
+The target can be a project directory or its `<projectId>.oloproj` file; every
+other project format is rejected. `--snapshot` accepts an id or defaults to
+`active`. Runner opens the project, selects the
+snapshot, requires its immutable release descriptor, executes it through the
+same release-only launcher, writes one JSON result using Runner output schema
+v1, and returns a stable exit code: `0` success, `2` usage, `3` project open,
+`4` snapshot selection, `5` immutable release required, `6` start rejected,
+`7` non-completed runtime terminal state, `8` canceled, or `70`
 internal/configuration failure.
 
 The implemented Runner is deliberately one-shot and synchronous. It does not
@@ -485,13 +548,16 @@ sessions from a published project snapshot instead of manually assembled ids.
 
 ## Current State And Remaining Work
 
-The repository now has a project-first Studio shell plus durable project source
-for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python,
+The repository now has a project-first Studio shell plus a root `.oloproj` and
+independent `.oloapp` application projects. Durable application-local source
+covers Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python,
 versioned custom Blockly block definitions, and Engineering configuration.
 Engineering workspaces, engineering projects and their configuration snapshots,
 recipes, and station profiles are stored under the active application's
-`configuration` directory. Every project-source repository is keyed by the
-same explicit `(project, application)` scope. Topology and layout use versioned
+`configuration` directory. Every project-source repository receives the same
+explicit `(project, application)` scope at runtime, while the files inside the
+application directory persist only application/resource identity so the
+directory remains host-project-independent. Topology and layout use versioned
 JSON; a process uses `flow.json` as an atomic commit pointer to content-addressed
 Blockly/Python artifacts with verified SHA-256 digests; custom blocks use
 immutable `version-000001.json` source files; Engineering resources use
@@ -499,20 +565,22 @@ schema-versioned JSON and atomic replacement. The same local topology, layout,
 process, block, and Engineering ids are therefore valid in two applications.
 
 A cold-restart API test destroys the first host, moves the complete project
-folder, opens its manifest in a fresh host, and restores two isolated
+folder, opens its `.oloproj` in a fresh host, and restores two isolated
 applications, including their custom blocks and Engineering configuration.
-Persistence tests also reject a modified Python artifact whose digest no longer
+Portability tests also copy a complete application directory from one project
+to another and read its resources without rewriting internal host identity.
+Persistence tests reject a modified Python artifact whose digest no longer
 matches `flow.json`.
 
 The cross-context immutable publisher and artifact store are now implemented.
 A Project Snapshot launch verifies and reads its release rather than editable
 source, and release-identified device command routing reads release-frozen
-capability metadata and Engineering device bindings. Legacy snapshots without
-release metadata can still be opened for compatibility, but the Project
-Snapshot runtime endpoint rejects them.
+capability metadata and Engineering device bindings. Project files containing
+snapshots without release metadata are invalid and rejected on open.
 
-Release manifest schema v2 now freezes canonical Flow IR v1, and dynamic
-Python/Blockly child actions have aggregate Runtime action, parent, and sequence
+Release manifest schema v3 now freezes the original Application project path
+plus canonical Flow IR v1, and dynamic Python/Blockly child actions have
+aggregate Runtime action, parent, and sequence
 identity with persisted lifecycle propagation. The old direct-start endpoints
 are isolated behind the explicit Development/Test-only gate. A one-shot
 headless Runner now executes an immutable Project Snapshot and returns stable

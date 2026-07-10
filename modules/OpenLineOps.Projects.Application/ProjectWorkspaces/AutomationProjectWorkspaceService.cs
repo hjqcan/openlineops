@@ -77,10 +77,9 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
                 }
             }
 
-            await _repository.SaveAsync(project, cancellationToken).ConfigureAwait(false);
-
             var manifest = AutomationProjectManifestMapper.FromProject(project, _clock.UtcNow);
             await _manifestStore.SaveAsync(manifest, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(project, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(ToWorkspaceDetails(project, manifest));
         }
@@ -128,9 +127,7 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
 
             manifest = manifest with
             {
-                ProjectPath = projectPath,
-                Applications = manifest.Applications ?? [],
-                Snapshots = manifest.Snapshots ?? []
+                ProjectPath = projectPath
             };
 
             var project = AutomationProjectManifestMapper.ToProject(manifest, projectPath);
@@ -185,6 +182,92 @@ public sealed class AutomationProjectWorkspaceService : IAutomationProjectWorksp
         catch (ArgumentException exception)
         {
             return Result.Failure<AutomationProjectWorkspaceDetails>(InvalidInput(exception));
+        }
+        catch (IOException exception)
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(ManifestStorageFailed(exception));
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(ManifestStorageFailed(exception));
+        }
+    }
+
+    public async Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+        string projectId,
+        ImportAutomationProjectApplicationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(Required(
+                "Projects.ProjectIdRequired",
+                "ProjectId"));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ProjectFilePath))
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(Required(
+                "Projects.ApplicationProjectFileRequired",
+                "ProjectFilePath"));
+        }
+
+        try
+        {
+            var project = await _repository
+                .GetByIdAsync(new AutomationProjectId(projectId), cancellationToken)
+                .ConfigureAwait(false);
+            if (project is null)
+            {
+                return Result.Failure<AutomationProjectWorkspaceDetails>(ProjectNotFound(projectId));
+            }
+
+            var applicationManifest = await _manifestStore
+                .LoadApplicationProjectAsync(
+                    project.ProjectPath,
+                    request.ProjectFilePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (applicationManifest is null)
+            {
+                return Result.Failure<AutomationProjectWorkspaceDetails>(ApplicationError.NotFound(
+                    "Projects.ApplicationProjectFileNotFound",
+                    $"Application project file '{request.ProjectFilePath}' was not found."));
+            }
+
+            var detachedProject = AutomationProjectManifestMapper.ToProject(
+                AutomationProjectManifestMapper.FromProject(project, _clock.UtcNow),
+                project.ProjectPath);
+            var addResult = detachedProject.AddApplication(ProjectApplication.Restore(
+                new ProjectApplicationId(applicationManifest.ApplicationId),
+                applicationManifest.DisplayName,
+                string.IsNullOrWhiteSpace(applicationManifest.TopologyId)
+                    ? null
+                    : new AutomationTopologyId(applicationManifest.TopologyId),
+                applicationManifest.ProcessDefinitionIds
+                    .Select(processId => new ProcessDefinitionId(processId)),
+                applicationManifest.ProjectFilePath));
+            if (!addResult.Succeeded)
+            {
+                return Result.Failure<AutomationProjectWorkspaceDetails>(ApplicationError.Conflict(
+                    addResult.Code,
+                    addResult.Message));
+            }
+
+            var manifest = AutomationProjectManifestMapper.FromProject(detachedProject, _clock.UtcNow);
+            await _manifestStore.SaveAsync(manifest, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(detachedProject, cancellationToken).ConfigureAwait(false);
+
+            return Result.Success(ToWorkspaceDetails(detachedProject, manifest));
+        }
+        catch (ArgumentException exception)
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(InvalidInput(exception));
+        }
+        catch (InvalidDataException exception)
+        {
+            return Result.Failure<AutomationProjectWorkspaceDetails>(InvalidManifest(exception));
         }
         catch (IOException exception)
         {

@@ -11,7 +11,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
     private ProjectApplication(
         ProjectApplicationId id,
         string displayName,
-        string? projectFilePath)
+        string projectFilePath)
         : base(id)
     {
         DisplayName = ProjectIdGuard.NotBlank(displayName, nameof(displayName));
@@ -20,7 +20,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
 
     public string DisplayName { get; }
 
-    public string? ProjectFilePath { get; }
+    public string ProjectFilePath { get; }
 
     public AutomationTopologyId? TopologyId { get; private set; }
 
@@ -29,7 +29,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
     public static ProjectApplication Create(
         ProjectApplicationId id,
         string displayName,
-        string? projectFilePath = null)
+        string projectFilePath)
     {
         return new ProjectApplication(id, displayName, projectFilePath);
     }
@@ -39,7 +39,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
         string displayName,
         AutomationTopologyId? topologyId,
         IEnumerable<ProcessDefinitionId> processDefinitionIds,
-        string? projectFilePath = null)
+        string projectFilePath)
     {
         ArgumentNullException.ThrowIfNull(processDefinitionIds);
 
@@ -84,13 +84,8 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
         return ProjectOperationResult.Accepted("Process definition linked.");
     }
 
-    private static string? NormalizeProjectFilePath(string? projectFilePath)
+    private static string NormalizeProjectFilePath(string projectFilePath)
     {
-        if (projectFilePath is null)
-        {
-            return null;
-        }
-
         if (string.IsNullOrWhiteSpace(projectFilePath)
             || Path.IsPathRooted(projectFilePath)
             || projectFilePath.Contains('\\')
@@ -103,10 +98,12 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
         }
 
         var segments = projectFilePath.Split('/');
-        if (segments.Any(segment => string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
+        if (segments.Length != 3
+            || !string.Equals(segments[0], "applications", StringComparison.Ordinal)
+            || segments.Any(segment => string.IsNullOrWhiteSpace(segment) || segment is "." or ".."))
         {
             throw new ArgumentException(
-                "Application project file path contains an invalid segment.",
+                "Application project file path must be applications/<folder>/<name>.oloapp.",
                 nameof(projectFilePath));
         }
 

@@ -3,7 +3,6 @@ namespace OpenLineOps.Processes.Infrastructure.Persistence;
 internal sealed record ProjectProcessFlowDocument(
     int FormatVersion,
     string ResourceKind,
-    string ProjectId,
     string ApplicationId,
     string ProcessDefinitionId,
     string VersionId,
@@ -15,7 +14,8 @@ internal sealed record ProjectProcessFlowDocument(
     ProjectProcessNodeDocument[] Nodes,
     ProjectProcessTransitionDocument[] Transitions)
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
+
     public const string Kind = "OpenLineOps.ProcessFlow";
 }
 

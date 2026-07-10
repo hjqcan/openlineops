@@ -22,27 +22,6 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
         new(2026, 7, 10, 8, 30, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task StartRejectsLegacySnapshotBeforeResolvingLiveScope()
-    {
-        var scopeResolver = new RecordingScopeResolver(LiveScope());
-        var launcher = CreateLauncher(
-            scopeResolver,
-            new RecordingReleaseStore(null),
-            new RecordingProcessRepository(null),
-            new RecordingConfigurationResolver(Result.Failure<RuntimeConfigurationSnapshotDetails>(
-                ApplicationError.NotFound("Tests.NotFound", "Not found."))),
-            new RecordingRuntimeSessionRunner());
-
-        var result = await launcher.StartAsync(
-            Snapshot(releaseManifestPath: null, releaseContentSha256: null),
-            StartRequest());
-
-        Assert.True(result.IsFailure);
-        Assert.Equal("Conflict.Projects.ProjectSnapshotReleaseRequired", result.Error.Code);
-        Assert.Equal(0, scopeResolver.CallCount);
-    }
-
-    [Fact]
     public async Task StartRejectsReleaseMetadataMismatchBeforeReadingReleaseSources()
     {
         var processRepository = new RecordingProcessRepository(null);
@@ -205,10 +184,9 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
     }
 
     private static PublishedProjectSnapshotDetails Snapshot(
-        string? releaseManifestPath = "releases/release-snapshot.main/release.json",
-        string? releaseContentSha256 = null)
+        string releaseManifestPath = "releases/release-snapshot.main/release.json",
+        string releaseContentSha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     {
-        releaseContentSha256 ??= new string('a', 64);
         return new PublishedProjectSnapshotDetails(
             "snapshot.main",
             "project.main",
@@ -246,6 +224,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
             new string('a', 64),
             Path.GetDirectoryName(sourceRootPath)!,
             sourceRootPath,
+            "applications/application.main/application.main.oloapp",
             Path.Combine(Path.GetDirectoryName(sourceRootPath)!, "release.json"),
             new ProjectReleaseSourceMetadata(
                 "topology.main",
@@ -280,7 +259,8 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
         return new ProjectApplicationWorkspaceScope(
             "project.main",
             "application.main",
-            Path.Combine(Path.GetTempPath(), "openlineops-live-runtime-tests"));
+            Path.Combine(Path.GetTempPath(), "openlineops-live-runtime-tests"),
+            "applications/application.main/application.main.oloapp");
     }
 
     private static StartProcessRuntimeSessionRequest StartRequest()

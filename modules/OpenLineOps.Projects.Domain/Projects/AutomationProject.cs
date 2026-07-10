@@ -66,8 +66,7 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
         }
 
         var applicationProjectPaths = applicationList
-            .Where(application => application.ProjectFilePath is not null)
-            .Select(application => application.ProjectFilePath!)
+            .Select(application => application.ProjectFilePath)
             .ToArray();
         if (applicationProjectPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count()
             != applicationProjectPaths.Length)
@@ -119,8 +118,7 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
                 $"Application name {application.DisplayName} already exists in project {Id}.");
         }
 
-        if (application.ProjectFilePath is not null
-            && _applications.Any(candidate => string.Equals(
+        if (_applications.Any(candidate => string.Equals(
                 candidate.ProjectFilePath,
                 application.ProjectFilePath,
                 StringComparison.OrdinalIgnoreCase)))

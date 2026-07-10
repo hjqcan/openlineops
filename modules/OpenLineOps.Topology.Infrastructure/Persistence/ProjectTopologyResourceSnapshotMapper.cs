@@ -24,7 +24,6 @@ internal static class ProjectTopologyResourceSnapshotMapper
         return new ProjectAutomationTopologyDocument(
             ProjectAutomationTopologyDocument.CurrentFormatVersion,
             ProjectAutomationTopologyDocument.Kind,
-            scope.ProjectId,
             scope.ApplicationId,
             topology.Id.Value,
             topology.DisplayName,
@@ -82,7 +81,6 @@ internal static class ProjectTopologyResourceSnapshotMapper
             ProjectAutomationTopologyDocument.CurrentFormatVersion,
             document.ResourceKind,
             ProjectAutomationTopologyDocument.Kind,
-            document.ProjectId,
             document.ApplicationId);
 
         var topology = AutomationTopology.Create(
@@ -168,7 +166,6 @@ internal static class ProjectTopologyResourceSnapshotMapper
         return new ProjectSiteLayoutDocument(
             ProjectSiteLayoutDocument.CurrentFormatVersion,
             ProjectSiteLayoutDocument.Kind,
-            scope.ProjectId,
             scope.ApplicationId,
             layout.Id.Value,
             layout.TopologyId.Value,
@@ -200,7 +197,6 @@ internal static class ProjectTopologyResourceSnapshotMapper
             ProjectSiteLayoutDocument.CurrentFormatVersion,
             document.ResourceKind,
             ProjectSiteLayoutDocument.Kind,
-            document.ProjectId,
             document.ApplicationId);
 
         var layout = SiteLayout.Create(
@@ -285,13 +281,12 @@ internal static class ProjectTopologyResourceSnapshotMapper
     private static void ValidateIdentity(
         ProjectApplicationWorkspaceScope scope,
         int actualFormatVersion,
-        int expectedFormatVersion,
+        int currentFormatVersion,
         string actualResourceKind,
         string expectedResourceKind,
-        string actualProjectId,
         string actualApplicationId)
     {
-        if (actualFormatVersion != expectedFormatVersion)
+        if (actualFormatVersion != currentFormatVersion)
         {
             throw new InvalidDataException(
                 $"Project resource format version {actualFormatVersion} is not supported.");
@@ -302,11 +297,10 @@ internal static class ProjectTopologyResourceSnapshotMapper
             throw new InvalidDataException($"Project resource kind '{actualResourceKind}' is not supported.");
         }
 
-        if (!string.Equals(actualProjectId, scope.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(actualApplicationId, scope.ApplicationId, StringComparison.Ordinal))
+        if (!string.Equals(actualApplicationId, scope.ApplicationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Project resource belongs to {actualProjectId}/{actualApplicationId}, not {scope.ProjectId}/{scope.ApplicationId}.");
+                $"Project resource belongs to application {actualApplicationId}, not {scope.ApplicationId}.");
         }
     }
 }

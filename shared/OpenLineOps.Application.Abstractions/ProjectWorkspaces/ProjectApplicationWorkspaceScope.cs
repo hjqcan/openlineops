@@ -1,6 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
-
 namespace OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 public sealed record ProjectApplicationWorkspaceScope
@@ -13,7 +10,7 @@ public sealed record ProjectApplicationWorkspaceScope
         string projectId,
         string applicationId,
         string projectPath,
-        string? applicationProjectRelativePath = null)
+        string applicationProjectRelativePath)
     {
         if (string.IsNullOrWhiteSpace(projectId))
         {
@@ -34,7 +31,6 @@ public sealed record ProjectApplicationWorkspaceScope
         ApplicationId = applicationId.Trim();
         ProjectPath = Path.GetFullPath(projectPath.Trim());
         ApplicationProjectRelativePath = NormalizeApplicationProjectRelativePath(
-            ApplicationId,
             applicationProjectRelativePath);
         ApplicationProjectFilePath = ResolveInsideProject(
             ProjectPath,
@@ -59,14 +55,8 @@ public sealed record ProjectApplicationWorkspaceScope
     public string ApplicationRootPath { get; }
 
     private static string NormalizeApplicationProjectRelativePath(
-        string applicationId,
-        string? applicationProjectRelativePath)
+        string applicationProjectRelativePath)
     {
-        if (applicationProjectRelativePath is null)
-        {
-            return $"applications/application-{ToLegacySafeSegment(applicationId)}/application.oloapp";
-        }
-
         if (string.IsNullOrWhiteSpace(applicationProjectRelativePath)
             || !string.Equals(
                 applicationProjectRelativePath,
@@ -82,14 +72,15 @@ public sealed record ProjectApplicationWorkspaceScope
         }
 
         var segments = applicationProjectRelativePath.Split('/');
-        if (segments.Length < 2
+        if (segments.Length != 3
+            || !string.Equals(segments[0], "applications", StringComparison.Ordinal)
             || segments.Any(segment =>
                 string.IsNullOrWhiteSpace(segment)
                 || !string.Equals(segment, segment.Trim(), StringComparison.Ordinal)
                 || segment is "." or ".."))
         {
             throw new ArgumentException(
-                "Application project path must contain normal relative path segments.",
+                "Application project path must be applications/<folder>/<name>.oloapp.",
                 nameof(applicationProjectRelativePath));
         }
 
@@ -175,32 +166,5 @@ public sealed record ProjectApplicationWorkspaceScope
             throw new InvalidDataException(
                 $"Application project path '{path}' is a reparse point and is not supported.");
         }
-    }
-
-    private static string ToLegacySafeSegment(string value)
-    {
-        var normalized = value.Trim();
-        var builder = new StringBuilder(normalized.Length);
-        foreach (var character in normalized)
-        {
-            builder.Append(char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_'
-                ? character
-                : '-');
-        }
-
-        var readable = builder.ToString().Trim('.', '-', '_');
-        if (string.IsNullOrEmpty(readable))
-        {
-            readable = "resource";
-        }
-
-        if (readable.Length > 64)
-        {
-            readable = readable[..64];
-        }
-
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
-            .ToLowerInvariant()[..12];
-        return $"{readable}--{hash}";
     }
 }

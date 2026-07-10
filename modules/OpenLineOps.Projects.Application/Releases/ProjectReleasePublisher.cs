@@ -161,7 +161,8 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             releaseScope = new ProjectApplicationWorkspaceScope(
                 scope.ProjectId,
                 scope.ApplicationId,
-                release.SourceRootPath);
+                release.SourceRootPath,
+                release.ApplicationProjectRelativePath);
         }
         catch (ArgumentException exception)
         {

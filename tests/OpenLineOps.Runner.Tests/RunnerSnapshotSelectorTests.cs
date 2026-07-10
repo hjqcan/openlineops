@@ -63,14 +63,19 @@ public sealed class RunnerSnapshotSelectorTests
             "C:/automation/line-a",
             new DateTimeOffset(2026, 7, 10, 0, 0, 0, TimeSpan.Zero),
             activeSnapshotId,
-            [new ProjectApplicationDetails("application.main", "Main", "topology.main", ["process.main"])],
+            [new ProjectApplicationDetails(
+                "application.main",
+                "Main",
+                "topology.main",
+                ["process.main"],
+                "applications/application.main/application.main.oloapp")],
             snapshots);
     }
 
     internal static PublishedProjectSnapshotDetails CreateSnapshot(
         string snapshotId,
-        string? releaseManifestPath = "releases/release-snapshot/release.json",
-        string? releaseContentSha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        string releaseManifestPath = "releases/release-snapshot/release.json",
+        string releaseContentSha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     {
         return new PublishedProjectSnapshotDetails(
             snapshotId,

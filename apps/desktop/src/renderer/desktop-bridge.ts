@@ -43,6 +43,10 @@ const fallbackDesktopApi: OpenLineOpsDesktopApi = {
     canceled: true,
     path: null
   }),
+  selectApplicationProjectFile: async () => ({
+    canceled: true,
+    path: null
+  }),
   apiRequest: async () => ({
     ok: false,
     status: 503,

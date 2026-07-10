@@ -3,7 +3,6 @@ namespace OpenLineOps.Topology.Infrastructure.Persistence;
 internal sealed record ProjectAutomationTopologyDocument(
     int FormatVersion,
     string ResourceKind,
-    string ProjectId,
     string ApplicationId,
     string TopologyId,
     string DisplayName,
@@ -15,7 +14,7 @@ internal sealed record ProjectAutomationTopologyDocument(
     SlotGroupDocument[] SlotGroups,
     SlotDefinitionDocument[] Slots)
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
     public const string Kind = "OpenLineOps.AutomationTopology";
 }
 
@@ -67,7 +66,6 @@ internal sealed record SlotDefinitionDocument(
 internal sealed record ProjectSiteLayoutDocument(
     int FormatVersion,
     string ResourceKind,
-    string ProjectId,
     string ApplicationId,
     string LayoutId,
     string TopologyId,
@@ -77,7 +75,7 @@ internal sealed record ProjectSiteLayoutDocument(
     string Units,
     SiteLayoutElementDocument[] Elements)
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
     public const string Kind = "OpenLineOps.SiteLayout";
 }
 

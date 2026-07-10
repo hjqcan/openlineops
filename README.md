@@ -14,7 +14,7 @@ This project is in early platform development.
   New/Open/Recent Start Center before a project is opened and an IDE workbench
   scoped to the active project and application after open.
 - Persistence: in-memory and SQLite for local development, PostgreSQL adapters for deployment mode, and reusable `OpenLineOps.Infrastructure.Data.Core` package adoption through the `OpenLineOps.SampleInspection` template and Devices `EfSqlite` provider.
-- Runtime: immutable Project Snapshot launch verifies release manifest schema v2,
+- Runtime: immutable Project Snapshot launch verifies release manifest schema v3,
   canonical frozen Flow IR, release-scoped process/configuration source, and
   release-scoped device routing. Dynamically expanded Python/Blockly automation
   actions are persisted as child Runtime steps and commands: steps record action,
@@ -28,9 +28,16 @@ This project is in early platform development.
   compiler and exact block/contract/plugin dependency locks remain future work.
 - Project workspace: project-folder source is isolated by explicit project and
   application scope across topology, layout, processes, Blockly/Python artifacts,
-  blocks, and Engineering configuration. Server-side publication creates an
-  immutable release containing frozen source, resolved metadata, per-file hashes,
-  a content digest, and canonical Flow IR.
+  blocks, and Engineering configuration. A root `<projectId>.oloproj` composes
+  independently movable application directories, each with its own `.oloapp` and
+  application-local resources. Files under an application root retain
+  `ApplicationId` but do not persist the host `ProjectId`, so the directory can
+  be copied under another project's `applications` directory and imported
+  without rewriting its contents. Only exact current project and Application
+  resource schemas are accepted; obsolete formats have no compatibility or
+  migration path. Server-side publication creates an immutable
+  release containing frozen source, resolved metadata, per-file hashes, a content
+  digest, and canonical Flow IR.
 - Headless execution: `OpenLineOps.Runner` implements one-shot execution of an
   existing immutable Project Snapshot without opening Studio. It is not yet a
   service, queue, recovery host, package/deployment tool, or signed-package verifier.
@@ -96,12 +103,12 @@ dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
 
 Runner writes one JSON result using Runner output schema v1 to standard output
 and returns a stable exit code. It accepts a project directory or
-`openlineops.project.json` path and
-refuses draft-only projects or legacy snapshots without an immutable release.
+`<projectId>.oloproj` path. It rejects every other project format and refuses
+draft-only projects or snapshots without an immutable release.
 See `docs/automation-ide-product-shell.md` for the current codes and limitations.
 
-The production runtime-start path is the Project Snapshot endpoint. The legacy
-simulated and direct process-definition start endpoints return `403` unless both
+The production runtime-start path is the Project Snapshot endpoint. The
+development-only simulated and direct process-definition start endpoints return `403` unless both
 the host environment is `Development` or `Test` and
 `OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is explicitly configured.
 

@@ -60,7 +60,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseSourceScope = new ProjectApplicationWorkspaceScope(
             opened.ProjectId,
             opened.ApplicationId,
-            opened.SourceRootPath);
+            opened.SourceRootPath,
+            opened.ApplicationProjectRelativePath);
         var releaseApplicationPath = GetApplicationSourcePath(releaseSourceScope);
         Assert.Equal("flow-v1", File.ReadAllText(Path.Combine(releaseApplicationPath, "flows", "process-main", "flow.json")));
         Assert.True(Directory.Exists(Path.Combine(releaseApplicationPath, "empty-folder")));
@@ -71,12 +72,12 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             "openlineops.project-release-artifact",
             manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(2, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(3, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
     }
 
     [Fact]
-    public async Task PublishCopiesExplicitApplicationRootIntoLegacyCompatibleReleaseLayout()
+    public async Task PublishPreservesExplicitApplicationProjectLayoutInsideRelease()
     {
         var projectPath = Path.Combine(_testRoot, "explicit-project");
         var scope = new ProjectApplicationWorkspaceScope(
@@ -98,7 +99,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseScope = new ProjectApplicationWorkspaceScope(
             opened.ProjectId,
             opened.ApplicationId,
-            opened.SourceRootPath);
+            opened.SourceRootPath,
+            opened.ApplicationProjectRelativePath);
 
         Assert.Equal(
             "explicit-flow",
@@ -112,8 +114,10 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var internalApplicationPath = manifest.RootElement
             .GetProperty("sourceApplicationRelativePath")
             .GetString();
-        Assert.StartsWith("applications/application-", internalApplicationPath, StringComparison.Ordinal);
-        Assert.DoesNotContain("Main Line", internalApplicationPath, StringComparison.Ordinal);
+        Assert.Equal("applications/Main Line", internalApplicationPath);
+        Assert.Equal(
+            "applications/Main Line/MainLine.oloapp",
+            manifest.RootElement.GetProperty("applicationProjectRelativePath").GetString());
     }
 
     [Fact]
@@ -139,7 +143,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseScope = new ProjectApplicationWorkspaceScope(
             opened!.ProjectId,
             opened.ApplicationId,
-            opened.SourceRootPath);
+            opened.SourceRootPath,
+            opened.ApplicationProjectRelativePath);
 
         Assert.Contains("immutable", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(
@@ -161,7 +166,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseScope = new ProjectApplicationWorkspaceScope(
             scope.ProjectId,
             scope.ApplicationId,
-            descriptor.SourceRootPath);
+            descriptor.SourceRootPath,
+            descriptor.ApplicationProjectRelativePath);
         await File.WriteAllTextAsync(
             Path.Combine(GetApplicationSourcePath(releaseScope), "configuration", "project.json"),
             "configuration-v2");
@@ -250,7 +256,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseScope = new ProjectApplicationWorkspaceScope(
             scope.ProjectId,
             scope.ApplicationId,
-            descriptor.SourceRootPath);
+            descriptor.SourceRootPath,
+            descriptor.ApplicationProjectRelativePath);
         File.Delete(Path.Combine(GetApplicationSourcePath(releaseScope), "layouts", "layout.json"));
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
@@ -282,6 +289,48 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task OpenRejectsPriorReleaseSchemaVersion()
+    {
+        var scope = CreateScope("project.old-release", "application.main");
+        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.old-release",
+            PublishedAtUtc,
+            CreateMetadata());
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
+        manifest["schemaVersion"] = 2;
+        await File.WriteAllTextAsync(descriptor.ManifestPath, manifest.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+
+        Assert.Contains("schema version 2", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task OpenRejectsUnknownReleaseManifestField()
+    {
+        var scope = CreateScope("project.unknown-field", "application.main");
+        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.unknown-field",
+            PublishedAtUtc,
+            CreateMetadata());
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
+        manifest["unexpectedSourcePath"] = "applications/application.main";
+        await File.WriteAllTextAsync(descriptor.ManifestPath, manifest.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+
+        Assert.Contains("invalid JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task ReleaseOpensAfterWholeProjectFolderMoves()
     {
         var originalProjectPath = Path.Combine(_testRoot, "original-project");
@@ -289,7 +338,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var originalScope = new ProjectApplicationWorkspaceScope(
             "project.movable",
             "application.main",
-            originalProjectPath);
+            originalProjectPath,
+            ApplicationProjectPath("application.main"));
         WriteSourceFile(originalScope, "flows/process-main/flow.json", "portable-flow");
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
@@ -302,7 +352,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var movedScope = new ProjectApplicationWorkspaceScope(
             originalScope.ProjectId,
             originalScope.ApplicationId,
-            movedProjectPath);
+            movedProjectPath,
+            originalScope.ApplicationProjectRelativePath);
         var opened = await store.OpenAsync(movedScope, descriptor.SnapshotId, descriptor.ContentSha256);
 
         Assert.NotNull(opened);
@@ -311,7 +362,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var releaseScope = new ProjectApplicationWorkspaceScope(
             opened.ProjectId,
             opened.ApplicationId,
-            opened.SourceRootPath);
+            opened.SourceRootPath,
+            opened.ApplicationProjectRelativePath);
         Assert.Equal(
             "portable-flow",
             File.ReadAllText(Path.Combine(GetApplicationSourcePath(releaseScope), "flows", "process-main", "flow.json")));
@@ -321,8 +373,16 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task ApplicationAAndBAreIsolatedAndWrongScopeIsRejected()
     {
         var projectPath = Path.Combine(_testRoot, "project-ab");
-        var scopeA = new ProjectApplicationWorkspaceScope("project.ab", "application.a", projectPath);
-        var scopeB = new ProjectApplicationWorkspaceScope("project.ab", "application.b", projectPath);
+        var scopeA = new ProjectApplicationWorkspaceScope(
+            "project.ab",
+            "application.a",
+            projectPath,
+            ApplicationProjectPath("application.a"));
+        var scopeB = new ProjectApplicationWorkspaceScope(
+            "project.ab",
+            "application.b",
+            projectPath,
+            ApplicationProjectPath("application.b"));
         WriteSourceFile(scopeA, "flows/shared/flow.json", "flow-from-a");
         WriteSourceFile(scopeB, "flows/shared/flow.json", "flow-from-b");
         var store = new FileSystemProjectReleaseArtifactStore();
@@ -366,7 +426,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         return new ProjectApplicationWorkspaceScope(
             projectId,
             applicationId,
-            Path.Combine(_testRoot, "project"));
+            Path.Combine(_testRoot, "project"),
+            ApplicationProjectPath(applicationId));
     }
 
     private static ProjectReleaseSourceMetadata CreateMetadata(string topologyId = "topology.main")
@@ -426,8 +487,14 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var scope = new ProjectApplicationWorkspaceScope(
             release.ProjectId,
             release.ApplicationId,
-            release.SourceRootPath);
+            release.SourceRootPath,
+            release.ApplicationProjectRelativePath);
         return File.ReadAllText(Path.Combine(GetApplicationSourcePath(scope), "flows", "shared", "flow.json"));
+    }
+
+    private static string ApplicationProjectPath(string applicationId)
+    {
+        return $"applications/{applicationId}/{applicationId}.oloapp";
     }
 
     private static string GetApplicationSourcePath(ProjectApplicationWorkspaceScope scope)

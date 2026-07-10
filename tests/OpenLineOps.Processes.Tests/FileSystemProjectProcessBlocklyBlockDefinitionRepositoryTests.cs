@@ -125,6 +125,52 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
     }
 
     [Fact]
+    public async Task ObsoleteCustomBlockSchemaIsRejected()
+    {
+        const string blockType = "user_obsolete_schema";
+        var scope = Scope("application.current-only", _projectDirectory);
+        var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
+        await repository.SaveNewVersionAsync(
+            scope,
+            blockType,
+            "Fixture",
+            "Current Only",
+            BlockJson(blockType, "current only"),
+            "automation_plan.append({'current': True})",
+            FirstRecordedAtUtc);
+        var path = FindBlockDocumentPath(_projectDirectory, blockType);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["schemaVersion"] = 1;
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            repository.GetLatestAsync(scope, blockType).AsTask());
+    }
+
+    [Fact]
+    public async Task RemovedHostProjectIdFieldIsRejectedFromCustomBlockResource()
+    {
+        const string blockType = "user_removed_host_project";
+        var scope = Scope("application.strict", _projectDirectory);
+        var repository = new FileSystemProjectProcessBlocklyBlockDefinitionRepository();
+        await repository.SaveNewVersionAsync(
+            scope,
+            blockType,
+            "Fixture",
+            "Strict",
+            BlockJson(blockType, "strict"),
+            "automation_plan.append({'strict': True})",
+            FirstRecordedAtUtc);
+        var path = FindBlockDocumentPath(_projectDirectory, blockType);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["projectId"] = "removed-host-project";
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            repository.GetLatestAsync(scope, blockType).AsTask());
+    }
+
+    [Fact]
     public async Task EditableCustomBlocksAreStoredBesideTheApplicationProjectFile()
     {
         const string blockType = "user/custom fixture action";
@@ -220,7 +266,11 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
 
     private static ProjectApplicationWorkspaceScope Scope(string applicationId, string projectDirectory)
     {
-        return new ProjectApplicationWorkspaceScope("project.process-blocks", applicationId, projectDirectory);
+        return new ProjectApplicationWorkspaceScope(
+            "project.process-blocks",
+            applicationId,
+            projectDirectory,
+            $"applications/{applicationId}/{applicationId}.oloapp");
     }
 
     private static string BlockJson(string blockType, string message)

@@ -135,6 +135,58 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
     }
 
     [Fact]
+    public async Task ObsoleteEngineeringResourceSchemaIsRejected()
+    {
+        var scope = Scope("application.current-only", _projectDirectory);
+        var configuration = CreateConfiguration(
+            "Current Only",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@current",
+            "5.0",
+            "100",
+            "device.current.primary",
+            "current-primary",
+            "device.current.secondary",
+            "current-secondary");
+        var repository = new FileSystemProjectEngineeringConfigurationRepository();
+        await repository.SaveAsync(scope, configuration.Workspace);
+        var path = FindDocumentPath(_projectDirectory, "resourceId", WorkspaceIdValue);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["schemaVersion"] = 1;
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            repository.GetByIdAsync(scope, new WorkspaceId(WorkspaceIdValue)));
+    }
+
+    [Fact]
+    public async Task RemovedHostProjectIdFieldIsRejectedFromEngineeringResource()
+    {
+        var scope = Scope("application.strict", _projectDirectory);
+        var configuration = CreateConfiguration(
+            "Strict",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@strict",
+            "5.0",
+            "100",
+            "device.strict.primary",
+            "strict-primary",
+            "device.strict.secondary",
+            "strict-secondary");
+        var repository = new FileSystemProjectEngineeringConfigurationRepository();
+        await repository.SaveAsync(scope, configuration.Workspace);
+        var path = FindDocumentPath(_projectDirectory, "resourceId", WorkspaceIdValue);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["projectId"] = "removed-host-project";
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            repository.GetByIdAsync(scope, new WorkspaceId(WorkspaceIdValue)));
+    }
+
+    [Fact]
     public async Task EditableConfigurationIsStoredBesideTheApplicationProjectFile()
     {
         var scope = new ProjectApplicationWorkspaceScope(
@@ -180,6 +232,53 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         Assert.Single(Directory.GetFiles(
             Path.Combine(configurationRoot, "station-profiles"),
             "station-profile-*.json"));
+    }
+
+    [Fact]
+    public async Task CompleteEngineeringApplicationFolderIsByteCopyableAcrossProjects()
+    {
+        const string applicationId = "application.engineering-portable";
+        var sourceScope = new ProjectApplicationWorkspaceScope(
+            "project.source",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-source"),
+            "applications/Source Engineering/Portable.oloapp");
+        var destinationScope = new ProjectApplicationWorkspaceScope(
+            "project.destination",
+            applicationId,
+            Path.Combine(_projectDirectory, "project-destination"),
+            "applications/Imported Engineering/Imported.oloapp");
+        var configuration = CreateConfiguration(
+            "Portable",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@portable",
+            "5.5",
+            "125",
+            "device.portable.primary",
+            "portable-primary",
+            "device.portable.secondary",
+            "portable-secondary");
+        var repository = new FileSystemProjectEngineeringConfigurationRepository();
+
+        await SaveAsync(repository, sourceScope, configuration);
+        Directory.CreateDirectory(sourceScope.ApplicationRootPath);
+        await File.WriteAllBytesAsync(sourceScope.ApplicationProjectFilePath, [0x4f, 0x4c, 0x4f]);
+
+        var documents = Directory.GetFiles(
+            Path.Combine(sourceScope.ApplicationRootPath, "configuration"),
+            "*.json",
+            SearchOption.AllDirectories);
+        Assert.Equal(4, documents.Length);
+        Assert.All(documents, path => AssertPortableV2Document(path, applicationId));
+
+        CopyDirectoryByteForByte(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
+        AssertApplicationFoldersHaveEqualBytes(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
+
+        await AssertConfigurationAsync(
+            new FileSystemProjectEngineeringConfigurationRepository(),
+            destinationScope,
+            configuration);
     }
 
     public void Dispose()
@@ -365,7 +464,11 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
 
     private static ProjectApplicationWorkspaceScope Scope(string applicationId, string projectDirectory)
     {
-        return new ProjectApplicationWorkspaceScope("project.engineering", applicationId, projectDirectory);
+        return new ProjectApplicationWorkspaceScope(
+            "project.engineering",
+            applicationId,
+            projectDirectory,
+            $"applications/{applicationId}/{applicationId}.oloapp");
     }
 
     private static string FindDocumentPath(
@@ -393,6 +496,62 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         {
             return false;
         }
+    }
+
+    private static void AssertPortableV2Document(string path, string applicationId)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var root = document.RootElement;
+
+        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(applicationId, root.GetProperty("applicationId").GetString());
+        Assert.False(root.TryGetProperty("projectId", out _));
+    }
+
+    private static void CopyDirectoryByteForByte(string sourceDirectory, string targetDirectory)
+    {
+        Directory.CreateDirectory(targetDirectory);
+        foreach (var directory in Directory.EnumerateDirectories(
+                     sourceDirectory,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                targetDirectory,
+                Path.GetRelativePath(sourceDirectory, directory)));
+        }
+
+        foreach (var sourcePath in Directory.EnumerateFiles(
+                     sourceDirectory,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            var targetPath = Path.Combine(
+                targetDirectory,
+                Path.GetRelativePath(sourceDirectory, sourcePath));
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            File.Copy(sourcePath, targetPath);
+        }
+    }
+
+    private static void AssertApplicationFoldersHaveEqualBytes(
+        string sourceDirectory,
+        string targetDirectory)
+    {
+        var sourceFiles = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(sourceDirectory, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var targetFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(targetDirectory, path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(sourceFiles);
+        Assert.Equal(sourceFiles, targetFiles);
+        Assert.All(sourceFiles, relativePath => Assert.Equal(
+            File.ReadAllBytes(Path.Combine(sourceDirectory, relativePath)),
+            File.ReadAllBytes(Path.Combine(targetDirectory, relativePath))));
     }
 
     private sealed record EngineeringConfigurationFixture(

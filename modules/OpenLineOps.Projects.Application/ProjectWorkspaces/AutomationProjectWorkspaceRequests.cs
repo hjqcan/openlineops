@@ -8,3 +8,5 @@ public sealed record CreateAutomationProjectWorkspaceRequest(
     string? DefaultApplicationName);
 
 public sealed record OpenAutomationProjectWorkspaceRequest(string ProjectPath);
+
+public sealed record ImportAutomationProjectApplicationRequest(string ProjectFilePath);

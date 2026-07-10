@@ -1620,11 +1620,28 @@ Delivered on 2026-07-09 (automation project workspace API foundation slice):
 
 Delivered on 2026-07-09 (automation project workspace manifest slice):
 
-- Added a versioned `openlineops.project.json` project-folder manifest model for project id, display name, project path, applications, linked topology/process ids, active snapshot id, and published snapshot metadata.
+- Added the first monolithic project-folder manifest prototype; this prototype
+  was removed by the 2026-07-10 portable Application clean cutover and is not an
+  accepted input format.
 - Added controlled domain restore factories for `AutomationProject`, `ProjectApplication`, and `PublishedProjectSnapshot` so infrastructure can rehydrate project aggregates without raising new domain events.
 - Added `AutomationProjectWorkspaceService` with create/open/save manifest use cases and a file-system manifest store that writes manifests through a temporary file replacement.
 - Added `/api/automation-project-workspaces`, `/api/automation-project-workspaces/open`, and `PUT /api/automation-projects/{projectId}/manifest` so Electron can create, open, and save project folders through the backend boundary.
 - Added application-service and host-level API tests proving project manifests round-trip through a fresh repository and through the ASP.NET Core host.
+
+Delivered on 2026-07-10 (portable Application project clean cutover):
+
+- Replaced the monolithic manifest prototype with one root `<projectId>.oloproj`
+  plus one independent `.oloapp` inside every Application directory.
+- Moved Topology, SiteLayout, Process/Blockly/Python, custom-block, and
+  Engineering configuration source below the owning Application root and
+  removed host `ProjectId` from every Application-local document.
+- Added copy-and-import composition: a complete Application directory can move
+  from Project A to Project B without rewriting its contents.
+- Removed obsolete project/resource DTOs, fallback paths, readers, recent-list
+  migration, and Runner support. Only exact current schemas are accepted; this
+  is an intentional breaking cutover with no compatibility path.
+- Added strict unknown-field, path-containment, duplicate-id/path,
+  reparse-point, immutable-release, and cross-project portability coverage.
 
 Exit criteria:
 

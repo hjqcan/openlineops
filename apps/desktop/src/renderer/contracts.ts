@@ -353,6 +353,10 @@ export interface AddProjectApplicationRequest {
   displayName: string;
 }
 
+export interface ImportProjectApplicationRequest {
+  projectFilePath: string;
+}
+
 export interface PublishedProjectSnapshotResponse {
   snapshotId: string;
   projectId: string;
@@ -366,8 +370,8 @@ export interface PublishedProjectSnapshotResponse {
   capabilityBindings: SnapshotCapabilityBindingResponse[];
   targetReferences: ProjectTargetReferenceResponse[];
   blockVersionIds: string[];
-  releaseManifestPath: string | null;
-  releaseContentSha256: string | null;
+  releaseManifestPath: string;
+  releaseContentSha256: string;
 }
 
 export interface SnapshotCapabilityBindingResponse {
@@ -462,8 +466,8 @@ export interface PublishedProjectSnapshotManifestResponse {
   capabilityBindings: SnapshotCapabilityBindingResponse[];
   targetReferences: ProjectTargetReferenceResponse[];
   blockVersionIds: string[];
-  releaseManifestPath: string | null;
-  releaseContentSha256: string | null;
+  releaseManifestPath: string;
+  releaseContentSha256: string;
 }
 
 export interface CreateAutomationProjectWorkspaceRequest {

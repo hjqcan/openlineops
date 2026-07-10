@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
 
@@ -80,45 +81,66 @@ public sealed class AutomationProjectFileFormatTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadReadsLegacyManifestWithoutPersistingAbsoluteProjectPath()
+    public async Task LoadRejectsExistingFileWithoutProjectExtension()
     {
-        var projectRoot = Path.Combine(_testRoot, "legacy");
+        var projectRoot = Path.Combine(_testRoot, "wrong-extension");
         Directory.CreateDirectory(projectRoot);
-        var legacyPath = Path.Combine(projectRoot, AutomationProjectFileConvention.LegacyProjectFileName);
+        var wrongFilePath = Path.Combine(projectRoot, "openlineops.project.json");
         await File.WriteAllTextAsync(
-            legacyPath,
-            """
-            {
-              "formatVersion": 1,
-              "product": "OpenLineOps",
-              "projectId": "legacy-line",
-              "displayName": "Legacy Line",
-              "projectPath": "C:\\stale\\machine\\path",
-              "createdAtUtc": "2026-07-10T06:00:00+00:00",
-              "updatedAtUtc": "2026-07-10T06:00:00+00:00",
-              "activeSnapshotId": null,
-              "applications": [
-                {
-                  "applicationId": "main-line",
-                  "displayName": "Main Line",
-                  "topologyId": null,
-                  "processDefinitionIds": []
-                }
-              ],
-              "snapshots": []
-            }
-            """);
+            wrongFilePath,
+            "{}");
+        var store = new FileSystemAutomationProjectManifestStore();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.LoadAsync(wrongFilePath));
+
+        Assert.Contains(".oloproj", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LoadDirectoryWithoutProjectFileReturnsMissing()
+    {
+        var projectRoot = Path.Combine(_testRoot, "missing");
+        Directory.CreateDirectory(projectRoot);
         var store = new FileSystemAutomationProjectManifestStore();
 
         var loaded = await store.LoadAsync(projectRoot);
 
-        Assert.NotNull(loaded);
-        Assert.Equal(Path.GetFullPath(projectRoot), loaded.ProjectPath);
-        Assert.Equal(AutomationProjectManifest.CurrentFormatVersion, loaded.FormatVersion);
-        Assert.StartsWith(
-            "applications/application-main-line--",
-            Assert.Single(loaded.Applications).ProjectFilePath,
-            StringComparison.Ordinal);
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public async Task LoadRejectsObsoleteRootProjectFormat()
+    {
+        var projectRoot = Path.Combine(_testRoot, "obsolete-root");
+        var store = new FileSystemAutomationProjectManifestStore();
+        await store.SaveAsync(CreateManifest(projectRoot));
+        var projectFilePath = Path.Combine(projectRoot, "packaging-line.oloproj");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(projectFilePath))!.AsObject();
+        document["formatVersion"] = 2;
+        await File.WriteAllTextAsync(projectFilePath, document.ToJsonString(JsonOptions));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.LoadAsync(projectFilePath));
+    }
+
+    [Fact]
+    public async Task LoadRejectsRemovedHostProjectIdFieldInApplicationProject()
+    {
+        var projectRoot = Path.Combine(_testRoot, "strict-application");
+        var store = new FileSystemAutomationProjectManifestStore();
+        await store.SaveAsync(CreateManifest(projectRoot));
+        var applicationFilePath = Path.Combine(
+            projectRoot,
+            "applications",
+            "main-line",
+            "main-line.oloapp");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(applicationFilePath))!.AsObject();
+        document["projectId"] = "removed-host-project";
+        await File.WriteAllTextAsync(applicationFilePath, document.ToJsonString(JsonOptions));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.LoadAsync(projectRoot));
     }
 
     [Fact]
@@ -161,6 +183,64 @@ public sealed class AutomationProjectFileFormatTests : IDisposable
         var exception = Assert.Throws<InvalidDataException>(() => store.GetManifestPath(_testRoot));
 
         Assert.Contains("multiple", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("releaseManifestPath", true)]
+    [InlineData("releaseContentSha256", true)]
+    [InlineData("releaseManifestPath", false)]
+    [InlineData("releaseContentSha256", false)]
+    public async Task LoadRejectsSnapshotWithoutCompleteImmutableReleaseDescriptor(
+        string fieldName,
+        bool removeField)
+    {
+        var projectRoot = Path.Combine(_testRoot, $"snapshot-{fieldName}-{removeField}");
+        Directory.CreateDirectory(projectRoot);
+        var projectFilePath = Path.Combine(projectRoot, "project.oloproj");
+        var snapshot = new AutomationProjectSnapshotFile(
+            "snapshot.main",
+            "application.main",
+            "topology.main",
+            ["layout.main"],
+            "process.main",
+            "process.main@1",
+            "configuration.main",
+            CreatedAtUtc,
+            [],
+            [],
+            [],
+            "releases/release-main/release.json",
+            new string('a', 64));
+        var projectFile = new AutomationProjectFile(
+            AutomationProjectFile.CurrentSchemaVersion,
+            AutomationProjectManifest.CurrentFormatVersion,
+            AutomationProjectFile.KindName,
+            AutomationProjectManifest.ProductName,
+            "project.main",
+            "Project Main",
+            CreatedAtUtc,
+            CreatedAtUtc,
+            null,
+            [],
+            [snapshot]);
+        var document = JsonNode.Parse(JsonSerializer.Serialize(projectFile, JsonOptions))!;
+        var snapshotNode = document["snapshots"]![0]!.AsObject();
+        if (removeField)
+        {
+            snapshotNode.Remove(fieldName);
+        }
+        else
+        {
+            snapshotNode[fieldName] = string.Empty;
+        }
+
+        await File.WriteAllTextAsync(projectFilePath, document.ToJsonString(JsonOptions));
+        var store = new FileSystemAutomationProjectManifestStore();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.LoadAsync(projectFilePath));
+
+        Assert.Contains(fieldName, exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     public void Dispose()

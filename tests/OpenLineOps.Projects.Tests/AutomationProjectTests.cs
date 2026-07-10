@@ -58,7 +58,8 @@ public sealed class AutomationProjectTests
         Assert.Single(snapshot.CapabilityBindings);
         Assert.Single(snapshot.TargetReferences);
         Assert.Single(snapshot.BlockVersionIds);
-        Assert.True(snapshot.HasImmutableRelease);
+        Assert.Equal("releases/release-main/release.json", snapshot.ReleaseManifestPath);
+        Assert.Equal(new string('a', 64), snapshot.ReleaseContentSha256);
         Assert.Contains(project.DomainEvents, domainEvent =>
             domainEvent is ProjectSnapshotPublishedDomainEvent published
             && published.ProjectId == project.Id
@@ -164,8 +165,14 @@ public sealed class AutomationProjectTests
             "Main Project",
             "projects/main",
             CreatedAtUtc);
-        var first = ProjectApplication.Create(new ProjectApplicationId("application.main"), "Station Application");
-        var second = ProjectApplication.Create(new ProjectApplicationId("application.secondary"), "station application");
+        var first = ProjectApplication.Create(
+            new ProjectApplicationId("application.main"),
+            "Station Application",
+            "applications/application.main/application.main.oloapp");
+        var second = ProjectApplication.Create(
+            new ProjectApplicationId("application.secondary"),
+            "station application",
+            "applications/application.secondary/application.secondary.oloapp");
 
         Assert.True(project.AddApplication(first).Succeeded);
         var result = project.AddApplication(second);
@@ -182,7 +189,10 @@ public sealed class AutomationProjectTests
             "projects/main",
             CreatedAtUtc);
         applicationId = new ProjectApplicationId("application.main");
-        var application = ProjectApplication.Create(applicationId, "Station Application");
+        var application = ProjectApplication.Create(
+            applicationId,
+            "Station Application",
+            "applications/application.main/application.main.oloapp");
 
         Assert.True(project.AddApplication(application).Succeeded);
 
