@@ -70,6 +70,13 @@ public sealed record AddSiteLayoutElementRequest(
     string? LayerId,
     string? Label);
 
+public sealed record UpdateSiteLayoutElementGeometryRequest(
+    double? X,
+    double? Y,
+    double? Width,
+    double? Height,
+    double? RotationDegrees);
+
 public sealed record AutomationTopologyResponse(
     string TopologyId,
     string DisplayName,

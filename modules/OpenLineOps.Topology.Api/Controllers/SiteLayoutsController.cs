@@ -6,8 +6,10 @@ using OpenLineOps.Topology.Application.Layouts;
 using OpenLineOps.Topology.Application.Topologies;
 using ApiAddElementRequest = OpenLineOps.Topology.Api.Models.AddSiteLayoutElementRequest;
 using ApiCreateLayoutRequest = OpenLineOps.Topology.Api.Models.CreateSiteLayoutRequest;
+using ApiUpdateElementGeometryRequest = OpenLineOps.Topology.Api.Models.UpdateSiteLayoutElementGeometryRequest;
 using AppAddElementRequest = OpenLineOps.Topology.Application.Layouts.AddSiteLayoutElementRequest;
 using AppCreateLayoutRequest = OpenLineOps.Topology.Application.Layouts.CreateSiteLayoutRequest;
+using AppUpdateElementGeometryRequest = OpenLineOps.Topology.Application.Layouts.UpdateSiteLayoutElementGeometryRequest;
 
 namespace OpenLineOps.Topology.Api.Controllers;
 
@@ -113,6 +115,40 @@ public sealed class SiteLayoutsController : ControllerBase
             : Ok(ToResponse(result.Value));
     }
 
+    [HttpPut("{layoutId}/elements/{elementId}/geometry")]
+    [ProducesResponseType<SiteLayoutResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<SiteLayoutResponse>> UpdateElementGeometryAsync(
+        string layoutId,
+        string elementId,
+        ApiUpdateElementGeometryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService
+            .UpdateLayoutElementGeometryAsync(
+                layoutId,
+                elementId,
+                new AppUpdateElementGeometryRequest(
+                    request.X!.Value,
+                    request.Y!.Value,
+                    request.Width!.Value,
+                    request.Height!.Value,
+                    request.RotationDegrees!.Value),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(ToResponse(result.Value));
+    }
+
     private static SiteLayoutResponse ToResponse(SiteLayoutDetails layout)
     {
         return new SiteLayoutResponse(
@@ -190,6 +226,23 @@ public sealed class SiteLayoutsController : ControllerBase
         AddNumber(errors, nameof(request.RotationDegrees), request.RotationDegrees);
         AutomationTopologiesController.AddRequired(errors, nameof(request.LayerId), request.LayerId);
         AutomationTopologiesController.AddRequired(errors, nameof(request.Label), request.Label);
+
+        return errors;
+    }
+
+    private static Dictionary<string, string[]> Validate(ApiUpdateElementGeometryRequest? request)
+    {
+        var errors = AutomationTopologiesController.NewErrors(request);
+        if (request is null)
+        {
+            return errors;
+        }
+
+        AddNumber(errors, nameof(request.X), request.X);
+        AddNumber(errors, nameof(request.Y), request.Y);
+        AddPositive(errors, nameof(request.Width), request.Width);
+        AddPositive(errors, nameof(request.Height), request.Height);
+        AddNumber(errors, nameof(request.RotationDegrees), request.RotationDegrees);
 
         return errors;
     }

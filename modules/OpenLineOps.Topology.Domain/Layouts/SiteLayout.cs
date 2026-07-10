@@ -68,8 +68,64 @@ public sealed class SiteLayout : AggregateRoot<SiteLayoutId>
                 $"Layout element {element.Id} already exists in site layout {Id}.");
         }
 
+        var boundsResult = ValidateGeometry(element.X, element.Y, element.Width, element.Height);
+        if (!boundsResult.Succeeded)
+        {
+            return boundsResult;
+        }
+
         _elements.Add(element);
 
         return TopologyOperationResult.Accepted("Layout element added.");
+    }
+
+    public TopologyOperationResult UpdateElementGeometry(
+        LayoutElementId elementId,
+        double x,
+        double y,
+        double width,
+        double height,
+        double rotationDegrees)
+    {
+        var element = _elements.SingleOrDefault(candidate => candidate.Id == elementId);
+        if (element is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.LayoutElementNotFound",
+                $"Layout element {elementId} was not found in site layout {Id}.");
+        }
+
+        var boundsResult = ValidateGeometry(x, y, width, height);
+        if (!boundsResult.Succeeded)
+        {
+            return boundsResult;
+        }
+
+        element.UpdateGeometry(x, y, width, height, rotationDegrees);
+
+        return TopologyOperationResult.Accepted("Layout element geometry updated.");
+    }
+
+    private TopologyOperationResult ValidateGeometry(
+        double x,
+        double y,
+        double width,
+        double height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.LayoutElementSizeInvalid",
+                "Layout element width and height must be positive.");
+        }
+
+        if (x < 0 || y < 0 || x + width > CanvasWidth || y + height > CanvasHeight)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.LayoutElementOutOfBounds",
+                $"Layout element geometry must stay inside site layout {Id}.");
+        }
+
+        return TopologyOperationResult.Accepted();
     }
 }

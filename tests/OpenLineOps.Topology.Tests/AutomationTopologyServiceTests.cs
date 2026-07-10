@@ -102,6 +102,15 @@ public sealed class AutomationTopologyServiceTests
                 0,
                 "default",
                 "L1"));
+        var movedSlotElement = await service.UpdateLayoutElementGeometryAsync(
+            "layout.main",
+            "element.slot.1",
+            new UpdateSiteLayoutElementGeometryRequest(
+                180,
+                260,
+                44,
+                42,
+                15));
 
         Assert.True(created.IsSuccess);
         Assert.True(site.IsSuccess);
@@ -115,7 +124,14 @@ public sealed class AutomationTopologyServiceTests
         Assert.True(layout.IsSuccess);
         Assert.True(withStationElement.IsSuccess);
         Assert.True(withSlotElement.IsSuccess);
-        Assert.Equal(2, withSlotElement.Value.Elements.Count);
+        Assert.True(movedSlotElement.IsSuccess);
+        Assert.Equal(2, movedSlotElement.Value.Elements.Count);
+        var movedElement = movedSlotElement.Value.Elements.Single(element => element.ElementId == "element.slot.1");
+        Assert.Equal(180, movedElement.X);
+        Assert.Equal(260, movedElement.Y);
+        Assert.Equal(44, movedElement.Width);
+        Assert.Equal(42, movedElement.Height);
+        Assert.Equal(15, movedElement.RotationDegrees);
     }
 
     [Fact]
@@ -152,6 +168,51 @@ public sealed class AutomationTopologyServiceTests
 
         Assert.True(result.IsFailure);
         Assert.Equal("Validation.Topology.LayoutTargetMissing", result.Error.Code);
+    }
+
+    [Fact]
+    public async Task UpdateLayoutElementGeometryRejectsOutOfBoundsElement()
+    {
+        var service = CreateService();
+
+        Assert.True((await service.CreateAsync(new CreateAutomationTopologyRequest("topology.main", "Main Line"))).IsSuccess);
+        Assert.True((await service.AddEquipmentNodeAsync(
+            "topology.main",
+            new AddEquipmentNodeRequest("node.site", null, "Site", "Factory Site"))).IsSuccess);
+        Assert.True((await service.CreateLayoutAsync(new CreateSiteLayoutRequest(
+            "layout.main",
+            "topology.main",
+            "Main Layout",
+            200,
+            160,
+            "px"))).IsSuccess);
+        Assert.True((await service.AddLayoutElementAsync(
+            "layout.main",
+            new AddSiteLayoutElementRequest(
+                "element.site",
+                "NodeShape",
+                "EquipmentNode",
+                "node.site",
+                20,
+                30,
+                80,
+                60,
+                0,
+                "default",
+                "Site"))).IsSuccess);
+
+        var result = await service.UpdateLayoutElementGeometryAsync(
+            "layout.main",
+            "element.site",
+            new UpdateSiteLayoutElementGeometryRequest(
+                180,
+                130,
+                80,
+                60,
+                0));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Topology.LayoutElementOutOfBounds", result.Error.Code);
     }
 
     private static AutomationTopologyService CreateService()

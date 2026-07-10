@@ -43,15 +43,15 @@ public sealed class SiteLayoutElement : Entity<LayoutElementId>
 
     public LayoutTargetReference Target { get; }
 
-    public double X { get; }
+    public double X { get; private set; }
 
-    public double Y { get; }
+    public double Y { get; private set; }
 
-    public double Width { get; }
+    public double Width { get; private set; }
 
-    public double Height { get; }
+    public double Height { get; private set; }
 
-    public double RotationDegrees { get; }
+    public double RotationDegrees { get; private set; }
 
     public string LayerId { get; }
 
@@ -70,5 +70,29 @@ public sealed class SiteLayoutElement : Entity<LayoutElementId>
         string label)
     {
         return new SiteLayoutElement(id, kind, target, x, y, width, height, rotationDegrees, layerId, label);
+    }
+
+    internal void UpdateGeometry(
+        double x,
+        double y,
+        double width,
+        double height,
+        double rotationDegrees)
+    {
+        if (width <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width), "Layout element width must be positive.");
+        }
+
+        if (height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(height), "Layout element height must be positive.");
+        }
+
+        X = x;
+        Y = y;
+        Width = width;
+        Height = height;
+        RotationDegrees = rotationDegrees;
     }
 }

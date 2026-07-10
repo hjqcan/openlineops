@@ -390,6 +390,51 @@ public sealed class AutomationTopologyService : IAutomationTopologyService
         }
     }
 
+    public async Task<Result<SiteLayoutDetails>> UpdateLayoutElementGeometryAsync(
+        string layoutId,
+        string elementId,
+        UpdateSiteLayoutElementGeometryRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (string.IsNullOrWhiteSpace(elementId))
+        {
+            return Result.Failure<SiteLayoutDetails>(LayoutElementNotFound(elementId));
+        }
+
+        try
+        {
+            var layout = await _layoutRepository
+                .GetByIdAsync(new SiteLayoutId(layoutId), cancellationToken)
+                .ConfigureAwait(false);
+            if (layout is null)
+            {
+                return Result.Failure<SiteLayoutDetails>(LayoutNotFound(layoutId));
+            }
+
+            var updateResult = layout.UpdateElementGeometry(
+                new LayoutElementId(elementId),
+                request.X,
+                request.Y,
+                request.Width,
+                request.Height,
+                request.RotationDegrees);
+            if (!updateResult.Succeeded)
+            {
+                return Result.Failure<SiteLayoutDetails>(ToApplicationError(updateResult));
+            }
+
+            await _layoutRepository.SaveAsync(layout, cancellationToken).ConfigureAwait(false);
+
+            return Result.Success(AutomationTopologyMapper.ToDetails(layout));
+        }
+        catch (ArgumentException exception)
+        {
+            return Result.Failure<SiteLayoutDetails>(InvalidInput(exception));
+        }
+    }
+
     private async Task<Result<AutomationTopologyDetails>> MutateTopologyAsync(
         string topologyId,
         Func<AutomationTopology, TopologyOperationResult> mutate,
@@ -451,6 +496,17 @@ public sealed class AutomationTopologyService : IAutomationTopologyService
         return ApplicationError.Conflict(result.Code, result.Message);
     }
 
+    private static ApplicationError ToApplicationError(TopologyOperationResult result)
+    {
+        return result.Code switch
+        {
+            "Topology.LayoutElementNotFound" => ApplicationError.NotFound(result.Code, result.Message),
+            "Topology.LayoutElementOutOfBounds" => ApplicationError.Validation(result.Code, result.Message),
+            "Topology.LayoutElementSizeInvalid" => ApplicationError.Validation(result.Code, result.Message),
+            _ => ToConflict(result)
+        };
+    }
+
     private static ApplicationError InvalidInput(ArgumentException exception)
     {
         return ApplicationError.Validation(
@@ -470,5 +526,12 @@ public sealed class AutomationTopologyService : IAutomationTopologyService
         return ApplicationError.NotFound(
             "Topology.LayoutNotFound",
             $"Site layout {layoutId} was not found.");
+    }
+
+    private static ApplicationError LayoutElementNotFound(string? elementId)
+    {
+        return ApplicationError.NotFound(
+            "Topology.LayoutElementNotFound",
+            $"Site layout element {elementId} was not found.");
     }
 }

@@ -58,4 +58,10 @@ public interface IAutomationTopologyService
         string layoutId,
         AddSiteLayoutElementRequest request,
         CancellationToken cancellationToken = default);
+
+    Task<Result<SiteLayoutDetails>> UpdateLayoutElementGeometryAsync(
+        string layoutId,
+        string elementId,
+        UpdateSiteLayoutElementGeometryRequest request,
+        CancellationToken cancellationToken = default);
 }

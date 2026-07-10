@@ -20,3 +20,10 @@ public sealed record AddSiteLayoutElementRequest(
     double RotationDegrees,
     string LayerId,
     string Label);
+
+public sealed record UpdateSiteLayoutElementGeometryRequest(
+    double X,
+    double Y,
+    double Width,
+    double Height,
+    double RotationDegrees);
