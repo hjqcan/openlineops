@@ -37,6 +37,7 @@ internal static class ProductionLineResourceMapper
                     stage.DisplayName,
                     stage.WorkstationId.Value,
                     stage.FlowDefinitionId,
+                    stage.ConfigurationSnapshotId,
                     stage.ExternalTestProgramAdapterId?.Value))
                 .ToArray(),
             definition.ExternalTestProgramAdapters
@@ -53,6 +54,11 @@ internal static class ProductionLineResourceMapper
                         new ExternalTestProgramInputMappingDocument(mapping.Source, mapping.Target)).ToArray(),
                     adapter.ResultMappings.Select(mapping =>
                         new ExternalTestProgramResultMappingDocument(mapping.SourcePath, mapping.TargetKey)).ToArray(),
+                    new ExternalTestProgramOutcomeMappingDocument(
+                        adapter.OutcomeMapping.SourcePath,
+                        adapter.OutcomeMapping.PassedToken,
+                        adapter.OutcomeMapping.FailedToken,
+                        adapter.OutcomeMapping.AbortedToken),
                     checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond)))
                 .ToArray(),
             definition.CreatedAtUtc,
@@ -82,7 +88,8 @@ internal static class ProductionLineResourceMapper
                 stage.DisplayName,
                 new WorkstationId(stage.WorkstationId),
                 stage.FlowDefinitionId,
-                string.IsNullOrWhiteSpace(stage.ExternalTestProgramAdapterId)
+                stage.ConfigurationSnapshotId,
+                stage.ExternalTestProgramAdapterId is null
                     ? null
                     : new ExternalTestProgramAdapterId(stage.ExternalTestProgramAdapterId))),
             document.ExternalTestProgramAdapters.Select(adapter => ExternalTestProgramAdapter.Create(
@@ -97,6 +104,11 @@ internal static class ProductionLineResourceMapper
                     new ExternalTestProgramInputMapping(mapping.Source, mapping.Target)),
                 adapter.ResultMappings.Select(mapping =>
                     new ExternalTestProgramResultMapping(mapping.SourcePath, mapping.TargetKey)),
+                new ExternalTestProgramOutcomeMapping(
+                    adapter.OutcomeMapping.SourcePath,
+                    adapter.OutcomeMapping.PassedToken,
+                    adapter.OutcomeMapping.FailedToken,
+                    adapter.OutcomeMapping.AbortedToken),
                 MillisecondsToTimeout(adapter.TimeoutMilliseconds))),
             document.CreatedAtUtc,
             document.UpdatedAtUtc);
@@ -127,12 +139,24 @@ internal static class ProductionLineResourceMapper
             || document.Stages is null
             || document.ExternalTestProgramAdapters is null
             || document.Workstations.Any(static workstation => workstation is null)
-            || document.Stages.Any(static stage => stage is null)
+            || document.Stages.Any(static stage => stage is null
+                || string.IsNullOrWhiteSpace(stage.ConfigurationSnapshotId)
+                || !string.Equals(
+                    stage.ConfigurationSnapshotId,
+                    stage.ConfigurationSnapshotId.Trim(),
+                    StringComparison.Ordinal)
+                || (stage.ExternalTestProgramAdapterId is not null
+                    && (string.IsNullOrWhiteSpace(stage.ExternalTestProgramAdapterId)
+                        || !string.Equals(
+                            stage.ExternalTestProgramAdapterId,
+                            stage.ExternalTestProgramAdapterId.Trim(),
+                            StringComparison.Ordinal))))
             || document.ExternalTestProgramAdapters.Any(adapter =>
                 adapter is null
                 || adapter.ArgumentTemplates is null
                 || adapter.InputMappings is null
                 || adapter.ResultMappings is null
+                || adapter.OutcomeMapping is null
                 || adapter.ArgumentTemplates.Any(static argument => argument is null)
                 || adapter.InputMappings.Any(static mapping => mapping is null)
                 || adapter.ResultMappings.Any(static mapping => mapping is null)

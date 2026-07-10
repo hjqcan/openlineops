@@ -56,12 +56,28 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Automation system {system.Id} already exists in topology {Id}.");
         }
 
-        if (system.ParentSystemId is not null
-            && _systems.All(candidate => candidate.Id != system.ParentSystemId))
+        var parent = system.ParentSystemId is null
+            ? null
+            : _systems.SingleOrDefault(candidate => candidate.Id == system.ParentSystemId);
+        if (system.ParentSystemId is not null && parent is null)
         {
             return TopologyOperationResult.Rejected(
                 "Topology.ParentSystemMissing",
                 $"Parent automation system {system.ParentSystemId} was not found in topology {Id}.");
+        }
+
+        if (system is StationSystem && parent is not null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.StationMustBeRoot",
+                $"Station system {system.Id} must be placed at the topology root.");
+        }
+
+        if (system is GeneralAutomationSystem && parent is not null and not StationSystem)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.ChildSystemRequiresStation",
+                $"Child automation system {system.Id} must belong directly to a Station system.");
         }
 
         var missingCapability = system.RequiredCapabilities

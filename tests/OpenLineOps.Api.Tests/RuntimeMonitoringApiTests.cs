@@ -9,6 +9,7 @@ using OpenLineOps.Runtime.Api.Models;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
 
@@ -56,7 +57,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         var sessionId = await PublishTargetLifecycleAsync(stationSystemId, suffix);
 
         using var targetResponse = await _client.GetAsync(
-            $"/api/runtime/monitoring/targets?stationSystemId={Uri.EscapeDataString(stationSystemId)}");
+            $"/api/runtime/monitoring/targets?{MonitoringQuery(suffix, stationSystemId)}");
         using var targetDocument = await ReadJsonAsync(targetResponse);
         var targets = targetDocument.RootElement.GetProperty("items").EnumerateArray().ToArray();
 
@@ -65,19 +66,30 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.All(targets, target => Assert.Equal(
             [
                 "actionId",
+                "applicationId",
                 "commandStatus",
+                "dutIdentity",
                 "failureReason",
                 "isTerminal",
                 "lastTransitionAtUtc",
+                "productionLineDefinitionId",
+                "productionRunId",
+                "projectId",
+                "projectSnapshotId",
                 "sessionId",
+                "stageId",
+                "stageSequence",
                 "stationSystemId",
                 "targetId",
-                "targetKind"
+                "targetKind",
+                "topologyId",
+                "workstationId"
             ],
             target.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal)));
         AssertTargetResponse(
             targets,
             sessionId,
+            suffix,
             RuntimeTargetKinds.System,
             "System.Main",
             "Completed",
@@ -85,6 +97,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         AssertTargetResponse(
             targets,
             sessionId,
+            suffix,
             RuntimeTargetKinds.SlotGroup,
             "Group.Main",
             "Completed",
@@ -92,22 +105,43 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         AssertTargetResponse(
             targets,
             sessionId,
+            suffix,
             RuntimeTargetKinds.Slot,
             "Slot.Main",
             "Failed",
             "slot execution failed");
 
         using var wrongCaseTargetResponse = await _client.GetAsync(
-            $"/api/runtime/monitoring/targets?stationSystemId={Uri.EscapeDataString(stationSystemId.ToLowerInvariant())}");
+            $"/api/runtime/monitoring/targets?{MonitoringQuery(suffix, stationSystemId.ToLowerInvariant())}");
         using var wrongCaseTargetDocument = await ReadJsonAsync(wrongCaseTargetResponse);
         Assert.Empty(wrongCaseTargetDocument.RootElement.GetProperty("items").EnumerateArray());
 
         using var stationResponse = await _client.GetAsync(
-            $"/api/runtime/monitoring/stations?stationSystemId={Uri.EscapeDataString(stationSystemId)}");
+            $"/api/runtime/monitoring/stations?{MonitoringQuery(suffix, stationSystemId)}");
         using var stationDocument = await ReadJsonAsync(stationResponse);
         var station = Assert.Single(stationDocument.RootElement.GetProperty("items").EnumerateArray());
         Assert.Equal(stationSystemId, station.GetProperty("stationSystemId").GetString());
+        Assert.Equal($"project-{suffix}", station.GetProperty("projectId").GetString());
+        Assert.Equal($"application-{suffix}", station.GetProperty("applicationId").GetString());
+        Assert.Equal($"snapshot-{suffix}", station.GetProperty("projectSnapshotId").GetString());
+        Assert.Equal($"topology-{suffix}", station.GetProperty("topologyId").GetString());
+        Assert.Equal(ProductionRunGuid(suffix), station.GetProperty("productionRunId").GetGuid());
+        Assert.Equal($"line-{suffix}", station.GetProperty("productionLineDefinitionId").GetString());
+        Assert.Equal($"stage-{suffix}", station.GetProperty("stageId").GetString());
+        Assert.Equal(1, station.GetProperty("stageSequence").GetInt32());
+        Assert.Equal($"workstation-{suffix}", station.GetProperty("workstationId").GetString());
+        AssertDutIdentity(station.GetProperty("dutIdentity"), suffix);
         Assert.False(station.TryGetProperty("stationId", out _));
+        Assert.False(station.TryGetProperty("serialNumber", out _));
+
+        using var wrongApplicationResponse = await _client.GetAsync(
+            $"/api/runtime/monitoring/stations?{MonitoringQuery(suffix, stationSystemId, $"application-other-{suffix}")}");
+        using var wrongApplicationDocument = await ReadJsonAsync(wrongApplicationResponse);
+        Assert.Empty(wrongApplicationDocument.RootElement.GetProperty("items").EnumerateArray());
+
+        using var missingScopeResponse = await _client.GetAsync(
+            $"/api/runtime/monitoring/stations?stationSystemId={Uri.EscapeDataString(stationSystemId)}");
+        Assert.Equal(HttpStatusCode.BadRequest, missingScopeResponse.StatusCode);
 
         using var sessionResponse = await _client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var sessionDocument = await ReadJsonAsync(sessionResponse);
@@ -115,13 +149,29 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.False(sessionDocument.RootElement.TryGetProperty("stationId", out _));
 
         using var timelineResponse = await _client.GetAsync(
-            $"/api/runtime/monitoring/sessions/{sessionId}/timeline");
+            $"/api/runtime/monitoring/sessions/{sessionId}/timeline?{MonitoringQuery(suffix, stationSystemId)}");
         using var timelineDocument = await ReadJsonAsync(timelineResponse);
         var timelineEntry = Assert.Single(
             timelineDocument.RootElement.GetProperty("items").EnumerateArray(),
             entry => entry.GetProperty("eventName").GetString() == "RuntimeSession.Created");
         Assert.Equal(stationSystemId, timelineEntry.GetProperty("stationSystemId").GetString());
+        Assert.Equal(ProductionRunGuid(suffix), timelineEntry.GetProperty("productionRunId").GetGuid());
+        Assert.Equal($"line-{suffix}", timelineEntry.GetProperty("productionLineDefinitionId").GetString());
+        Assert.Equal($"stage-{suffix}", timelineEntry.GetProperty("stageId").GetString());
+        Assert.Equal(1, timelineEntry.GetProperty("stageSequence").GetInt32());
+        Assert.Equal($"workstation-{suffix}", timelineEntry.GetProperty("workstationId").GetString());
+        AssertDutIdentity(timelineEntry.GetProperty("dutIdentity"), suffix);
         Assert.False(timelineEntry.TryGetProperty("stationId", out _));
+        Assert.False(timelineEntry.TryGetProperty("serialNumber", out _));
+
+        using var wrongRunResponse = await _client.GetAsync(
+            $"/api/runtime/monitoring/stations?{MonitoringQuery(suffix, stationSystemId, productionRunId: Guid.NewGuid())}");
+        using var wrongRunDocument = await ReadJsonAsync(wrongRunResponse);
+        Assert.Empty(wrongRunDocument.RootElement.GetProperty("items").EnumerateArray());
+
+        using var unscopedTimelineResponse = await _client.GetAsync(
+            $"/api/runtime/monitoring/sessions/{sessionId}/timeline");
+        Assert.Equal(HttpStatusCode.BadRequest, unscopedTimelineResponse.StatusCode);
 
         using var alarmResponse = await _client.GetAsync(
             $"/api/runtime/monitoring/alarms?stationSystemId={Uri.EscapeDataString(stationSystemId)}");
@@ -140,7 +190,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             recoveryStationSystemId,
             $"recovery-{suffix}");
         using var runningTargetResponse = await _client.GetAsync(
-            $"/api/runtime/monitoring/targets?stationSystemId={Uri.EscapeDataString(recoveryStationSystemId)}");
+            $"/api/runtime/monitoring/targets?{MonitoringQuery($"recovery-{suffix}", recoveryStationSystemId)}");
         using var runningTargetDocument = await ReadJsonAsync(runningTargetResponse);
         var runningTarget = Assert.Single(
             runningTargetDocument.RootElement.GetProperty("items").EnumerateArray());
@@ -194,14 +244,43 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         });
 
         await connection.StartAsync();
+        await connection.InvokeAsync(
+            "JoinProductionRunGroup",
+            $"project-{suffix}",
+            $"application-{suffix}",
+            $"snapshot-{suffix}",
+            $"topology-{suffix}",
+            ProductionRunGuid(suffix));
         var sessionId = await PublishTargetLifecycleAsync(stationSystemId, suffix);
         var stationStatus = await stationStatusReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var failedTarget = await failedTargetReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(stationSystemId, stationStatus.StationSystemId);
         Assert.Equal(sessionId, stationStatus.LatestSessionId);
+        Assert.Equal($"project-{suffix}", stationStatus.ProjectId);
+        Assert.Equal($"application-{suffix}", stationStatus.ApplicationId);
+        Assert.Equal($"snapshot-{suffix}", stationStatus.ProjectSnapshotId);
+        Assert.Equal($"topology-{suffix}", stationStatus.TopologyId);
+        Assert.Equal(ProductionRunGuid(suffix), stationStatus.ProductionRunId);
+        Assert.Equal($"line-{suffix}", stationStatus.ProductionLineDefinitionId);
+        Assert.Equal($"stage-{suffix}", stationStatus.StageId);
+        Assert.Equal(1, stationStatus.StageSequence);
+        Assert.Equal($"workstation-{suffix}", stationStatus.WorkstationId);
+        Assert.Equal($"dut-model-{suffix}", stationStatus.DutIdentity.ModelId);
+        Assert.Equal("serialNumber", stationStatus.DutIdentity.InputKey);
+        Assert.Equal($"DUT-{suffix}", stationStatus.DutIdentity.Value);
         Assert.Equal(stationSystemId, failedTarget.StationSystemId);
         Assert.Equal(sessionId, failedTarget.SessionId);
+        Assert.Equal(stationStatus.ProjectId, failedTarget.ProjectId);
+        Assert.Equal(stationStatus.ApplicationId, failedTarget.ApplicationId);
+        Assert.Equal(stationStatus.ProjectSnapshotId, failedTarget.ProjectSnapshotId);
+        Assert.Equal(stationStatus.TopologyId, failedTarget.TopologyId);
+        Assert.Equal(stationStatus.ProductionRunId, failedTarget.ProductionRunId);
+        Assert.Equal(stationStatus.ProductionLineDefinitionId, failedTarget.ProductionLineDefinitionId);
+        Assert.Equal(stationStatus.StageId, failedTarget.StageId);
+        Assert.Equal(stationStatus.StageSequence, failedTarget.StageSequence);
+        Assert.Equal(stationStatus.WorkstationId, failedTarget.WorkstationId);
+        Assert.Equal(stationStatus.DutIdentity, failedTarget.DutIdentity);
         Assert.Equal("slot execution failed", failedTarget.FailureReason);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.System
@@ -242,6 +321,22 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             .Build();
     }
 
+    private static string MonitoringQuery(
+        string suffix,
+        string stationSystemId,
+        string? applicationId = null,
+        Guid? productionRunId = null)
+    {
+        return string.Join(
+            "&",
+            $"projectId={Uri.EscapeDataString($"project-{suffix}")}",
+            $"applicationId={Uri.EscapeDataString(applicationId ?? $"application-{suffix}")}",
+            $"projectSnapshotId={Uri.EscapeDataString($"snapshot-{suffix}")}",
+            $"topologyId={Uri.EscapeDataString($"topology-{suffix}")}",
+            $"productionRunId={Uri.EscapeDataString((productionRunId ?? ProductionRunGuid(suffix)).ToString("D"))}",
+            $"stationSystemId={Uri.EscapeDataString(stationSystemId)}");
+    }
+
     private async Task<Guid> PublishTargetLifecycleAsync(string stationSystemId, string suffix)
     {
         var repository = _factory.Services.GetRequiredService<IRuntimeSessionRepository>();
@@ -254,16 +349,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             new ConfigurationSnapshotId($"configuration-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
             DateTimeOffset.UtcNow,
-            new RuntimeSessionTraceMetadata(
-                null,
-                null,
-                null,
-                null,
-                "runtime-monitoring-api-tests",
-                $"project-{suffix}",
-                $"application-{suffix}",
-                $"snapshot-{suffix}",
-                $"topology-{suffix}"));
+            CreateTraceMetadata(suffix));
         var transitionAtUtc = DateTimeOffset.UtcNow;
         session.Start(transitionAtUtc);
 
@@ -319,16 +405,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             new ConfigurationSnapshotId($"configuration-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
             DateTimeOffset.UtcNow,
-            new RuntimeSessionTraceMetadata(
-                null,
-                null,
-                null,
-                null,
-                "runtime-monitoring-api-tests",
-                $"project-{suffix}",
-                $"application-{suffix}",
-                $"snapshot-{suffix}",
-                $"topology-{suffix}"));
+            CreateTraceMetadata(suffix));
         var transitionAtUtc = DateTimeOffset.UtcNow;
         session.Start(transitionAtUtc);
         var step = session.StartStep(
@@ -406,6 +483,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
     private static void AssertTargetResponse(
         IEnumerable<JsonElement> targets,
         Guid sessionId,
+        string suffix,
         string targetKind,
         string targetId,
         string commandStatus,
@@ -417,6 +495,12 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
                 && item.GetProperty("targetId").GetString() == targetId);
         Assert.Equal(sessionId, target.GetProperty("sessionId").GetGuid());
         Assert.Equal(commandStatus, target.GetProperty("commandStatus").GetString());
+        Assert.Equal(ProductionRunGuid(suffix), target.GetProperty("productionRunId").GetGuid());
+        Assert.Equal($"line-{suffix}", target.GetProperty("productionLineDefinitionId").GetString());
+        Assert.Equal($"stage-{suffix}", target.GetProperty("stageId").GetString());
+        Assert.Equal(1, target.GetProperty("stageSequence").GetInt32());
+        Assert.Equal($"workstation-{suffix}", target.GetProperty("workstationId").GetString());
+        AssertDutIdentity(target.GetProperty("dutIdentity"), suffix);
         Assert.True(target.GetProperty("isTerminal").GetBoolean());
         Assert.Equal(failureReason, target.GetProperty("failureReason").GetString());
     }
@@ -425,5 +509,40 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
     {
         var stream = await response.Content.ReadAsStreamAsync();
         return await JsonDocument.ParseAsync(stream);
+    }
+
+    private static RuntimeSessionTraceMetadata CreateTraceMetadata(string suffix)
+    {
+        return new RuntimeSessionTraceMetadata(
+            new ProductionRunId(ProductionRunGuid(suffix)),
+            $"line-{suffix}",
+            $"stage-{suffix}",
+            1,
+            $"workstation-{suffix}",
+            new DutIdentity($"dut-model-{suffix}", "serialNumber", $"DUT-{suffix}"),
+            null,
+            null,
+            null,
+            "runtime-monitoring-api-tests",
+            $"project-{suffix}",
+            $"application-{suffix}",
+            $"snapshot-{suffix}",
+            $"topology-{suffix}");
+    }
+
+    private static Guid ProductionRunGuid(string suffix)
+    {
+        const string recoveryPrefix = "recovery-";
+        var guidText = suffix.StartsWith(recoveryPrefix, StringComparison.Ordinal)
+            ? suffix[recoveryPrefix.Length..]
+            : suffix;
+        return Guid.ParseExact(guidText, "N");
+    }
+
+    private static void AssertDutIdentity(JsonElement dutIdentity, string suffix)
+    {
+        Assert.Equal($"dut-model-{suffix}", dutIdentity.GetProperty("modelId").GetString());
+        Assert.Equal("serialNumber", dutIdentity.GetProperty("inputKey").GetString());
+        Assert.Equal($"DUT-{suffix}", dutIdentity.GetProperty("value").GetString());
     }
 }

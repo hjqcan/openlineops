@@ -21,7 +21,7 @@ public sealed class PythonScriptDefinitionValidator : IProcessScriptDefinitionVa
             return ValueTask.FromResult(ProcessScriptValidationReport.Valid);
         }
 
-        if (!string.Equals(node.ScriptLanguage, "Python", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(node.ScriptLanguage, "Python", StringComparison.Ordinal))
         {
             return ValueTask.FromResult(Invalid(new ProcessScriptValidationIssue(
                 "PYTHON_LANGUAGE_UNSUPPORTED",

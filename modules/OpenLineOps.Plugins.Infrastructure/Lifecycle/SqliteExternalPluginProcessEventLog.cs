@@ -20,6 +20,7 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
     public void Record(ExternalPluginProcessEvent processEvent)
     {
         ArgumentNullException.ThrowIfNull(processEvent);
+        RequireCanonicalPluginId(processEvent.PluginId, nameof(processEvent));
 
         lock (_syncRoot)
         {
@@ -157,7 +158,7 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
     private static string BuildListSql(ExternalPluginProcessEventQuery query)
     {
         var filters = new List<string>();
-        if (!string.IsNullOrWhiteSpace(query.PluginId))
+        if (query.PluginId is not null)
         {
             filters.Add("plugin_id = $plugin_id");
         }
@@ -193,9 +194,9 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
         SqliteCommand command,
         ExternalPluginProcessEventQuery query)
     {
-        if (!string.IsNullOrWhiteSpace(query.PluginId))
+        if (query.PluginId is not null)
         {
-            command.Parameters.AddWithValue("$plugin_id", query.PluginId.Trim());
+            command.Parameters.AddWithValue("$plugin_id", query.PluginId);
         }
 
         if (query.Kind is not null)
@@ -219,6 +220,11 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
 
     private static void ValidateQuery(ExternalPluginProcessEventQuery query)
     {
+        if (query.PluginId is not null)
+        {
+            RequireCanonicalPluginId(query.PluginId, nameof(query));
+        }
+
         if (query.Skip < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(query), "External plugin process event query skip must be greater than or equal to zero.");
@@ -227,6 +233,17 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
         if (query.Take <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(query), "External plugin process event query take must be greater than zero.");
+        }
+    }
+
+    private static void RequireCanonicalPluginId(string pluginId, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(pluginId)
+            || !string.Equals(pluginId, pluginId.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "External plugin process event plugin id must be non-empty and must not contain surrounding whitespace.",
+                parameterName);
         }
     }
 

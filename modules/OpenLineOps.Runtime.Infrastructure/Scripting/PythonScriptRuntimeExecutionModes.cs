@@ -2,21 +2,15 @@ namespace OpenLineOps.Runtime.Infrastructure.Scripting;
 
 public static class PythonScriptRuntimeExecutionModes
 {
-    public const string InProcessTrusted = "InProcessTrusted";
-
     public const string ProcessIsolated = "ProcessIsolated";
 
-    public static bool IsInProcessTrusted(string? value)
+    public static void RequireCurrent(string? value)
     {
-        return string.Equals(value, InProcessTrusted, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "InProcess", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Trusted", StringComparison.OrdinalIgnoreCase);
-    }
-
-    public static bool IsProcessIsolated(string? value)
-    {
-        return string.Equals(value, ProcessIsolated, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Worker", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "ExternalProcess", StringComparison.OrdinalIgnoreCase);
+        if (!string.Equals(value, ProcessIsolated, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Unsupported Python script execution mode '{value}'. Expected exactly "
+                + $"'{ProcessIsolated}'.");
+        }
     }
 }

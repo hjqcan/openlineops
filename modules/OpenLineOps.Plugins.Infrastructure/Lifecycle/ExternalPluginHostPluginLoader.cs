@@ -1,13 +1,12 @@
 using System.Reflection;
 using System.Text.Json;
 using OpenLineOps.Plugin.Abstractions;
+using OpenLineOps.Plugins.Infrastructure.Serialization;
 
 namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public sealed class ExternalPluginHostPluginLoader
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     public async ValueTask<IOpenLineOpsPlugin> LoadAsync(
         ExternalPluginHostLoadRequest request,
         CancellationToken cancellationToken = default)
@@ -25,12 +24,16 @@ public sealed class ExternalPluginHostPluginLoader
 
         await using var stream = File.OpenRead(manifestPath);
         var manifest = await JsonSerializer
-            .DeserializeAsync<PluginManifest>(stream, JsonOptions, cancellationToken)
+            .DeserializeAsync<PluginManifest>(
+                stream,
+                PluginJsonContracts.ManifestOptions,
+                cancellationToken)
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Plugin manifest '{manifestPath}' is empty or invalid.");
 
         var packagePath = Path.GetDirectoryName(manifestPath)
             ?? throw new InvalidOperationException($"Plugin manifest '{manifestPath}' has no package directory.");
+        _ = PluginJsonContracts.RequireCanonicalEntryAssembly(manifest.EntryAssembly);
         var entryAssemblyPath = ResolveEntryAssemblyPath(packagePath, manifest, request.EntryAssemblyPath);
         var entryType = string.IsNullOrWhiteSpace(request.EntryType)
             ? manifest.EntryType

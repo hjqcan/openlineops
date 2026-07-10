@@ -17,8 +17,8 @@ public sealed class RuntimeMonitoringProjection :
     IRuntimeDomainEventSubscriber
 {
     private readonly IRuntimeSessionRepository _sessionRepository;
-    private readonly ConcurrentDictionary<string, RuntimeStationStatusProjection> _stationStatuses =
-        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<RuntimeStationStatusKey, RuntimeStationStatusProjection> _stationStatuses =
+        new(RuntimeStationStatusKeyComparer.Instance);
     private readonly ConcurrentDictionary<RuntimeTargetStatusKey, RuntimeTargetStatusState> _targetStatuses =
         new(RuntimeTargetStatusKeyComparer.Instance);
     private readonly ConcurrentDictionary<Guid, RuntimeTimelineEntry[]> _timelines = new();
@@ -56,7 +56,21 @@ public sealed class RuntimeMonitoringProjection :
                 continue;
             }
 
-            _stationStatuses[session.StationId.Value] = ToStationStatus(session);
+            var monitoringScope = ScopeFrom(session);
+            var stationStatusKey = new RuntimeStationStatusKey(
+                monitoringScope.ProjectId,
+                monitoringScope.ApplicationId,
+                monitoringScope.ProjectSnapshotId,
+                monitoringScope.TopologyId,
+                session.TraceMetadata.ProductionRunId,
+                session.TraceMetadata.ProductionStageId,
+                session.StationId.Value);
+            if (eventGroup.Any(envelope => envelope.DomainEvent is RuntimeSessionCreatedDomainEvent))
+            {
+                RemovePriorTargetOverlay(stationStatusKey);
+            }
+
+            _stationStatuses[stationStatusKey] = ToStationStatus(session);
 
             foreach (var envelope in eventGroup)
             {
@@ -77,39 +91,47 @@ public sealed class RuntimeMonitoringProjection :
     }
 
     public ValueTask<IReadOnlyCollection<RuntimeStationStatusProjection>> GetStationStatusesAsync(
+        RuntimeMonitoringScope scope,
         string? stationSystemId = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
-            ? null
-            : stationSystemId.Trim();
+        var canonicalStationSystemId = OptionalCanonical(stationSystemId, nameof(stationSystemId));
 
         IReadOnlyCollection<RuntimeStationStatusProjection> statuses = _stationStatuses.Values
-            .Where(status => normalizedStationSystemId is null
-                || string.Equals(status.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
+            .Where(status => MatchesScope(status, scope))
+            .Where(status => canonicalStationSystemId is null
+                || string.Equals(status.StationSystemId, canonicalStationSystemId, StringComparison.Ordinal))
             .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
+            .ThenBy(status => status.ProductionRunId.Value)
+            .ThenBy(status => status.StageSequence)
+            .ThenBy(status => status.StageId, StringComparer.Ordinal)
             .ToArray();
 
         return ValueTask.FromResult(statuses);
     }
 
     public ValueTask<IReadOnlyCollection<RuntimeTargetStatusProjection>> GetTargetStatusesAsync(
+        RuntimeMonitoringScope scope,
         string? stationSystemId = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
-            ? null
-            : stationSystemId.Trim();
+        var canonicalStationSystemId = OptionalCanonical(stationSystemId, nameof(stationSystemId));
 
         IReadOnlyCollection<RuntimeTargetStatusProjection> statuses = _targetStatuses.Values
             .Select(state => state.Projection)
-            .Where(status => normalizedStationSystemId is null
-                || string.Equals(status.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
+            .Where(status => MatchesScope(status, scope))
+            .Where(status => canonicalStationSystemId is null
+                || string.Equals(status.StationSystemId, canonicalStationSystemId, StringComparison.Ordinal))
             .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
+            .ThenBy(status => status.ProductionRunId.Value)
+            .ThenBy(status => status.StageSequence)
+            .ThenBy(status => status.StageId, StringComparer.Ordinal)
             .ThenBy(status => status.TargetKind, StringComparer.Ordinal)
             .ThenBy(status => status.TargetId, StringComparer.Ordinal)
             .ToArray();
@@ -119,12 +141,17 @@ public sealed class RuntimeMonitoringProjection :
 
     public ValueTask<IReadOnlyCollection<RuntimeTimelineEntry>> GetSessionTimelineAsync(
         RuntimeSessionId sessionId,
+        RuntimeMonitoringScope scope,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
 
         var entries = _timelines.TryGetValue(sessionId.Value, out var timeline)
-            ? timeline.OrderBy(entry => entry.Sequence).ToArray()
+            ? timeline
+                .Where(entry => MatchesScope(entry, scope))
+                .OrderBy(entry => entry.Sequence)
+                .ToArray()
             : [];
 
         return ValueTask.FromResult<IReadOnlyCollection<RuntimeTimelineEntry>>(entries);
@@ -137,14 +164,12 @@ public sealed class RuntimeMonitoringProjection :
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
-            ? null
-            : stationSystemId.Trim();
+        var canonicalStationSystemId = OptionalCanonical(stationSystemId, nameof(stationSystemId));
 
         IReadOnlyCollection<RuntimeAlarmProjection> alarms = _alarms.Values
             .Where(alarm => includeAcknowledged || !alarm.IsAcknowledged)
-            .Where(alarm => normalizedStationSystemId is null
-                || string.Equals(alarm.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
+            .Where(alarm => canonicalStationSystemId is null
+                || string.Equals(alarm.StationSystemId, canonicalStationSystemId, StringComparison.Ordinal))
             .OrderByDescending(alarm => alarm.OccurredAtUtc)
             .ThenBy(alarm => alarm.AlarmId.Value)
             .ToArray();
@@ -168,7 +193,13 @@ public sealed class RuntimeMonitoringProjection :
                     "AcknowledgedBy is required.")));
         }
 
-        var normalizedActor = acknowledgedBy.Trim();
+        if (char.IsWhiteSpace(acknowledgedBy[0]) || char.IsWhiteSpace(acknowledgedBy[^1]))
+        {
+            return ValueTask.FromResult(Result.Failure<RuntimeAlarmProjection>(
+                ApplicationError.Validation(
+                    "Runtime.AlarmAcknowledgedByInvalid",
+                    "AcknowledgedBy must be a canonical string.")));
+        }
 
         while (true)
         {
@@ -185,7 +216,7 @@ public sealed class RuntimeMonitoringProjection :
                 return ValueTask.FromResult(Result.Success(alarm));
             }
 
-            var acknowledged = alarm.Acknowledge(normalizedActor, acknowledgedAtUtc);
+            var acknowledged = alarm.Acknowledge(acknowledgedBy, acknowledgedAtUtc);
             if (_alarms.TryUpdate(alarmId.Value, acknowledged, alarm))
             {
                 return ValueTask.FromResult(Result.Success(acknowledged));
@@ -231,6 +262,12 @@ public sealed class RuntimeMonitoringProjection :
     {
         var projection = RuntimeTargetStatusProjection.FromCommandStatusChanged(session, commandStatusEvent);
         var key = new RuntimeTargetStatusKey(
+            projection.ProjectId,
+            projection.ApplicationId,
+            projection.ProjectSnapshotId,
+            projection.TopologyId,
+            projection.ProductionRunId,
+            projection.StageId,
             projection.StationSystemId,
             projection.TargetKind,
             projection.TargetId);
@@ -312,6 +349,16 @@ public sealed class RuntimeMonitoringProjection :
             domainEvent.OccurredAtUtc,
             domainEvent.EventName,
             session.Id,
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            session.TraceMetadata.DutIdentity,
             session.StationId.Value,
             entityKind,
             entityId,
@@ -326,13 +373,22 @@ public sealed class RuntimeMonitoringProjection :
     private static RuntimeStationStatusProjection ToStationStatus(RuntimeSession session)
     {
         return new RuntimeStationStatusProjection(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            session.TraceMetadata.DutIdentity,
             session.StationId.Value,
             session.Id,
             session.ProcessDefinitionId.Value,
             session.ProcessVersionId.Value,
             session.ConfigurationSnapshotId.Value,
             session.RecipeSnapshotId.Value,
-            session.TraceMetadata.SerialNumber,
             session.TraceMetadata.BatchId,
             session.TraceMetadata.FixtureId,
             session.TraceMetadata.DeviceId,
@@ -344,6 +400,82 @@ public sealed class RuntimeMonitoringProjection :
             session.Incidents.Count,
             session.LastTransitionAtUtc,
             session.IsTerminal);
+    }
+
+    private void RemovePriorTargetOverlay(RuntimeStationStatusKey stationStatusKey)
+    {
+        foreach (var entry in _targetStatuses)
+        {
+            if (RuntimeStationStatusKeyComparer.Matches(entry.Key, stationStatusKey))
+            {
+                _targetStatuses.TryRemove(entry.Key, out _);
+            }
+        }
+    }
+
+    private static RuntimeMonitoringScope ScopeFrom(RuntimeSession session)
+    {
+        return new RuntimeMonitoringScope(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId);
+    }
+
+    private static bool MatchesScope(
+        RuntimeStationStatusProjection status,
+        RuntimeMonitoringScope scope)
+    {
+        return string.Equals(status.ProjectId, scope.ProjectId, StringComparison.Ordinal)
+            && string.Equals(status.ApplicationId, scope.ApplicationId, StringComparison.Ordinal)
+            && string.Equals(status.ProjectSnapshotId, scope.ProjectSnapshotId, StringComparison.Ordinal)
+            && string.Equals(status.TopologyId, scope.TopologyId, StringComparison.Ordinal)
+            && (scope.ProductionRunId is null
+                || status.ProductionRunId == scope.ProductionRunId.Value);
+    }
+
+    private static bool MatchesScope(
+        RuntimeTargetStatusProjection status,
+        RuntimeMonitoringScope scope)
+    {
+        return string.Equals(status.ProjectId, scope.ProjectId, StringComparison.Ordinal)
+            && string.Equals(status.ApplicationId, scope.ApplicationId, StringComparison.Ordinal)
+            && string.Equals(status.ProjectSnapshotId, scope.ProjectSnapshotId, StringComparison.Ordinal)
+            && string.Equals(status.TopologyId, scope.TopologyId, StringComparison.Ordinal)
+            && (scope.ProductionRunId is null
+                || status.ProductionRunId == scope.ProductionRunId.Value);
+    }
+
+    private static bool MatchesScope(
+        RuntimeTimelineEntry entry,
+        RuntimeMonitoringScope scope)
+    {
+        return string.Equals(entry.ProjectId, scope.ProjectId, StringComparison.Ordinal)
+            && string.Equals(entry.ApplicationId, scope.ApplicationId, StringComparison.Ordinal)
+            && string.Equals(entry.ProjectSnapshotId, scope.ProjectSnapshotId, StringComparison.Ordinal)
+            && string.Equals(entry.TopologyId, scope.TopologyId, StringComparison.Ordinal)
+            && (scope.ProductionRunId is null
+                || entry.ProductionRunId == scope.ProductionRunId.Value);
+    }
+
+    private static string? OptionalCanonical(string? value, string parameterName)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(value)
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1]))
+        {
+            throw new ArgumentException(
+                $"{parameterName} must be null or a non-empty canonical string.",
+                parameterName);
+        }
+
+        return value;
     }
 
     private static RuntimeSessionId? TryGetSessionId(IDomainEvent domainEvent)
@@ -361,7 +493,22 @@ public sealed class RuntimeMonitoringProjection :
 
     private sealed record RuntimeEventEnvelope(IDomainEvent DomainEvent, RuntimeSessionId? SessionId);
 
+    private readonly record struct RuntimeStationStatusKey(
+        string ProjectId,
+        string ApplicationId,
+        string ProjectSnapshotId,
+        string TopologyId,
+        ProductionRunId ProductionRunId,
+        string StageId,
+        string StationSystemId);
+
     private readonly record struct RuntimeTargetStatusKey(
+        string ProjectId,
+        string ApplicationId,
+        string ProjectSnapshotId,
+        string TopologyId,
+        ProductionRunId ProductionRunId,
+        string StageId,
         string StationSystemId,
         string TargetKind,
         string TargetId);
@@ -376,17 +523,70 @@ public sealed class RuntimeMonitoringProjection :
 
         public bool Equals(RuntimeTargetStatusKey x, RuntimeTargetStatusKey y)
         {
-            return StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId)
+            return StringComparer.Ordinal.Equals(x.ProjectId, y.ProjectId)
+                && StringComparer.Ordinal.Equals(x.ApplicationId, y.ApplicationId)
+                && StringComparer.Ordinal.Equals(x.ProjectSnapshotId, y.ProjectSnapshotId)
+                && StringComparer.Ordinal.Equals(x.TopologyId, y.TopologyId)
+                && x.ProductionRunId == y.ProductionRunId
+                && StringComparer.Ordinal.Equals(x.StageId, y.StageId)
+                && StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId)
                 && StringComparer.Ordinal.Equals(x.TargetKind, y.TargetKind)
                 && StringComparer.Ordinal.Equals(x.TargetId, y.TargetId);
         }
 
         public int GetHashCode(RuntimeTargetStatusKey obj)
         {
+            var scopeHash = HashCode.Combine(
+                StringComparer.Ordinal.GetHashCode(obj.ProjectId),
+                StringComparer.Ordinal.GetHashCode(obj.ApplicationId),
+                StringComparer.Ordinal.GetHashCode(obj.ProjectSnapshotId),
+                StringComparer.Ordinal.GetHashCode(obj.TopologyId),
+                obj.ProductionRunId,
+                StringComparer.Ordinal.GetHashCode(obj.StageId));
             return HashCode.Combine(
+                scopeHash,
                 StringComparer.Ordinal.GetHashCode(obj.StationSystemId),
                 StringComparer.Ordinal.GetHashCode(obj.TargetKind),
                 StringComparer.Ordinal.GetHashCode(obj.TargetId));
+        }
+    }
+
+    private sealed class RuntimeStationStatusKeyComparer : IEqualityComparer<RuntimeStationStatusKey>
+    {
+        public static RuntimeStationStatusKeyComparer Instance { get; } = new();
+
+        public bool Equals(RuntimeStationStatusKey x, RuntimeStationStatusKey y)
+        {
+            return StringComparer.Ordinal.Equals(x.ProjectId, y.ProjectId)
+                && StringComparer.Ordinal.Equals(x.ApplicationId, y.ApplicationId)
+                && StringComparer.Ordinal.Equals(x.ProjectSnapshotId, y.ProjectSnapshotId)
+                && StringComparer.Ordinal.Equals(x.TopologyId, y.TopologyId)
+                && x.ProductionRunId == y.ProductionRunId
+                && StringComparer.Ordinal.Equals(x.StageId, y.StageId)
+                && StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId);
+        }
+
+        public int GetHashCode(RuntimeStationStatusKey obj)
+        {
+            return HashCode.Combine(
+                StringComparer.Ordinal.GetHashCode(obj.ProjectId),
+                StringComparer.Ordinal.GetHashCode(obj.ApplicationId),
+                StringComparer.Ordinal.GetHashCode(obj.ProjectSnapshotId),
+                StringComparer.Ordinal.GetHashCode(obj.TopologyId),
+                obj.ProductionRunId,
+                StringComparer.Ordinal.GetHashCode(obj.StageId),
+                StringComparer.Ordinal.GetHashCode(obj.StationSystemId));
+        }
+
+        public static bool Matches(RuntimeTargetStatusKey target, RuntimeStationStatusKey station)
+        {
+            return StringComparer.Ordinal.Equals(target.ProjectId, station.ProjectId)
+                && StringComparer.Ordinal.Equals(target.ApplicationId, station.ApplicationId)
+                && StringComparer.Ordinal.Equals(target.ProjectSnapshotId, station.ProjectSnapshotId)
+                && StringComparer.Ordinal.Equals(target.TopologyId, station.TopologyId)
+                && target.ProductionRunId == station.ProductionRunId
+                && StringComparer.Ordinal.Equals(target.StageId, station.StageId)
+                && StringComparer.Ordinal.Equals(target.StationSystemId, station.StationSystemId);
         }
     }
 }

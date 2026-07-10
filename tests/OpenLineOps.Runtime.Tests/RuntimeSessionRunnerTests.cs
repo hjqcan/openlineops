@@ -29,10 +29,12 @@ public sealed class RuntimeSessionRunnerTests
             RuntimeCommandExecutionResult.Completed("scan-ok"),
             RuntimeCommandExecutionResult.Completed("measure-ok"));
         var runner = CreateRunner(repository, eventPublisher, commandExecutor);
+        var request = CreateStartRequest(CreateTwoNodeProcess());
 
-        var result = await runner.RunAsync(CreateStartRequest(CreateTwoNodeProcess()));
+        var result = await runner.RunAsync(request);
 
         Assert.True(result.IsSuccess);
+        Assert.Equal(request.SessionId, result.Value.SessionId);
         Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
         Assert.Equal(2, result.Value.CompletedSteps);
         Assert.Equal(2, result.Value.CommandCount);
@@ -42,6 +44,16 @@ public sealed class RuntimeSessionRunnerTests
         Assert.Equal("snapshot-20260629-001", commandExecutor.Contexts[0].ConfigurationSnapshotId.Value);
         Assert.Equal("node-scan", commandExecutor.Contexts[0].NodeId.Value);
         Assert.Equal("node-measure", commandExecutor.Contexts[1].NodeId.Value);
+        Assert.Equal(
+            Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            commandExecutor.Contexts[0].ProductionRunId.Value);
+        Assert.Equal("line.main", commandExecutor.Contexts[0].ProductionLineDefinitionId);
+        Assert.Equal("stage.main", commandExecutor.Contexts[0].ProductionStageId);
+        Assert.Equal(1, commandExecutor.Contexts[0].StageSequence);
+        Assert.Equal("workstation.main", commandExecutor.Contexts[0].WorkstationId);
+        Assert.Equal("dut.default", commandExecutor.Contexts[0].DutIdentity.ModelId);
+        Assert.Equal("serialNumber", commandExecutor.Contexts[0].DutIdentity.InputKey);
+        Assert.Equal("DUT-DEFAULT", commandExecutor.Contexts[0].DutIdentity.Value);
 
         var persisted = await repository.GetByIdAsync(result.Value.SessionId);
         Assert.NotNull(persisted);
@@ -80,6 +92,56 @@ public sealed class RuntimeSessionRunnerTests
         Assert.Equal("Runtime.CommandFailed", Assert.Single(persisted.Incidents).Code);
         Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
         Assert.Equal(RuntimeCommandStatus.Failed, Assert.Single(persisted.Commands).Status);
+    }
+
+    [Fact]
+    public async Task SemanticFailedResultPersistsTypedJudgementAndVendorEvidence()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.SemanticFailed(
+                "External adapter reported failure.",
+                "{\"judgement\":\"Failed\"}"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+
+        var result = await runner.RunAsync(CreateStartRequest(CreateTwoNodeProcess()));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        var command = Assert.Single(persisted.Commands);
+        Assert.Equal(RuntimeCommandStatus.Failed, command.Status);
+        Assert.Equal(RuntimeCommandSemanticOutcome.Failed, command.SemanticOutcome);
+        Assert.Equal("{\"judgement\":\"Failed\"}", command.ResultPayload);
+    }
+
+    [Fact]
+    public async Task SemanticAbortedResultCancelsSessionAndPersistsVendorEvidence()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.SemanticAborted(
+                "External adapter reported abort.",
+                "{\"judgement\":\"Aborted\"}"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+
+        var result = await runner.RunAsync(CreateStartRequest(CreateTwoNodeProcess()));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Canceled, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        var command = Assert.Single(persisted.Commands);
+        Assert.Equal(RuntimeCommandStatus.Canceled, command.Status);
+        Assert.Equal(RuntimeCommandSemanticOutcome.Aborted, command.SemanticOutcome);
+        Assert.Equal("{\"judgement\":\"Aborted\"}", command.ResultPayload);
     }
 
     [Fact]
@@ -138,6 +200,30 @@ public sealed class RuntimeSessionRunnerTests
         Assert.NotNull(persisted);
         Assert.Equal(RuntimeSessionStatus.Failed, persisted.Status);
         Assert.Equal("Runtime.DecisionBranchNotMatched", Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Theory]
+    [InlineData("{\"status\":\"OK\"}")]
+    [InlineData("{\"branch\":\"ok\"}")]
+    [InlineData(" ok ")]
+    public async Task DecisionRoutingRejectsCaseAliasesAndPaddedBranchValues(string payload)
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Completed(payload));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+
+        var result = await runner.RunAsync(CreateStartRequest(CreateBranchingProcess()));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal("Runtime.DecisionBranchNotMatched", Assert.Single(persisted.Incidents).Code);
+        Assert.Single(commandExecutor.Contexts);
     }
 
     [Fact]
@@ -215,6 +301,75 @@ public sealed class RuntimeSessionRunnerTests
         Assert.Empty(commandExecutor.Contexts);
     }
 
+    [Fact]
+    public async Task CommandCompletionAndSessionTerminalStatePersistWhenCancellationRacesAfterExecution()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var eventPublisher = new InMemoryRuntimeDomainEventPublisher();
+        using var cancellation = new CancellationTokenSource();
+        var runner = CreateRunner(
+            repository,
+            eventPublisher,
+            new CancelingCommandExecutor(cancellation));
+        var request = CreateStartRequest(new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-cancellation-race"),
+            new ProcessVersionId("process-cancellation-race@1.0.0"),
+            [
+                Node(
+                    new RuntimeNodeId("node-cancellation-race"),
+                    "Cancellation race",
+                    new RuntimeCapabilityId("capability.cancellation-race"),
+                    "execute",
+                    TimeSpan.FromSeconds(1))
+            ]));
+
+        var result = await runner.RunAsync(request, cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(request.SessionId));
+        Assert.Equal(RuntimeSessionStatus.Completed, persisted.Status);
+        Assert.Equal(RuntimeCommandStatus.Completed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(RuntimeStepStatus.Completed, Assert.Single(persisted.Steps).Status);
+    }
+
+    [Fact]
+    public async Task CommandExecutorExceptionBecomesPersistedFailedCommandStepAndSession()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            new ThrowingCommandExecutor());
+        var request = CreateStartRequest(new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-executor-fault"),
+            new ProcessVersionId("process-executor-fault@1.0.0"),
+            [
+                Node(
+                    new RuntimeNodeId("node-executor-fault"),
+                    "Executor fault",
+                    new RuntimeCapabilityId("capability.executor-fault"),
+                    "execute",
+                    TimeSpan.FromSeconds(1))
+            ]));
+
+        var result = await runner.RunAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(request.SessionId));
+        Assert.Equal(RuntimeSessionStatus.Failed, persisted.Status);
+        Assert.Equal(RuntimeCommandStatus.Failed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
+        Assert.Contains(
+            typeof(InvalidOperationException).FullName!,
+            Assert.Single(persisted.Incidents).Message,
+            StringComparison.Ordinal);
+    }
+
     private static ExecutableRuntimeNode Node(
         RuntimeNodeId nodeId,
         string displayName,
@@ -250,6 +405,7 @@ public sealed class RuntimeSessionRunnerTests
     private static StartRuntimeSessionRequest CreateStartRequest(ExecutableRuntimeProcess process)
     {
         return new StartRuntimeSessionRequest(
+            RuntimeSessionId.New(),
             new StationId("station-a"),
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RecipeSnapshotId("recipe-20260629-001"),
@@ -456,6 +612,32 @@ public sealed class RuntimeSessionRunnerTests
                 : _results.Dequeue();
 
             return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class CancelingCommandExecutor(CancellationTokenSource cancellation)
+        : IRuntimeCommandExecutor
+    {
+        public ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            _ = context;
+            _ = cancellationToken;
+            cancellation.Cancel();
+            return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed("completed"));
+        }
+    }
+
+    private sealed class ThrowingCommandExecutor : IRuntimeCommandExecutor
+    {
+        public ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            _ = context;
+            _ = cancellationToken;
+            throw new InvalidOperationException("simulated executor fault");
         }
     }
 

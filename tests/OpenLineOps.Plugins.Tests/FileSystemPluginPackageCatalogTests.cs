@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Infrastructure.Discovery;
 
@@ -6,17 +7,19 @@ namespace OpenLineOps.Plugins.Tests;
 public sealed class FileSystemPluginPackageCatalogTests
 {
     [Fact]
-    public async Task DiscoverAsyncReadsPluginManifestFilesFromRootTree()
+    public async Task DiscoverAsyncReadsOnlyCanonicalManifestFilesFromRootTree()
     {
         var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugins-{Guid.NewGuid():N}");
         var scannerDirectory = Path.Combine(root, "scanner");
         var exporterDirectory = Path.Combine(root, "exporter");
+        var reporterDirectory = Path.Combine(root, "reporter");
         var sampleDirectory = Path.Combine(root, "sample");
 
         try
         {
             Directory.CreateDirectory(scannerDirectory);
             Directory.CreateDirectory(exporterDirectory);
+            Directory.CreateDirectory(reporterDirectory);
             Directory.CreateDirectory(sampleDirectory);
             await File.WriteAllTextAsync(
                 Path.Combine(scannerDirectory, "openlineops-plugin.json"),
@@ -60,6 +63,19 @@ public sealed class FileSystemPluginPackageCatalogTests
                 }
                 """);
             await File.WriteAllTextAsync(
+                Path.Combine(reporterDirectory, "plugin.json"),
+                """
+                {
+                  "id": "openlineops.reporter",
+                  "name": "Reporter",
+                  "version": "1.0.0",
+                  "kind": "ReportExporter",
+                  "entryAssembly": "Reporter.dll",
+                  "entryType": "Reporter.Plugin",
+                  "capabilities": [ "report.test" ]
+                }
+                """);
+            await File.WriteAllTextAsync(
                 Path.Combine(scannerDirectory, "OpenLineOps.FakeScanner.dll"),
                 "scanner-binary");
             await File.WriteAllTextAsync(
@@ -68,25 +84,17 @@ public sealed class FileSystemPluginPackageCatalogTests
             await File.WriteAllTextAsync(
                 Path.Combine(sampleDirectory, "OpenLineOps.SamplePlugins.LoopbackDevice.dll"),
                 "loopback-binary");
+            await File.WriteAllTextAsync(Path.Combine(reporterDirectory, "Reporter.dll"), "reporter-binary");
 
             var catalog = new FileSystemPluginPackageCatalog(root);
 
             var packages = await catalog.DiscoverAsync();
 
-            Assert.Equal(3, packages.Count);
-            Assert.Contains(packages, package =>
-                package.Manifest.Id == "openlineops.fake-scanner"
-                && package.Manifest.Kind == PluginKind.DeviceDriver
-                && package.Manifest.Capabilities.Single() == "device.scanner");
-            Assert.Contains(packages, package =>
-                package.Manifest.Id == "openlineops.csv-exporter"
-                && package.Manifest.Kind == PluginKind.ReportExporter
-                && package.Manifest.ContractVersion == "1.0.0");
-            Assert.Contains(packages, package =>
-                package.Manifest.Id == "openlineops.samples.loopback-device"
-                && package.Manifest.Kind == PluginKind.DeviceDriver
-                && package.Manifest.Capabilities.Single() == "device.loopback"
-                && Path.GetFileName(package.ManifestPath) == "manifest.json");
+            var package = Assert.Single(packages);
+            Assert.Equal("openlineops.samples.loopback-device", package.Manifest.Id);
+            Assert.Equal(PluginKind.DeviceDriver, package.Manifest.Kind);
+            Assert.Equal("device.loopback", package.Manifest.Capabilities.Single());
+            Assert.Equal(FileSystemPluginPackageCatalog.ManifestFileName, Path.GetFileName(package.ManifestPath));
             Assert.All(packages, package =>
             {
                 Assert.True(package.RuntimeIdentity.IsComplete);
@@ -146,7 +154,7 @@ public sealed class FileSystemPluginPackageCatalogTests
             var catalog = new FileSystemPluginPackageCatalog(root);
 
             var first = Assert.Single(await catalog.DiscoverAsync());
-            await File.WriteAllTextAsync(sidecarPath, "sidecar-v2");
+            await File.WriteAllTextAsync(sidecarPath, "sidecar-updated");
             var second = Assert.Single(await catalog.DiscoverAsync());
 
             Assert.NotEqual(first.PackageContentSha256, second.PackageContentSha256);
@@ -161,4 +169,90 @@ public sealed class FileSystemPluginPackageCatalogTests
             }
         }
     }
+
+    [Fact]
+    public async Task DiscoverAsyncRejectsCaseAliasedManifestPropertyName()
+    {
+        var manifestJson = CanonicalManifestJson.Replace("\"id\":", "\"Id\":", StringComparison.Ordinal);
+
+        await AssertManifestRejectedAsync<JsonException>(manifestJson);
+    }
+
+    [Fact]
+    public async Task DiscoverAsyncRejectsUnknownManifestProperty()
+    {
+        var manifestJson = CanonicalManifestJson.Replace(
+            "\"capabilities\": [ \"device.test\" ]",
+            "\"capabilities\": [ \"device.test\" ], \"legacy\": true",
+            StringComparison.Ordinal);
+
+        await AssertManifestRejectedAsync<JsonException>(manifestJson);
+    }
+
+    [Theory]
+    [InlineData("\"devicedriver\"")]
+    [InlineData("1")]
+    public async Task DiscoverAsyncRejectsNonCanonicalPluginKind(string kindJson)
+    {
+        var manifestJson = CanonicalManifestJson.Replace(
+            "\"DeviceDriver\"",
+            kindJson,
+            StringComparison.Ordinal);
+
+        await AssertManifestRejectedAsync<JsonException>(manifestJson);
+    }
+
+    [Theory]
+    [InlineData("bin\\Plugin.dll")]
+    [InlineData("/Plugin.dll")]
+    [InlineData("./Plugin.dll")]
+    [InlineData("bin//Plugin.dll")]
+    [InlineData(" Plugin.dll")]
+    public async Task DiscoverAsyncRejectsNonCanonicalEntryAssembly(string entryAssembly)
+    {
+        var manifestJson = CanonicalManifestJson.Replace(
+            "\"Plugin.dll\"",
+            JsonSerializer.Serialize(entryAssembly),
+            StringComparison.Ordinal);
+
+        await AssertManifestRejectedAsync<InvalidDataException>(manifestJson);
+    }
+
+    private static async Task AssertManifestRejectedAsync<TException>(string manifestJson)
+        where TException : Exception
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugin-invalid-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(Path.Combine(root, "manifest.json"), manifestJson);
+            await File.WriteAllTextAsync(Path.Combine(root, "Plugin.dll"), "plugin-binary");
+
+            var catalog = new FileSystemPluginPackageCatalog(root);
+
+            await Assert.ThrowsAsync<TException>(async () =>
+            {
+                _ = await catalog.DiscoverAsync();
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private const string CanonicalManifestJson = """
+        {
+          "id": "openlineops.test",
+          "name": "Test Plugin",
+          "version": "1.0.0",
+          "kind": "DeviceDriver",
+          "entryAssembly": "Plugin.dll",
+          "entryType": "Test.Plugin",
+          "capabilities": [ "device.test" ]
+        }
+        """;
 }

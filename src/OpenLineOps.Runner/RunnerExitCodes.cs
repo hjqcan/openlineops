@@ -13,11 +13,13 @@ public static class RunnerExitCodes
 
     public const int SnapshotSelectionFailed = 4;
 
-    public const int RuntimeStartRejected = 5;
+    public const int ImmutableReleaseMissing = 5;
 
-    public const int RuntimeExecutionFailed = 6;
+    public const int ProductionRunStartRejected = 6;
 
-    public const int Canceled = 7;
+    public const int ProductionRunExecutionFailed = 7;
+
+    public const int Canceled = 8;
 
     public const int InternalError = 70;
 }

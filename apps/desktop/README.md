@@ -10,6 +10,7 @@ npm run typecheck
 npm run build
 npm run package:win
 npm run smoke:e2e
+npm run smoke:e2e:packaged
 npm run dev
 ```
 
@@ -29,7 +30,7 @@ npm install
 - Runtime commands, steps, monitoring, and trace records carry required ActionId, TargetKind, and TargetId identities.
 - SignalR monitoring connects at `/hubs/runtime-progress`.
 - The API base URL defaults to `http://localhost:5135` and can be overridden with `OPENLINEOPS_API_BASE_URL`.
-- Backend project and repository roots can be overridden with `OPENLINEOPS_API_PROJECT` and `OPENLINEOPS_REPO_ROOT`.
+- Source-development backend roots can be overridden with `OPENLINEOPS_API_PROJECT` and `OPENLINEOPS_REPO_ROOT`; packaged builds never depend on a source checkout.
 
 ## Current Workbenches
 
@@ -43,8 +44,10 @@ npm install
 
 ## Packaging
 
-`npm run package:win` builds the renderer and Electron main/preload code, then creates an unsigned Windows development package under `release/desktop/win-unpacked`. The .NET API is a separate release artifact selected with `OPENLINEOPS_REPO_ROOT` or `OPENLINEOPS_API_PROJECT`.
+`npm run package:win` builds the renderer and Electron main/preload code, publishes a self-contained Windows API runtime and bundled sample plugin, then creates an unsigned Windows package under `release/desktop/win-unpacked`. The packaged IDE starts its own API automatically and stores writable runtime databases under the current user profile; it does not require a source checkout or separately installed .NET runtime.
 
 ## End-to-End Smoke Test
 
 `npm run smoke:e2e` launches the real Electron application and local API, opens a portable project/Application, authors and publishes a Blockly flow, publishes a project release, starts that immutable release, verifies runtime state, then creates and saves a production-line definition through Line Designer. The smoke path does not use removed global Process APIs or development runtime-start endpoints.
+
+`npm run smoke:e2e:packaged` repeats the same workflow through the generated `OpenLineOps.exe` and its bundled API runtime, so packaging and startup-path regressions fail the build.

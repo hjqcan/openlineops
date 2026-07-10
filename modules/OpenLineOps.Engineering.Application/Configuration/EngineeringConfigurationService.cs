@@ -1,5 +1,5 @@
-using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
@@ -428,9 +428,7 @@ internal sealed class ProjectEngineeringConfigurationEngine
                 return Result.Failure<EngineeringProjectDetails>(ProjectNotFound(projectId));
             }
 
-            var rollbackResult = project.RollbackToSnapshot(
-                new ConfigurationSnapshotId(snapshotId),
-                _clock.UtcNow);
+            var rollbackResult = project.RollbackToSnapshot(new ConfigurationSnapshotId(snapshotId));
 
             if (!rollbackResult.Succeeded)
             {

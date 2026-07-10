@@ -15,6 +15,13 @@ public static class ProjectReleaseRuntimeProviderKinds
     public const string ProcessCommandProvider = "ProcessCommandProvider";
 }
 
+public static class ProjectReleaseExternalTestProgramLaunchKinds
+{
+    public const string ApplicationExecutable = "ApplicationExecutable";
+
+    public const string Provider = "Provider";
+}
+
 public abstract record ProjectReleaseRuntimeCommandRoute(
     string ProviderKind,
     string ProviderKey,
@@ -35,6 +42,41 @@ public sealed record ProjectReleaseDeviceCommandRoute(
     DeviceCommandDefinitionId CommandDefinitionId,
     DeviceCapabilityId CapabilityId,
     DevicePluginPackageIdentity? PluginPackage = null)
+    : ProjectReleaseRuntimeCommandRoute(ProviderKind, ProviderKey, CapabilityId);
+
+public sealed record ExternalTestProgramRouteInputMapping(
+    string Source,
+    string Target);
+
+public sealed record ExternalTestProgramRouteResultMapping(
+    string SourcePath,
+    string TargetKey);
+
+public sealed record ExternalTestProgramRouteOutcomeMapping(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);
+
+public sealed record ProjectReleaseExternalTestProgramCommandRoute(
+    string ProviderKind,
+    string ProviderKey,
+    DeviceCapabilityId CapabilityId,
+    string AdapterId,
+    string LaunchKind,
+    string ReleaseApplicationRootPath,
+    string DutModelId,
+    string DutModelCode,
+    string DutIdentityInputKey,
+    string? Executable,
+    long? ExecutableSizeBytes,
+    string? ExecutableSha256,
+    IReadOnlyCollection<string> ArgumentTemplates,
+    IReadOnlyCollection<ExternalTestProgramRouteInputMapping> InputMappings,
+    IReadOnlyCollection<ExternalTestProgramRouteResultMapping> ResultMappings,
+    ExternalTestProgramRouteOutcomeMapping OutcomeMapping,
+    long TimeoutMilliseconds,
+    ProjectReleaseRuntimeCommandRoute? ProviderRoute)
     : ProjectReleaseRuntimeCommandRoute(ProviderKind, ProviderKey, CapabilityId);
 
 public sealed record DevicePluginPackageIdentity(

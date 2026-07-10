@@ -23,6 +23,23 @@ public sealed class ExternalPluginProcessRegistryTests
         Assert.Same(process, developmentLookup);
     }
 
+    [Fact]
+    public void PluginIdLookupDoesNotTrimOrCaseFoldAliases()
+    {
+        var registry = new ExternalPluginProcessRegistry();
+        var process = new StubExternalPluginProcess();
+        registry.Register("plugin.exact", process);
+
+        Assert.False(registry.TryGet(" plugin.exact ", out _));
+        Assert.False(registry.TryGet("Plugin.Exact", out _));
+        Assert.Throws<ArgumentException>(() => registry.Register(" plugin.exact ", process));
+
+        registry.Unregister(" plugin.exact ", process);
+
+        Assert.True(registry.TryGet("plugin.exact", out var exact));
+        Assert.Same(process, exact);
+    }
+
     private static PluginPackageRuntimeIdentity Identity(char contentHashCharacter)
     {
         return new PluginPackageRuntimeIdentity(

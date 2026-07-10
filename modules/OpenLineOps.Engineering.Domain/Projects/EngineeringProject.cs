@@ -1,5 +1,4 @@
 using OpenLineOps.Domain.Abstractions.Entities;
-using OpenLineOps.Engineering.Domain.Events;
 using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Engineering.Domain.Operations;
 using OpenLineOps.Engineering.Domain.Recipes;
@@ -59,8 +58,6 @@ public sealed class EngineeringProject : AggregateRoot<EngineeringProjectId>
         };
 
         project._snapshots.AddRange(snapshots);
-        project.ClearDomainEvents();
-
         return project;
     }
 
@@ -109,14 +106,10 @@ public sealed class EngineeringProject : AggregateRoot<EngineeringProjectId>
         _snapshots.Add(snapshot);
         ActiveSnapshotId = snapshot.Id;
 
-        RaiseDomainEvent(new ConfigurationSnapshotPublishedDomainEvent(Id, snapshot.Id, publishedAtUtc));
-
         return EngineeringOperationResult.Accepted("Configuration snapshot published.");
     }
 
-    public EngineeringOperationResult RollbackToSnapshot(
-        ConfigurationSnapshotId snapshotId,
-        DateTimeOffset rolledBackAtUtc)
+    public EngineeringOperationResult RollbackToSnapshot(ConfigurationSnapshotId snapshotId)
     {
         var snapshot = _snapshots.SingleOrDefault(candidate => candidate.Id == snapshotId);
         if (snapshot is null)
@@ -134,8 +127,6 @@ public sealed class EngineeringProject : AggregateRoot<EngineeringProjectId>
         }
 
         ActiveSnapshotId = snapshot.Id;
-        RaiseDomainEvent(new EngineeringProjectRolledBackDomainEvent(Id, snapshot.Id, rolledBackAtUtc));
-
         return EngineeringOperationResult.Accepted("Engineering project rolled back.");
     }
 }

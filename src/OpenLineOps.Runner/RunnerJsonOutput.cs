@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using OpenLineOps.Processes.Application.Runtime;
-using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Projects.Application.ProjectWorkspaces;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner;
 
@@ -15,13 +15,46 @@ public sealed record RunnerProjectOutput(
     string SnapshotId,
     string ReleaseContentSha256);
 
-public sealed record RunnerSessionOutput(
-    Guid SessionId,
+public sealed record RunnerProductionStageOutput(
+    string StageId,
+    int Sequence,
+    string WorkstationId,
+    string StationId,
+    string ProcessDefinitionId,
+    string ProcessVersionId,
     string ConfigurationSnapshotId,
     string Status,
-    int CompletedSteps,
+    Guid? RuntimeSessionId,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    string? FailureCode,
+    string? FailureReason,
+    int CompletedStepCount,
     int CommandCount,
     int IncidentCount);
+
+public sealed record RunnerProductionRunOutput(
+    Guid ProductionRunId,
+    string ProductionLineDefinitionId,
+    string DutModelId,
+    string DutIdentityInputKey,
+    string DutIdentityValue,
+    string ActorId,
+    string? BatchId,
+    string? FixtureId,
+    string? DeviceId,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    string? FailureCode,
+    string? FailureReason,
+    int CompletedStageCount,
+    int StageCount,
+    int CompletedStepCount,
+    int CommandCount,
+    int IncidentCount,
+    IReadOnlyList<RunnerProductionStageOutput> Stages);
 
 public sealed record RunnerJsonOutput(
     int SchemaVersion,
@@ -30,7 +63,7 @@ public sealed record RunnerJsonOutput(
     int ExitCode,
     string Target,
     RunnerProjectOutput? Project,
-    RunnerSessionOutput? Session,
+    RunnerProductionRunOutput? ProductionRun,
     RunnerErrorOutput? Error)
 {
     public const int CurrentSchemaVersion = 1;
@@ -39,7 +72,7 @@ public sealed record RunnerJsonOutput(
         string target,
         AutomationProjectWorkspaceDetails workspace,
         PublishedProjectSnapshotDetails snapshot,
-        StartedProcessRuntimeSessionDetails session)
+        ProductionRunSnapshot productionRun)
     {
         return new RunnerJsonOutput(
             CurrentSchemaVersion,
@@ -48,7 +81,7 @@ public sealed record RunnerJsonOutput(
             RunnerExitCodes.Success,
             target,
             ToProject(workspace, snapshot),
-            ToSession(session),
+            ToProductionRun(productionRun),
             Error: null);
     }
 
@@ -59,7 +92,7 @@ public sealed record RunnerJsonOutput(
         string errorMessage,
         AutomationProjectWorkspaceDetails? workspace = null,
         PublishedProjectSnapshotDetails? snapshot = null,
-        StartedProcessRuntimeSessionDetails? session = null)
+        ProductionRunSnapshot? productionRun = null)
     {
         return new RunnerJsonOutput(
             CurrentSchemaVersion,
@@ -70,7 +103,7 @@ public sealed record RunnerJsonOutput(
             workspace is not null && snapshot is not null
                 ? ToProject(workspace, snapshot)
                 : null,
-            session is null ? null : ToSession(session),
+            productionRun is null ? null : ToProductionRun(productionRun),
             new RunnerErrorOutput(errorCode, errorMessage));
     }
 
@@ -86,15 +119,54 @@ public sealed record RunnerJsonOutput(
             snapshot.ReleaseContentSha256);
     }
 
-    private static RunnerSessionOutput ToSession(StartedProcessRuntimeSessionDetails session)
+    private static RunnerProductionRunOutput ToProductionRun(ProductionRunSnapshot productionRun)
     {
-        return new RunnerSessionOutput(
-            session.SessionId,
-            session.ConfigurationSnapshotId,
-            session.Status,
-            session.CompletedSteps,
-            session.CommandCount,
-            session.IncidentCount);
+        var stages = productionRun.Stages
+            .OrderBy(stage => stage.Sequence)
+            .Select(stage => new RunnerProductionStageOutput(
+                stage.StageId,
+                stage.Sequence,
+                stage.WorkstationId,
+                stage.StationId.Value,
+                stage.ProcessDefinitionId.Value,
+                stage.ProcessVersionId.Value,
+                stage.ConfigurationSnapshotId.Value,
+                stage.Status.ToString(),
+                stage.RuntimeSessionId?.Value,
+                stage.StartedAtUtc,
+                stage.CompletedAtUtc,
+                stage.FailureCode,
+                stage.FailureReason,
+                stage.CompletedStepCount,
+                stage.CommandCount,
+                stage.IncidentCount))
+            .ToArray();
+
+        return new RunnerProductionRunOutput(
+            productionRun.RunId.Value,
+            productionRun.ProductionLineDefinitionId,
+            productionRun.DutIdentity.ModelId,
+            productionRun.DutIdentity.InputKey,
+            productionRun.DutIdentity.Value,
+            productionRun.ActorId,
+            productionRun.BatchId,
+            productionRun.FixtureId,
+            productionRun.DeviceId,
+            productionRun.Status.ToString(),
+            productionRun.CreatedAtUtc,
+            productionRun.StartedAtUtc,
+            productionRun.CompletedAtUtc,
+            productionRun.FailureCode,
+            productionRun.FailureReason,
+            stages.Count(stage => string.Equals(
+                stage.Status,
+                ProductionStageRunStatus.Completed.ToString(),
+                StringComparison.Ordinal)),
+            stages.Length,
+            stages.Sum(stage => stage.CompletedStepCount),
+            stages.Sum(stage => stage.CommandCount),
+            stages.Sum(stage => stage.IncidentCount),
+            stages);
     }
 }
 

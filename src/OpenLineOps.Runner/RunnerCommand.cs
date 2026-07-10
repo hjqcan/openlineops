@@ -1,21 +1,32 @@
 using System.Text.Json;
-using OpenLineOps.Processes.Application.Runtime;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
+using OpenLineOps.Runtime.Application.Events;
+using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner;
 
 public sealed class RunnerCommand
 {
     private readonly IAutomationProjectWorkspaceService _workspaceService;
-    private readonly IProjectReleaseRuntimeSessionLauncher _runtimeLauncher;
+    private readonly IProjectReleaseProductionRunLauncher _productionRunLauncher;
+    private readonly IProductionRunRecoveryService _recoveryService;
+    private readonly IProductionRunTerminalOutboxDispatcher _terminalOutboxDispatcher;
+    private readonly IProjectExecutionCoordinator _executionCoordinator;
 
     public RunnerCommand(
         IAutomationProjectWorkspaceService workspaceService,
-        IProjectReleaseRuntimeSessionLauncher runtimeLauncher)
+        IProjectReleaseProductionRunLauncher productionRunLauncher,
+        IProductionRunRecoveryService recoveryService,
+        IProductionRunTerminalOutboxDispatcher terminalOutboxDispatcher,
+        IProjectExecutionCoordinator executionCoordinator)
     {
         _workspaceService = workspaceService;
-        _runtimeLauncher = runtimeLauncher;
+        _productionRunLauncher = productionRunLauncher;
+        _recoveryService = recoveryService;
+        _terminalOutboxDispatcher = terminalOutboxDispatcher;
+        _executionCoordinator = executionCoordinator;
     }
 
     public async Task<int> RunAsync(
@@ -94,22 +105,42 @@ public sealed class RunnerCommand
         }
 
         var snapshot = selection.Snapshot!;
-        var runResult = await _runtimeLauncher
+        await using var executionLease = await _executionCoordinator
+            .TryAcquireAsync(workspace.Project.ProjectPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (executionLease is null)
+        {
+            return await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunStartRejected,
+                projectTarget,
+                "Runner.ProjectExecutionAlreadyActive",
+                $"The IDE or another Runner owns the execution lease for project {workspace.Project.ProjectId}.",
+                output,
+                workspace,
+                snapshot).ConfigureAwait(false);
+        }
+
+        await _recoveryService.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        await _terminalOutboxDispatcher.DrainAsync(cancellationToken).ConfigureAwait(false);
+
+        var runResult = await _productionRunLauncher
             .StartAsync(
                 snapshot,
-                new StartProcessRuntimeSessionRequest(
-                    snapshot.ConfigurationSnapshotId,
-                    options.SerialNumber,
+                new StartProjectReleaseProductionRunRequest(
+                    options.ProductionRunId,
+                    options.DutIdentityValue,
+                    options.ActorId,
                     options.BatchId,
                     options.FixtureId,
-                    options.DeviceId,
-                    options.ActorId),
+                    options.DeviceId),
                 cancellationToken)
             .ConfigureAwait(false);
         if (runResult.IsFailure)
         {
             return await WriteFailureAsync(
-                RunnerExitCodes.RuntimeStartRejected,
+                IsMissingRelease(runResult.Error.Code)
+                    ? RunnerExitCodes.ImmutableReleaseMissing
+                    : RunnerExitCodes.ProductionRunStartRejected,
                 projectTarget,
                 runResult.Error.Code,
                 runResult.Error.Message,
@@ -118,25 +149,50 @@ public sealed class RunnerCommand
                 snapshot).ConfigureAwait(false);
         }
 
-        var session = runResult.Value;
-        if (!string.Equals(session.Status, "Completed", StringComparison.Ordinal))
+        var productionRun = runResult.Value.Run;
+        await _terminalOutboxDispatcher.DrainAsync(CancellationToken.None).ConfigureAwait(false);
+        if (productionRun.Status == ProductionRunStatus.Canceled)
         {
             return await WriteFailureAsync(
-                RunnerExitCodes.RuntimeExecutionFailed,
+                RunnerExitCodes.Canceled,
                 projectTarget,
-                "Runner.RuntimeExecutionFailed",
-                $"Runtime session {session.SessionId} ended with status {session.Status}.",
+                "Runner.ProductionRunCanceled",
+                $"Production Run {productionRun.RunId.Value:D} was canceled.",
                 output,
                 workspace,
                 snapshot,
-                session).ConfigureAwait(false);
+                productionRun).ConfigureAwait(false);
+        }
+
+        if (productionRun.Status != ProductionRunStatus.Completed)
+        {
+            return await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunExecutionFailed,
+                projectTarget,
+                productionRun.FailureCode ?? "Runner.ProductionRunFailed",
+                productionRun.FailureReason
+                    ?? $"Production Run {productionRun.RunId.Value:D} ended with status {productionRun.Status}.",
+                output,
+                workspace,
+                snapshot,
+                productionRun).ConfigureAwait(false);
         }
 
         await RunnerJsonOutputWriter
-            .WriteAsync(output, RunnerJsonOutput.Succeeded(projectTarget, workspace, snapshot, session))
+            .WriteAsync(
+                output,
+                RunnerJsonOutput.Succeeded(projectTarget, workspace, snapshot, productionRun))
             .ConfigureAwait(false);
 
         return RunnerExitCodes.Success;
+    }
+
+    private static bool IsMissingRelease(string errorCode)
+    {
+        return string.Equals(
+            errorCode,
+            "NotFound.Projects.ProjectReleaseNotFound",
+            StringComparison.Ordinal);
     }
 
     private static async Task<int> WriteFailureAsync(
@@ -147,7 +203,7 @@ public sealed class RunnerCommand
         TextWriter output,
         AutomationProjectWorkspaceDetails? workspace = null,
         OpenLineOps.Projects.Application.Projects.PublishedProjectSnapshotDetails? snapshot = null,
-        StartedProcessRuntimeSessionDetails? session = null)
+        OpenLineOps.Runtime.Domain.Runs.ProductionRunSnapshot? productionRun = null)
     {
         await RunnerJsonOutputWriter
             .WriteAsync(
@@ -159,7 +215,7 @@ public sealed class RunnerCommand
                     errorMessage,
                     workspace,
                     snapshot,
-                    session))
+                    productionRun))
             .ConfigureAwait(false);
 
         return exitCode;

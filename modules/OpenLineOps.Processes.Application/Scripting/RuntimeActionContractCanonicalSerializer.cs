@@ -40,10 +40,10 @@ public sealed class RuntimeActionContractCanonicalSerializer
         {
             var buffer = new ArrayBufferWriter<byte>();
             using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions
-                   {
-                       Indented = false,
-                       SkipValidation = false
-                   }))
+            {
+                Indented = false,
+                SkipValidation = false
+            }))
             {
                 WriteContract(writer, validation.Value);
             }

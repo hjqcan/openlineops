@@ -88,8 +88,11 @@ public sealed class BoundedContextScaffoldGeneratorTests
         Assert.Contains("AggregateRoot<InspectionPlanId>", aggregate, StringComparison.Ordinal);
         Assert.Contains("IAggregateRepository<InspectionPlan, InspectionPlanId>", repositoryPort, StringComparison.Ordinal);
         Assert.Contains("BaseRepository<QualityDbContext, InspectionPlan, InspectionPlanId>", repository, StringComparison.Ordinal);
+        Assert.Contains("IntegrationEventPublicationPolicy? integrationEventPublicationPolicy = null", dbContext, StringComparison.Ordinal);
         Assert.Contains("IIntegrationEventPublisher? integrationEventPublisher = null", dbContext, StringComparison.Ordinal);
+        Assert.Contains("ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null", dbContext, StringComparison.Ordinal);
         Assert.Contains("IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null", dbContext, StringComparison.Ordinal);
+        Assert.Contains("integrationEventPublicationPolicy", dbContext, StringComparison.Ordinal);
         Assert.Contains("integrationEventTransactionCoordinator: integrationEventTransactionCoordinator", dbContext, StringComparison.Ordinal);
         Assert.Contains("IDesignTimeDbContextFactory<QualityDbContext>", designTimeFactory, StringComparison.Ordinal);
         Assert.Contains("openlineops-quality-design-time.sqlite", designTimeFactory, StringComparison.Ordinal);

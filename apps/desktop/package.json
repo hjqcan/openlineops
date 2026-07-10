@@ -15,6 +15,7 @@
     "package:win": "npm run build && npm run package:win:ci",
     "package:win:ci": "node scripts/package-win-unpacked.mjs",
     "smoke:e2e": "npm run build && node scripts/electron-smoke.mjs",
+    "smoke:e2e:packaged": "npm run package:win && node scripts/electron-smoke.mjs --packaged",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {

@@ -74,6 +74,20 @@ public static class ProcessGraphValidator
                     $"Command node {node.Id} must declare a command name."));
             }
 
+            if (node.TargetKind is null)
+            {
+                issues.Add(Error(
+                    "Processes.CommandTargetKindMissing",
+                    $"Command node {node.Id} must declare a target kind."));
+            }
+
+            if (string.IsNullOrWhiteSpace(node.TargetId))
+            {
+                issues.Add(Error(
+                    "Processes.CommandTargetIdMissing",
+                    $"Command node {node.Id} must declare a target id."));
+            }
+
             if (node.CommandTimeout is null || node.CommandTimeout <= TimeSpan.Zero)
             {
                 issues.Add(Error(
@@ -89,7 +103,7 @@ public static class ProcessGraphValidator
     {
         foreach (var node in nodes.Where(node => node.IsPythonScript))
         {
-            if (!string.Equals(node.ScriptLanguage, "Python", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(node.ScriptLanguage, "Python", StringComparison.Ordinal))
             {
                 issues.Add(Error(
                     "Processes.PythonScriptLanguageInvalid",

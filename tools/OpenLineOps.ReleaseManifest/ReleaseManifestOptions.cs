@@ -1,7 +1,6 @@
 namespace OpenLineOps.ReleaseManifest;
 
 public sealed record ReleaseManifestOptions(
-    string Product,
     string Version,
     string ArtifactsDirectory,
     string ManifestPath,

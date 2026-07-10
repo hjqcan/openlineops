@@ -51,12 +51,21 @@ import {
 
 type WorkspaceMode = 'edit' | 'run';
 type CanvasMode = 'edit' | 'monitor';
+type TopologyDimension = '2d' | '3d';
 type PaletteItemKind = 'Station' | 'System' | 'Group' | 'Slot';
 type OperationalState = 'Idle' | 'Running' | 'Completed' | 'Failed' | 'Offline';
+
+interface TopologyCamera {
+  yawDegrees: number;
+  pitchDegrees: number;
+  zoom: number;
+}
 
 interface TopologyDesignerProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
+  projectSnapshotId: string | null;
+  activeProductionRunId: string | null;
   isBackendHealthy: boolean;
   workspaceMode: WorkspaceMode;
   runtimeConnected: boolean;
@@ -91,6 +100,34 @@ interface SemanticPropertiesDraft {
   slotAddress: string;
   slotMaterialKind: string;
   slotEnabled: boolean;
+}
+
+interface Topology3DRenderElement {
+  element: SiteLayoutElementResponse;
+  descriptor: ElementDescriptor;
+  state: OperationalState;
+  absoluteX: number;
+  absoluteY: number;
+  baseZ: number;
+  depth: number;
+  containerWidth: number;
+  containerHeight: number;
+}
+
+interface Topology3DDragState {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  viewportWidthPx: number;
+  viewportHeightPx: number;
+  previousGeometry: UpdateSiteLayoutElementGeometryRequest;
+  latestGeometry: UpdateSiteLayoutElementGeometryRequest;
+  moved: boolean;
+}
+
+interface Topology3DPoint {
+  x: number;
+  y: number;
 }
 
 const slotGroupKinds = [
@@ -130,9 +167,21 @@ const statusLegend: Array<{ state: OperationalState; label: string }> = [
   { state: 'Offline', label: 'Offline' }
 ];
 
+const defaultTopologyCamera: TopologyCamera = {
+  yawDegrees: -32,
+  pitchDegrees: 52,
+  zoom: 0.9
+};
+
+const topology3DViewWidth = 1200;
+const topology3DViewHeight = 680;
+const topology3DViewCenter = { x: topology3DViewWidth / 2, y: 370 };
+
 export function TopologyDesigner({
   activeWorkspace,
   activeApplicationId,
+  projectSnapshotId,
+  activeProductionRunId,
   isBackendHealthy,
   workspaceMode,
   runtimeConnected,
@@ -147,6 +196,8 @@ export function TopologyDesigner({
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved');
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('edit');
+  const [dimension, setDimension] = useState<TopologyDimension>('2d');
+  const [camera, setCamera] = useState<TopologyCamera>(defaultTopologyCamera);
   const [deleteConfirmElementId, setDeleteConfirmElementId] = useState<string | null>(null);
 
   const activeApplication = activeWorkspace?.project.applications.find(
@@ -166,15 +217,50 @@ export function TopologyDesigner({
   const selectedElement = useMemo(
     () => layout?.elements.find(element => element.elementId === selectedElementId) ?? null,
     [layout, selectedElementId]);
-  const stationStatuses = useMemo(
-    () => new Map(stations.map(status => [status.stationSystemId, status])),
-    [stations]);
-  const targetStatusByKey = useMemo(
-    () => new Map(targetStatuses.map(status => [
-      runtimeTargetStatusKey(status.stationSystemId, status.targetKind, status.targetId),
-      status
-    ])),
-    [targetStatuses]);
+  const stationStatuses = useMemo(() => {
+    if (effectiveMode !== 'monitor' || !activeProductionRunId) {
+      return new Map<string, RuntimeStationStatus>();
+    }
+
+    return new Map(stations
+      .filter(status => status.productionRunId === activeProductionRunId)
+      .sort((left, right) => left.lastTransitionAtUtc.localeCompare(right.lastTransitionAtUtc)
+        || left.stageSequence - right.stageSequence)
+      .map(status => [status.stationSystemId, status]));
+  }, [activeProductionRunId, effectiveMode, stations]);
+  const targetStatusByKey = useMemo(() => {
+    if (effectiveMode !== 'monitor' || !activeProductionRunId) {
+      return new Map<string, RuntimeTargetStatus>();
+    }
+
+    return new Map(targetStatuses
+      .filter(status => {
+        const stationStatus = stationStatuses.get(status.stationSystemId);
+        return status.productionRunId === activeProductionRunId
+          && stationStatus !== undefined
+          && status.productionLineDefinitionId === stationStatus.productionLineDefinitionId
+          && status.stageId === stationStatus.stageId
+          && status.stageSequence === stationStatus.stageSequence
+          && status.workstationId === stationStatus.workstationId;
+      })
+      .map(status => [
+        runtimeTargetStatusKey(status.stationSystemId, status.targetKind, status.targetId),
+        status
+      ]));
+  }, [activeProductionRunId, effectiveMode, stationStatuses, targetStatuses]);
+  const runtimeMonitorLabel = useMemo(() => {
+    if (effectiveMode !== 'monitor') {
+      return null;
+    }
+
+    const stationSystemIds = new Set(
+      topology?.systems
+        .filter(system => system.kind === 'Station')
+        .map(system => system.systemId) ?? []);
+    const scopedStatuses = [...stationStatuses.values()].filter(status =>
+      stationSystemIds.has(status.stationSystemId));
+    return describeRuntimeMonitorState(scopedStatuses);
+  }, [effectiveMode, stationStatuses, topology?.systems]);
 
   const refresh = useCallback(async () => {
     if (!activeApplication || !apiScope) {
@@ -187,19 +273,60 @@ export function TopologyDesigner({
       return;
     }
 
-    if (!activeApplication.topologyId) {
+    if (effectiveMode === 'edit' && !activeApplication.topologyId) {
       setTopology(null);
       setLayout(null);
       return;
     }
 
+    if (effectiveMode === 'monitor' && !projectSnapshotId) {
+      setTopology(null);
+      setLayout(null);
+      onMessage('Publish an immutable project snapshot before opening Monitor mode.');
+      return;
+    }
+
+    const releaseSnapshot = effectiveMode === 'monitor' && projectSnapshotId
+      ? activeWorkspace?.project.snapshots.find(snapshot => (
+        snapshot.snapshotId === projectSnapshotId
+        && snapshot.applicationId === activeApplication.applicationId)) ?? null
+      : null;
+    if (effectiveMode === 'monitor' && projectSnapshotId && !releaseSnapshot) {
+      setTopology(null);
+      setLayout(null);
+      onMessage(`Published snapshot ${projectSnapshotId} does not belong to the active Application.`);
+      return;
+    }
+
+    const topologyId = releaseSnapshot?.topologyId ?? activeApplication.topologyId;
+    if (!topologyId) {
+      setTopology(null);
+      setLayout(null);
+      onMessage('The selected Application has no topology in the active editing or release scope.');
+      return;
+    }
+    const expectedLayoutId = createLayoutId(activeApplication.applicationId);
+    const layoutId = releaseSnapshot
+      ? releaseSnapshot.layoutIds.find(candidate => candidate === expectedLayoutId) ?? null
+      : expectedLayoutId;
+    if (!layoutId) {
+      setTopology(null);
+      setLayout(null);
+      onMessage(`Published snapshot ${releaseSnapshot!.snapshotId} does not contain the Application line layout.`);
+      return;
+    }
+
     const [topologyResponse, layoutResponse] = await Promise.all([
-      getAutomationTopology(activeApplication.topologyId, apiScope),
-      getSiteLayout(createLayoutId(activeApplication.applicationId), apiScope)
+      getAutomationTopology(topologyId, apiScope, releaseSnapshot?.snapshotId),
+      getSiteLayout(layoutId, apiScope, releaseSnapshot?.snapshotId)
     ]);
     setTopology(topologyResponse.ok && topologyResponse.body ? topologyResponse.body : null);
     setLayout(layoutResponse.ok && layoutResponse.body ? layoutResponse.body : null);
-  }, [activeApplication, apiScope, isBackendHealthy]);
+    if (releaseSnapshot && (!topologyResponse.ok || !layoutResponse.ok)) {
+      onMessage(
+        `Published topology load failed for ${releaseSnapshot.snapshotId}: topology ${topologyResponse.status}, layout ${layoutResponse.status}.`);
+    }
+  }, [activeApplication, activeWorkspace?.project.snapshots, apiScope, effectiveMode, isBackendHealthy, onMessage, projectSnapshotId]);
 
   useEffect(() => {
     refresh().catch(error => onMessage(`2D layout refresh failed: ${String(error)}`));
@@ -284,9 +411,11 @@ export function TopologyDesigner({
       return;
     }
 
-    const selection = selectedElement
-      ?? layout.elements.find(element => element.kind === 'SystemShape')
-      ?? null;
+    const selection = rootPlacement
+      ? resolveDropInsertionElement(kind, rootPlacement, layout, topology)
+      : selectedElement
+        ?? layout.elements.find(element => element.kind === 'SystemShape')
+        ?? null;
     setBusy(true);
     try {
       if (kind === 'Station') {
@@ -653,7 +782,7 @@ export function TopologyDesigner({
         <div className="topology-document-identity">
           <Waypoints size={17} />
           <div>
-            <strong>{activeApplication?.displayName ?? '2D Layout'}</strong>
+            <strong>{activeApplication?.displayName ?? 'Topology Layout'}</strong>
             <span>{layout?.layoutId ?? 'No layout created'}</span>
           </div>
         </div>
@@ -679,9 +808,23 @@ export function TopologyDesigner({
         </div>
 
         <div className="topology-dimension-switch" role="group" aria-label="Topology dimension">
-          <button type="button" className="active" aria-pressed="true">2D</button>
-          <button type="button" disabled title="3D topology is planned after the semantic 2D editor is complete">
-            <Cuboid size={13} /> 3D · Planned
+          <button
+            type="button"
+            className={dimension === '2d' ? 'active' : ''}
+            aria-pressed={dimension === '2d'}
+            onClick={() => setDimension('2d')}
+            data-testid="topology-dimension-2d"
+          >
+            2D
+          </button>
+          <button
+            type="button"
+            className={dimension === '3d' ? 'active' : ''}
+            aria-pressed={dimension === '3d'}
+            onClick={() => setDimension('3d')}
+            data-testid="topology-dimension-3d"
+          >
+            <Cuboid size={13} /> 3D
           </button>
         </div>
 
@@ -717,28 +860,55 @@ export function TopologyDesigner({
           <div className="topology-canvas-meta">
             <div>
               <span className={`topology-mode-indicator ${effectiveMode}`} />
-              <strong>{effectiveMode === 'edit' ? 'Layout editor' : 'Live line overview'}</strong>
+              <strong>{dimension.toUpperCase()} {effectiveMode === 'edit' ? 'Layout editor' : 'Live line overview'}</strong>
               <small>{topology ? `${topology.systems.length} systems · ${topology.capabilities.length} capabilities · ${topology.slotGroups.length} groups · ${topology.slots.length} slots` : 'No topology'}</small>
             </div>
-            {workspaceMode === 'run' ? <span className="topology-runtime-lock"><LockKeyhole size={12} /> Project is running</span> : null}
+            {runtimeMonitorLabel ? (
+              <span className="topology-runtime-lock" data-testid="topology-runtime-state-label">
+                <LockKeyhole size={12} /> {runtimeMonitorLabel}
+              </span>
+            ) : null}
           </div>
 
           <div className="topology-canvas-stage">
             {layout && topology ? (
-              <div
-                className={`topology-canvas ${effectiveMode}`}
-                style={{ aspectRatio: `${layout.canvasWidth} / ${layout.canvasHeight}` }}
-                onDragOver={event => {
-                  if (editable) {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'copy';
-                  }
-                }}
-                onDrop={handleCanvasDrop}
-                onClick={() => setSelectedElementId(null)}
-                data-testid="topology-canvas"
-              >
-                <TopologyElementTree
+              dimension === '2d' ? (
+                <div
+                  className={`topology-canvas ${effectiveMode}`}
+                  style={{ aspectRatio: `${layout.canvasWidth} / ${layout.canvasHeight}` }}
+                  onDragOver={event => {
+                    if (editable) {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'copy';
+                    }
+                  }}
+                  onDrop={handleCanvasDrop}
+                  onClick={() => setSelectedElementId(null)}
+                  data-testid="topology-canvas"
+                >
+                  <TopologyElementTree
+                    layout={layout}
+                    topology={topology}
+                    stationStatuses={stationStatuses}
+                    targetStatusByKey={targetStatusByKey}
+                    runtimeConnected={runtimeConnected}
+                    selectedElementId={selectedElementId}
+                    editable={editable}
+                    onSelect={setSelectedElementId}
+                    onPreviewGeometry={previewGeometry}
+                    onCommitGeometry={commitGeometry}
+                  />
+                  {layout.elements.length === 0 ? (
+                    <div className="topology-canvas-empty">
+                      <BoxSelect size={28} />
+                      <strong>Start with a Station</strong>
+                      <span>Drag it here or click the Station tile in the palette.</span>
+                    </div>
+                  ) : null}
+                  <div className="topology-canvas-scale">{layout.canvasWidth} × {layout.canvasHeight} · local coordinates</div>
+                </div>
+              ) : (
+                <SemanticTopology3D
                   layout={layout}
                   topology={topology}
                   stationStatuses={stationStatuses}
@@ -746,19 +916,14 @@ export function TopologyDesigner({
                   runtimeConnected={runtimeConnected}
                   selectedElementId={selectedElementId}
                   editable={editable}
+                  camera={camera}
+                  onCameraChange={setCamera}
                   onSelect={setSelectedElementId}
                   onPreviewGeometry={previewGeometry}
                   onCommitGeometry={commitGeometry}
+                  onAddAt={(kind, placement) => void addPaletteItem(kind, placement)}
                 />
-                {layout.elements.length === 0 ? (
-                  <div className="topology-canvas-empty">
-                    <BoxSelect size={28} />
-                    <strong>Start with a Station</strong>
-                    <span>Drag it here or click the Station tile in the palette.</span>
-                  </div>
-                ) : null}
-                <div className="topology-canvas-scale">1200 × 680 · local coordinates</div>
-              </div>
+              )
             ) : (
               <div className="topology-layout-empty">
                 <Layers3 size={34} />
@@ -778,8 +943,8 @@ export function TopologyDesigner({
           </div>
 
           <footer className="topology-canvas-footer">
-            <span><MousePointer2 size={12} /> Drag elements · Arrow keys nudge · Shift = 10 px</span>
-            <span>Children use parent-local coordinates</span>
+            <span><MousePointer2 size={12} /> {dimension === '3d' ? 'Drag floor to orbit · Wheel to zoom · Drag blocks to move' : 'Drag elements · Arrow keys nudge · Shift = 10 px'}</span>
+            <span>{dimension === '3d' ? '3D projects the same persisted local coordinates' : 'Children use parent-local coordinates'}</span>
           </footer>
         </main>
 
@@ -863,6 +1028,463 @@ function PalettePanel({
         <span>Monitor mode locks all structural and geometry changes.</span>
       </div>
     </aside>
+  );
+}
+
+function SemanticTopology3D({
+  layout,
+  topology,
+  stationStatuses,
+  targetStatusByKey,
+  runtimeConnected,
+  selectedElementId,
+  editable,
+  camera,
+  onCameraChange,
+  onSelect,
+  onPreviewGeometry,
+  onCommitGeometry,
+  onAddAt
+}: {
+  layout: SiteLayoutResponse;
+  topology: AutomationTopologyResponse;
+  stationStatuses: Map<string, RuntimeStationStatus>;
+  targetStatusByKey: Map<string, RuntimeTargetStatus>;
+  runtimeConnected: boolean;
+  selectedElementId: string | null;
+  editable: boolean;
+  camera: TopologyCamera;
+  onCameraChange(camera: TopologyCamera): void;
+  onSelect(elementId: string): void;
+  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onCommitGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ): void;
+  onAddAt(kind: PaletteItemKind, placement: { x: number; y: number }): void;
+}): React.ReactElement {
+  const orbitState = useRef<{
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    camera: TopologyCamera;
+  } | null>(null);
+  const [orbiting, setOrbiting] = useState(false);
+  const renderElements = useMemo(
+    () => flattenTopology3DElements(
+      layout,
+      topology,
+      stationStatuses,
+      targetStatusByKey,
+      runtimeConnected),
+    [layout, runtimeConnected, stationStatuses, targetStatusByKey, topology]);
+  const floorCorners = useMemo(() => [
+    projectTopology3DPoint(0, 0, 0, layout, camera),
+    projectTopology3DPoint(layout.canvasWidth, 0, 0, layout, camera),
+    projectTopology3DPoint(layout.canvasWidth, layout.canvasHeight, 0, layout, camera),
+    projectTopology3DPoint(0, layout.canvasHeight, 0, layout, camera)
+  ], [camera, layout]);
+  const gridLines = useMemo(
+    () => createTopology3DGridLines(layout, camera),
+    [camera, layout]);
+
+  const adjustCamera = (change: Partial<TopologyCamera>): void => {
+    onCameraChange(normalizeTopologyCamera({ ...camera, ...change }));
+  };
+
+  const handleOrbitStart = (event: React.PointerEvent<SVGSVGElement>): void => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    orbitState.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      camera
+    };
+    setOrbiting(true);
+    onSelect('');
+  };
+
+  const handleOrbitMove = (event: React.PointerEvent<SVGSVGElement>): void => {
+    const orbit = orbitState.current;
+    if (!orbit || orbit.pointerId !== event.pointerId) {
+      return;
+    }
+
+    onCameraChange(normalizeTopologyCamera({
+      ...orbit.camera,
+      yawDegrees: orbit.camera.yawDegrees + (event.clientX - orbit.clientX) * 0.32,
+      pitchDegrees: orbit.camera.pitchDegrees - (event.clientY - orbit.clientY) * 0.22
+    }));
+  };
+
+  const finishOrbit = (event: React.PointerEvent<SVGSVGElement>): void => {
+    const orbit = orbitState.current;
+    if (!orbit || orbit.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    orbitState.current = null;
+    setOrbiting(false);
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>): void => {
+    if (!editable) {
+      return;
+    }
+
+    const kind = event.dataTransfer.getData('application/x-openlineops-topology') as PaletteItemKind;
+    if (!paletteItems.some(item => item.kind === kind)) {
+      return;
+    }
+
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const projectedPoint = {
+      x: ((event.clientX - bounds.left) / bounds.width) * topology3DViewWidth,
+      y: ((event.clientY - bounds.top) / bounds.height) * topology3DViewHeight
+    };
+    const world = unprojectTopology3DPoint(projectedPoint, layout, camera);
+    onAddAt(kind, {
+      x: clamp(world.x, 0, layout.canvasWidth),
+      y: clamp(world.y, 0, layout.canvasHeight)
+    });
+  };
+
+  return (
+    <div
+      className={`topology-3d-viewport ${editable ? 'editable' : 'locked'}${orbiting ? ' orbiting' : ''}`}
+      style={{ aspectRatio: `${layout.canvasWidth} / ${layout.canvasHeight}` }}
+      onDragOver={event => {
+        if (editable) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+      onDrop={handleDrop}
+      data-testid="topology-3d-viewport"
+    >
+      <div className="topology-3d-atmosphere" aria-hidden="true" />
+      <svg
+        className="topology-3d-scene"
+        viewBox={`0 0 ${topology3DViewWidth} ${topology3DViewHeight}`}
+        role="application"
+        aria-label="Semantic 3D automation line layout"
+        onPointerDown={handleOrbitStart}
+        onPointerMove={handleOrbitMove}
+        onPointerUp={finishOrbit}
+        onPointerCancel={finishOrbit}
+        onWheel={event => {
+          event.preventDefault();
+          adjustCamera({ zoom: camera.zoom * (event.deltaY > 0 ? 0.92 : 1.08) });
+        }}
+      >
+        <defs>
+          <filter id="topology-3d-shadow" x="-30%" y="-30%" width="160%" height="180%">
+            <feDropShadow dx="0" dy="9" stdDeviation="8" floodColor="#060b0e" floodOpacity="0.48" />
+          </filter>
+          <filter id="topology-3d-selected" x="-30%" y="-30%" width="160%" height="180%">
+            <feDropShadow dx="0" dy="0" stdDeviation="5" floodColor="#ff9b5f" floodOpacity="0.85" />
+          </filter>
+          <linearGradient id="topology-3d-floor" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#233139" />
+            <stop offset="1" stopColor="#172126" />
+          </linearGradient>
+        </defs>
+
+        <polygon
+          className="topology-3d-floor"
+          points={toSvgPoints(floorCorners)}
+          fill="url(#topology-3d-floor)"
+        />
+        <g className="topology-3d-grid" aria-hidden="true">
+          {gridLines.map((line, index) => (
+            <line
+              key={`${line.axis}-${index}`}
+              x1={line.start.x}
+              y1={line.start.y}
+              x2={line.end.x}
+              y2={line.end.y}
+              className={line.major ? 'major' : ''}
+            />
+          ))}
+        </g>
+
+        {renderElements.map(renderElement => (
+          <Topology3DPrism
+            key={renderElement.element.elementId}
+            renderElement={renderElement}
+            layout={layout}
+            camera={camera}
+            selected={renderElement.element.elementId === selectedElementId}
+            editable={editable}
+            onSelect={onSelect}
+            onPreviewGeometry={onPreviewGeometry}
+            onCommitGeometry={onCommitGeometry}
+          />
+        ))}
+
+        <g className="topology-3d-axis" aria-hidden="true" transform="translate(64 598)">
+          <circle r="26" />
+          <line x1="0" y1="0" x2="22" y2="8" className="x" />
+          <line x1="0" y1="0" x2="-15" y2="16" className="y" />
+          <line x1="0" y1="0" x2="0" y2="-23" className="z" />
+          <text x="26" y="13">X</text>
+          <text x="-25" y="23">Y</text>
+          <text x="5" y="-23">Z</text>
+        </g>
+      </svg>
+
+      {layout.elements.length === 0 ? (
+        <div className="topology-3d-empty">
+          <Cuboid size={31} />
+          <strong>Place the first Station</strong>
+          <span>The 3D scene is generated from the same semantic layout.</span>
+        </div>
+      ) : null}
+
+      <div className="topology-3d-camera-controls" aria-label="3D camera controls">
+        <span className="topology-3d-camera-readout">
+          <Cuboid size={13} />
+          <strong>ORBIT</strong>
+          <small>{Math.round(camera.yawDegrees)}° / {Math.round(camera.pitchDegrees)}°</small>
+        </span>
+        <button
+          type="button"
+          onClick={() => adjustCamera({ yawDegrees: camera.yawDegrees - 15 })}
+          aria-label="Rotate camera left"
+          data-testid="topology-3d-rotate-left"
+        >
+          −15°
+        </button>
+        <button
+          type="button"
+          onClick={() => adjustCamera({ yawDegrees: camera.yawDegrees + 15 })}
+          aria-label="Rotate camera right"
+          data-testid="topology-3d-rotate-right"
+        >
+          +15°
+        </button>
+        <button
+          type="button"
+          onClick={() => adjustCamera({ zoom: camera.zoom / 1.12 })}
+          aria-label="Zoom out"
+          data-testid="topology-3d-zoom-out"
+        >
+          −
+        </button>
+        <button
+          type="button"
+          onClick={() => adjustCamera({ zoom: camera.zoom * 1.12 })}
+          aria-label="Zoom in"
+          data-testid="topology-3d-zoom-in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={() => onCameraChange(defaultTopologyCamera)}
+          data-testid="topology-3d-reset-camera"
+        >
+          Reset
+        </button>
+      </div>
+
+      <div className="topology-3d-coordinate-badge">
+        <span>SEMANTIC 3D</span>
+        <strong>{layout.canvasWidth} × {layout.canvasHeight}</strong>
+        <small>same persisted layout</small>
+      </div>
+    </div>
+  );
+}
+
+function Topology3DPrism({
+  renderElement,
+  layout,
+  camera,
+  selected,
+  editable,
+  onSelect,
+  onPreviewGeometry,
+  onCommitGeometry
+}: {
+  renderElement: Topology3DRenderElement;
+  layout: SiteLayoutResponse;
+  camera: TopologyCamera;
+  selected: boolean;
+  editable: boolean;
+  onSelect(elementId: string): void;
+  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onCommitGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest
+  ): void;
+}): React.ReactElement {
+  const dragState = useRef<Topology3DDragState | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const { element, descriptor, state, absoluteX, absoluteY, baseZ, depth } = renderElement;
+  const baseCorners = [
+    projectTopology3DPoint(absoluteX, absoluteY, baseZ, layout, camera),
+    projectTopology3DPoint(absoluteX + element.width, absoluteY, baseZ, layout, camera),
+    projectTopology3DPoint(absoluteX + element.width, absoluteY + element.height, baseZ, layout, camera),
+    projectTopology3DPoint(absoluteX, absoluteY + element.height, baseZ, layout, camera)
+  ];
+  const topCorners = [
+    projectTopology3DPoint(absoluteX, absoluteY, baseZ + depth, layout, camera),
+    projectTopology3DPoint(absoluteX + element.width, absoluteY, baseZ + depth, layout, camera),
+    projectTopology3DPoint(absoluteX + element.width, absoluteY + element.height, baseZ + depth, layout, camera),
+    projectTopology3DPoint(absoluteX, absoluteY + element.height, baseZ + depth, layout, camera)
+  ];
+  const labelPoint = projectTopology3DPoint(
+    absoluteX + element.width / 2,
+    absoluteY + element.height / 2,
+    baseZ + depth + 3,
+    layout,
+    camera);
+  const elementClass = toElementClass(element.kind);
+
+  const handlePointerDown = (event: React.PointerEvent<SVGGElement>): void => {
+    event.stopPropagation();
+    onSelect(element.elementId);
+    if (!editable || event.button !== 0) {
+      return;
+    }
+
+    const bounds = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const geometry = toGeometry(element);
+    dragState.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      viewportWidthPx: bounds.width,
+      viewportHeightPx: bounds.height,
+      previousGeometry: geometry,
+      latestGeometry: geometry,
+      moved: false
+    };
+    setDragging(true);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<SVGGElement>): void => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const screenDelta = {
+      x: ((event.clientX - drag.startClientX) / drag.viewportWidthPx) * topology3DViewWidth,
+      y: ((event.clientY - drag.startClientY) / drag.viewportHeightPx) * topology3DViewHeight
+    };
+    const worldDelta = unprojectTopology3DDelta(screenDelta, layout, camera);
+    const next = clampGeometry({
+      ...drag.previousGeometry,
+      x: drag.previousGeometry.x + worldDelta.x,
+      y: drag.previousGeometry.y + worldDelta.y
+    }, renderElement.containerWidth, renderElement.containerHeight);
+    drag.latestGeometry = next;
+    drag.moved = drag.moved || Math.abs(worldDelta.x) > 0.2 || Math.abs(worldDelta.y) > 0.2;
+    onPreviewGeometry(element.elementId, next);
+  };
+
+  const finishDrag = (event: React.PointerEvent<SVGGElement>, cancelled: boolean): void => {
+    event.stopPropagation();
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragState.current = null;
+    setDragging(false);
+    if (cancelled) {
+      onPreviewGeometry(element.elementId, drag.previousGeometry);
+    } else if (drag.moved) {
+      onCommitGeometry(element.elementId, drag.latestGeometry, drag.previousGeometry);
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<SVGGElement>): void => {
+    if (!editable || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const step = event.shiftKey ? 10 : 1;
+    const previous = toGeometry(element);
+    const next = clampGeometry({
+      ...previous,
+      x: previous.x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0),
+      y: previous.y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
+    }, renderElement.containerWidth, renderElement.containerHeight);
+    onPreviewGeometry(element.elementId, next);
+    onCommitGeometry(element.elementId, next, previous);
+  };
+
+  const labelWidth = descriptor.system?.kind === 'Station'
+    ? 148
+    : element.kind === 'SlotShape'
+      ? 62
+      : 108;
+
+  return (
+    <g
+      className={`topology-3d-prism ${elementClass} status-${state.toLowerCase()}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}`}
+      role="button"
+      tabIndex={editable ? 0 : -1}
+      aria-label={`${descriptor.displayName}, ${state}`}
+      aria-pressed={selected}
+      data-operational-state={state}
+      data-testid={`topology-3d-element-${element.elementId}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={event => finishDrag(event, false)}
+      onPointerCancel={event => finishDrag(event, true)}
+      onKeyDown={handleKeyDown}
+      filter={selected ? 'url(#topology-3d-selected)' : descriptor.system?.kind === 'Station' ? 'url(#topology-3d-shadow)' : undefined}
+    >
+      <title>{descriptor.displayName} · {descriptor.detail} · {state}</title>
+      <polygon
+        className="topology-3d-face side side-south"
+        points={toSvgPoints([baseCorners[3], baseCorners[2], topCorners[2], topCorners[3]])}
+      />
+      <polygon
+        className="topology-3d-face side side-east"
+        points={toSvgPoints([baseCorners[1], baseCorners[2], topCorners[2], topCorners[1]])}
+      />
+      <polygon
+        className="topology-3d-face side side-north"
+        points={toSvgPoints([baseCorners[0], baseCorners[1], topCorners[1], topCorners[0]])}
+      />
+      <polygon
+        className="topology-3d-face side side-west"
+        points={toSvgPoints([baseCorners[0], baseCorners[3], topCorners[3], topCorners[0]])}
+      />
+      <polygon className="topology-3d-face top" points={toSvgPoints(topCorners)} />
+      <g className="topology-3d-label" transform={`translate(${labelPoint.x} ${labelPoint.y})`}>
+        <rect x={-labelWidth / 2} y="-12" width={labelWidth} height="24" rx="3" />
+        <circle cx={-labelWidth / 2 + 10} cy="0" r="3.5" />
+        <text x={-labelWidth / 2 + 19} y="1.5">{truncateTopologyLabel(descriptor.displayName, labelWidth)}</text>
+      </g>
+    </g>
   );
 }
 
@@ -1511,6 +2133,222 @@ function HierarchyTree({
   );
 }
 
+function flattenTopology3DElements(
+  layout: SiteLayoutResponse,
+  topology: AutomationTopologyResponse,
+  stationStatuses: Map<string, RuntimeStationStatus>,
+  targetStatusByKey: Map<string, RuntimeTargetStatus>,
+  runtimeConnected: boolean
+): Topology3DRenderElement[] {
+  const childrenByParent = new Map<string | null, SiteLayoutElementResponse[]>();
+  for (const element of layout.elements) {
+    const siblings = childrenByParent.get(element.parentElementId) ?? [];
+    siblings.push(element);
+    childrenByParent.set(element.parentElementId, siblings);
+  }
+  for (const siblings of childrenByParent.values()) {
+    siblings.sort((left, right) => left.zIndex - right.zIndex || left.elementId.localeCompare(right.elementId));
+  }
+
+  const result: Topology3DRenderElement[] = [];
+  const visit = (
+    parentElementId: string | null,
+    originX: number,
+    originY: number,
+    parentTopZ: number,
+    stationSystemId: string | null,
+    containerWidth: number,
+    containerHeight: number
+  ): void => {
+    for (const element of childrenByParent.get(parentElementId) ?? []) {
+      const descriptor = describeElement(element, topology);
+      const elementStationSystemId = descriptor.system?.kind === 'Station'
+        ? descriptor.system.systemId
+        : stationSystemId;
+      const state = descriptor.system?.kind === 'Station'
+        ? toOperationalState(stationStatuses.get(descriptor.system.systemId), runtimeConnected)
+        : toTargetOperationalState(
+          elementStationSystemId
+            ? targetStatusByKey.get(runtimeTargetStatusKey(
+              elementStationSystemId,
+              element.target.kind,
+              element.target.targetId))
+            : undefined,
+          runtimeConnected);
+      const baseZ = parentElementId === null ? 0 : parentTopZ + 4;
+      const depth = topology3DDepth(element, descriptor);
+      const absoluteX = originX + element.x;
+      const absoluteY = originY + element.y;
+      result.push({
+        element,
+        descriptor,
+        state,
+        absoluteX,
+        absoluteY,
+        baseZ,
+        depth,
+        containerWidth,
+        containerHeight
+      });
+      visit(
+        element.elementId,
+        absoluteX,
+        absoluteY,
+        baseZ + depth,
+        elementStationSystemId,
+        element.width,
+        element.height);
+    }
+  };
+
+  visit(null, 0, 0, 0, null, layout.canvasWidth, layout.canvasHeight);
+  return result.sort((left, right) =>
+    left.baseZ - right.baseZ
+    || left.element.zIndex - right.element.zIndex
+    || left.absoluteY - right.absoluteY
+    || left.element.elementId.localeCompare(right.element.elementId));
+}
+
+function topology3DDepth(
+  element: SiteLayoutElementResponse,
+  descriptor: ElementDescriptor
+): number {
+  if (descriptor.system?.kind === 'Station') {
+    return 28;
+  }
+
+  if (element.kind === 'SystemShape') {
+    return 20;
+  }
+
+  return element.kind === 'GroupRegion' ? 8 : 15;
+}
+
+function projectTopology3DPoint(
+  worldX: number,
+  worldY: number,
+  worldZ: number,
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): Topology3DPoint {
+  const yaw = camera.yawDegrees * Math.PI / 180;
+  const pitch = camera.pitchDegrees * Math.PI / 180;
+  const deltaX = worldX - layout.canvasWidth / 2;
+  const deltaY = worldY - layout.canvasHeight / 2;
+  const rotatedX = deltaX * Math.cos(yaw) - deltaY * Math.sin(yaw);
+  const rotatedY = deltaX * Math.sin(yaw) + deltaY * Math.cos(yaw);
+  const scale = topology3DProjectionScale(layout, camera);
+  return {
+    x: topology3DViewCenter.x + rotatedX * scale,
+    y: topology3DViewCenter.y
+      + rotatedY * Math.sin(pitch) * scale
+      - worldZ * Math.cos(pitch) * scale * 2.35
+  };
+}
+
+function unprojectTopology3DPoint(
+  projected: Topology3DPoint,
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): Topology3DPoint {
+  const delta = unprojectTopology3DDelta({
+    x: projected.x - topology3DViewCenter.x,
+    y: projected.y - topology3DViewCenter.y
+  }, layout, camera);
+  return {
+    x: layout.canvasWidth / 2 + delta.x,
+    y: layout.canvasHeight / 2 + delta.y
+  };
+}
+
+function unprojectTopology3DDelta(
+  projectedDelta: Topology3DPoint,
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): Topology3DPoint {
+  const yaw = camera.yawDegrees * Math.PI / 180;
+  const pitch = camera.pitchDegrees * Math.PI / 180;
+  const scale = topology3DProjectionScale(layout, camera);
+  const rotatedX = projectedDelta.x / scale;
+  const rotatedY = projectedDelta.y / (scale * Math.sin(pitch));
+  return {
+    x: rotatedX * Math.cos(yaw) + rotatedY * Math.sin(yaw),
+    y: -rotatedX * Math.sin(yaw) + rotatedY * Math.cos(yaw)
+  };
+}
+
+function topology3DProjectionScale(
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): number {
+  const diagonal = Math.hypot(layout.canvasWidth, layout.canvasHeight);
+  return (1000 / Math.max(diagonal, 1)) * camera.zoom;
+}
+
+function createTopology3DGridLines(
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): Array<{
+  axis: 'x' | 'y';
+  major: boolean;
+  start: Topology3DPoint;
+  end: Topology3DPoint;
+}> {
+  const lines: Array<{
+    axis: 'x' | 'y';
+    major: boolean;
+    start: Topology3DPoint;
+    end: Topology3DPoint;
+  }> = [];
+  const step = Math.max(50, Math.round(Math.max(layout.canvasWidth, layout.canvasHeight) / 12 / 50) * 50);
+  let index = 0;
+  for (let x = 0; x <= layout.canvasWidth; x += step) {
+    lines.push({
+      axis: 'x',
+      major: index % 5 === 0,
+      start: projectTopology3DPoint(x, 0, 0.5, layout, camera),
+      end: projectTopology3DPoint(x, layout.canvasHeight, 0.5, layout, camera)
+    });
+    index += 1;
+  }
+
+  index = 0;
+  for (let y = 0; y <= layout.canvasHeight; y += step) {
+    lines.push({
+      axis: 'y',
+      major: index % 5 === 0,
+      start: projectTopology3DPoint(0, y, 0.5, layout, camera),
+      end: projectTopology3DPoint(layout.canvasWidth, y, 0.5, layout, camera)
+    });
+    index += 1;
+  }
+  return lines;
+}
+
+function normalizeTopologyCamera(camera: TopologyCamera): TopologyCamera {
+  const yaw = ((camera.yawDegrees + 180) % 360 + 360) % 360 - 180;
+  return {
+    yawDegrees: yaw,
+    pitchDegrees: clamp(camera.pitchDegrees, 28, 72),
+    zoom: clamp(camera.zoom, 0.52, 1.45)
+  };
+}
+
+function toSvgPoints(points: Topology3DPoint[]): string {
+  return points.map(point => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+}
+
+function truncateTopologyLabel(label: string, labelWidth: number): string {
+  const maximumCharacters = Math.max(5, Math.floor((labelWidth - 28) / 6.4));
+  return label.length <= maximumCharacters
+    ? label
+    : `${label.slice(0, Math.max(1, maximumCharacters - 1))}…`;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
 function describeElement(
   element: SiteLayoutElementResponse,
   topology: AutomationTopologyResponse
@@ -1604,7 +2442,7 @@ function runtimeTargetStatusKey(
   targetKind: string,
   targetId: string
 ): string {
-  return `${stationSystemId}\u0000${targetKind}\u0000${targetId}`;
+  return JSON.stringify([stationSystemId, targetKind, targetId]);
 }
 
 function toTargetOperationalState(
@@ -1632,6 +2470,26 @@ function toTargetOperationalState(
   }
 }
 
+function describeRuntimeMonitorState(statuses: RuntimeStationStatus[]): string {
+  if (statuses.some(status => !status.isTerminal)) {
+    return 'Project is running';
+  }
+
+  const latest = statuses
+    .slice()
+    .sort((left, right) => right.lastTransitionAtUtc.localeCompare(left.lastTransitionAtUtc))[0];
+  switch (latest?.sessionStatus) {
+    case 'Completed':
+      return 'Last run completed';
+    case 'Failed':
+    case 'Canceled':
+    case 'Stopped':
+      return 'Last run failed';
+    default:
+      return 'Monitor mode';
+  }
+}
+
 function toOperationalState(
   status: RuntimeStationStatus | undefined,
   runtimeConnected: boolean
@@ -1643,28 +2501,89 @@ function toOperationalState(
     return 'Idle';
   }
 
-  const normalized = status.sessionStatus.trim().toLowerCase();
-  if (normalized.includes('offline') || normalized.includes('disconnect')) {
-    return 'Offline';
-  }
-  if (status.incidentCount > 0
-    || normalized.includes('fail')
-    || normalized.includes('fault')
-    || normalized.includes('reject')
-    || normalized.includes('timedout')
-    || normalized.includes('timed-out')
-    || normalized.includes('timeout')
-    || normalized.includes('abort')
-    || normalized.includes('cancel')) {
+  if (status.incidentCount > 0) {
     return 'Failed';
   }
-  if (normalized.includes('complete') || normalized.includes('success') || normalized.includes('pass')) {
-    return 'Completed';
+
+  switch (status.sessionStatus) {
+    case 'Created':
+    case 'Queued':
+    case 'Running':
+    case 'Pausing':
+    case 'Paused':
+    case 'Stopping':
+      return 'Running';
+    case 'Completed':
+      return 'Completed';
+    case 'Failed':
+    case 'Canceled':
+    case 'Stopped':
+      return 'Failed';
   }
-  if (status.runningStepCount > 0 || !status.isTerminal) {
-    return 'Running';
+}
+
+function resolveDropInsertionElement(
+  kind: PaletteItemKind,
+  point: { x: number; y: number },
+  layout: SiteLayoutResponse,
+  topology: AutomationTopologyResponse
+): SiteLayoutElementResponse | null {
+  if (kind === 'Station') {
+    return null;
   }
-  return 'Idle';
+
+  const candidates = layout.elements.filter(element => {
+    if (!containsAbsolutePoint(element, point, layout)) {
+      return false;
+    }
+
+    if (kind === 'Slot') {
+      return element.kind === 'GroupRegion'
+        && topology.slotGroups.some(group => group.slotGroupId === element.target.targetId);
+    }
+
+    return element.kind === 'SystemShape'
+      && topology.systems.some(system => (
+        system.systemId === element.target.targetId
+        && system.kind === 'Station'));
+  });
+
+  return candidates.sort((left, right) => (
+    elementDepth(right, layout) - elementDepth(left, layout)
+    || right.zIndex - left.zIndex
+    || right.elementId.localeCompare(left.elementId)
+  ))[0] ?? null;
+}
+
+function containsAbsolutePoint(
+  element: SiteLayoutElementResponse,
+  point: { x: number; y: number },
+  layout: SiteLayoutResponse
+): boolean {
+  const origin = absoluteElementOrigin(element, layout);
+  return point.x >= origin.x
+    && point.x <= origin.x + element.width
+    && point.y >= origin.y
+    && point.y <= origin.y + element.height;
+}
+
+function elementDepth(element: SiteLayoutElementResponse, layout: SiteLayoutResponse): number {
+  let depth = 0;
+  let parentElementId = element.parentElementId;
+  const visited = new Set<string>([element.elementId]);
+  while (parentElementId) {
+    if (visited.has(parentElementId)) {
+      return depth;
+    }
+    visited.add(parentElementId);
+    const parent = layout.elements.find(candidate => candidate.elementId === parentElementId);
+    if (!parent) {
+      return depth;
+    }
+    depth += 1;
+    parentElementId = parent.parentElementId;
+  }
+  return depth;
 }
 
 function absoluteElementOrigin(

@@ -27,9 +27,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         ActionId = actionId ?? throw new ArgumentNullException(nameof(actionId));
         Target = target ?? throw new ArgumentNullException(nameof(target));
         TargetCapability = targetCapability;
-        CommandName = string.IsNullOrWhiteSpace(commandName)
-            ? throw new ArgumentException("Command name cannot be empty.", nameof(commandName))
-            : commandName.Trim();
+        CommandName = Required(commandName, nameof(commandName));
         CreatedAtUtc = createdAtUtc;
         Timeout = timeout;
         DeadlineAtUtc = createdAtUtc.Add(timeout);
@@ -67,6 +65,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
     public string? ResultPayload { get; private set; }
 
     public string? FailureReason { get; private set; }
+
+    public RuntimeCommandSemanticOutcome? SemanticOutcome { get; private set; }
 
     public bool IsTerminal => Status is RuntimeCommandStatus.Completed
         or RuntimeCommandStatus.Failed
@@ -108,6 +108,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset? completedAtUtc,
         string? resultPayload,
         string? failureReason,
+        RuntimeCommandSemanticOutcome? semanticOutcome,
         RuntimeActionId actionId,
         RuntimeTargetReference target)
     {
@@ -125,9 +126,12 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             AcceptedAtUtc = acceptedAtUtc,
             StartedAtUtc = startedAtUtc,
             CompletedAtUtc = completedAtUtc,
-            ResultPayload = NormalizeOptional(resultPayload),
-            FailureReason = NormalizeOptional(failureReason)
+            ResultPayload = resultPayload,
+            FailureReason = CanonicalOptional(failureReason),
+            SemanticOutcome = semanticOutcome
         };
+
+        ValidateSemanticOutcome(status, semanticOutcome);
 
         return command;
     }
@@ -142,22 +146,41 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         return TransitionTo(RuntimeCommandStatus.InProgress, startedAtUtc);
     }
 
-    internal RuntimeOperationResult Complete(string? resultPayload, DateTimeOffset completedAtUtc)
+    internal RuntimeOperationResult Complete(
+        string? resultPayload,
+        DateTimeOffset completedAtUtc,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
-        ResultPayload = string.IsNullOrWhiteSpace(resultPayload)
-            ? null
-            : resultPayload.Trim();
+        ValidateSemanticOutcome(RuntimeCommandStatus.Completed, semanticOutcome);
+        var result = TransitionTo(RuntimeCommandStatus.Completed, completedAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
 
-        return TransitionTo(RuntimeCommandStatus.Completed, completedAtUtc);
+        ResultPayload = resultPayload;
+        SemanticOutcome = semanticOutcome;
+        return result;
     }
 
-    internal RuntimeOperationResult Fail(string reason, DateTimeOffset failedAtUtc)
+    internal RuntimeOperationResult Fail(
+        string reason,
+        DateTimeOffset failedAtUtc,
+        string? resultPayload = null,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
-        FailureReason = string.IsNullOrWhiteSpace(reason)
-            ? "Command failed."
-            : reason.Trim();
+        ValidateSemanticOutcome(RuntimeCommandStatus.Failed, semanticOutcome);
+        var canonicalReason = Required(reason, nameof(reason));
+        var result = TransitionTo(RuntimeCommandStatus.Failed, failedAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
 
-        return TransitionTo(RuntimeCommandStatus.Failed, failedAtUtc);
+        FailureReason = canonicalReason;
+        ResultPayload = resultPayload;
+        SemanticOutcome = semanticOutcome;
+        return result;
     }
 
     internal RuntimeOperationResult TimeoutAt(DateTimeOffset timedOutAtUtc)
@@ -167,18 +190,29 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         return TransitionTo(RuntimeCommandStatus.TimedOut, timedOutAtUtc);
     }
 
-    internal RuntimeOperationResult Cancel(DateTimeOffset canceledAtUtc)
+    internal RuntimeOperationResult Cancel(
+        DateTimeOffset canceledAtUtc,
+        string reason = "Command canceled.",
+        string? resultPayload = null,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
-        FailureReason = "Command canceled.";
+        ValidateSemanticOutcome(RuntimeCommandStatus.Canceled, semanticOutcome);
+        var canonicalReason = Required(reason, nameof(reason));
+        var result = TransitionTo(RuntimeCommandStatus.Canceled, canceledAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
 
-        return TransitionTo(RuntimeCommandStatus.Canceled, canceledAtUtc);
+        FailureReason = canonicalReason;
+        ResultPayload = resultPayload;
+        SemanticOutcome = semanticOutcome;
+        return result;
     }
 
     internal RuntimeOperationResult Reject(string reason, DateTimeOffset rejectedAtUtc)
     {
-        FailureReason = string.IsNullOrWhiteSpace(reason)
-            ? "Command rejected."
-            : reason.Trim();
+        FailureReason = Required(reason, nameof(reason));
 
         return TransitionTo(RuntimeCommandStatus.Rejected, rejectedAtUtc);
     }
@@ -245,10 +279,44 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         };
     }
 
-    private static string? NormalizeOptional(string? value)
+    private static string? CanonicalOptional(string? value)
+    {
+        return value is null ? null : Required(value, nameof(value));
+    }
+
+    private static void ValidateSemanticOutcome(
+        RuntimeCommandStatus status,
+        RuntimeCommandSemanticOutcome? semanticOutcome)
+    {
+        if (semanticOutcome is null)
+        {
+            return;
+        }
+
+        var valid = (status, semanticOutcome) switch
+        {
+            (RuntimeCommandStatus.Completed, RuntimeCommandSemanticOutcome.Passed) => true,
+            (RuntimeCommandStatus.Failed, RuntimeCommandSemanticOutcome.Failed) => true,
+            (RuntimeCommandStatus.Canceled, RuntimeCommandSemanticOutcome.Aborted) => true,
+            _ => false
+        };
+
+        if (!valid)
+        {
+            throw new ArgumentException(
+                $"Semantic outcome {semanticOutcome} is invalid for command status {status}.",
+                nameof(semanticOutcome));
+        }
+    }
+
+    private static string Required(string value, string parameterName)
     {
         return string.IsNullOrWhiteSpace(value)
-            ? null
-            : value.Trim();
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1])
+            ? throw new ArgumentException(
+                $"{parameterName} must be non-empty canonical text.",
+                parameterName)
+            : value;
     }
 }

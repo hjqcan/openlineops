@@ -42,8 +42,7 @@ public sealed class ProjectReleasePublisherTests
             new PublishProjectReleaseRequest(
                 "snapshot.main",
                 "application.main",
-                "process.main",
-                "configuration.main"));
+                "line.main"));
 
         Assert.True(result.IsSuccess);
         Assert.Equal(
@@ -62,16 +61,15 @@ public sealed class ProjectReleasePublisherTests
         Assert.Equal(PublishedAtUtc, artifactStore.PublishedAtUtc);
         Assert.NotNull(projectService.PublishRequest);
         Assert.Equal("topology.main", projectService.PublishRequest.TopologyId);
+        Assert.Equal("line.main", projectService.PublishRequest.ProductionLineDefinitionId);
         Assert.Equal(["layout.main", "layout.overview"], projectService.PublishRequest.LayoutIds);
-        Assert.Equal("process.main@1.0.0", projectService.PublishRequest.ProcessVersionId);
         Assert.Equal("releases/snapshot.main/release.json", projectService.PublishRequest.ReleaseManifestPath);
         Assert.Equal(new string('a', 64), projectService.PublishRequest.ReleaseContentSha256);
         Assert.Equal("binding.motion", Assert.Single(projectService.PublishRequest.CapabilityBindings).BindingId);
         Assert.Equal("slot.main", Assert.Single(projectService.PublishRequest.TargetReferences).TargetId);
         Assert.Equal(["openlineops_move_axis@1"], projectService.PublishRequest.BlockVersionIds);
         Assert.Equal("topology.main", sourceResolver.TopologyId);
-        Assert.Equal("process.main", sourceResolver.ProcessDefinitionId);
-        Assert.Equal("configuration.main", sourceResolver.ConfigurationSnapshotId);
+        Assert.Equal("line.main", sourceResolver.ProductionLineDefinitionId);
     }
 
     [Fact]
@@ -101,8 +99,7 @@ public sealed class ProjectReleasePublisherTests
             new PublishProjectReleaseRequest(
                 "snapshot.main",
                 "application.main",
-                "process.main",
-                "configuration.main"));
+                "line.main"));
 
         Assert.True(result.IsFailure);
         Assert.Equal(expectedError, result.Error);
@@ -137,8 +134,7 @@ public sealed class ProjectReleasePublisherTests
             new PublishProjectReleaseRequest(
                 "snapshot.main",
                 "application.main",
-                "process.main",
-                "configuration.main"));
+                "line.main"));
 
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ReleaseArtifactPathOutsideProject", result.Error.Code);
@@ -156,10 +152,7 @@ public sealed class ProjectReleasePublisherTests
         var project = CreateProject(projectPath);
         var sourceResolver = new RecordingSourceResolver(Result.Success(CreateMetadata()), calls)
         {
-            CopiedSourceResult = Result.Success(CreateMetadata() with
-            {
-                FlowIrSha256 = new string('b', 64)
-            })
+            CopiedSourceResult = Result.Success(CreateMetadataWithChangedFlowIr())
         };
         var projectService = new RecordingProjectService(project, calls);
         var publisher = new ProjectReleasePublisher(
@@ -177,8 +170,7 @@ public sealed class ProjectReleasePublisherTests
             new PublishProjectReleaseRequest(
                 "snapshot.main",
                 "application.main",
-                "process.main",
-                "configuration.main"));
+                "line.main"));
 
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ReleaseArtifactSourceMismatch", result.Error.Code);
@@ -218,8 +210,7 @@ public sealed class ProjectReleasePublisherTests
             new PublishProjectReleaseRequest(
                 "snapshot.main",
                 "application.main",
-                "process.main",
-                "configuration.main"));
+                "line.main"));
 
         Assert.True(result.IsFailure);
         Assert.Equal(manifestError, result.Error);
@@ -264,14 +255,8 @@ public sealed class ProjectReleasePublisherTests
     {
         return new ProjectReleaseSourceMetadata(
             "topology.main",
-            "station.eol",
             ["layout.main", "layout.overview"],
-            "process.main",
-            "process.main@1.0.0",
-            "openlineops.flow-ir/v1",
-            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-            "{}",
-            "configuration.main",
+            CreateProductionMetadata(),
             [
                 new ProjectReleaseCapabilityBinding(
                     "motion.axis",
@@ -282,6 +267,45 @@ public sealed class ProjectReleasePublisherTests
             [new ProjectReleaseTargetReference("Slot", "slot.main")],
             ["openlineops_move_axis@1"],
             []);
+    }
+
+    private static ProjectReleaseSourceMetadata CreateMetadataWithChangedFlowIr()
+    {
+        var metadata = CreateMetadata();
+        var stage = Assert.Single(metadata.ProductionLine.Stages) with
+        {
+            FlowIrSha256 = new string('b', 64)
+        };
+        return metadata with
+        {
+            ProductionLine = metadata.ProductionLine with { Stages = [stage] }
+        };
+    }
+
+    private static ProjectReleaseProductionLine CreateProductionMetadata()
+    {
+        return new ProjectReleaseProductionLine(
+            "line.main",
+            "Main Line",
+            "topology.main",
+            new ProjectReleaseDutModel("dut.main", "MAINBOARD-A", "serialNumber"),
+            [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+            [
+                new ProjectReleaseProductionStage(
+                    "stage.eol",
+                    1,
+                    "EOL",
+                    "workstation.eol",
+                    "process.main",
+                    "configuration.main.v1",
+                    "process.main@1.0.0",
+                    "openlineops.flow-ir/v1",
+                    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                    "{}",
+                    ["openlineops_move_axis@1"],
+                    ExternalTestProgramAdapterId: null)
+            ],
+            ExternalTestProgramAdapters: []);
     }
 
     private static ProjectReleaseArtifactDescriptor CreateArtifact(string projectPath)
@@ -350,22 +374,18 @@ public sealed class ProjectReleasePublisherTests
 
         public string? TopologyId { get; private set; }
 
-        public string? ProcessDefinitionId { get; private set; }
-
-        public string? ConfigurationSnapshotId { get; private set; }
+        public string? ProductionLineDefinitionId { get; private set; }
 
         public Task<Result<ProjectReleaseSourceMetadata>> ResolveAsync(
             ProjectApplicationWorkspaceScope scope,
             string topologyId,
-            string processDefinitionId,
-            string configurationSnapshotId,
+            string productionLineDefinitionId,
             CancellationToken cancellationToken = default)
         {
             calls.Add("source.resolve");
             _invocationCount += 1;
             TopologyId = topologyId;
-            ProcessDefinitionId = processDefinitionId;
-            ConfigurationSnapshotId = configurationSnapshotId;
+            ProductionLineDefinitionId = productionLineDefinitionId;
             return Task.FromResult(_invocationCount > 1 && CopiedSourceResult is not null
                 ? CopiedSourceResult
                 : result);

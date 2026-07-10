@@ -23,10 +23,7 @@ public sealed class CapEfCoreIntegrationEventTransactionCoordinator(ICapPublishe
         try
         {
             var affectedRows = await saveChangesAsync(cancellationToken).ConfigureAwait(false);
-            if (affectedRows > 0)
-            {
-                await publishIntegrationEventsAsync(cancellationToken).ConfigureAwait(false);
-            }
+            await publishIntegrationEventsAsync(cancellationToken).ConfigureAwait(false);
 
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 

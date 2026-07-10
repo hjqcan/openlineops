@@ -78,7 +78,7 @@ public sealed class AssemblyLoadContextPluginInstanceActivatorTests
         return new PluginPackageDescriptor(
             manifest,
             packagePath,
-            Path.Combine(packagePath, "openlineops-plugin.json"));
+            Path.Combine(packagePath, "manifest.json"));
     }
 
     private static PluginManifest CreateManifest(

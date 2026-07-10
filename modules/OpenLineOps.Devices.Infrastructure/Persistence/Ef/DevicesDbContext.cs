@@ -1,8 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using OpenLineOps.Devices.Domain.Definitions;
 using OpenLineOps.Devices.Domain.Instances;
 using OpenLineOps.Domain.Abstractions.EventBus;
-using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Infrastructure.Data.Core.Context;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
 
@@ -10,14 +10,18 @@ namespace OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 
 public sealed class DevicesDbContext(
     DbContextOptions<DevicesDbContext> options,
-    IDomainEventDispatcher? domainEventDispatcher = null,
+    IntegrationEventPublicationPolicy? integrationEventPublicationPolicy = null,
     IIntegrationEventPublisher? integrationEventPublisher = null,
-    IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null)
+    ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
+    IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null,
+    ILogger<BaseDbContext>? logger = null)
     : BaseDbContext(
         options,
-        domainEventDispatcher,
+        integrationEventPublicationPolicy,
         integrationEventPublisher: integrationEventPublisher,
-        integrationEventTransactionCoordinator: integrationEventTransactionCoordinator)
+        transactionalIntegrationEventPublisher: transactionalIntegrationEventPublisher,
+        integrationEventTransactionCoordinator: integrationEventTransactionCoordinator,
+        logger: logger)
 {
     public DbSet<DeviceDefinition> DeviceDefinitions => Set<DeviceDefinition>();
 

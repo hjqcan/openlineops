@@ -6,15 +6,18 @@ namespace OpenLineOps.Runtime.Application.Monitoring;
 public interface IRuntimeMonitoringService
 {
     ValueTask<IReadOnlyCollection<RuntimeStationStatusProjection>> GetStationStatusesAsync(
+        RuntimeMonitoringScope scope,
         string? stationSystemId = null,
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<RuntimeTargetStatusProjection>> GetTargetStatusesAsync(
+        RuntimeMonitoringScope scope,
         string? stationSystemId = null,
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<RuntimeTimelineEntry>> GetSessionTimelineAsync(
         RuntimeSessionId sessionId,
+        RuntimeMonitoringScope scope,
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<RuntimeAlarmProjection>> GetAlarmsAsync(

@@ -1,11 +1,22 @@
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 
 namespace OpenLineOps.Runtime.Application.Monitoring;
 
 public sealed record RuntimeTargetStatusProjection(
+    string ProjectId,
+    string ApplicationId,
+    string ProjectSnapshotId,
+    string TopologyId,
+    ProductionRunId ProductionRunId,
+    string ProductionLineDefinitionId,
+    string StageId,
+    int StageSequence,
+    string WorkstationId,
+    DutIdentity DutIdentity,
     string StationSystemId,
     RuntimeSessionId SessionId,
     string ActionId,
@@ -35,6 +46,16 @@ public sealed record RuntimeTargetStatusProjection(
         var isTerminal = IsTerminalStatus(domainEvent.ToStatus);
 
         return new RuntimeTargetStatusProjection(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            session.TraceMetadata.DutIdentity,
             session.StationId.Value,
             session.Id,
             command.ActionId.Value,

@@ -4,7 +4,7 @@ public sealed class PythonScriptRuntimeOptions
 {
     public const string SectionName = "OpenLineOps:Runtime:Scripting:Python";
 
-    public string ExecutionMode { get; set; } = PythonScriptRuntimeExecutionModes.InProcessTrusted;
+    public string ExecutionMode { get; set; } = PythonScriptRuntimeExecutionModes.ProcessIsolated;
 
     public string? WorkerFileName { get; set; }
 
@@ -77,17 +77,33 @@ public static class PythonScriptWorkerIsolationModes
 
     public const string Container = "Container";
 
+    public static PythonScriptWorkerIsolationMode Parse(string? value)
+    {
+        return value switch
+        {
+            ExternalProcess => PythonScriptWorkerIsolationMode.ExternalProcess,
+            LeastPrivilegeIdentity => PythonScriptWorkerIsolationMode.LeastPrivilegeIdentity,
+            Container => PythonScriptWorkerIsolationMode.Container,
+            _ => throw new InvalidOperationException(
+                $"Unsupported Python script worker isolation mode '{value}'. Expected exactly "
+                + $"'{ExternalProcess}', '{LeastPrivilegeIdentity}', or '{Container}'.")
+        };
+    }
+
     public static bool IsLeastPrivilegeIdentity(string? value)
     {
-        return string.Equals(value, LeastPrivilegeIdentity, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Sudo", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "RunAs", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value, LeastPrivilegeIdentity, StringComparison.Ordinal);
     }
 
     public static bool IsContainer(string? value)
     {
-        return string.Equals(value, Container, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Docker", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Podman", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value, Container, StringComparison.Ordinal);
     }
+}
+
+public enum PythonScriptWorkerIsolationMode
+{
+    ExternalProcess,
+    LeastPrivilegeIdentity,
+    Container
 }

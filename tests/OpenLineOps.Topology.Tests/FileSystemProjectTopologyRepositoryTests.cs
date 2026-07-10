@@ -63,6 +63,47 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ReaderFailsClosedWhenGeneralSystemIsNestedUnderGeneralSystem()
+    {
+        var scope = CreateScope();
+        var topology = CreateTopology();
+        var repository = new FileSystemProjectAutomationTopologyRepository();
+        await repository.SaveAsync(scope, topology);
+        var path = Directory.GetFiles(Path.Combine(scope.ApplicationRootPath, "topology"), "*.json").Single();
+        var invalidHierarchy = (await File.ReadAllTextAsync(path)).Replace(
+            "\"systems\": [",
+            """
+            "systems": [
+                {
+                  "systemId": "system.root",
+                  "parentSystemId": null,
+                  "kind": "System",
+                  "systemType": "root",
+                  "displayName": "Root System",
+                  "requiredCapabilityIds": [],
+                  "providedCapabilityIds": [],
+                  "metadata": {}
+                },
+                {
+                  "systemId": "system.invalid-child",
+                  "parentSystemId": "system.root",
+                  "kind": "System",
+                  "systemType": "component",
+                  "displayName": "Invalid Child",
+                  "requiredCapabilityIds": [],
+                  "providedCapabilityIds": [],
+                  "metadata": {}
+                },
+            """,
+            StringComparison.Ordinal);
+        await File.WriteAllTextAsync(path, invalidHierarchy);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, topology.Id));
+        Assert.Contains("Topology.ChildSystemRequiresStation", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UpdatedAndCascadeDeletedStateSurvivesFreshRepositoryInstances()
     {
         var scope = CreateScope();

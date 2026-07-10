@@ -53,8 +53,8 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Equal(FlowIrActionKind.DeviceCommand, action.Kind);
         Assert.Equal("vision-camera", action.RequiredCapability);
         Assert.Equal("Inspect", action.CommandName);
-        Assert.Equal(FlowIrTargetReferenceKind.Capability, action.Target.Kind);
-        Assert.Equal("vision-camera", action.Target.Reference);
+        Assert.Equal(FlowIrTargetReferenceKind.System, action.Target.Kind);
+        Assert.Equal("system.vision", action.Target.Reference);
         Assert.Equal("scan-ok", action.InputPayload);
         Assert.Equal(30_000, action.Execution.TimeoutMilliseconds);
         Assert.Equal(0, action.Execution.RetryLimit);
@@ -63,6 +63,41 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Equal(FlowIrSourceElementKind.ProcessNode, action.Source.ElementKind);
         Assert.Equal("inspect", action.Source.ElementId);
         Assert.Null(action.Source.ContentHash);
+    }
+
+    [Theory]
+    [InlineData(ProcessActionTargetKind.System, FlowIrTargetReferenceKind.System)]
+    [InlineData(ProcessActionTargetKind.SlotGroup, FlowIrTargetReferenceKind.SlotGroup)]
+    [InlineData(ProcessActionTargetKind.Slot, FlowIrTargetReferenceKind.Slot)]
+    [InlineData(ProcessActionTargetKind.Dut, FlowIrTargetReferenceKind.Dut)]
+    [InlineData(ProcessActionTargetKind.Capability, FlowIrTargetReferenceKind.Capability)]
+    [InlineData(ProcessActionTargetKind.Driver, FlowIrTargetReferenceKind.Driver)]
+    public void CompilePreservesEveryFormalCommandTargetKind(
+        ProcessActionTargetKind targetKind,
+        FlowIrTargetReferenceKind expectedTargetKind)
+    {
+        var definition = CreateDefinition();
+        AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            CapabilityId("vision-camera"),
+            targetKind,
+            "target.1",
+            commandName: "Inspect",
+            commandTimeout: TimeSpan.FromSeconds(30)));
+        AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
+        AddTransition(definition, Transition("start-to-inspect", "start", "inspect"));
+        AddTransition(definition, Transition("inspect-to-end", "inspect", "end"));
+        Publish(definition);
+
+        var result = _compiler.Compile(definition);
+
+        Assert.True(result.IsSuccess, result.Error.Message);
+        var commandNode = Assert.Single(result.Value.Document.Nodes, node => node.NodeId == "inspect");
+        var action = Assert.Single(commandNode.Actions);
+        Assert.Equal(expectedTargetKind, action.Target.Kind);
+        Assert.Equal("target.1", action.Target.Reference);
     }
 
     [Fact]
@@ -150,6 +185,8 @@ public sealed class ProcessFlowIrCompilerTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30)));
         AddNode(definition, ProcessNode.End(NodeId("accepted"), "Accepted"));
@@ -292,6 +329,8 @@ public sealed class ProcessFlowIrCompilerTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromTicks(TimeSpan.TicksPerMillisecond + 1)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
@@ -315,6 +354,8 @@ public sealed class ProcessFlowIrCompilerTests
                 NodeId("inspect"),
                 "Inspect",
                 CapabilityId("vision-camera"),
+                ProcessActionTargetKind.System,
+                "system.vision",
                 commandName: "Inspect",
                 commandTimeout: TimeSpan.FromSeconds(30),
                 inputPayload: "scan-ok"),
@@ -347,6 +388,8 @@ public sealed class ProcessFlowIrCompilerTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30)));
         AddNode(definition, ProcessNode.Decision(NodeId("route"), "Route"));

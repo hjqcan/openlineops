@@ -10,7 +10,7 @@ public static class RuntimeScriptCommand
 
     public static bool IsPythonScript(RuntimeCommandExecutionContext context)
     {
-        return string.Equals(context.TargetCapability.Value, PythonCapability, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(context.CommandName, PythonCommandName, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(context.TargetCapability.Value, PythonCapability, StringComparison.Ordinal)
+            && string.Equals(context.CommandName, PythonCommandName, StringComparison.Ordinal);
     }
 }

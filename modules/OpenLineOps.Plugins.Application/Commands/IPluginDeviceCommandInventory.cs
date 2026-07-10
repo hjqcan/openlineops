@@ -18,7 +18,7 @@ public interface IPluginDeviceCommandInventory
         var commands = await ListDeviceCommandsAsync(cancellationToken).ConfigureAwait(false);
 
         return commands.FirstOrDefault(candidate =>
-            string.Equals(candidate.Capability, capability.Trim(), StringComparison.Ordinal)
-            && string.Equals(candidate.CommandName, commandName.Trim(), StringComparison.OrdinalIgnoreCase));
+            string.Equals(candidate.Capability, capability, StringComparison.Ordinal)
+            && string.Equals(candidate.CommandName, commandName, StringComparison.Ordinal));
     }
 }

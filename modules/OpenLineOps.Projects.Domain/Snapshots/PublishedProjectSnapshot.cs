@@ -16,9 +16,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         ProjectApplicationId applicationId,
         AutomationTopologyId topologyId,
         IEnumerable<string> layoutIds,
-        ProcessDefinitionId processDefinitionId,
-        ProcessVersionId processVersionId,
-        ConfigurationSnapshotId configurationSnapshotId,
+        ProductionLineDefinitionId productionLineDefinitionId,
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
@@ -31,16 +29,10 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         ApplicationId = applicationId;
         TopologyId = topologyId;
         _layoutIds = NormalizeDistinct(layoutIds);
-        ProcessDefinitionId = processDefinitionId;
-        ProcessVersionId = processVersionId;
-        ConfigurationSnapshotId = configurationSnapshotId;
+        ProductionLineDefinitionId = productionLineDefinitionId;
         _capabilityBindings = capabilityBindings.ToList();
         _targetReferences = targetReferences.ToList();
-        _blockVersionIds = blockVersionIds
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        _blockVersionIds = ValidateDistinct(blockVersionIds, "Block version ids");
         ReleaseManifestPath = NormalizeReleaseManifestPath(releaseManifestPath);
         ReleaseContentSha256 = NormalizeReleaseContentSha256(releaseContentSha256);
         PublishedAtUtc = publishedAtUtc;
@@ -54,11 +46,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
 
     public IReadOnlyCollection<string> LayoutIds => _layoutIds.AsReadOnly();
 
-    public ProcessDefinitionId ProcessDefinitionId { get; }
-
-    public ProcessVersionId ProcessVersionId { get; }
-
-    public ConfigurationSnapshotId ConfigurationSnapshotId { get; }
+    public ProductionLineDefinitionId ProductionLineDefinitionId { get; }
 
     public DateTimeOffset PublishedAtUtc { get; }
 
@@ -78,9 +66,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         ProjectApplicationId applicationId,
         AutomationTopologyId topologyId,
         IEnumerable<string> layoutIds,
-        ProcessDefinitionId processDefinitionId,
-        ProcessVersionId processVersionId,
-        ConfigurationSnapshotId configurationSnapshotId,
+        ProductionLineDefinitionId productionLineDefinitionId,
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
@@ -109,9 +95,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
             applicationId,
             topologyId,
             layoutIds,
-            processDefinitionId,
-            processVersionId,
-            configurationSnapshotId,
+            productionLineDefinitionId,
             capabilityBindings,
             targetReferences,
             blockVersionIds,
@@ -126,9 +110,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
         ProjectApplicationId applicationId,
         AutomationTopologyId topologyId,
         IEnumerable<string> layoutIds,
-        ProcessDefinitionId processDefinitionId,
-        ProcessVersionId processVersionId,
-        ConfigurationSnapshotId configurationSnapshotId,
+        ProductionLineDefinitionId productionLineDefinitionId,
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
@@ -147,9 +129,7 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
             applicationId,
             topologyId,
             layoutIds,
-            processDefinitionId,
-            processVersionId,
-            configurationSnapshotId,
+            productionLineDefinitionId,
             capabilityBindings,
             targetReferences,
             blockVersionIds,
@@ -160,12 +140,28 @@ public sealed class PublishedProjectSnapshot : Entity<PublishedProjectSnapshotId
 
     private static List<string> NormalizeDistinct(IEnumerable<string> values)
     {
-        return values
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Order(StringComparer.Ordinal)
-            .ToList();
+        return ValidateDistinct(values, "Layout ids");
+    }
+
+    private static List<string> ValidateDistinct(
+        IEnumerable<string> values,
+        string description)
+    {
+        var identifiers = values.ToArray();
+        if (identifiers.Any(value => string.IsNullOrWhiteSpace(value)
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                $"{description} must contain only non-empty canonical identities.",
+                nameof(values));
+        }
+
+        if (identifiers.Distinct(StringComparer.Ordinal).Count() != identifiers.Length)
+        {
+            throw new ArgumentException($"{description} must be unique.", nameof(values));
+        }
+
+        return identifiers.Order(StringComparer.Ordinal).ToList();
     }
 
     private static string NormalizeReleaseManifestPath(string value)

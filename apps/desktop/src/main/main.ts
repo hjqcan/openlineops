@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -23,26 +24,98 @@ let lastExitCode: number | null = null;
 const recentLogs: string[] = [];
 
 const config = createDesktopConfig();
+const backendLaunch = createBackendLaunchConfig();
+
+interface BackendLaunchConfig {
+  executablePath: string;
+  arguments: string[];
+  workingDirectory: string;
+  environment: NodeJS.ProcessEnv;
+}
 
 function createDesktopConfig(): DesktopConfig {
-  const appPath = app.getAppPath();
-  const repoRoot = process.env.OPENLINEOPS_REPO_ROOT
-    ? path.resolve(process.env.OPENLINEOPS_REPO_ROOT)
-    : path.resolve(appPath, '..', '..');
   const apiBaseUrl = trimTrailingSlash(process.env.OPENLINEOPS_API_BASE_URL ?? 'http://localhost:5135');
-  const apiProjectPath = process.env.OPENLINEOPS_API_PROJECT
-    ? path.resolve(process.env.OPENLINEOPS_API_PROJECT)
-    : path.join(repoRoot, 'src', 'OpenLineOps.Api', 'OpenLineOps.Api.csproj');
   const logPath = process.env.OPENLINEOPS_DESKTOP_LOG_PATH
     ? path.resolve(process.env.OPENLINEOPS_DESKTOP_LOG_PATH)
     : path.join(app.getPath('userData'), 'logs');
 
   return {
     apiBaseUrl,
-    repoRoot,
-    apiProjectPath,
     logPath,
     isPackaged: app.isPackaged
+  };
+}
+
+function createBackendLaunchConfig(): BackendLaunchConfig {
+  if (!app.isPackaged) {
+    const appPath = app.getAppPath();
+    const repoRoot = process.env.OPENLINEOPS_REPO_ROOT
+      ? path.resolve(process.env.OPENLINEOPS_REPO_ROOT)
+      : path.resolve(appPath, '..', '..');
+    const apiProjectPath = process.env.OPENLINEOPS_API_PROJECT
+      ? path.resolve(process.env.OPENLINEOPS_API_PROJECT)
+      : path.join(repoRoot, 'src', 'OpenLineOps.Api', 'OpenLineOps.Api.csproj');
+
+    return {
+      executablePath: 'dotnet',
+      arguments: ['run', '--project', apiProjectPath, '--urls', config.apiBaseUrl],
+      workingDirectory: repoRoot,
+      environment: {
+        ...process.env,
+        ASPNETCORE_ENVIRONMENT: process.env.ASPNETCORE_ENVIRONMENT ?? 'Development',
+        OpenLineOps__Runtime__Scripting__Python__ExecutionMode: 'ProcessIsolated',
+        OpenLineOps__Runtime__Scripting__Python__WorkerFileName: 'dotnet',
+        OpenLineOps__Runtime__Scripting__Python__WorkerArguments:
+          `run --project "${path.join(repoRoot, 'src', 'OpenLineOps.ScriptWorker', 'OpenLineOps.ScriptWorker.csproj')}" --no-launch-profile`,
+        OpenLineOps__Runtime__Scripting__Python__WorkerWorkingDirectory: repoRoot,
+        OpenLineOps__Runtime__Scripting__Python__Sandbox__IsolationMode: 'ExternalProcess',
+        OpenLineOps__Runtime__Scripting__Python__Sandbox__RequireLeastPrivilegeExecution: 'false'
+      }
+    };
+  }
+
+  const runtimeRoot = path.join(app.getAppPath(), 'runtime');
+  const apiDirectory = path.join(runtimeRoot, 'api');
+  const scriptWorkerDirectory = path.join(runtimeRoot, 'script-worker');
+  const dataDirectory = path.join(app.getPath('userData'), 'data');
+  mkdirSync(dataDirectory, { recursive: true });
+
+  return {
+    executablePath: path.join(apiDirectory, 'OpenLineOps.Api.exe'),
+    arguments: ['--urls', config.apiBaseUrl],
+    workingDirectory: apiDirectory,
+    environment: {
+      ...process.env,
+      ASPNETCORE_ENVIRONMENT: 'Production',
+      DOTNET_ENVIRONMENT: 'Production',
+      OpenLineOps__Runtime__Persistence__DatabasePath: path.join(
+        dataDirectory,
+        'openlineops-runtime.sqlite'),
+      OpenLineOps__Traceability__Persistence__DatabasePath: path.join(
+        dataDirectory,
+        'openlineops-traceability.sqlite'),
+      OpenLineOps__Traceability__ArtifactStorage__RootPath: path.join(
+        dataDirectory,
+        'trace-artifacts'),
+      OpenLineOps__Devices__Persistence__DatabasePath: path.join(
+        dataDirectory,
+        'openlineops-devices.sqlite'),
+      OpenLineOps__Operations__Persistence__DatabasePath: path.join(
+        dataDirectory,
+        'openlineops-operations.sqlite'),
+      OpenLineOps__Plugins__EventLog__DatabasePath: path.join(
+        dataDirectory,
+        'openlineops-plugin-events.sqlite'),
+      OpenLineOps__Plugins__PackageRoot: path.join(runtimeRoot, 'plugins'),
+      OpenLineOps__Runtime__Scripting__Python__ExecutionMode: 'ProcessIsolated',
+      OpenLineOps__Runtime__Scripting__Python__WorkerFileName: path.join(
+        scriptWorkerDirectory,
+        'OpenLineOps.ScriptWorker.exe'),
+      OpenLineOps__Runtime__Scripting__Python__WorkerWorkingDirectory: scriptWorkerDirectory,
+      OpenLineOps__Runtime__Scripting__Python__Sandbox__IsolationMode: 'ExternalProcess',
+      OpenLineOps__Runtime__Scripting__Python__Sandbox__RequireLeastPrivilegeExecution: 'false',
+      OpenLineOps__Desktop__AllowedOrigins__0: 'null'
+    }
   };
 }
 
@@ -73,17 +146,16 @@ async function createWindow(): Promise<void> {
 
 ipcMain.handle('desktop:get-config', () => config);
 ipcMain.handle('backend:get-status', async () => getBackendStatus());
-ipcMain.handle('backend:start', async () => {
+ipcMain.handle('backend:start', async () => startBackend());
+
+async function startBackend(): Promise<BackendStatus> {
   if (!backendProcess) {
     backendProcess = spawn(
-      'dotnet',
-      ['run', '--project', config.apiProjectPath, '--urls', config.apiBaseUrl],
+      backendLaunch.executablePath,
+      backendLaunch.arguments,
       {
-        cwd: config.repoRoot,
-        env: {
-          ...process.env,
-          ASPNETCORE_ENVIRONMENT: process.env.ASPNETCORE_ENVIRONMENT ?? 'Development'
-        },
+        cwd: backendLaunch.workingDirectory,
+        env: backendLaunch.environment,
         windowsHide: true
       });
     backendStartedAtUtc = new Date().toISOString();
@@ -91,6 +163,12 @@ ipcMain.handle('backend:start', async () => {
 
     backendProcess.stdout.on('data', chunk => appendLog(chunk.toString()));
     backendProcess.stderr.on('data', chunk => appendLog(chunk.toString()));
+    backendProcess.on('error', error => {
+      appendLog(`OpenLineOps.Api failed to start: ${error.message}`);
+      backendProcess = null;
+      backendStartedAtUtc = null;
+      lastExitCode = -1;
+    });
     backendProcess.on('exit', code => {
       lastExitCode = code;
       backendProcess = null;
@@ -100,7 +178,7 @@ ipcMain.handle('backend:start', async () => {
   }
 
   return getBackendStatus();
-});
+}
 ipcMain.handle('backend:stop', async () => {
   if (backendProcess) {
     backendProcess.kill();
@@ -182,6 +260,7 @@ ipcMain.handle('api:request', async (_event, requestPath: string, options?: ApiR
   apiRequest(requestPath, options));
 
 app.whenReady().then(async () => {
+  await startBackend();
   await createWindow();
 
   app.on('activate', async () => {

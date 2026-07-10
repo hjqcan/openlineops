@@ -1,5 +1,4 @@
 using OpenLineOps.Domain.Abstractions.Entities;
-using OpenLineOps.Processes.Domain.Events;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Operations;
@@ -112,8 +111,6 @@ public sealed class ProcessDefinition : AggregateRoot<ProcessDefinitionId>
 
         Status = ProcessDefinitionStatus.Published;
         PublishedAtUtc = publishedAtUtc;
-
-        RaiseDomainEvent(new ProcessDefinitionPublishedDomainEvent(Id, VersionId, publishedAtUtc));
 
         return ProcessOperationResult.Accepted("Process definition published.");
     }

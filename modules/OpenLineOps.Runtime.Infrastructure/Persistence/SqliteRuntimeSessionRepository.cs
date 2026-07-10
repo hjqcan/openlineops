@@ -9,7 +9,7 @@ namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
 public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions JsonOptions = RuntimePersistenceJson.CreateOptions();
 
     private readonly string _connectionString;
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
@@ -17,9 +17,7 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
 
     public SqliteRuntimeSessionRepository(string connectionString)
     {
-        _connectionString = string.IsNullOrWhiteSpace(connectionString)
-            ? throw new ArgumentException("SQLite connection string is required.", nameof(connectionString))
-            : connectionString.Trim();
+        _connectionString = RequireFileBackedConnectionString(connectionString);
     }
 
     public async ValueTask SaveAsync(
@@ -187,6 +185,28 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
     private SqliteConnection CreateConnection()
     {
         return new SqliteConnection(_connectionString);
+    }
+
+    private static string RequireFileBackedConnectionString(string connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new ArgumentException("SQLite connection string is required.", nameof(connectionString));
+        }
+
+        var normalized = connectionString.Trim();
+        var builder = new SqliteConnectionStringBuilder(normalized);
+        if (builder.Mode == SqliteOpenMode.Memory
+            || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase)
+            || (builder.DataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                && builder.DataSource.Contains("mode=memory", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ArgumentException(
+                "Runtime SQLite persistence requires a file-backed database; use the InMemory provider for transient execution.",
+                nameof(connectionString));
+        }
+
+        return normalized;
     }
 
     private void EnsureDatabaseDirectory()

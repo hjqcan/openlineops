@@ -1,4 +1,3 @@
-using OpenLineOps.Devices.Domain.Events;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Domain.Instances;
 
@@ -9,11 +8,11 @@ public sealed class DeviceInstanceTests
     private static readonly DateTimeOffset RegisteredAtUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void DeviceConnectionLifecycleEmitsStatusEvents()
+    public void DeviceConnectionLifecycleUpdatesStatus()
     {
         var device = CreateDeviceInstance();
 
-        var request = device.RequestConnection(RegisteredAtUtc.AddSeconds(1));
+        var request = device.RequestConnection();
         var connected = device.ConfirmConnected(RegisteredAtUtc.AddSeconds(2));
         var disconnected = device.Disconnect(RegisteredAtUtc.AddSeconds(3), "operator disconnect");
 
@@ -24,37 +23,21 @@ public sealed class DeviceInstanceTests
         Assert.Null(device.ConnectedAtUtc);
         Assert.Equal(RegisteredAtUtc.AddSeconds(3), device.LastDisconnectedAtUtc);
 
-        Assert.Collection(
-            device.DomainEvents.OfType<DeviceConnectionStatusChangedDomainEvent>(),
-            first =>
-            {
-                Assert.Equal(DeviceConnectionStatus.Disconnected, first.PreviousStatus);
-                Assert.Equal(DeviceConnectionStatus.Connecting, first.NewStatus);
-            },
-            second =>
-            {
-                Assert.Equal(DeviceConnectionStatus.Connecting, second.PreviousStatus);
-                Assert.Equal(DeviceConnectionStatus.Connected, second.NewStatus);
-            },
-            third =>
-            {
-                Assert.Equal(DeviceConnectionStatus.Connected, third.PreviousStatus);
-                Assert.Equal(DeviceConnectionStatus.Disconnected, third.NewStatus);
-            });
+        Assert.Empty(device.DomainEvents);
     }
 
     [Fact]
     public void FaultedDeviceMustBeResetBeforeReconnect()
     {
         var device = CreateDeviceInstance();
-        device.RequestConnection(RegisteredAtUtc.AddSeconds(1));
+        device.RequestConnection();
         device.ConfirmConnected(RegisteredAtUtc.AddSeconds(2));
 
-        var faulted = device.MarkFaulted(RegisteredAtUtc.AddSeconds(3), "camera offline");
-        var reconnect = device.RequestConnection(RegisteredAtUtc.AddSeconds(4));
+        var faulted = device.MarkFaulted("camera offline");
+        var reconnect = device.RequestConnection();
         var faultReason = device.FaultReason;
-        var reset = device.ResetFault(RegisteredAtUtc.AddSeconds(5));
-        var reconnectAfterReset = device.RequestConnection(RegisteredAtUtc.AddSeconds(6));
+        var reset = device.ResetFault();
+        var reconnectAfterReset = device.RequestConnection();
 
         Assert.True(faulted.Succeeded, faulted.Message);
         Assert.False(reconnect.Succeeded);

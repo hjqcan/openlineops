@@ -1,5 +1,4 @@
 using OpenLineOps.Projects.Domain.Applications;
-using OpenLineOps.Projects.Domain.Events;
 using OpenLineOps.Projects.Domain.Identifiers;
 using OpenLineOps.Projects.Domain.Projects;
 using OpenLineOps.Projects.Domain.Snapshots;
@@ -12,26 +11,20 @@ public sealed class AutomationProjectTests
     private static readonly DateTimeOffset PublishedAtUtc = new(2026, 7, 9, 1, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void PublishSnapshotFreezesLinkedApplicationTopologyProcessBindingsAndTargets()
+    public void PublishSnapshotFreezesProductionLineTopologyBindingsAndTargets()
     {
         var project = CreateProjectWithApplication(out var applicationId);
         var topologyId = new AutomationTopologyId("topology.main");
-        var processDefinitionId = new ProcessDefinitionId("process.main");
-        var processVersionId = new ProcessVersionId("process.main.v1");
-        var configurationSnapshotId = new ConfigurationSnapshotId("configuration.main.v1");
         var snapshotId = new PublishedProjectSnapshotId("snapshot.main.v1");
 
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
-        Assert.True(project.LinkProcessDefinition(applicationId, processDefinitionId).Succeeded);
 
         var result = project.PublishSnapshot(
             snapshotId,
             applicationId,
             topologyId,
             ["layout.main"],
-            processDefinitionId,
-            processVersionId,
-            configurationSnapshotId,
+            new ProductionLineDefinitionId("line.main"),
             [
                 new SnapshotCapabilityBinding(
                     "motion.axis.move",
@@ -40,7 +33,7 @@ public sealed class AutomationProjectTests
                     "simulator.axis.x")
             ],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
-            ["block.move-axis@1.0.0", "block.move-axis@1.0.0"],
+            ["block.move-axis@1.0.0"],
             "releases/release-main/release.json",
             new string('a', 64),
             PublishedAtUtc);
@@ -52,38 +45,24 @@ public sealed class AutomationProjectTests
         Assert.Equal(applicationId, snapshot.ApplicationId);
         Assert.Equal(topologyId, snapshot.TopologyId);
         Assert.Equal("layout.main", Assert.Single(snapshot.LayoutIds));
-        Assert.Equal(processDefinitionId, snapshot.ProcessDefinitionId);
-        Assert.Equal(processVersionId, snapshot.ProcessVersionId);
-        Assert.Equal(configurationSnapshotId, snapshot.ConfigurationSnapshotId);
+        Assert.Equal("line.main", snapshot.ProductionLineDefinitionId.Value);
         Assert.Single(snapshot.CapabilityBindings);
         Assert.Single(snapshot.TargetReferences);
         Assert.Single(snapshot.BlockVersionIds);
         Assert.Equal("releases/release-main/release.json", snapshot.ReleaseManifestPath);
         Assert.Equal(new string('a', 64), snapshot.ReleaseContentSha256);
-        Assert.Contains(project.DomainEvents, domainEvent =>
-            domainEvent is ProjectSnapshotPublishedDomainEvent published
-            && published.ProjectId == project.Id
-            && published.SnapshotId == snapshotId
-            && published.ApplicationId == applicationId
-            && published.TopologyId == topologyId);
     }
 
     [Fact]
     public void PublishSnapshotRejectsUnlinkedTopology()
     {
         var project = CreateProjectWithApplication(out var applicationId);
-        var processDefinitionId = new ProcessDefinitionId("process.main");
-
-        Assert.True(project.LinkProcessDefinition(applicationId, processDefinitionId).Succeeded);
-
         var result = project.PublishSnapshot(
             new PublishedProjectSnapshotId("snapshot.main.v1"),
             applicationId,
             new AutomationTopologyId("topology.main"),
             ["layout.main"],
-            processDefinitionId,
-            new ProcessVersionId("process.main.v1"),
-            new ConfigurationSnapshotId("configuration.main.v1"),
+            new ProductionLineDefinitionId("line.main"),
             [new SnapshotCapabilityBinding("motion.axis.move", "binding.axis.x.simulator", "Simulator", "simulator.axis.x")],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
             ["block.move-axis@1.0.0"],
@@ -100,19 +79,14 @@ public sealed class AutomationProjectTests
     {
         var project = CreateProjectWithApplication(out var applicationId);
         var topologyId = new AutomationTopologyId("topology.main");
-        var processDefinitionId = new ProcessDefinitionId("process.main");
-
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
-        Assert.True(project.LinkProcessDefinition(applicationId, processDefinitionId).Succeeded);
 
         var result = project.PublishSnapshot(
             new PublishedProjectSnapshotId("snapshot.main.v1"),
             applicationId,
             topologyId,
             ["layout.main"],
-            processDefinitionId,
-            new ProcessVersionId("process.main.v1"),
-            new ConfigurationSnapshotId("configuration.main.v1"),
+            new ProductionLineDefinitionId("line.main"),
             [],
             [new ProjectTargetReference("slot", "slot.left-nest.1")],
             ["block.move-axis@1.0.0"],
@@ -129,19 +103,14 @@ public sealed class AutomationProjectTests
     {
         var project = CreateProjectWithApplication(out var applicationId);
         var topologyId = new AutomationTopologyId("topology.main");
-        var processDefinitionId = new ProcessDefinitionId("process.main");
-
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
-        Assert.True(project.LinkProcessDefinition(applicationId, processDefinitionId).Succeeded);
 
         var result = project.PublishSnapshot(
             new PublishedProjectSnapshotId("snapshot.main.v1"),
             applicationId,
             topologyId,
             [],
-            processDefinitionId,
-            new ProcessVersionId("process.main.v1"),
-            new ConfigurationSnapshotId("configuration.main.v1"),
+            new ProductionLineDefinitionId("line.main"),
             [new SnapshotCapabilityBinding(
                 "motion.axis.move",
                 "binding.axis.x.simulator",
@@ -155,6 +124,44 @@ public sealed class AutomationProjectTests
 
         Assert.False(result.Succeeded);
         Assert.Equal("Projects.NoLayouts", result.Code);
+    }
+
+    [Fact]
+    public void PublishedSnapshotRejectsNonCanonicalOrDuplicateLayoutIds()
+    {
+        string[][] invalidCollections =
+        [
+            [null!],
+            [string.Empty],
+            [" "],
+            [" layout.main"],
+            ["layout.main "],
+            ["layout.main", "layout.main"]
+        ];
+
+        foreach (var layoutIds in invalidCollections)
+        {
+            Assert.Throws<ArgumentException>(() => PublishSnapshot(layoutIds, ["block.main@1"]));
+        }
+    }
+
+    [Fact]
+    public void PublishedSnapshotRejectsNonCanonicalOrDuplicateBlockVersionIds()
+    {
+        string[][] invalidCollections =
+        [
+            [null!],
+            [string.Empty],
+            [" "],
+            [" block.main@1"],
+            ["block.main@1 "],
+            ["block.main@1", "block.main@1"]
+        ];
+
+        foreach (var blockVersionIds in invalidCollections)
+        {
+            Assert.Throws<ArgumentException>(() => PublishSnapshot(["layout.main"], blockVersionIds));
+        }
     }
 
     [Fact]
@@ -197,5 +204,24 @@ public sealed class AutomationProjectTests
         Assert.True(project.AddApplication(application).Succeeded);
 
         return project;
+    }
+
+    private static PublishedProjectSnapshot PublishSnapshot(
+        IEnumerable<string> layoutIds,
+        IEnumerable<string> blockVersionIds)
+    {
+        return PublishedProjectSnapshot.Publish(
+            new PublishedProjectSnapshotId("snapshot.main"),
+            new AutomationProjectId("project.main"),
+            new ProjectApplicationId("application.main"),
+            new AutomationTopologyId("topology.main"),
+            layoutIds,
+            new ProductionLineDefinitionId("line.main"),
+            [new SnapshotCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main")],
+            [new ProjectTargetReference("System", "station.main")],
+            blockVersionIds,
+            "releases/snapshot.main/release.json",
+            new string('a', 64),
+            PublishedAtUtc);
     }
 }

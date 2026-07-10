@@ -1,8 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Infrastructure.Data.Core.Identifiers;
-using OpenLineOps.SampleInspection.Domain.Events;
 using OpenLineOps.SampleInspection.Domain.Identifiers;
 using OpenLineOps.SampleInspection.Domain.Plans;
 using OpenLineOps.SampleInspection.Infrastructure.Persistence;
@@ -12,18 +10,17 @@ namespace OpenLineOps.SampleInspection.Tests;
 public sealed class InspectionPersistenceTemplateTests
 {
     [Fact]
-    public async Task EfDataCoreTemplatePersistsAggregateAndDispatchesDomainEvents()
+    public async Task EfDataCoreTemplatePersistsAggregateWithoutUnusedDomainEvents()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
 
-        var dispatcher = new CapturingDomainEventDispatcher();
         var options = CreateOptions(connection);
         var planId = new InspectionPlanId("inspection.plan.visual-axis-check.v1");
         var createdAtUtc = new DateTimeOffset(2026, 6, 30, 8, 0, 0, TimeSpan.Zero);
         var activatedAtUtc = new DateTimeOffset(2026, 6, 30, 8, 30, 0, TimeSpan.Zero);
 
-        await using (var context = new InspectionDbContext(options, dispatcher))
+        await using (var context = new InspectionDbContext(options))
         {
             await context.Database.MigrateAsync();
 
@@ -58,14 +55,6 @@ public sealed class InspectionPersistenceTemplateTests
             Assert.Empty(restored.DomainEvents);
         }
 
-        Assert.Contains(
-            dispatcher.Dispatched,
-            domainEvent => domainEvent is InspectionPlanCreatedDomainEvent created
-                && created.PlanId == planId);
-        Assert.Contains(
-            dispatcher.Dispatched,
-            domainEvent => domainEvent is InspectionPlanActivatedDomainEvent activated
-                && activated.PlanId == planId);
     }
 
     [Fact]
@@ -103,16 +92,4 @@ public sealed class InspectionPersistenceTemplateTests
             .Options;
     }
 
-    private sealed class CapturingDomainEventDispatcher : IDomainEventDispatcher
-    {
-        public List<IDomainEvent> Dispatched { get; } = [];
-
-        public Task DispatchAsync(
-            IReadOnlyCollection<IDomainEvent> domainEvents,
-            CancellationToken cancellationToken = default)
-        {
-            Dispatched.AddRange(domainEvents);
-            return Task.CompletedTask;
-        }
-    }
 }

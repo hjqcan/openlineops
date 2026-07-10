@@ -4,7 +4,7 @@ Last updated: 2026-07-10
 
 ## Product Positioning
 
-OpenLineOps is positioned as a next-generation extensible automation project workspace and runtime platform for automated test production lines. It should let users create or open automation projects, compose applications, automation topology, equipment nodes, modules, capability contracts, driver bindings, slot groups, and slots, edit a visual site layout, author execution flows with Blockly, execute flexible PythonScript logic through the .NET runtime boundary, monitor runs, and trace results.
+OpenLineOps is an IDE and release-only runtime platform for automation production lines. Users create or open an automation project, compose portable Applications from Systems, Station Systems, capability contracts, driver bindings, slot groups, and slots, edit a semantic 2D production-line layout, author execution flows primarily with Blockly, use explicit PythonScript actions for advanced logic, publish immutable snapshots, monitor runs, and trace production results.
 
 The product should feel closer to a project-oriented desktop workbench than to a single sequence editor. The primary user asset is an automation project. Engineering configuration, device integration, process orchestration, runtime monitoring, traceability, and plugin delivery all serve that project lifecycle.
 
@@ -33,7 +33,7 @@ Current target layout:
 - `src/OpenLineOps.ScriptWorker`: process-isolated Python script worker process.
 - `shared/OpenLineOps.Domain.Abstractions`: base DDD abstractions such as entities, aggregate roots, value objects, and domain events.
 - `shared/OpenLineOps.Application.Abstractions`: application-layer primitives such as results, paging, time, and current-user context.
-- `shared/OpenLineOps.EventBus`: CAP-backed integration-event publisher, EventBus options, dependency injection for local in-memory or deployment PostgreSQL/RabbitMQ profiles, and optional EF Core transaction coordination.
+- `shared/OpenLineOps.EventBus`: CAP-backed integration-event publisher, EventBus options, dependency injection for local in-memory or deployment PostgreSQL/RabbitMQ profiles, and the explicit `PostCommit` or `Transactional` publication policy.
 - `shared/OpenLineOps.Plugin.Abstractions`: plugin manifest and lifecycle contracts.
 - `shared/OpenLineOps.StateMachine.Core`: runtime state-machine contracts.
 - `shared/OpenLineOps.Runtime.Contracts`: API-facing runtime DTOs and shared contracts.
@@ -54,30 +54,31 @@ Initial aggregates and models:
 
 - `AutomationProject`: root project asset with manifest, settings, draft status, and publication history.
 - `ProjectApplication`: logical application or automation scenario inside a project.
-- `AutomationTopology`: structural model of equipment nodes, modules, ports, connections, slots, groups, and bindings.
-- `EquipmentNode`: addressable site, area, line, cell, station, unit, fixture, module, buffer, transport, device mount, external system, or logical subsystem node.
-- `AutomationModule`: reusable behavior-bearing component attached to a topology node.
+- `AutomationTopology`: structural model of Systems, capability contracts, driver bindings, slot groups, and slots owned by one portable Application.
+- `AutomationSystem`: the single composable structural and executable system identity. Systems may contain child Systems.
+- `StationSystem`: an `AutomationSystem` subtype that represents a production station and owns its station-local groups and slots.
 - `CapabilityContract`: versioned command/function contract exposed by simulator, plugin, device, process, or external service providers.
 - `DriverBinding`: project-local binding between a required capability and a concrete provider.
 - `SlotDefinition`: stable material endpoint for DUT, carrier, nest, fixture position, tray position, or logical work item.
 - `SlotGroup`: controlled material grouping such as fixture nest, tester bank, tray row, buffer lane, or robot pick group.
-- `SiteLayout`: top-down visual layout model with future 3D extension points.
+- `SiteLayout`: hierarchical top-down layout whose System, Group, and Slot elements use parent-local coordinates; the semantic model remains renderer-neutral for a future 3D editor.
 - `PublishedProjectSnapshot`: immutable handoff artifact for runtime launch.
 
 Main use cases:
 
 - Create, open, list, rename, archive, and package automation projects.
-- Compose applications, topology nodes, modules, capability contracts, driver bindings, slot groups, and slots inside a project.
-- Edit the site layout with stable references to equipment nodes, modules, slot groups, slots, connections, and zones.
+- Compose independent Applications from Systems, Station Systems, capability contracts, driver bindings, slot groups, and slots.
+- Copy an entire Application directory between projects without rewriting its owned resources.
+- Edit the Application layout with stable references to Systems, slot groups, and slots.
 - Bind project capability requirements to device instances, plugin commands, simulator routes, process command providers, or external systems.
 - Associate process definitions and Blockly/PythonScript flows with selected project targets.
-- Publish an immutable project snapshot that freezes layout, bindings, process versions, block versions, generated Python source hashes, and engineering configuration.
+- Publish an immutable project snapshot that freezes topology, layout, bindings, Flow IR, Blockly block versions, explicit Python source hashes, production-line definitions, and engineering configuration.
 - Start runtime sessions from a published project snapshot.
 
 Acceptance criteria:
 
 - Electron has a project-first entry experience with new project, open project, and recent projects.
-- A runtime session can be traced back to project id, project snapshot id, application, equipment node, module, slot group, slot, process version, capability binding, and operator/system identity.
+- A runtime session can be traced back to project id, project snapshot id, Application, topology, Station System, exact command target, slot group, slot, process version, capability binding, and operator/system identity.
 - Draft project edits cannot change an already published runtime snapshot.
 - The first layout implementation is two-dimensional but stores semantics in a way that does not block future 3D rendering.
 - Blockly remains the default process authoring mode; manual Python code is available for advanced editing.
@@ -222,7 +223,7 @@ Initial aggregates:
 
 Main use cases:
 
-- Query session trace by serial number, batch, station, fixture, and time range.
+- Query ProductionRun trace by exact DUT identity, batch, production line, Stage, Station, process, release scope, judgement, and time range.
 - Export trace package.
 - Attach artifacts such as images, logs, CSV, or binary vendor output.
 - Generate result judgement from configured rules.
@@ -341,11 +342,7 @@ Delivered on 2026-06-29:
 - Runtime domain entities now expose controlled restore factories so infrastructure can rehydrate sessions, steps, commands, and incidents without reflection or ORM field mapping.
 - Runtime module dependency injection can select `InMemory` or `Sqlite` persistence through `OpenLineOps:Runtime:Persistence`.
 - Repository tests prove a session graph survives a repository restart, recovery plans are built from SQLite-backed non-terminal sessions, and missing sessions return null.
-- PostgreSQL runtime session repository added behind the same `IRuntimeSessionRepository` application port for deployment-mode persistence.
-- PostgreSQL runtime sessions use the same aggregate JSON snapshot shape as SQLite, stored in a `jsonb` document column with relational query columns for session id, status, station, process, configuration snapshot, recipe snapshot, and last transition time.
-- Runtime module dependency injection can select `PostgreSql` persistence through `OpenLineOps:Runtime:Persistence`, with `Postgres` and `PostgreSQL` accepted as aliases.
-- Configuration tests cover required PostgreSQL connection strings and prove repository construction does not open a database connection.
-- Optional Testcontainers-backed PostgreSQL integration test proves a runtime session graph can be saved, reloaded through a new repository instance, and included in recovery planning when `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1` is set.
+- Runtime persistence is deliberately single-host: SQLite acquires an exclusive host-lifetime store lease before startup recovery, while `InMemory` is reserved for transient tests.
 - `modules/OpenLineOps.Runtime.Api` API module project.
 - Runtime controller registration through the ASP.NET Core host.
 - Runtime dependency injection registration for runner, repository, domain-event publisher, id provider, clock, and simulated command executor.
@@ -799,14 +796,15 @@ Delivered on 2026-06-29:
   - `OpenLineOps.Traceability.Application`
   - `OpenLineOps.Traceability.Infrastructure`
   - `OpenLineOps.Traceability.Tests`
-- Added `TraceRecord` as the initial trace aggregate for completed runtime output.
-- Added mandatory trace links for runtime session, serial number, batch, station, fixture, process definition, process version, configuration snapshot, recipe snapshot, device, judgement, completion time, and operator/system actor.
+- Added `TraceRecord` as the immutable aggregate for one complete production run.
+- Added mandatory run links for ProductionRun, Project, Application, Project Snapshot, topology, production line, DUT model/input/value, actor, terminal status, final judgement, lifecycle timestamps, and optional batch/fixture/device identity.
+- Each trace freezes its ordered Stage executions, including workstation, Station, process/version, configuration, recipe, Runtime Session, terminal status, metrics, commands, measurements, artifacts, and incidents.
 - Added `MeasurementRecord`, `ArtifactRecord`, `AuditEntry`, `ResultJudgement`, and artifact kind metadata.
-- Added `ITraceRecordRepository` and `TraceRecordQuery` with bounded pagination through the shared paging abstraction.
+- Added `ITraceRecordRepository` with atomic create-only semantics and `TraceRecordQuery` with bounded pagination through the shared paging abstraction.
 - Added `InMemoryTraceRecordRepository` for application development and fast tests.
-- Added `SqliteTraceRecordRepository` for local development storage:
+- Added `SqliteTraceRecordRepository` for durable local storage:
   - Stores the full aggregate document as JSON.
-  - Extracts serial, batch, station, fixture, runtime session, process, configuration, recipe, judgement, and completion fields into relational columns.
+  - Extracts production-run/DUT/scope fields and a relational Stage search projection for indexed exact queries.
   - Orders query results by `completed_at_utc` and `trace_id` for deterministic pagination.
   - Persists artifact metadata only; artifact binary storage remains abstracted behind `StorageKey`.
 - Added `TraceRecordService` as the application use-case boundary for creating, querying, reading, and exporting trace records.
@@ -815,14 +813,15 @@ Delivered on 2026-06-29:
   - `GET /api/traceability/records`
   - `GET /api/traceability/records/{traceRecordId}`
   - `GET /api/traceability/records/{traceRecordId}/export`
-- Added trace export package response format `openlineops.trace-package.v1` for JSON trace packages.
-- Added `OpenLineOps:Traceability:Persistence` configuration with in-memory default and SQLite support.
+- Added trace export package response format `openlineops.production-run-trace-package.v1` for JSON trace packages.
+- Added `OpenLineOps:Traceability:Persistence` configuration with SQLite as the product default and explicit in-memory development support.
 - Added focused tests for required trace links, measurement/artifact/audit attachment, stable pagination, SQLite round trip, and query filters.
 - Added API integration tests for trace creation, paginated search, detail lookup, export, not-found, validation, and API explorer group registration.
-- Added runtime trace metadata on `RuntimeSession`, simulated runtime start requests, and process-launched runtime sessions so production identity can enter the runtime boundary before trace creation.
-- Added a runtime domain-event subscriber in the Traceability API composition layer that listens for completed runtime sessions, reloads the completed session through the runtime repository port, and creates a deterministic one-to-one `TraceRecord`.
-- Runtime-generated trace records include runtime session id, serial, batch, station, fixture, process definition/version, configuration snapshot, recipe snapshot, device id, generated judgement, completed command measurements, and a system audit entry.
-- Added tests proving runtime trace metadata persists through SQLite and a completed simulated runtime session can be queried and exported through Traceability APIs.
+- Runtime Sessions freeze their ProductionRun/line/Stage/workstation/DUT/release identity so each Stage can be verified without reading mutable engineering sources.
+- Added a runtime domain-event subscriber that listens only for `ProductionRunTerminalDomainEvent`, reloads every referenced Stage Session, validates exact identity and evidence counts, and creates deterministic `TraceRecordId = ProductionRunId` evidence.
+- Repeated terminal events are idempotent: the repositories atomically reject a second trace for the same ProductionRun.
+- A duplicate ProductionRun identity is accepted as an idempotent replay only when canonical deep comparison proves every frozen evidence field is identical; conflicting evidence raises an integrity conflict for reconciliation.
+- Completed, failed, canceled, and skipped Stages are all recorded honestly; a run canceled before execution still creates one trace with skipped Stage evidence.
 - Added `ITraceArtifactStorage` as the application-layer artifact binary storage port so Traceability can store artifact content without coupling the trace aggregate to file-system details.
 - Added a local file artifact storage adapter with path confinement, deterministic storage keys, SHA-256 calculation, optional expected-hash validation, and common media-type inference for downloads.
 - Added `POST /api/traceability/artifacts` and `GET /api/traceability/artifacts/{storageKey}` so clients can upload artifact content first, then reference returned `storageKey`, `sizeBytes`, and `sha256` metadata from trace records.
@@ -838,35 +837,29 @@ Delivered on 2026-06-29:
 - Runtime completion trace generation no longer hardcodes `Passed`; it lets the Traceability application rule decide.
 - Added tests proving explicit judgement precedence, failed-measurement generated `Failed`, configured no-measurement `Unknown`, invalid configured default validation, and API-level missing-judgement generation.
 - Added `ITraceReadModelService` for Electron-oriented Traceability read models.
-- Added station dashboard read model with judgement counts, first/last completion timestamps, truncation indicator, and recent trace rows including measurement, failed-measurement, and artifact counts.
-- Added engineering trace search read model with richer row shape and facets for judgements, stations, devices, and process versions.
+- Added station dashboard read model with production-run judgement counts and evidence totals aggregated only from matching Stages.
+- Added engineering trace search with run/DUT/scope fields, nested Stage filters, and facets for judgement, run status, production line, Station, device, process version, and Project Snapshot.
 - Added read-model API endpoints:
   - `GET /api/traceability/read-models/station-dashboard`
   - `GET /api/traceability/read-models/engineering-search`
 - Extended trace query filters to include process definition, process version, configuration snapshot, recipe snapshot, device, and judgement.
-- Added SQLite indexes and tests for process/device/judgement filters.
+- Added SQLite root and Stage indexes and tests for combined exact run/Stage filters.
 - Added application and host-level API tests proving dashboard counts, recent trace ordering, engineering search rows, and facet counts.
-- Added `PostgresTraceRecordRepository` for deployment-mode trace persistence:
-  - Stores the full trace aggregate snapshot as a PostgreSQL `jsonb` document.
-  - Extracts runtime session, serial, batch, station, fixture, process, configuration, recipe, device, judgement, and completion columns for indexed search.
-  - Uses the same stable ordering contract as SQLite: `completed_at_utc`, then `trace_id`.
-- Traceability module dependency injection can select `PostgreSql` persistence through `OpenLineOps:Traceability:Persistence`, with `Postgres` and `PostgreSQL` accepted as aliases.
-- Configuration tests cover required PostgreSQL connection strings and prove repository construction does not open a database connection.
-- Optional Testcontainers-backed PostgreSQL integration test proves a trace record graph can be saved, reloaded through a new repository instance, and queried by process version, device, and judgement when `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1` is set.
+- Traceability persistence accepts only exact `Sqlite` or `InMemory` tokens. Formal execution is intentionally single-host SQLite; the module does not expose a misleading multi-host provider without lease, compare-and-swap, and outbox guarantees.
 
 Remaining tasks:
 
-- None for the current Milestone 5 scope. Before deployment use, run the optional PostgreSQL integration profile in a Docker-enabled environment.
+- None for the current single-host execution scope.
 
 Key tests:
 
-- Trace is linked to runtime session, configuration snapshot, station, and process version.
+- Trace identity is exactly the ProductionRun identity and every ordered Stage is linked to its immutable Runtime Session, Station, process version, configuration, and recipe.
 - Pagination is stable.
 - Artifact metadata persists without coupling to storage implementation.
 
 Exit criteria:
 
-- A completed runtime session can be searched and exported.
+- Every terminal production run creates exactly one searchable and exportable trace.
 
 ### Milestone 6: Monitoring And Realtime
 
@@ -891,7 +884,8 @@ Delivered on 2026-06-29:
   - runtime alarm rows derived from runtime incidents.
 - Added alarm acknowledgement workflow that records `AcknowledgedBy` and `AcknowledgedAtUtc`, hides acknowledged alarms by default, and exposes acknowledged alarms when requested.
 - Added Runtime monitoring HTTP endpoints:
-  - `GET /api/runtime/monitoring/stations`
+  - `GET /api/runtime/monitoring/stations?projectId={projectId}&applicationId={applicationId}&projectSnapshotId={projectSnapshotId}&topologyId={topologyId}`
+  - `GET /api/runtime/monitoring/targets?projectId={projectId}&applicationId={applicationId}&projectSnapshotId={projectSnapshotId}&topologyId={topologyId}`
   - `GET /api/runtime/monitoring/sessions/{sessionId}/timeline`
   - `GET /api/runtime/monitoring/alarms`
   - `POST /api/runtime/monitoring/alarms/{alarmId}/acknowledgements`
@@ -901,6 +895,7 @@ Delivered on 2026-06-29:
   - `StationStatusChanged`
   - `AlarmRaised`
   - `AlarmAcknowledged`
+- Station and target status rows carry the exact project/application/snapshot/topology identity. Local station, group, and slot ids are never used as global keys, and starting a new station session clears the prior target overlay for that scope.
 - Runtime SignalR subscriber broadcasts from the same runtime domain-event stream used by traceability and monitoring projection.
 - Added tests proving runtime events update station status, timeline, and alarm projection; alarm acknowledgement records actor and timestamp; HTTP monitoring endpoints expose resync state; and SignalR publishes station/timeline updates during simulated runtime execution.
 
@@ -928,14 +923,14 @@ Recommended stack:
 - Local API client generated or typed from OpenAPI contracts.
 - SignalR client for live runtime updates.
 
-Initial screens:
+Primary screens:
 
-- Workspace/project selector.
-- Station runtime dashboard.
-- Process definition editor.
-- Device configuration view.
-- Trace query view.
-- Plugin management view.
+- Visual Studio-style start center for create/open/recent automation projects.
+- Project workbench and Application selector/explorer.
+- Shared 2D Topology Edit/Monitor canvas.
+- Blockly-first Flow Designer with explicit PythonScript editing.
+- Production Line Designer, engineering configuration, and devices/drivers.
+- Runtime output, trace evidence, and extensions management.
 
 Key constraints:
 
@@ -944,13 +939,13 @@ Key constraints:
 - Desktop startup should manage backend process lifecycle explicitly.
 - API base URL, logs, and local data path must be configurable.
 - The desktop shell should be project-first: start with new/open/recent projects, keep an active project context, and scope workbenches to that project.
-- A site layout editor should provide a top-down canvas for applications, equipment nodes, modules, slot groups, slots, devices, connections, and labelled zones, with future 3D rendering kept outside the domain model.
+- The 2D layout editor and Runtime Monitor use the same semantic canvas for Station Systems, child Systems, slot groups, and slots. A future 3D renderer consumes the same domain references instead of introducing a second topology model.
 - Flow editing defaults to Blockly for script authoring and allows manual Python code editing for advanced users.
 - Python script validation and execution must use the in-repository `lib/pythonscript` component unless a future ADR explicitly replaces that integration.
 
 Exit criteria:
 
-- Electron can start the backend, show platform info, display health, and subscribe to live runtime simulation events.
+- Electron can start the backend, create/open a project, edit an Application, launch an immutable published snapshot, and subscribe to exact Station/target runtime events.
 
 Delivered on 2026-06-29:
 
@@ -1081,7 +1076,7 @@ Delivered on 2026-06-30 (desktop Blockly block version history slice):
 - The panel selects user-registered block types only; built-in and manifest-generated read-only blocks remain excluded from restore controls.
 - Restoring a version uses the existing registration endpoint to re-register the selected older definition as the latest version, preserving immutable version history instead of mutating prior rows.
 - Registration and restore flows now refresh the backend catalog and selected block history after successful writes, so the UI stays aligned with the persisted process block repository.
-- Extended the Electron smoke test to register a custom block twice, verify v1/v2 history, restore v1 as v3, and continue through process publication and runtime launch.
+- Extended the Electron smoke test to register a custom block twice, verify ordered revision history, restore the first revision as a new revision, and continue through process publication and runtime launch.
 
 Delivered on 2026-06-30 (published process launch slice):
 
@@ -1114,8 +1109,8 @@ Delivered on 2026-06-30 (trace desktop workbench slice):
 
 - Replaced the Trace placeholder view with an API-backed `TraceWorkbench` in the Electron renderer.
 - Added desktop Traceability API client contracts for engineering trace search, trace record details, and trace export packages.
-- The Trace workbench can query engineering trace read models, show judgement/station/device/process-version facets, select a trace row, inspect measurements/artifacts/audit entries, and load an export package.
-- Extended the Electron smoke test so it opens Trace after a simulated runtime session, verifies search results, loads a selected trace detail, and loads the trace export package.
+- The Trace workbench searches immutable ProductionRun records, shows run/line/Station/device/process facets, and expands ordered Stages with commands, measurements, incidents, and artifacts.
+- Extended the Electron smoke test so it verifies one trace per ProductionRun, inspects nested Stage evidence, and loads the immutable production-run trace package.
 
 Delivered on 2026-06-30 (plugins desktop workbench slice):
 
@@ -1271,7 +1266,7 @@ Delivered on 2026-06-30 (Operations PostgreSQL provider profile slice):
 
 - Added `Provider=PostgreSql` for Operations persistence, with `Postgres` and `PostgreSQL` accepted as aliases under `OpenLineOps:Operations:Persistence`.
 - Kept Operations on the EF/Data.Core path for PostgreSQL instead of adding a handwritten repository, so alarm domain events still flow through `BaseDbContext`, integration DTO conversion, and the optional CAP EF transaction coordinator.
-- Added `AddEfPostgreSqlOperationsPersistence()` backed by `Npgsql.EntityFrameworkCore.PostgreSQL`, with connection-string validation matching the existing Runtime/Processes/Engineering/Traceability PostgreSQL provider style.
+- Added `AddEfPostgreSqlOperationsPersistence()` backed by `Npgsql.EntityFrameworkCore.PostgreSQL`, with strict Operations-owned connection-string validation.
 - Made Operations alarm timestamp columns use `bigint` for migration-backed relational portability, avoiding PostgreSQL 32-bit integer overflow for `DateTimeOffset.UtcTicks` while remaining SQLite-compatible.
 - Extended API DI tests to cover PostgreSQL provider selection and missing PostgreSQL connection-string validation.
 - Added an optional Testcontainers-backed PostgreSQL integration test proving the Operations app service can raise and query alarms across scopes when `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1` is set.
@@ -1582,17 +1577,17 @@ Deliverables:
 - ADR for making Automation Project Workspace the primary product shell.
 - Projects bounded context with Domain/Application/Infrastructure/API split.
 - `AutomationProject` aggregate with project manifest, lifecycle, and strong typed ids.
-- Topology model for project applications, equipment nodes, automation modules, capability contracts, driver bindings, slot groups, and slots.
-- `SiteLayout` draft model with top-down coordinates, layers, layout elements, target references, and future 3D metadata extension points.
+- Topology model for portable Applications, Automation Systems, Station Systems, capability contracts, driver bindings, slot groups, and slots.
+- Hierarchical `SiteLayout` model with parent-local coordinates, semantic target references, and renderer-neutral future 3D support.
 - Project publication workflow that creates immutable `PublishedProjectSnapshot` records.
 - API endpoints for project create/list/open/update, composition updates, layout updates, and publish.
-- In-memory and SQLite persistence adapters for local desktop development.
+- Project/Application-owned file persistence for editable source and content-addressed release artifacts for execution.
 - Host-level API tests and domain behavior tests for project lifecycle, composition invariants, layout validation, and snapshot immutability.
 - Electron start window for new/open/recent projects.
 - Project explorer sidebar scoped to the active project.
-- First top-down site layout editor for equipment nodes, modules, slot groups, slots, devices, labels, and zones.
+- Editable top-down layout and monitor canvas for Station Systems, child Systems, slot groups, and slots.
 - Runtime launch update so the UI starts sessions from a published project snapshot instead of manually assembled ids.
-- Traceability update so traces include project snapshot, topology, layout, equipment node, module, slot group, and slot references.
+- Traceability update so traces include immutable project/application/snapshot/topology identity and exact execution target identity.
 
 Delivered on 2026-07-09 (automation project workspace domain skeleton slice):
 
@@ -1637,20 +1632,21 @@ Delivered on 2026-07-10 (portable Application project clean cutover):
   removed host `ProjectId` from every Application-local document.
 - Added copy-and-import composition: a complete Application directory can move
   from Project A to Project B without rewriting its contents.
-- Removed obsolete project/resource DTOs, fallback paths, readers, recent-list
-  migration, and Runner support. Only exact current schemas are accepted; this
-  is an intentional breaking cutover with no compatibility path.
+- Removed obsolete project/resource DTOs, fallback paths, readers, and
+  recent-list migration. Runner was rebuilt on the same immutable
+  ProductionRun boundary. Only exact current schemas are accepted; this is an
+  intentional breaking cutover with no compatibility path.
 - Added strict unknown-field, path-containment, duplicate-id/path,
   reparse-point, immutable-release, and cross-project portability coverage.
 
 Exit criteria:
 
 - A user can create or open an automation project from Electron.
-- A user can define at least one application, equipment node, automation module, slot group, slot, capability contract, and driver binding inside that project.
+- A user can define at least one portable Application containing a Station System, child System, slot group, slot, capability contract, and driver binding.
 - A user can place those elements on a top-down layout and persist the layout.
 - A user can connect a Blockly/PythonScript process to a project target.
-- A user can publish the project and start a runtime session from the published project snapshot.
-- Trace output identifies the project snapshot and target equipment node, slot group, or slot used by the run.
+- A user can publish a Production Line snapshot and start the complete ordered Production Run.
+- Trace and Runtime Monitor output identify the immutable project snapshot and exact System, capability, driver, slot group, slot, or DUT target used by the run.
 - Existing Process, Device, Runtime, and Traceability tests remain green.
 
 ## Testing Strategy
@@ -1675,23 +1671,19 @@ Minimum rules:
 
 Use HTTP APIs for configuration, traceability, and management. Use SignalR for live runtime monitoring. Consider gRPC only for high-frequency local service communication after there is evidence HTTP/SignalR is insufficient.
 
-Initial API groups:
+Current API boundaries:
 
 - `/api/platform`
-- `/api/automation-projects`
-- `/api/automation-topologies`
-- `/api/site-layouts`
-- `/api/workspaces`
-- `/api/projects`
-- `/api/recipes`
-- `/api/stations`
-- `/api/devices`
-- `/api/process-definitions`
-- `/api/runtime-sessions`
-- `/api/traces`
-- `/api/plugins`
-- `/health/live`
-- `/health/ready`
+- `/api/automation-projects` for project creation/opening and immutable snapshot publication.
+- `/api/automation-projects/{projectId}/applications/{applicationId}/...` for every editable Application-owned topology, layout, process, Blockly block, engineering, and production-line resource.
+- `/api/automation-projects/{projectId}/snapshots/{snapshotId}/production-runs` as the only project Production launch boundary.
+- `/api/runtime/...` for immutable-session queries, monitoring projections, recovery, alarms, and SignalR progress.
+- `/api/devices`, `/api/traceability`, `/api/plugins`, and `/api/operations` for their bounded-context responsibilities.
+- `/health/live` and `/health/ready`.
+
+There are no global authoring APIs for topology, layout, process definitions,
+Blockly blocks, or engineering configuration. Runtime never resolves editable
+Application source or live plugin/device inventories as an execution fallback.
 
 ## Persistence Strategy
 
@@ -1709,11 +1701,11 @@ Do not decide final storage solely from UI convenience. Runtime traceability and
 
 ## Immediate Next Development Tasks
 
-1. Add local desktop persistence for automation projects and topology drafts, starting with SQLite repository adapters behind the existing application ports.
-2. Define the first project folder/package manifest so Electron can create and open project directories consistently.
-3. Move Electron toward the new/open/recent project shell, active project context, and project explorer.
-4. Connect the process editor to project targets so Blockly/PythonScript nodes can reference equipment nodes, modules, slot groups, slots, and capability contracts.
-5. Add runtime launch from published project snapshots and enrich trace records with project, topology, layout, slot, and capability binding references.
+1. Finish interaction and visual QA for the Blockly-first Flow Designer and semantic 2D Topology editor at supported desktop sizes.
+2. Package the implemented one-shot Runner for unattended deployment through an operator shortcut, scheduler, or service wrapper while keeping the immutable release boundary.
+3. Add explicit production run-context acquisition for DUT, batch, fixture, operator, and device identity while preserving metadata-free IDE dry runs.
+4. Harden release publication, recovery, trace evidence, and operational diagnostics around the immutable snapshot boundary.
+5. Begin a renderer-neutral 3D layout prototype only after the 2D semantic editing and monitoring contracts are stable.
 
 ## Current Verification Commands
 
@@ -1819,7 +1811,7 @@ Current result on 2026-06-30:
 - `tests/OpenLineOps.Devices.Tests` tests: passed, 43 total, including EF/Data.Core SQLite device aggregate round trip, station query, update path, Unit of Work commit, domain event dispatch/clearing, SQLite snapshot import into EF SQLite, and migration bootstrap for EF `EnsureCreated` databases.
 - `tests/OpenLineOps.Api.Tests` tests: passed, 74 total, including PythonScript process runtime launch, ProcessIsolated DI selection, Python script worker sandbox configuration binding, Devices configuration API coverage, Devices default `EfSqlite` persistence, explicit InMemory persistence selection, Operations alarm API coverage, Operations PostgreSQL provider-profile DI coverage, Runtime-to-Operations incident alarm bridge coverage, PostgreSQL and RabbitMQ readiness health-check registration coverage, Plugins management API coverage, versioned Process Blockly block API coverage, and sample plugin manifest-generated Blockly block discovery.
 - `tests/OpenLineOps.Operations.Tests` tests: passed, 10 total, including aggregate lifecycle behavior, SQLite/Data.Core persistence through EF migrations, OpenLineOps integration event publishing, alarm integration DTO conversion, open-station alarm queries, app-service lifecycle use cases, first-write migration bootstrap, and pending-migration verification.
-- `tests/OpenLineOps.PostgresIntegration.Tests` build: passed; default test run skipped 6 container-backed PostgreSQL tests, including the Operations PostgreSQL app-service persistence profile and the CAP EF transaction coordinator PostgreSQL outbox profile, until `OPENLINEOPS_RUN_POSTGRES_INTEGRATION=1` is set.
+- `tests/OpenLineOps.PostgresIntegration.Tests` build: passed; default test run skipped 3 container-backed Operations/EventBus/RabbitMQ tests until their explicit integration profiles are enabled.
 - `tests/OpenLineOps.EventBus.Tests` tests: passed, 7 total, including CAP publisher domain-event-to-integration-DTO conversion, integration event topic/header publishing behavior, compatibility publish failure handling, strict transaction publish failure behavior, EventBus PostgreSQL connection-string fail-fast validation, invalid in-memory transaction-coordinator validation, and PostgreSQL CAP storage transaction-coordinator registration.
 - `tests/OpenLineOps.ReleaseManifest.Tests` tests: passed, 3 total, including release manifest/checksum/release-notes generation, stale output-file exclusion, empty artifact directory failure, and command validation.
 - Desktop `npm run typecheck`: passed.
@@ -1841,7 +1833,7 @@ Current result on 2026-07-09:
 - `OpenLineOps.slnx` serial build: passed with zero warnings.
 - `OpenLineOps.sln` tests: passed, 355 total.
 - `OpenLineOps.slnx` serial tests: passed, 355 total.
-- `tests/OpenLineOps.PostgresIntegration.Tests` default test run: passed with 7 skipped container-backed tests, including the new RabbitMQ EventBus readiness integration test, because no opt-in container environment variable was set.
+- `tests/OpenLineOps.PostgresIntegration.Tests` default test run: passed with 3 skipped container-backed Operations/EventBus/RabbitMQ tests because no opt-in container environment variable was set.
 - Optional PostgreSQL and RabbitMQ container execution: not run in the current workspace because the `docker` CLI is not installed.
 - `dotnet list OpenLineOps.sln package --vulnerable --include-transitive`: passed, no vulnerable packages reported from current configured sources.
 - `dotnet list tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj package --vulnerable --include-transitive`: passed, no vulnerable packages reported from current configured sources.
@@ -1898,3 +1890,17 @@ Current result on 2026-07-09:
 The dated delivery logs above are historical evidence, not current contracts. References in those logs to `automation_plan`, `RuntimeAutomationPlanDispatcher`, global `/api/process-definitions` or `/api/process-blocks` routes, simulated runtime starts, global process persistence, and obsolete runtime configuration resolvers describe deleted implementations. The current model compiles Blockly directly to the single Flow IR schema (`openlineops.flow-ir/v1`), keeps Python as one controlled published action, scopes authoring to Project/Application resources, and starts runtime only from immutable project release snapshots.
 
 Because the product has not shipped, the current persisted formats are their first and only schemas: Application topology, hierarchical layout, Production lines, Flow IR, Engineering configuration, Application-local Blockly block documents, immutable Project release artifacts, and the repository release-manifest tool all use schema version 1. There are no migration readers, version aliases, or compatibility mappings for discarded development formats.
+
+## Delivered and verified on 2026-07-10
+
+- The desktop opens as a Visual Studio-style IDE start center: users create or open one `.oloproj` Automation Project, then work with independently portable `.oloapp` Applications stored in their own folders.
+- `AutomationSystem` is the canonical topology aggregate and `StationSystem` is its station specialization. Each Application owns its systems, hierarchical layout, capability contracts, driver bindings, slot groups, slots, production line, Blockly documents, Python scripts, engineering configuration, and release inputs.
+- The 2D topology designer supports authoring and moving stations, child systems, groups, and slots. Runtime monitoring projects exact station/target status onto the same production-line overview. A future 3D viewport will consume the same canonical topology and layout rather than introduce another domain model.
+- Flow Designer is Blockly-first, with explicit target binding and a separate controlled Python action for cases that require code. The authored graph compiles directly to the single Flow IR contract.
+- Runtime execution is release-only. The IDE publishes an immutable Project release and the independent Runner starts that release; editable sources, simulated starts, direct process starts, and runtime fallback resolution are not execution paths.
+- The Windows unpacked package contains the Electron IDE, a self-contained API runtime, and the bundled sample plugin. `OpenLineOps.exe` starts the packaged runtime automatically and writes mutable runtime data under the current user profile.
+- Canonical enum tokens, provider names, plugin manifests, release manifests, paths, hashes, JSON field names, and target identities are exact and case-sensitive. Unknown fields, numeric enum aliases, whitespace aliases, duplicate JSON properties, path-case aliases, and legacy format readers fail closed.
+- Platform contract scans found no second-generation schema/API/type names in product code. The current schemas remain the first and only persisted formats.
+- Solution formatting checks passed. `OpenLineOps.sln` built with zero warnings and zero errors; all 699 tests passed with zero skipped tests.
+- Release candidate and CI release-bundle inspection verification passed for their positive fixtures and rejected every strictness negative fixture as expected.
+- Desktop typecheck, production build, development Electron end-to-end smoke, and packaged Electron end-to-end smoke passed. The packaged application was also opened through Windows UI automation and reported `Runtime Healthy` and `Runtime ready`.

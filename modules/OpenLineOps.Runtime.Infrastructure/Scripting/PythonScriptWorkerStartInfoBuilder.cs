@@ -10,14 +10,14 @@ internal static class PythonScriptWorkerStartInfoBuilder
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (PythonScriptWorkerIsolationModes.IsContainer(options.Sandbox.IsolationMode))
+        return PythonScriptWorkerIsolationModes.Parse(options.Sandbox.IsolationMode) switch
         {
-            return BuildContainerStartInfo(options);
-        }
-
-        return PythonScriptWorkerIsolationModes.IsLeastPrivilegeIdentity(options.Sandbox.IsolationMode)
-            ? BuildLeastPrivilegeStartInfo(options)
-            : BuildExternalProcessStartInfo(options);
+            PythonScriptWorkerIsolationMode.ExternalProcess => BuildExternalProcessStartInfo(options),
+            PythonScriptWorkerIsolationMode.LeastPrivilegeIdentity => BuildLeastPrivilegeStartInfo(options),
+            PythonScriptWorkerIsolationMode.Container => BuildContainerStartInfo(options),
+            _ => throw new InvalidOperationException(
+                $"Unsupported Python script worker isolation mode '{options.Sandbox.IsolationMode}'.")
+        };
     }
 
     public static string? ValidateSandboxPolicy(PythonScriptRuntimeOptions options)
@@ -338,9 +338,7 @@ internal static class PythonScriptWorkerStartInfoBuilder
             return sandbox.ContainerRuntimeExecutable.Trim();
         }
 
-        return string.Equals(sandbox.IsolationMode, "Podman", StringComparison.OrdinalIgnoreCase)
-            ? "podman"
-            : "docker";
+        return "docker";
     }
 
     private static string ResolveLeastPrivilegeLauncherExecutable(PythonScriptWorkerSandboxOptions sandbox)

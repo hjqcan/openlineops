@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using OpenLineOps.Infrastructure.Data.Core.Identifiers;
+using OpenLineOps.Infrastructure.Data.Core.ValueConversion;
 using OpenLineOps.Operations.Domain.Aggregates;
 using OpenLineOps.Operations.Domain.Identifiers;
 
@@ -33,12 +34,12 @@ internal sealed class AlarmConfiguration : IEntityTypeConfiguration<Alarm>
             .HasMaxLength(160);
 
         builder.Property(aggregate => aggregate.Severity)
-            .HasConversion<string>()
+            .HasConversion(new CanonicalEnumToStringConverter<OpenLineOps.Operations.Domain.Shared.Enums.AlarmSeverity>())
             .HasMaxLength(32)
             .IsRequired();
 
         builder.Property(aggregate => aggregate.Status)
-            .HasConversion<string>()
+            .HasConversion(new CanonicalEnumToStringConverter<OpenLineOps.Operations.Domain.Shared.Enums.AlarmStatus>())
             .HasMaxLength(32)
             .IsRequired();
 

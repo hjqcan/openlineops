@@ -27,10 +27,10 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         var normalized = Normalize(document);
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions
-               {
-                   Indented = false,
-                   SkipValidation = false
-               }))
+        {
+            Indented = false,
+            SkipValidation = false
+        }))
         {
             WriteDocument(writer, normalized);
         }
@@ -352,9 +352,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         }
 
         var action = node.Actions[0];
-        if (!string.Equals(action.DisplayName, node.DisplayName, StringComparison.Ordinal)
-            || action.Target.Kind != FlowIrTargetReferenceKind.Capability
-            || !string.Equals(action.Target.Reference, action.RequiredCapability, StringComparison.Ordinal))
+        if (!string.Equals(action.DisplayName, node.DisplayName, StringComparison.Ordinal))
         {
             return Invalid($"Action on node {node.NodeId} does not match its executable node metadata.");
         }
@@ -375,6 +373,11 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                                          && action.PythonScript is null
                                          && action.Source.ContentHash is null => null,
             FlowIrNodeKind.PythonScript when action.Kind == FlowIrActionKind.PythonScript
+                                             && action.Target.Kind == FlowIrTargetReferenceKind.Capability
+                                             && string.Equals(
+                                                 action.Target.Reference,
+                                                 action.RequiredCapability,
+                                                 StringComparison.Ordinal)
                                              && string.Equals(
                                                  action.RequiredCapability,
                                                  RuntimeScriptCommand.PythonCapability,

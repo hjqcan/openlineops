@@ -5,36 +5,34 @@ using OpenLineOps.Infrastructure.Data.Core.Context;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
 using OpenLineOps.Infrastructure.Data.Core.Identifiers;
 using OpenLineOps.Infrastructure.Data.Core.Repositories;
-using NetDevPackDomainEvent = NetDevPack.Messaging.DomainEvent;
-using NetDevPackDomainEventDispatcher = NetDevPack.Messaging.IDomainEventDispatcher;
 using NetDevPackEvent = NetDevPack.Messaging.Event;
 using OpenLineOpsDomainEvent = OpenLineOps.Domain.Abstractions.Events.DomainEvent;
-using OpenLineOpsDomainEventContract = OpenLineOps.Domain.Abstractions.Events.IDomainEvent;
-using OpenLineOpsDomainEventDispatcher =
-    OpenLineOps.Domain.Abstractions.Events.IDomainEventDispatcher;
 
 namespace OpenLineOps.Infrastructure.Data.Core.Tests;
 
 public sealed class BaseDbContextTests
 {
+    private static readonly IntegrationEventPublicationPolicy PostCommitPolicy =
+        new(IntegrationEventPublicationMode.PostCommit);
+
+    private static readonly IntegrationEventPublicationPolicy TransactionalPolicy =
+        new(IntegrationEventPublicationMode.Transactional);
+
     [Fact]
-    public async Task CommitDispatchesOpenLineOpsDomainEventsAndClearsThem()
+    public async Task LocalOnlyEventsFailBeforePersistenceBecauseNoDispatcherPipelineExists()
     {
-        var dispatcher = new CapturingOpenLineOpsDomainEventDispatcher();
-        await using var context = CreateContext(openLineOpsDispatcher: dispatcher);
-        var aggregate = TestAggregate.Create(
+        await using var context = CreateContext();
+        var aggregate = TestAggregate.CreateWithLocalEvent(
             new TestAggregateId(Guid.NewGuid()),
             "axis-x");
 
         context.Aggregates.Add(aggregate);
 
-        var committed = await context.CommitAsync();
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
 
-        Assert.True(committed);
-        Assert.Empty(aggregate.DomainEvents);
-        var domainEvent = Assert.IsType<TestAggregateRenamedDomainEvent>(
-            Assert.Single(dispatcher.Dispatched));
-        Assert.Equal(aggregate.Id, domainEvent.AggregateId);
+        Assert.Contains("has no dispatch pipeline", exception.Message, StringComparison.Ordinal);
+        Assert.Single(aggregate.DomainEvents);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
     }
 
     [Fact]
@@ -48,9 +46,7 @@ public sealed class BaseDbContextTests
             var repository = new TestAggregateRepository(writeContext);
             repository.Add(TestAggregate.Create(aggregateId, "fixture-light"));
 
-            var committed = await repository.UnitOfWork.Commit();
-
-            Assert.True(committed);
+            Assert.True(await repository.UnitOfWork.Commit());
             Assert.Same(writeContext, repository.UnitOfWork);
         }
 
@@ -103,31 +99,12 @@ public sealed class BaseDbContextTests
     }
 
     [Fact]
-    public async Task CommitDispatchesNetDevPackDomainEventsAndPublishesIntegrationEvents()
+    public async Task PostCommitPublishesOpenLineOpsIntegrationEventsAndThenClearsThem()
     {
-        var dispatcher = new CapturingNetDevPackDomainEventDispatcher();
         var publisher = new CapturingIntegrationEventPublisher();
         await using var context = CreateContext(
-            netDevPackDispatcher: dispatcher,
+            publicationPolicy: PostCommitPolicy,
             integrationEventPublisher: publisher);
-        var aggregate = new TestNetDevPackAggregate("netdevpack-device");
-        aggregate.MarkChanged();
-
-        context.NetDevPackAggregates.Add(aggregate);
-
-        var committed = await context.CommitAsync();
-
-        Assert.True(committed);
-        Assert.Empty(aggregate.DomainEvents ?? Array.Empty<NetDevPackEvent>());
-        Assert.IsType<TestNetDevPackChangedEvent>(Assert.Single(dispatcher.Dispatched));
-        Assert.IsType<TestNetDevPackChangedEvent>(Assert.Single(publisher.Published));
-    }
-
-    [Fact]
-    public async Task CommitPublishesOpenLineOpsIntegrationEvents()
-    {
-        var publisher = new CapturingIntegrationEventPublisher();
-        await using var context = CreateContext(integrationEventPublisher: publisher);
         var aggregate = TestAggregate.CreateWithIntegrationEvent(
             new TestAggregateId(Guid.NewGuid()),
             "axis-y");
@@ -144,34 +121,204 @@ public sealed class BaseDbContextTests
     }
 
     [Fact]
-    public async Task CommitPublishesIntegrationEventsThroughTransactionCoordinatorWhenAvailable()
+    public async Task IntegrationEventsWithoutExplicitPolicyFailBeforePersistence()
+    {
+        var publisher = new CapturingIntegrationEventPublisher();
+        await using var context = CreateContext(integrationEventPublisher: publisher);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-policy");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Contains("explicit integration event publication policy", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
+        Assert.Empty(publisher.Published);
+        Assert.Single(aggregate.DomainEvents);
+    }
+
+    [Fact]
+    public async Task PostCommitWithoutPublisherFailsBeforePersistence()
+    {
+        await using var context = CreateContext(publicationPolicy: PostCommitPolicy);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-publisher");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Contains(nameof(IIntegrationEventPublisher), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
+        Assert.Single(aggregate.DomainEvents);
+    }
+
+    [Fact]
+    public async Task PostCommitFailureRethrowsAndRetriesUnpublishedEventWithoutResaving()
+    {
+        var publisher = new FailOnceIntegrationEventPublisher();
+        await using var context = CreateContext(
+            publicationPolicy: PostCommitPolicy,
+            integrationEventPublisher: publisher);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-retry");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Equal("publisher unavailable", exception.Message);
+        Assert.Equal(EntityState.Unchanged, context.Entry(aggregate).State);
+        Assert.Single(aggregate.DomainEvents);
+        Assert.Equal(1, await context.Aggregates.CountAsync());
+
+        var retried = await context.CommitAsync();
+
+        Assert.True(retried);
+        Assert.Empty(aggregate.DomainEvents);
+        Assert.Equal(2, publisher.AttemptCount);
+        Assert.Single(publisher.Published);
+        Assert.Equal(1, await context.Aggregates.CountAsync());
+    }
+
+    [Fact]
+    public async Task PostCommitClearsEachPublishedEventSoRetryDoesNotDuplicateEarlierSuccesses()
+    {
+        var publisher = new FailOnSecondAttemptIntegrationEventPublisher();
+        await using var context = CreateContext(
+            publicationPolicy: PostCommitPolicy,
+            integrationEventPublisher: publisher);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "first");
+        aggregate.AddIntegrationEvent("second");
+        context.Aggregates.Add(aggregate);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        var remaining = Assert.IsType<TestAggregateIntegratedDomainEvent>(
+            Assert.Single(aggregate.DomainEvents));
+        Assert.Equal("second", remaining.Name);
+
+        Assert.True(await context.CommitAsync());
+
+        Assert.Empty(aggregate.DomainEvents);
+        Assert.Equal(
+            ["first", "second"],
+            publisher.Published
+                .Cast<TestAggregateIntegratedDomainEvent>()
+                .Select(domainEvent => domainEvent.Name)
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task TransactionalWithoutTransactionalPublisherFailsBeforePersistence()
+    {
+        await using var context = CreateContext(
+            publicationPolicy: TransactionalPolicy,
+            integrationEventPublisher: new CapturingIntegrationEventPublisher(),
+            integrationEventTransactionCoordinator: new CapturingIntegrationEventTransactionCoordinator());
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-transactional-publisher");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Contains(nameof(ITransactionalIntegrationEventPublisher), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
+        Assert.Single(aggregate.DomainEvents);
+    }
+
+    [Fact]
+    public async Task TransactionalWithoutCoordinatorFailsBeforePersistence()
+    {
+        var publisher = new CapturingTransactionalIntegrationEventPublisher();
+        await using var context = CreateContext(
+            publicationPolicy: TransactionalPolicy,
+            transactionalIntegrationEventPublisher: publisher);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-coordinator");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Contains(nameof(IIntegrationEventTransactionCoordinator), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
+        Assert.Empty(publisher.TransactionalPublished);
+        Assert.Single(aggregate.DomainEvents);
+    }
+
+    [Fact]
+    public async Task TransactionalModePublishesThroughCoordinatorAndClearsAfterSuccess()
     {
         var publisher = new CapturingTransactionalIntegrationEventPublisher();
         var coordinator = new CapturingIntegrationEventTransactionCoordinator();
         await using var context = CreateContext(
-            integrationEventPublisher: publisher,
+            publicationPolicy: TransactionalPolicy,
+            transactionalIntegrationEventPublisher: publisher,
             integrationEventTransactionCoordinator: coordinator);
         var aggregate = TestAggregate.CreateWithIntegrationEvent(
             new TestAggregateId(Guid.NewGuid()),
             "axis-z");
-
         context.Aggregates.Add(aggregate);
 
         var committed = await context.CommitAsync();
 
         Assert.True(committed);
         Assert.Equal(1, coordinator.CallCount);
-        Assert.Empty(publisher.Published);
+        Assert.Empty(aggregate.DomainEvents);
         var domainEvent = Assert.IsType<TestAggregateIntegratedDomainEvent>(
             Assert.Single(publisher.TransactionalPublished));
         Assert.Equal(aggregate.Id, domainEvent.AggregateId);
     }
 
+    [Fact]
+    public async Task TransactionalPublishFailureRethrowsAndKeepsEventsAndEfStateRetryable()
+    {
+        var publisher = new ThrowingTransactionalIntegrationEventPublisher();
+        var coordinator = new CapturingIntegrationEventTransactionCoordinator();
+        await using var context = CreateContext(
+            publicationPolicy: TransactionalPolicy,
+            transactionalIntegrationEventPublisher: publisher,
+            integrationEventTransactionCoordinator: coordinator);
+        var aggregate = TestAggregate.CreateWithIntegrationEvent(
+            new TestAggregateId(Guid.NewGuid()),
+            "axis-transaction-failure");
+        context.Aggregates.Add(aggregate);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => context.CommitAsync());
+
+        Assert.Equal("transactional publisher unavailable", exception.Message);
+        Assert.Equal(1, coordinator.CallCount);
+        Assert.Equal(EntityState.Added, context.Entry(aggregate).State);
+        Assert.Single(aggregate.DomainEvents);
+    }
+
+    [Fact]
+    public async Task NetDevPackIntegrationEventsUseTheSameExplicitPostCommitPolicy()
+    {
+        var publisher = new CapturingIntegrationEventPublisher();
+        await using var context = CreateContext(
+            publicationPolicy: PostCommitPolicy,
+            integrationEventPublisher: publisher);
+        var aggregate = new TestNetDevPackAggregate("netdevpack-device");
+        aggregate.MarkChanged();
+        context.NetDevPackAggregates.Add(aggregate);
+
+        Assert.True(await context.CommitAsync());
+
+        Assert.Empty(aggregate.DomainEvents ?? Array.Empty<NetDevPackEvent>());
+        Assert.IsType<TestNetDevPackChangedEvent>(Assert.Single(publisher.Published));
+    }
+
     private static TestDataContext CreateContext(
         string? databaseName = null,
-        OpenLineOpsDomainEventDispatcher? openLineOpsDispatcher = null,
-        NetDevPackDomainEventDispatcher? netDevPackDispatcher = null,
+        IntegrationEventPublicationPolicy? publicationPolicy = null,
         IIntegrationEventPublisher? integrationEventPublisher = null,
+        ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
         IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null)
     {
         var options = new DbContextOptionsBuilder<TestDataContext>()
@@ -180,23 +327,23 @@ public sealed class BaseDbContextTests
 
         return new TestDataContext(
             options,
-            openLineOpsDispatcher,
-            netDevPackDispatcher,
+            publicationPolicy,
             integrationEventPublisher,
+            transactionalIntegrationEventPublisher,
             integrationEventTransactionCoordinator);
     }
 
     private sealed class TestDataContext(
         DbContextOptions<TestDataContext> options,
-        OpenLineOpsDomainEventDispatcher? openLineOpsDispatcher = null,
-        NetDevPackDomainEventDispatcher? netDevPackDispatcher = null,
+        IntegrationEventPublicationPolicy? publicationPolicy = null,
         IIntegrationEventPublisher? integrationEventPublisher = null,
+        ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
         IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null)
         : BaseDbContext(
             options,
-            openLineOpsDispatcher,
-            netDevPackDispatcher,
+            publicationPolicy,
             integrationEventPublisher,
+            transactionalIntegrationEventPublisher,
             integrationEventTransactionCoordinator)
     {
         public DbSet<TestAggregate> Aggregates => Set<TestAggregate>();
@@ -245,26 +392,30 @@ public sealed class BaseDbContextTests
 
         public static TestAggregate Create(TestAggregateId id, string name)
         {
-            var aggregate = new TestAggregate(id, string.Empty);
-            aggregate.Rename(name);
+            return new TestAggregate(id, name);
+        }
+
+        public static TestAggregate CreateWithLocalEvent(TestAggregateId id, string name)
+        {
+            var aggregate = new TestAggregate(id, name);
+            aggregate.RaiseDomainEvent(new TestAggregateRenamedDomainEvent(id, name));
 
             return aggregate;
         }
 
         public static TestAggregate CreateWithIntegrationEvent(TestAggregateId id, string name)
         {
-            var aggregate = new TestAggregate(id, string.Empty);
-            aggregate.Name = name;
-            aggregate.RaiseDomainEvent(new TestAggregateIntegratedDomainEvent(id, name));
+            var aggregate = new TestAggregate(id, name);
+            aggregate.AddIntegrationEvent(name);
 
             return aggregate;
         }
 
-        private void Rename(string name)
+        public void AddIntegrationEvent(string name)
         {
-            Name = name;
-            RaiseDomainEvent(new TestAggregateRenamedDomainEvent(Id, name));
+            RaiseDomainEvent(new TestAggregateIntegratedDomainEvent(Id, name));
         }
+
     }
 
     private sealed record TestAggregateId(Guid Value);
@@ -305,43 +456,12 @@ public sealed class BaseDbContextTests
     }
 
     private sealed class TestNetDevPackChangedEvent(Guid aggregateId) :
-        NetDevPackDomainEvent(aggregateId),
+        NetDevPack.Messaging.DomainEvent(aggregateId),
         IIntegrationEvent
     {
         public string EventName => "test.netdevpack.changed";
 
         public string Version => "v1";
-    }
-
-    private sealed class CapturingOpenLineOpsDomainEventDispatcher :
-        OpenLineOpsDomainEventDispatcher
-    {
-        public List<OpenLineOpsDomainEventContract> Dispatched { get; } = [];
-
-        public Task DispatchAsync(
-            IReadOnlyCollection<OpenLineOpsDomainEventContract> domainEvents,
-            CancellationToken cancellationToken = default)
-        {
-            Dispatched.AddRange(domainEvents);
-            return Task.CompletedTask;
-        }
-    }
-
-    private sealed class CapturingNetDevPackDomainEventDispatcher :
-        NetDevPackDomainEventDispatcher
-    {
-        public List<NetDevPackDomainEvent> Dispatched { get; } = [];
-
-        public Task DispatchAsync(IEnumerable<NetDevPackDomainEvent> domainEvents)
-        {
-            Dispatched.AddRange(domainEvents);
-            return Task.CompletedTask;
-        }
-
-        public void Dispatch(IEnumerable<NetDevPackDomainEvent> domainEvents)
-        {
-            Dispatched.AddRange(domainEvents);
-        }
     }
 
     private sealed class CapturingIntegrationEventPublisher : IIntegrationEventPublisher
@@ -357,18 +477,57 @@ public sealed class BaseDbContextTests
         }
     }
 
-    private sealed class CapturingTransactionalIntegrationEventPublisher : ITransactionalIntegrationEventPublisher
+    private sealed class FailOnceIntegrationEventPublisher : IIntegrationEventPublisher
     {
+        public int AttemptCount { get; private set; }
+
         public List<object> Published { get; } = [];
 
+        public Task PublishAsync(
+            IEnumerable<object> domainEvents,
+            CancellationToken cancellationToken = default)
+        {
+            AttemptCount++;
+            if (AttemptCount == 1)
+            {
+                throw new InvalidOperationException("publisher unavailable");
+            }
+
+            Published.AddRange(domainEvents);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FailOnSecondAttemptIntegrationEventPublisher : IIntegrationEventPublisher
+    {
+        private int _attemptCount;
+
+        public List<object> Published { get; } = [];
+
+        public Task PublishAsync(
+            IEnumerable<object> domainEvents,
+            CancellationToken cancellationToken = default)
+        {
+            _attemptCount++;
+            if (_attemptCount == 2)
+            {
+                throw new InvalidOperationException("second event failed");
+            }
+
+            Published.AddRange(domainEvents);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CapturingTransactionalIntegrationEventPublisher : ITransactionalIntegrationEventPublisher
+    {
         public List<object> TransactionalPublished { get; } = [];
 
         public Task PublishAsync(
             IEnumerable<object> domainEvents,
             CancellationToken cancellationToken = default)
         {
-            Published.AddRange(domainEvents);
-            return Task.CompletedTask;
+            throw new InvalidOperationException("Transactional mode must not use the PostCommit publisher path.");
         }
 
         public Task PublishTransactionalAsync(
@@ -377,6 +536,23 @@ public sealed class BaseDbContextTests
         {
             TransactionalPublished.AddRange(domainEvents);
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ThrowingTransactionalIntegrationEventPublisher : ITransactionalIntegrationEventPublisher
+    {
+        public Task PublishAsync(
+            IEnumerable<object> domainEvents,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException("Transactional mode must not use the PostCommit publisher path.");
+        }
+
+        public Task PublishTransactionalAsync(
+            IEnumerable<object> domainEvents,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException("transactional publisher unavailable");
         }
     }
 
@@ -394,12 +570,8 @@ public sealed class BaseDbContextTests
             ArgumentNullException.ThrowIfNull(dbContext);
 
             CallCount++;
-
             var affectedRows = await saveChangesAsync(cancellationToken).ConfigureAwait(false);
-            if (affectedRows > 0)
-            {
-                await publishIntegrationEventsAsync(cancellationToken).ConfigureAwait(false);
-            }
+            await publishIntegrationEventsAsync(cancellationToken).ConfigureAwait(false);
 
             return affectedRows;
         }

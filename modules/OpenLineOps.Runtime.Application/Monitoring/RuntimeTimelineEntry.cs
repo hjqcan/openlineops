@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 
 namespace OpenLineOps.Runtime.Application.Monitoring;
@@ -9,6 +10,16 @@ public sealed record RuntimeTimelineEntry(
     DateTimeOffset OccurredAtUtc,
     string EventName,
     RuntimeSessionId SessionId,
+    string ProjectId,
+    string ApplicationId,
+    string ProjectSnapshotId,
+    string TopologyId,
+    ProductionRunId ProductionRunId,
+    string ProductionLineDefinitionId,
+    string StageId,
+    int StageSequence,
+    string WorkstationId,
+    DutIdentity DutIdentity,
     string StationSystemId,
     string EntityKind,
     string? EntityId,

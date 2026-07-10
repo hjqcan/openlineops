@@ -15,7 +15,7 @@ public static class PythonScriptExecutionScope
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (!string.Equals(request.ScriptLanguage, "Python", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(request.ScriptLanguage, "Python", StringComparison.Ordinal))
         {
             return RuntimeCommandExecutionResult.Rejected(
                 $"Script language '{request.ScriptLanguage}' is not supported by the PythonScript runtime executor.");
@@ -58,10 +58,26 @@ public static class PythonScriptExecutionScope
         scope.Set("input_payload", request.InputPayload);
         scope.Set("script_version", request.ScriptVersion);
         scope.Set("session_id", request.SessionId);
+        scope.Set("production_run_id", request.ProductionRunId);
+        scope.Set("production_line_definition_id", request.ProductionLineDefinitionId);
+        scope.Set("production_stage_id", request.ProductionStageId);
+        scope.Set("stage_sequence", request.StageSequence);
+        scope.Set("workstation_id", request.WorkstationId);
+        scope.Set("dut_model_id", request.DutModelId);
+        scope.Set("dut_identity_input_key", request.DutIdentityInputKey);
+        scope.Set("dut_identity_value", request.DutIdentityValue);
         scope.Set("station_id", request.StationId);
         scope.Set("configuration_snapshot_id", request.ConfigurationSnapshotId);
+        scope.Set("project_id", request.ProjectId);
+        scope.Set("application_id", request.ApplicationId);
+        scope.Set("project_snapshot_id", request.ProjectSnapshotId);
         scope.Set("node_id", request.NodeId);
         scope.Set("command_id", request.CommandId);
+        scope.Set("action_id", request.ActionId);
+        scope.Set("target_capability", request.TargetCapability);
+        scope.Set("target_kind", request.TargetKind);
+        scope.Set("target_id", request.TargetId);
+        scope.Set("command_name", request.CommandName);
 
         scope.Exec("""
             import io

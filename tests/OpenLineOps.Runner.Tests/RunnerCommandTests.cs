@@ -1,38 +1,40 @@
 using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Results;
-using OpenLineOps.Processes.Application.Runtime;
 using OpenLineOps.Projects.Api.Integrations;
-using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Runner;
+using OpenLineOps.Runtime.Application.Events;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner.Tests;
 
 public sealed class RunnerCommandTests
 {
+    private static readonly Guid RunId =
+        Guid.Parse("00000000-0000-0000-0000-000000000042");
+
     [Fact]
-    public async Task RunUsesActiveImmutableSnapshotAndForwardsTraceMetadata()
+    public async Task RunUsesActiveImmutableProductionLineAndForwardsRunIdentity()
     {
         var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
         var workspace = CreateWorkspace(
             RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
             snapshot);
-        var launcher = new CapturingRuntimeLauncher(Result.Success(
-            new StartedProcessRuntimeSessionDetails(
-                Guid.Parse("00000000-0000-0000-0000-000000000042"),
-                snapshot.ConfigurationSnapshotId,
-                "Completed",
-                CompletedSteps: 3,
-                CommandCount: 3,
-                IncidentCount: 0)));
-        var command = new RunnerCommand(new StubWorkspaceService(workspace), launcher);
+        var launcher = new CapturingProductionRunLauncher(Result.Success(
+            new ProductionRunRunResult(CreateProductionRun(ProductionRunStatus.Completed))));
+        var command = CreateCommand(workspace, launcher);
         var writer = new StringWriter();
 
         var exitCode = await command.RunAsync(
             new RunnerRunOptions(
                 "project",
                 "active",
-                "SN-42",
+                RunId,
+                "DUT-42",
                 "batch-a",
                 "fixture-a",
                 "device-a",
@@ -43,8 +45,8 @@ public sealed class RunnerCommandTests
         Assert.Equal(RunnerExitCodes.Success, exitCode);
         Assert.Same(snapshot, launcher.Snapshot);
         Assert.NotNull(launcher.Request);
-        Assert.Equal(snapshot.ConfigurationSnapshotId, launcher.Request.ConfigurationSnapshotId);
-        Assert.Equal("SN-42", launcher.Request.SerialNumber);
+        Assert.Equal(RunId, launcher.Request.ProductionRunId);
+        Assert.Equal("DUT-42", launcher.Request.DutIdentityValue);
         Assert.Equal("batch-a", launcher.Request.BatchId);
         Assert.Equal("fixture-a", launcher.Request.FixtureId);
         Assert.Equal("device-a", launcher.Request.DeviceId);
@@ -55,37 +57,111 @@ public sealed class RunnerCommandTests
         Assert.True(root.GetProperty("success").GetBoolean());
         Assert.Equal(0, root.GetProperty("exitCode").GetInt32());
         Assert.Equal("snapshot.active", root.GetProperty("project").GetProperty("snapshotId").GetString());
-        Assert.Equal("Completed", root.GetProperty("session").GetProperty("status").GetString());
+        var productionRun = root.GetProperty("productionRun");
+        Assert.Equal(RunId, productionRun.GetProperty("productionRunId").GetGuid());
+        Assert.Equal("Completed", productionRun.GetProperty("status").GetString());
+        Assert.Equal(1, productionRun.GetProperty("stageCount").GetInt32());
+        Assert.Equal(1, productionRun.GetProperty("completedStageCount").GetInt32());
+        Assert.Equal("stage.main", productionRun.GetProperty("stages")[0].GetProperty("stageId").GetString());
         Assert.False(root.TryGetProperty("error", out _));
+        Assert.False(root.TryGetProperty("session", out _));
     }
 
     [Fact]
-    public async Task RunReturnsRuntimeFailureExitCodeForFailedTerminalSession()
+    public async Task RunReturnsProductionRunFailureExitCodeForFailedTerminalRun()
     {
         var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
         var workspace = CreateWorkspace(
             RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
             snapshot);
-        var launcher = new CapturingRuntimeLauncher(Result.Success(
-            new StartedProcessRuntimeSessionDetails(
-                Guid.Parse("00000000-0000-0000-0000-000000000043"),
-                snapshot.ConfigurationSnapshotId,
-                "Failed",
-                CompletedSteps: 1,
-                CommandCount: 2,
-                IncidentCount: 1)));
-        var command = new RunnerCommand(new StubWorkspaceService(workspace), launcher);
+        var launcher = new CapturingProductionRunLauncher(Result.Success(
+            new ProductionRunRunResult(CreateProductionRun(ProductionRunStatus.Failed))));
+        var command = CreateCommand(workspace, launcher);
         var writer = new StringWriter();
 
         var exitCode = await command.RunAsync(
-            new RunnerRunOptions("project", "active", null, null, null, null, null),
+            new RunnerRunOptions(
+                "project",
+                "active",
+                RunId,
+                "DUT-42",
+                BatchId: null,
+                FixtureId: null,
+                DeviceId: null,
+                "actor-a"),
             "C:/automation",
             writer);
 
-        Assert.Equal(6, exitCode);
+        Assert.Equal(RunnerExitCodes.ProductionRunExecutionFailed, exitCode);
         using var document = JsonDocument.Parse(writer.ToString());
         Assert.False(document.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal("Failed", document.RootElement.GetProperty("session").GetProperty("status").GetString());
+        Assert.Equal(
+            "Failed",
+            document.RootElement.GetProperty("productionRun").GetProperty("status").GetString());
+        Assert.Equal(
+            "Runtime.StageFailed",
+            document.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    private static ProductionRunSnapshot CreateProductionRun(ProductionRunStatus status)
+    {
+        var createdAt = new DateTimeOffset(2026, 7, 10, 1, 0, 0, TimeSpan.Zero);
+        var stageStatus = status == ProductionRunStatus.Completed
+            ? ProductionStageRunStatus.Completed
+            : ProductionStageRunStatus.Failed;
+        var failureCode = status == ProductionRunStatus.Completed ? null : "Runtime.StageFailed";
+        var failureReason = status == ProductionRunStatus.Completed ? null : "Stage failed.";
+        var stage = new ProductionStageRunSnapshot(
+            "stage.main",
+            1,
+            "workstation.main",
+            new StationId("station.main"),
+            new ProcessDefinitionId("process.main"),
+            new ProcessVersionId("process.main@1.0.0"),
+            new ConfigurationSnapshotId("configuration.main"),
+            new RecipeSnapshotId("recipe.main@1.0.0"),
+            stageStatus,
+            new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000043")),
+            createdAt.AddSeconds(1),
+            createdAt.AddSeconds(2),
+            failureCode,
+            failureReason,
+            CompletedStepCount: status == ProductionRunStatus.Completed ? 3 : 1,
+            CommandCount: status == ProductionRunStatus.Completed ? 3 : 2,
+            IncidentCount: status == ProductionRunStatus.Completed ? 0 : 1);
+
+        return new ProductionRunSnapshot(
+            new ProductionRunId(RunId),
+            "project.line-a",
+            "application.main",
+            "snapshot.active",
+            "topology.main",
+            "line.main",
+            new DutIdentity("dut.main", "serialNumber", "DUT-42"),
+            "batch-a",
+            "fixture-a",
+            "device-a",
+            "actor-a",
+            status,
+            createdAt,
+            createdAt.AddSeconds(2),
+            createdAt.AddSeconds(1),
+            createdAt.AddSeconds(2),
+            failureCode,
+            failureReason,
+            [stage]);
+    }
+
+    private static RunnerCommand CreateCommand(
+        AutomationProjectWorkspaceDetails workspace,
+        IProjectReleaseProductionRunLauncher launcher)
+    {
+        return new RunnerCommand(
+            new StubWorkspaceService(workspace),
+            launcher,
+            new StubProductionRunRecoveryService(),
+            new StubTerminalOutboxDispatcher(),
+            new StubExecutionCoordinator());
     }
 
     private static AutomationProjectWorkspaceDetails CreateWorkspace(
@@ -98,9 +174,7 @@ public sealed class RunnerCommandTests
             snapshot.ApplicationId,
             snapshot.TopologyId,
             snapshot.LayoutIds.ToArray(),
-            snapshot.ProcessDefinitionId,
-            snapshot.ProcessVersionId,
-            snapshot.ConfigurationSnapshotId,
+            snapshot.ProductionLineDefinitionId,
             snapshot.PublishedAtUtc,
             [],
             [],
@@ -166,17 +240,17 @@ public sealed class RunnerCommandTests
         }
     }
 
-    private sealed class CapturingRuntimeLauncher(
-        Result<StartedProcessRuntimeSessionDetails> result)
-        : IProjectReleaseRuntimeSessionLauncher
+    private sealed class CapturingProductionRunLauncher(
+        Result<ProductionRunRunResult> result)
+        : IProjectReleaseProductionRunLauncher
     {
         public PublishedProjectSnapshotDetails? Snapshot { get; private set; }
 
-        public StartProcessRuntimeSessionRequest? Request { get; private set; }
+        public StartProjectReleaseProductionRunRequest? Request { get; private set; }
 
-        public ValueTask<Result<StartedProcessRuntimeSessionDetails>> StartAsync(
+        public ValueTask<Result<ProductionRunRunResult>> StartAsync(
             PublishedProjectSnapshotDetails snapshot,
-            StartProcessRuntimeSessionRequest request,
+            StartProjectReleaseProductionRunRequest request,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -184,5 +258,40 @@ public sealed class RunnerCommandTests
             Request = request;
             return ValueTask.FromResult(result);
         }
+    }
+
+    private sealed class StubProductionRunRecoveryService : IProductionRunRecoveryService
+    {
+        public ValueTask<ProductionRunRecoveryResult> RecoverAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(new ProductionRunRecoveryResult(0, 0, 0));
+        }
+    }
+
+    private sealed class StubTerminalOutboxDispatcher : IProductionRunTerminalOutboxDispatcher
+    {
+        public ValueTask<int> DrainAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(0);
+        }
+    }
+
+    private sealed class StubExecutionCoordinator : IProjectExecutionCoordinator
+    {
+        public ValueTask<IProjectExecutionLease?> TryAcquireAsync(
+            string projectDirectory,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IProjectExecutionLease?>(new StubExecutionLease());
+        }
+    }
+
+    private sealed class StubExecutionLease : IProjectExecutionLease
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

@@ -29,6 +29,25 @@ public sealed class RuntimeCommandLifecycleTests
     }
 
     [Fact]
+    public void SemanticOutcomeMustMatchTerminalCommandStatus()
+    {
+        var session = CreateRunningSession();
+        var command = CreateCommand(session);
+        session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2));
+        session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3));
+
+        Assert.Throws<ArgumentException>(() => session.CompleteCommand(
+            command.Id,
+            "{\"judgement\":\"Failed\"}",
+            StartedAtUtc.AddSeconds(4),
+            RuntimeCommandSemanticOutcome.Failed));
+
+        Assert.Equal(RuntimeCommandStatus.InProgress, command.Status);
+        Assert.Null(command.SemanticOutcome);
+        Assert.Null(command.ResultPayload);
+    }
+
+    [Fact]
     public void CommandCannotCompleteBeforeStart()
     {
         var session = CreateRunningSession();

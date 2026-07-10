@@ -321,7 +321,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             var sourceInfo = new FileInfo(sourcePath);
             var sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken).ConfigureAwait(false);
             if (sourceInfo.Length != copiedFile.SizeBytes
-                || !string.Equals(sourceSha256, copiedFile.Sha256, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(sourceSha256, copiedFile.Sha256, StringComparison.Ordinal))
             {
                 throw new IOException(
                     $"Project application source file '{relativeFile}' changed while the release was being published.");
@@ -358,12 +358,12 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         ValidateManifestFiles(manifestPath, manifest.Files, manifest.SourceApplicationRelativePath);
         ValidateSha256(manifest.ContentSha256, nameof(manifest.ContentSha256), argumentError: false);
         var computedContentSha256 = ComputeContentSha256(manifest);
-        if (!string.Equals(manifest.ContentSha256, computedContentSha256, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(manifest.ContentSha256, computedContentSha256, StringComparison.Ordinal))
         {
             throw InvalidRelease(manifestPath, "content SHA-256 does not match release.json");
         }
 
-        if (!string.Equals(manifest.ContentSha256, expectedContentSha256, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(manifest.ContentSha256, expectedContentSha256, StringComparison.Ordinal))
         {
             throw InvalidRelease(
                 manifestPath,
@@ -415,7 +415,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             }
 
             var actualSha256 = await ComputeFileSha256Async(path, cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(actualSha256, file.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(actualSha256, file.Sha256, StringComparison.Ordinal))
             {
                 throw InvalidRelease(manifestPath, $"source file '{file.RelativePath}' SHA-256 does not match");
             }
@@ -487,15 +487,25 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     {
         var topologyDirectory = Path.Combine(sourceApplicationPath, "topology");
         var layoutDirectory = Path.Combine(sourceApplicationPath, "layouts");
-        if (!Directory.Exists(topologyDirectory) || !Directory.Exists(layoutDirectory))
+        var productionLinesDirectory = Path.Combine(sourceApplicationPath, "production", "lines");
+        if (!Directory.Exists(topologyDirectory)
+            || !Directory.Exists(layoutDirectory)
+            || !Directory.Exists(productionLinesDirectory))
         {
-            throw InvalidRelease(manifestPath, "embedded topology or layout directory is missing");
+            throw InvalidRelease(
+                manifestPath,
+                "embedded topology, layout, or Production line directory is missing");
         }
 
         var topologyIds = new List<string>();
         foreach (var path in Directory.EnumerateFiles(topologyDirectory, "*.json", SearchOption.TopDirectoryOnly))
         {
-            var identity = await ReadEmbeddedResourceIdentityAsync(path, cancellationToken).ConfigureAwait(false);
+            var identity = await ReadEmbeddedResourceIdentityAsync(
+                    path,
+                    identityPropertyName: "topologyId",
+                    forbiddenIdentityPropertyName: "layoutId",
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
             if (!string.Equals(identity.SchemaVersion, ApplicationResourceSchemaVersions.AutomationTopology, StringComparison.Ordinal)
                 || !string.Equals(identity.ResourceKind, "OpenLineOps.AutomationTopology", StringComparison.Ordinal)
                 || !string.Equals(identity.ApplicationId, applicationId, StringComparison.Ordinal))
@@ -514,7 +524,12 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         var layoutIds = new List<string>();
         foreach (var path in Directory.EnumerateFiles(layoutDirectory, "*.json", SearchOption.TopDirectoryOnly))
         {
-            var identity = await ReadEmbeddedResourceIdentityAsync(path, cancellationToken).ConfigureAwait(false);
+            var identity = await ReadEmbeddedResourceIdentityAsync(
+                    path,
+                    identityPropertyName: "layoutId",
+                    forbiddenIdentityPropertyName: null,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
             if (!string.Equals(identity.SchemaVersion, ApplicationResourceSchemaVersions.SiteLayout, StringComparison.Ordinal)
                 || !string.Equals(identity.ResourceKind, "OpenLineOps.SiteLayout", StringComparison.Ordinal)
                 || !string.Equals(identity.ApplicationId, applicationId, StringComparison.Ordinal))
@@ -530,11 +545,323 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         {
             throw InvalidRelease(manifestPath, "one or more frozen layout identities are missing or duplicated");
         }
+
+        var productionLineIds = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(
+                     productionLinesDirectory,
+                     "line.json",
+                     SearchOption.AllDirectories))
+        {
+            var identity = await ReadEmbeddedResourceIdentityAsync(
+                    path,
+                    identityPropertyName: "lineDefinitionId",
+                    forbiddenIdentityPropertyName: null,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(
+                    identity.SchemaVersion,
+                    ApplicationResourceSchemaVersions.ProductionLine,
+                    StringComparison.Ordinal)
+                || !string.Equals(identity.ResourceKind, "OpenLineOps.ProductionLine", StringComparison.Ordinal)
+                || !string.Equals(identity.ApplicationId, applicationId, StringComparison.Ordinal))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"embedded Production line '{Path.GetFileName(Path.GetDirectoryName(path))}' has an unsupported schema or identity");
+            }
+
+            productionLineIds.Add(identity.ResourceId);
+        }
+
+        if (productionLineIds.Count(id => string.Equals(
+                id,
+                metadata.ProductionLine.LineDefinitionId,
+                StringComparison.Ordinal)) != 1)
+        {
+            throw InvalidRelease(
+                manifestPath,
+                $"embedded Production line {metadata.ProductionLine.LineDefinitionId} is missing or duplicated");
+        }
+
+        await ValidateEmbeddedStageConfigurationsAsync(
+                sourceApplicationPath,
+                applicationId,
+                metadata,
+                manifestPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask ValidateEmbeddedStageConfigurationsAsync(
+        string sourceApplicationPath,
+        string applicationId,
+        ProjectReleaseSourceMetadata metadata,
+        string manifestPath,
+        CancellationToken cancellationToken)
+    {
+        var projectsDirectory = Path.Combine(sourceApplicationPath, "configuration", "projects");
+        var stationProfilesDirectory = Path.Combine(
+            sourceApplicationPath,
+            "configuration",
+            "station-profiles");
+        if (!Directory.Exists(projectsDirectory) || !Directory.Exists(stationProfilesDirectory))
+        {
+            throw InvalidRelease(
+                manifestPath,
+                "embedded engineering project or Station profile directory is missing");
+        }
+
+        var snapshots = new List<EmbeddedConfigurationSnapshot>();
+        foreach (var path in Directory.EnumerateFiles(
+                     projectsDirectory,
+                     "project-*.json",
+                     SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileBufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var document = await JsonDocument.ParseAsync(
+                    stream,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            var root = document.RootElement;
+            ValidateEmbeddedEngineeringResource(
+                root,
+                applicationId,
+                expectedKind: "project",
+                path,
+                manifestPath);
+            var projectSnapshot = GetRequiredEmbeddedObject(
+                root,
+                "snapshot",
+                path,
+                manifestPath);
+            var configurationSnapshots = GetRequiredEmbeddedArray(
+                projectSnapshot,
+                "snapshots",
+                path,
+                manifestPath);
+            foreach (var configurationSnapshot in configurationSnapshots.EnumerateArray())
+            {
+                snapshots.Add(new EmbeddedConfigurationSnapshot(
+                    GetRequiredEmbeddedString(
+                        configurationSnapshot,
+                        "snapshotId",
+                        path,
+                        manifestPath),
+                    GetRequiredEmbeddedString(
+                        configurationSnapshot,
+                        "processDefinitionId",
+                        path,
+                        manifestPath),
+                    GetRequiredEmbeddedString(
+                        configurationSnapshot,
+                        "processVersionId",
+                        path,
+                        manifestPath),
+                    GetRequiredEmbeddedString(
+                        configurationSnapshot,
+                        "stationProfileId",
+                        path,
+                        manifestPath),
+                    GetRequiredEmbeddedString(
+                        configurationSnapshot,
+                        "status",
+                        path,
+                        manifestPath)));
+            }
+        }
+
+        var stationProfiles = new List<EmbeddedStationProfile>();
+        foreach (var path in Directory.EnumerateFiles(
+                     stationProfilesDirectory,
+                     "station-profile-*.json",
+                     SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileBufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var document = await JsonDocument.ParseAsync(
+                    stream,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            var root = document.RootElement;
+            ValidateEmbeddedEngineeringResource(
+                root,
+                applicationId,
+                expectedKind: "station-profile",
+                path,
+                manifestPath);
+            var stationProfile = GetRequiredEmbeddedObject(
+                root,
+                "snapshot",
+                path,
+                manifestPath);
+            stationProfiles.Add(new EmbeddedStationProfile(
+                GetRequiredEmbeddedString(
+                    stationProfile,
+                    "stationProfileId",
+                    path,
+                    manifestPath),
+                GetRequiredEmbeddedString(
+                    stationProfile,
+                    "stationSystemId",
+                    path,
+                    manifestPath)));
+        }
+
+        foreach (var stage in metadata.ProductionLine.Stages)
+        {
+            var matchingSnapshots = snapshots.Where(snapshot => string.Equals(
+                    snapshot.SnapshotId,
+                    stage.ConfigurationSnapshotId,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (matchingSnapshots.Length != 1)
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"Production stage {stage.StageId} configuration snapshot {stage.ConfigurationSnapshotId} is missing or duplicated");
+            }
+
+            var snapshot = matchingSnapshots[0];
+            if (!string.Equals(snapshot.Status, "Published", StringComparison.Ordinal)
+                || !string.Equals(
+                    snapshot.ProcessDefinitionId,
+                    stage.FlowDefinitionId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    snapshot.ProcessVersionId,
+                    stage.FlowVersionId,
+                    StringComparison.Ordinal))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"Production stage {stage.StageId} configuration snapshot does not match its frozen Flow");
+            }
+
+            var matchingProfiles = stationProfiles.Where(profile => string.Equals(
+                    profile.StationProfileId,
+                    snapshot.StationProfileId,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            var workstation = metadata.ProductionLine.Workstations.Single(candidate => string.Equals(
+                candidate.WorkstationId,
+                stage.WorkstationId,
+                StringComparison.Ordinal));
+            if (matchingProfiles.Length != 1
+                || !string.Equals(
+                    matchingProfiles[0].StationSystemId,
+                    workstation.StationSystemId,
+                    StringComparison.Ordinal))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"Production stage {stage.StageId} configuration Station does not match its frozen Workstation");
+            }
+        }
+    }
+
+    private static void ValidateEmbeddedEngineeringResource(
+        JsonElement root,
+        string applicationId,
+        string expectedKind,
+        string path,
+        string manifestPath)
+    {
+        if (!string.Equals(
+                GetRequiredEmbeddedString(root, "schema", path, manifestPath),
+                "openlineops.engineering-configuration-resource",
+                StringComparison.Ordinal)
+            || !root.TryGetProperty("schemaVersion", out var schemaVersion)
+            || schemaVersion.ValueKind != JsonValueKind.Number
+            || !schemaVersion.TryGetInt32(out var version)
+            || version != 1
+            || !string.Equals(
+                GetRequiredEmbeddedString(root, "applicationId", path, manifestPath),
+                applicationId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                GetRequiredEmbeddedString(root, "resourceKind", path, manifestPath),
+                expectedKind,
+                StringComparison.Ordinal))
+        {
+            throw InvalidRelease(
+                manifestPath,
+                $"embedded engineering resource '{Path.GetFileName(path)}' has an unsupported schema or identity");
+        }
+    }
+
+    private static JsonElement GetRequiredEmbeddedObject(
+        JsonElement root,
+        string propertyName,
+        string path,
+        string manifestPath)
+    {
+        if (!root.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.Object)
+        {
+            throw InvalidRelease(
+                manifestPath,
+                $"embedded resource '{Path.GetFileName(path)}' has no valid '{propertyName}' object");
+        }
+
+        return value;
+    }
+
+    private static JsonElement GetRequiredEmbeddedArray(
+        JsonElement root,
+        string propertyName,
+        string path,
+        string manifestPath)
+    {
+        if (!root.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.Array)
+        {
+            throw InvalidRelease(
+                manifestPath,
+                $"embedded resource '{Path.GetFileName(path)}' has no valid '{propertyName}' array");
+        }
+
+        return value;
+    }
+
+    private static string GetRequiredEmbeddedString(
+        JsonElement root,
+        string propertyName,
+        string path,
+        string manifestPath)
+    {
+        if (!root.TryGetProperty(propertyName, out var value)
+            || value.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(value.GetString())
+            || !string.Equals(value.GetString(), value.GetString()!.Trim(), StringComparison.Ordinal))
+        {
+            throw InvalidRelease(
+                manifestPath,
+                $"embedded resource '{Path.GetFileName(path)}' has no valid '{propertyName}'");
+        }
+
+        return value.GetString()!;
     }
 
     private static async ValueTask<(string SchemaVersion, string ResourceKind, string ApplicationId, string ResourceId)>
         ReadEmbeddedResourceIdentityAsync(
             string path,
+            string identityPropertyName,
+            string? forbiddenIdentityPropertyName,
             CancellationToken cancellationToken)
     {
         try
@@ -549,18 +876,18 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             var root = document.RootElement;
-            var resourceIdProperty = root.TryGetProperty("layoutId", out var layoutId)
-                ? layoutId
-                : root.TryGetProperty("topologyId", out var topologyId)
-                    ? topologyId
-                    : throw new InvalidDataException($"Embedded application resource '{path}' has no identity.");
+            if (forbiddenIdentityPropertyName is not null
+                && root.TryGetProperty(forbiddenIdentityPropertyName, out _))
+            {
+                throw new InvalidDataException(
+                    $"Embedded application resource '{path}' contains forbidden identity '{forbiddenIdentityPropertyName}'.");
+            }
+
             return (
                 RequireJsonString(root, "schemaVersion", path),
                 RequireJsonString(root, "resourceKind", path),
                 RequireJsonString(root, "applicationId", path),
-                resourceIdProperty.ValueKind == JsonValueKind.String
-                    ? RequireValue(resourceIdProperty.GetString(), "resourceId")
-                    : throw new InvalidDataException($"Embedded application resource '{path}' has an invalid identity."));
+                RequireJsonString(root, identityPropertyName, path));
         }
         catch (JsonException exception)
         {
@@ -718,8 +1045,10 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     {
         ArgumentNullException.ThrowIfNull(metadata);
 
+        var topologyId = RequireValue(metadata.TopologyId, nameof(metadata.TopologyId));
         var layoutIds = NormalizeIdentifiers(metadata.LayoutIds, nameof(metadata.LayoutIds));
         var blockVersionIds = NormalizeIdentifiers(metadata.BlockVersionIds, nameof(metadata.BlockVersionIds));
+        var productionLine = NormalizeProductionLine(metadata.ProductionLine);
         var packageDependencies = NormalizePackageDependencies(metadata.PackageDependencies);
         var capabilityBindings = (metadata.CapabilityBindings
                 ?? throw new ArgumentException("CapabilityBindings collection is required.", nameof(metadata)))
@@ -747,17 +1076,35 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
             .ToArray();
-        var stationSystemId = RequireValue(metadata.StationSystemId, nameof(metadata.StationSystemId));
-        if (targetReferences.Count(target =>
-                string.Equals(target.Kind, "System", StringComparison.Ordinal)
-                && string.Equals(target.TargetId, stationSystemId, StringComparison.Ordinal)) != 1)
+        if (!string.Equals(productionLine.TopologyId, topologyId, StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "StationSystemId must match exactly one frozen System target reference.",
+                "Production line topology must match release topology.",
+                nameof(metadata));
+        }
+        if (productionLine.Workstations.Any(workstation => targetReferences.Count(target =>
+                string.Equals(target.Kind, "System", StringComparison.Ordinal)
+                && string.Equals(
+                    target.TargetId,
+                    workstation.StationSystemId,
+                    StringComparison.Ordinal)) != 1))
+        {
+            throw new ArgumentException(
+                "Every frozen Production Workstation Station must match exactly one System target reference.",
                 nameof(metadata));
         }
 
-        var flowIr = NormalizeFlowIr(metadata);
+        var productionBlockVersionIds = productionLine.Stages
+            .SelectMany(stage => stage.BlockVersionIds)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (!blockVersionIds.SequenceEqual(productionBlockVersionIds, StringComparer.Ordinal))
+        {
+            throw new ArgumentException(
+                "Release block version locks must equal the union of frozen Production stage block locks.",
+                nameof(metadata));
+        }
         if (packageDependencies.Any(dependency => capabilityBindings.Count(binding =>
                 string.Equals(dependency.CapabilityId, binding.CapabilityId, StringComparison.Ordinal)
                 && string.Equals(dependency.BindingId, binding.BindingId, StringComparison.Ordinal)
@@ -770,19 +1117,360 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         }
 
         return new ProjectReleaseSourceMetadata(
-            RequireValue(metadata.TopologyId, nameof(metadata.TopologyId)),
-            stationSystemId,
+            topologyId,
             layoutIds,
-            RequireValue(metadata.ProcessDefinitionId, nameof(metadata.ProcessDefinitionId)),
-            RequireValue(metadata.ProcessVersionId, nameof(metadata.ProcessVersionId)),
-            flowIr.SchemaVersion,
-            flowIr.Sha256,
-            flowIr.CanonicalJson,
-            RequireValue(metadata.ConfigurationSnapshotId, nameof(metadata.ConfigurationSnapshotId)),
+            productionLine,
             capabilityBindings,
             targetReferences,
             blockVersionIds,
             packageDependencies);
+    }
+
+    private static ProjectReleaseProductionLine NormalizeProductionLine(
+        ProjectReleaseProductionLine? line)
+    {
+        if (line is null)
+        {
+            throw new ArgumentException("ProductionLine is required.", nameof(line));
+        }
+
+        if (line.DutModel is null)
+        {
+            throw new ArgumentException("ProductionLine.DutModel is required.", nameof(line));
+        }
+
+        var dutModel = new ProjectReleaseDutModel(
+            RequireProductionValue(line.DutModel.DutModelId, nameof(line.DutModel.DutModelId)),
+            RequireProductionValue(line.DutModel.ModelCode, nameof(line.DutModel.ModelCode)),
+            RequireProductionValue(line.DutModel.IdentityInputKey, nameof(line.DutModel.IdentityInputKey)));
+        var workstations = (line.Workstations
+                ?? throw new ArgumentException("ProductionLine.Workstations is required.", nameof(line)))
+            .Select(workstation => workstation is null
+                ? throw new ArgumentException("ProductionLine.Workstations cannot contain null.", nameof(line))
+                : new ProjectReleaseWorkstation(
+                    RequireProductionValue(workstation.WorkstationId, nameof(workstation.WorkstationId)),
+                    RequireProductionValue(workstation.DisplayName, nameof(workstation.DisplayName)),
+                    RequireProductionValue(workstation.StationSystemId, nameof(workstation.StationSystemId))))
+            .OrderBy(workstation => workstation.WorkstationId, StringComparer.Ordinal)
+            .ToArray();
+        if (workstations.Length == 0)
+        {
+            throw new ArgumentException("ProductionLine requires at least one Workstation.", nameof(line));
+        }
+
+        EnsureProductionIdentifiersAreUnique(
+            workstations.Select(workstation => workstation.WorkstationId),
+            "Production Workstation ids");
+        EnsureProductionIdentifiersAreUnique(
+            workstations.Select(workstation => workstation.StationSystemId),
+            "Production Workstation Station System ids");
+
+        var stages = (line.Stages
+                ?? throw new ArgumentException("ProductionLine.Stages is required.", nameof(line)))
+            .Select(stage =>
+            {
+                if (stage is null)
+                {
+                    throw new ArgumentException("ProductionLine.Stages cannot contain null.", nameof(line));
+                }
+
+                if (stage.Sequence <= 0)
+                {
+                    throw new ArgumentException("Production stage sequence must be positive.", nameof(line));
+                }
+
+                var flowIr = NormalizeFrozenFlowIr(
+                    stage.FlowIrSchemaVersion,
+                    stage.FlowIrSha256,
+                    stage.FlowIrCanonicalJson,
+                    $"Production stage {stage.StageId} Flow IR");
+                return new ProjectReleaseProductionStage(
+                    RequireProductionValue(stage.StageId, nameof(stage.StageId)),
+                    stage.Sequence,
+                    RequireProductionValue(stage.DisplayName, nameof(stage.DisplayName)),
+                    RequireProductionValue(stage.WorkstationId, nameof(stage.WorkstationId)),
+                    RequireProductionValue(stage.FlowDefinitionId, nameof(stage.FlowDefinitionId)),
+                    RequireProductionValue(
+                        stage.ConfigurationSnapshotId,
+                        nameof(stage.ConfigurationSnapshotId)),
+                    RequireProductionValue(stage.FlowVersionId, nameof(stage.FlowVersionId)),
+                    flowIr.SchemaVersion,
+                    flowIr.Sha256,
+                    flowIr.CanonicalJson,
+                    NormalizeIdentifiers(stage.BlockVersionIds, nameof(stage.BlockVersionIds)),
+                    stage.ExternalTestProgramAdapterId is null
+                        ? null
+                        : RequireProductionValue(
+                            stage.ExternalTestProgramAdapterId,
+                            nameof(stage.ExternalTestProgramAdapterId)));
+            })
+            .OrderBy(stage => stage.Sequence)
+            .ToArray();
+        if (stages.Length == 0)
+        {
+            throw new ArgumentException("ProductionLine requires at least one Stage.", nameof(line));
+        }
+
+        EnsureProductionIdentifiersAreUnique(stages.Select(stage => stage.StageId), "Production Stage ids");
+        if (!stages.Select(stage => stage.Sequence).SequenceEqual(Enumerable.Range(1, stages.Length)))
+        {
+            throw new ArgumentException(
+                "Production stage sequence must be contiguous and start at 1.",
+                nameof(line));
+        }
+
+        var workstationIds = workstations
+            .Select(workstation => workstation.WorkstationId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (stages.Any(stage => !workstationIds.Contains(stage.WorkstationId)))
+        {
+            throw new ArgumentException(
+                "Every Production stage must reference one frozen Workstation.",
+                nameof(line));
+        }
+
+        if (workstations.Any(workstation => stages.All(stage =>
+                !string.Equals(stage.WorkstationId, workstation.WorkstationId, StringComparison.Ordinal))))
+        {
+            throw new ArgumentException(
+                "Every frozen Production Workstation must be used by at least one Stage.",
+                nameof(line));
+        }
+
+        var adapters = (line.ExternalTestProgramAdapters
+                ?? throw new ArgumentException(
+                    "ProductionLine.ExternalTestProgramAdapters is required.",
+                    nameof(line)))
+            .Select(adapter => NormalizeProductionAdapter(adapter, line.LineDefinitionId))
+            .OrderBy(adapter => adapter.AdapterId, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            adapters.Select(adapter => adapter.AdapterId),
+            "Production external test adapter ids");
+        var adapterIds = adapters.Select(adapter => adapter.AdapterId).ToHashSet(StringComparer.Ordinal);
+        if (stages.Any(stage => stage.ExternalTestProgramAdapterId is not null
+            && !adapterIds.Contains(stage.ExternalTestProgramAdapterId)))
+        {
+            throw new ArgumentException(
+                "Every Production stage external test adapter must reference one frozen adapter.",
+                nameof(line));
+        }
+
+        if (adapters.Any(adapter => stages.All(stage => !string.Equals(
+                stage.ExternalTestProgramAdapterId,
+                adapter.AdapterId,
+                StringComparison.Ordinal))))
+        {
+            throw new ArgumentException(
+                "Every frozen external test adapter must be used by at least one Production stage.",
+                nameof(line));
+        }
+
+        return new ProjectReleaseProductionLine(
+            RequireProductionValue(line.LineDefinitionId, nameof(line.LineDefinitionId)),
+            RequireProductionValue(line.DisplayName, nameof(line.DisplayName)),
+            RequireProductionValue(line.TopologyId, nameof(line.TopologyId)),
+            dutModel,
+            workstations,
+            stages,
+            adapters);
+    }
+
+    private static ProjectReleaseExternalTestProgramAdapter NormalizeProductionAdapter(
+        ProjectReleaseExternalTestProgramAdapter? adapter,
+        string lineDefinitionId)
+    {
+        if (adapter is null)
+        {
+            throw new ArgumentException(
+                $"Production line {lineDefinitionId} external test adapters cannot contain null.",
+                nameof(adapter));
+        }
+
+        var executable = adapter.Executable is null
+            ? null
+            : NormalizeProductionExecutable(adapter.Executable);
+        var providerKey = adapter.ProviderKey is null
+            ? null
+            : RequireProductionValue(adapter.ProviderKey, nameof(adapter.ProviderKey));
+        var expectedLaunchKind = executable is null ? "Provider" : "ApplicationExecutable";
+        if ((executable is null) == (providerKey is null)
+            || !string.Equals(adapter.LaunchKind, expectedLaunchKind, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Production external test adapter {adapter.AdapterId} must have one canonical launch route.",
+                nameof(adapter));
+        }
+
+        if (adapter.TimeoutMilliseconds <= 0)
+        {
+            throw new ArgumentException(
+                $"Production external test adapter {adapter.AdapterId} timeout must be positive.",
+                nameof(adapter));
+        }
+
+        var arguments = (adapter.ArgumentTemplates
+                ?? throw new ArgumentException("Adapter ArgumentTemplates is required.", nameof(adapter)))
+            .Select(argument => RequireProductionValue(argument, nameof(adapter.ArgumentTemplates)))
+            .ToArray();
+        var inputMappings = (adapter.InputMappings
+                ?? throw new ArgumentException("Adapter InputMappings is required.", nameof(adapter)))
+            .Select(mapping => mapping is null
+                ? throw new ArgumentException("Adapter InputMappings cannot contain null.", nameof(adapter))
+                : new ProjectReleaseExternalTestProgramInputMapping(
+                    RequireProductionValue(mapping.Source, nameof(mapping.Source)),
+                    RequireProductionValue(mapping.Target, nameof(mapping.Target))))
+            .OrderBy(mapping => mapping.Target, StringComparer.Ordinal)
+            .ThenBy(mapping => mapping.Source, StringComparer.Ordinal)
+            .ToArray();
+        var resultMappings = (adapter.ResultMappings
+                ?? throw new ArgumentException("Adapter ResultMappings is required.", nameof(adapter)))
+            .Select(mapping => mapping is null
+                ? throw new ArgumentException("Adapter ResultMappings cannot contain null.", nameof(adapter))
+                : new ProjectReleaseExternalTestProgramResultMapping(
+                    RequireProductionValue(mapping.SourcePath, nameof(mapping.SourcePath)),
+                    RequireProductionValue(mapping.TargetKey, nameof(mapping.TargetKey))))
+            .OrderBy(mapping => mapping.TargetKey, StringComparer.Ordinal)
+            .ThenBy(mapping => mapping.SourcePath, StringComparer.Ordinal)
+            .ToArray();
+        var rawOutcomeMapping = adapter.OutcomeMapping
+            ?? throw new ArgumentException("Adapter OutcomeMapping is required.", nameof(adapter));
+        var outcomeMapping = new ProjectReleaseExternalTestProgramOutcomeMapping(
+            RequireProductionValue(rawOutcomeMapping.SourcePath, nameof(rawOutcomeMapping.SourcePath)),
+            RequireProductionValue(rawOutcomeMapping.PassedToken, nameof(rawOutcomeMapping.PassedToken)),
+            RequireProductionValue(rawOutcomeMapping.FailedToken, nameof(rawOutcomeMapping.FailedToken)),
+            RequireProductionValue(rawOutcomeMapping.AbortedToken, nameof(rawOutcomeMapping.AbortedToken)));
+        if (inputMappings.Length == 0 || resultMappings.Length == 0)
+        {
+            throw new ArgumentException(
+                $"Production external test adapter {adapter.AdapterId} mappings are required.",
+                nameof(adapter));
+        }
+
+        EnsureProductionIdentifiersAreUnique(
+            inputMappings.Select(mapping => mapping.Target),
+            $"Production adapter {adapter.AdapterId} input targets");
+        EnsureProductionIdentifiersAreUnique(
+            resultMappings.Select(mapping => mapping.TargetKey),
+            $"Production adapter {adapter.AdapterId} result targets");
+        if (inputMappings.All(mapping => !string.Equals(
+                mapping.Source,
+                "$dut.identity",
+                StringComparison.Ordinal))
+            || inputMappings.All(mapping => !string.Equals(
+                mapping.Source,
+                "$dut.model",
+                StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                $"Production external test adapter {adapter.AdapterId} input mappings must include DUT identity and DUT model.",
+                nameof(adapter));
+        }
+
+        if (inputMappings.Any(mapping =>
+                !ProjectReleaseExternalTestProgramContract.IsSupportedInputSource(mapping.Source))
+            || arguments.Any(argument =>
+                !ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
+                    argument,
+                    inputMappings.Select(mapping => mapping.Target)))
+            || resultMappings.Any(mapping =>
+                !ProjectReleaseExternalTestProgramContract.IsSupportedResultPath(mapping.SourcePath))
+            || !ProjectReleaseExternalTestProgramContract.IsSupportedOutcomeMapping(outcomeMapping))
+        {
+            throw new ArgumentException(
+                $"Production external test adapter {adapter.AdapterId} contains an unsupported input source, argument placeholder, or result path.",
+                nameof(adapter));
+        }
+
+        return new ProjectReleaseExternalTestProgramAdapter(
+            RequireProductionValue(adapter.AdapterId, nameof(adapter.AdapterId)),
+            RequireProductionValue(adapter.DisplayName, nameof(adapter.DisplayName)),
+            RequireProductionValue(adapter.CapabilityId, nameof(adapter.CapabilityId)),
+            RequireProductionValue(adapter.CommandName, nameof(adapter.CommandName)),
+            expectedLaunchKind,
+            executable,
+            providerKey,
+            arguments,
+            inputMappings,
+            resultMappings,
+            outcomeMapping,
+            adapter.TimeoutMilliseconds);
+    }
+
+    private static string NormalizeProductionExecutable(string value)
+    {
+        var executable = RequireProductionValue(value, nameof(value));
+        if (Path.IsPathRooted(executable)
+            || executable.Contains('\\')
+            || executable.Split('/').Length < 2
+            || !string.Equals(executable.Split('/')[0], "programs", StringComparison.Ordinal)
+            || executable.Split('/').Any(segment => segment is "" or "." or ".."))
+        {
+            throw new ArgumentException(
+                "Production external test executable must be a canonical programs/ Application-relative path.",
+                nameof(value));
+        }
+
+        return executable;
+    }
+
+    private static (string SchemaVersion, string Sha256, string CanonicalJson) NormalizeFrozenFlowIr(
+        string schemaVersion,
+        string sha256,
+        string canonicalJson,
+        string description)
+    {
+        var normalizedSchemaVersion = RequireProductionValue(schemaVersion, $"{description} schema version");
+        var normalizedCanonicalJson = RequireProductionValue(canonicalJson, $"{description} canonical JSON");
+        ValidateSha256(sha256, $"{description} SHA-256", argumentError: true);
+        try
+        {
+            using var _ = JsonDocument.Parse(normalizedCanonicalJson);
+        }
+        catch (JsonException exception)
+        {
+            throw new ArgumentException(
+                $"{description} contains invalid canonical JSON: {exception.Message}",
+                nameof(canonicalJson),
+                exception);
+        }
+
+        var computedSha256 = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(normalizedCanonicalJson)))
+            .ToLowerInvariant();
+        if (!string.Equals(sha256, computedSha256, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"{description} SHA-256 does not match its canonical JSON.",
+                nameof(sha256));
+        }
+
+        return (normalizedSchemaVersion, sha256, normalizedCanonicalJson);
+    }
+
+    private static string RequireProductionValue(string? value, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1]))
+        {
+            throw new ArgumentException($"{fieldName} must be a non-empty canonical value.", fieldName);
+        }
+
+        return value;
+    }
+
+    private static void EnsureProductionIdentifiersAreUnique(
+        IEnumerable<string> values,
+        string description)
+    {
+        var identifiers = values.ToArray();
+        if (identifiers.Distinct(StringComparer.OrdinalIgnoreCase).Count() != identifiers.Length)
+        {
+            throw new ArgumentException(
+                $"{description} must be unique and cannot differ only by case.",
+                nameof(values));
+        }
     }
 
     private static ProjectReleasePackageDependencyLock[] NormalizePackageDependencies(
@@ -994,57 +1682,8 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
 
     private static string NormalizeSha256(string value, string fieldName)
     {
-        var sha256 = RequireValue(value, fieldName);
-        ValidateSha256(sha256, fieldName, argumentError: true);
-        if (!string.Equals(sha256, sha256.ToLowerInvariant(), StringComparison.Ordinal))
-        {
-            throw new ArgumentException($"{fieldName} must be lowercase.", fieldName);
-        }
-
-        return sha256;
-    }
-
-    private static (string SchemaVersion, string Sha256, string CanonicalJson) NormalizeFlowIr(
-        ProjectReleaseSourceMetadata metadata)
-    {
-        var schemaVersion = RequireValue(
-            metadata.FlowIrSchemaVersion,
-            nameof(metadata.FlowIrSchemaVersion));
-        var sha256 = RequireValue(metadata.FlowIrSha256, nameof(metadata.FlowIrSha256));
-        var canonicalJson = RequireValue(
-            metadata.FlowIrCanonicalJson,
-            nameof(metadata.FlowIrCanonicalJson));
-        ValidateSha256(sha256, nameof(metadata.FlowIrSha256), argumentError: true);
-        if (!string.Equals(sha256, sha256.ToLowerInvariant(), StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                "FlowIrSha256 must be lowercase.",
-                nameof(metadata));
-        }
-
-        try
-        {
-            using var _ = JsonDocument.Parse(canonicalJson);
-        }
-        catch (JsonException exception)
-        {
-            throw new ArgumentException(
-                $"FlowIrCanonicalJson is invalid JSON: {exception.Message}",
-                nameof(metadata),
-                exception);
-        }
-
-        var computedSha256 = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(canonicalJson)))
-            .ToLowerInvariant();
-        if (!string.Equals(sha256, computedSha256, StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                $"FlowIrSha256 is '{sha256}', expected '{computedSha256}'.",
-                nameof(metadata));
-        }
-
-        return (schemaVersion, sha256, canonicalJson);
+        ValidateSha256(value, fieldName, argumentError: true);
+        return value;
     }
 
     private static string[] NormalizeIdentifiers(
@@ -1202,14 +1841,18 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     {
         if (string.IsNullOrWhiteSpace(value)
             || value.Length != 64
-            || !value.All(Uri.IsHexDigit))
+            || !value.All(Uri.IsHexDigit)
+            || !string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal))
         {
             if (argumentError)
             {
-                throw new ArgumentException($"{fieldName} must be a 64-character SHA-256 value.", fieldName);
+                throw new ArgumentException(
+                    $"{fieldName} must be a lowercase 64-character SHA-256 value.",
+                    fieldName);
             }
 
-            throw new InvalidDataException($"{fieldName} must be a 64-character SHA-256 value.");
+            throw new InvalidDataException(
+                $"{fieldName} must be a lowercase 64-character SHA-256 value.");
         }
     }
 
@@ -1255,4 +1898,15 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     }
 
     private sealed record FileTreeSnapshot(string[] Directories, string[] Files);
+
+    private sealed record EmbeddedConfigurationSnapshot(
+        string SnapshotId,
+        string ProcessDefinitionId,
+        string ProcessVersionId,
+        string StationProfileId,
+        string Status);
+
+    private sealed record EmbeddedStationProfile(
+        string StationProfileId,
+        string StationSystemId);
 }

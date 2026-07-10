@@ -95,12 +95,12 @@ by a server-side publisher. Its manifest records server-resolved execution
 metadata, per-file hashes, a release content digest, and canonical versioned
 Flow IR. The Project Snapshot runtime verifies that Flow IR and reads process
 validation source, configuration, and device bindings only from the frozen
-release. A complete provider/plugin package lock is still needed before this is
-the fully resolved deployment revision in the target architecture.
+release. Provider routes and plugin packages are resolved and locked by exact
+identity and content before publication; Runtime does not consult live authoring
+inventories.
 
-The production direction is that IDE runs also use immutable releases. The
-implemented Project Snapshot launch already enforces this boundary; ephemeral
-development releases are a future option.
+IDE runs and standalone Runner execution both use the same immutable release
+boundary. Editable Application source is never an execution fallback.
 
 ### `.olopkg`
 
@@ -470,29 +470,22 @@ modules/OpenLineOps.ProjectExecution.Application/
 Adapters:
 
 ```text
-Studio Run command ---------+
-HTTP API controller --------+--> IProjectRunService --> durable worker --> Runtime
-CLI adapter ----------------+
-Windows Service named pipe -+
-Remote Agent endpoint ------+
+Studio Run command ----+
+HTTP API controller ---+--> IProjectReleaseProductionRunLauncher --> IProductionRunRunner
+CLI Runner ------------+                                      |--> ordered Runtime Sessions
 ```
 
-The run request is durably stored before hardware is touched. A station lease
-and idempotency key prevent accidental duplicate runs.
-
-The current synchronous HTTP request model must evolve to submit-and-observe:
-
-- Studio, Service, and Agent receive a session id immediately.
-- CLI submits and then waits or streams events.
-- Runtime publishes progress independently of the caller connection.
+The caller supplies a Production Run id. The Run and every Stage-to-Session link
+are persisted before that Stage can touch hardware. Reusing a Run id is rejected,
+and interrupted Runs terminate without replaying device commands.
 
 ## Runner And CLI
 
 `src/OpenLineOps.Runner` is an implemented one-shot headless executable. It
 opens a project directory or `<projectId>.oloproj`, selects an explicit or active
 Project Snapshot, requires an immutable release descriptor, runs it through
-`ProjectReleaseRuntimeSessionLauncher`, writes one JSON result using Runner
-output schema v1 to standard output, and exits after the session reaches a
+`ProjectReleaseProductionRunLauncher`, writes one JSON result using the Runner
+output schema to standard output, and exits after the Production Run reaches a
 terminal state. All non-`.oloproj` project formats are rejected.
 
 Current command:
@@ -500,14 +493,21 @@ Current command:
 ```powershell
 dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
   run C:\Projects\LineA --snapshot active `
-  --serial SN-001 --batch BATCH-001 --fixture fixture-a `
+  --dut DUT-001 --batch BATCH-001 --fixture fixture-a `
   --device device-a --actor operator-a
 ```
 
-`--snapshot` defaults to `active`; the remaining options are optional runtime
-trace inputs. Runner rejects draft-only projects and snapshots without a
-release. Runtime configuration comes from `appsettings.json`,
+`--dut` and `--actor` are required. `--snapshot` defaults to `active`, and
+`--run-id` defaults to a new GUID; supplying it makes retries explicitly
+idempotent. Batch, fixture, and device are optional trace inputs. Runner rejects
+draft-only projects and snapshots without a release. Runtime configuration comes from `appsettings.json`,
 `appsettings.<environment>.json`, and environment variables.
+
+Runner stores Runtime and Traceability state in a path-scoped directory under
+the current user's local application data. An exclusive per-project lease
+prevents two one-shot Runner processes from touching the same line concurrently;
+startup recovery terminalizes interrupted Run and Session records without
+replaying a command.
 
 Implemented stable exit codes:
 
@@ -516,17 +516,16 @@ Implemented stable exit codes:
 - `3`: project path or manifest could not be opened;
 - `4`: requested or active snapshot could not be selected;
 - `5`: selected snapshot has no immutable release;
-- `6`: immutable release verification or runtime start was rejected;
-- `7`: runtime session ended in a non-Completed terminal state;
+- `6`: immutable release verification or Production Run start was rejected;
+- `7`: Production Run failed;
 - `8`: execution was canceled;
 - `70`: unexpected configuration/internal error.
 
 This Runner is synchronous and one-shot. It is not a daemon, Windows Service,
-queue, remote Agent, recovery host, operator UI, or station-lease manager. It
-does not package, sign, verify, cache, or deploy `.olopkg` files, and it does not
-provide durable resume/idempotency across process termination. Those
-capabilities require the future host-neutral run service and durable runtime
-state boundary.
+queue, remote Agent, operator UI, or station-lease manager. It does not package,
+sign, verify, cache, or deploy `.olopkg` files. A Run interrupted by process
+termination is recovered to an honest terminal failure and never replays
+hardware commands.
 
 Future package/deployment CLI commands remain a design target:
 

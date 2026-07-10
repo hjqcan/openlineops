@@ -102,6 +102,10 @@ Test-ContentContains `
     -Message "Workflow must configure PYTHONNET_PYDLL for GitHub-hosted Windows runners."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "verify-no-version-suffix-implementations\.ps1" `
+    -Message "Workflow must reject internal version tokens and version-suffixed implementations."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern '\$expectedPythonDllName' `
     -Message "Workflow must prefer the version-specific Python runtime DLL for pythonnet."
 Test-ContentContains `

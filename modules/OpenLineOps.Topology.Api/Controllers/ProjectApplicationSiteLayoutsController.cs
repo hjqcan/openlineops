@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Topology.Api.Models;
+using OpenLineOps.Topology.Api.ReleaseReading;
 using OpenLineOps.Topology.Application.ProjectWorkspaces;
 using ApiAddElementRequest = OpenLineOps.Topology.Api.Models.AddSiteLayoutElementRequest;
 using ApiCreateLayoutRequest = OpenLineOps.Topology.Api.Models.CreateSiteLayoutRequest;
@@ -21,10 +22,14 @@ namespace OpenLineOps.Topology.Api.Controllers;
 public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
 {
     private readonly IProjectAutomationTopologyService _topologyService;
+    private readonly ProjectReleaseTopologyReader _releaseReader;
 
-    public ProjectApplicationSiteLayoutsController(IProjectAutomationTopologyService topologyService)
+    public ProjectApplicationSiteLayoutsController(
+        IProjectAutomationTopologyService topologyService,
+        ProjectReleaseTopologyReader releaseReader)
     {
         _topologyService = topologyService;
+        _releaseReader = releaseReader;
     }
 
     [HttpPost]
@@ -75,11 +80,21 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
         string projectId,
         string applicationId,
         string layoutId,
+        [FromQuery] string? snapshotId,
         CancellationToken cancellationToken)
     {
-        var result = await _topologyService
-            .GetLayoutByIdAsync(projectId, applicationId, layoutId, cancellationToken)
-            .ConfigureAwait(false);
+        var result = snapshotId is null
+            ? await _topologyService
+                .GetLayoutByIdAsync(projectId, applicationId, layoutId, cancellationToken)
+                .ConfigureAwait(false)
+            : await _releaseReader
+                .GetLayoutAsync(
+                    projectId,
+                    applicationId,
+                    snapshotId,
+                    layoutId,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         return result.IsFailure
             ? ToProblem(result.Error)

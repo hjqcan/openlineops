@@ -124,6 +124,35 @@ public sealed class AutomationTopologyServiceTests
     }
 
     [Fact]
+    public async Task SystemKindRequiresExactCanonicalToken()
+    {
+        var service = new Fixture().Service;
+        Assert.True((await service.CreateAsync(
+            "project",
+            "app",
+            new CreateAutomationTopologyRequest("topology", "Topology"))).IsSuccess);
+
+        var canonical = await service.AddSystemAsync(
+            "project",
+            "app",
+            "topology",
+            new AddAutomationSystemRequest(
+                "station.canonical", null, "Station", "station", "Station", [], [],
+                new Dictionary<string, string>()));
+        var caseChanged = await service.AddSystemAsync(
+            "project",
+            "app",
+            "topology",
+            new AddAutomationSystemRequest(
+                "station.case-changed", null, "station", "station", "Station", [], [],
+                new Dictionary<string, string>()));
+
+        Assert.True(canonical.IsSuccess);
+        Assert.True(caseChanged.IsFailure);
+        Assert.Equal("Validation.Topology.InvalidSystemKind", caseChanged.Error.Code);
+    }
+
+    [Fact]
     public async Task ScopedCrudRenamesTargetsAndDeletesLayoutBeforeTopologyWithoutDanglingTargets()
     {
         var operations = new List<string>();

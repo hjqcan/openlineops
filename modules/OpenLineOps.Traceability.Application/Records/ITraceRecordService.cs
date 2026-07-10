@@ -6,7 +6,7 @@ namespace OpenLineOps.Traceability.Application.Records;
 
 public interface ITraceRecordService
 {
-    Task<Result<TraceRecordDetails>> CreateCompletedAsync(
+    Task<Result<TraceRecordDetails>> CreateAsync(
         CreateTraceRecordRequest request,
         CancellationToken cancellationToken = default);
 

@@ -14,12 +14,8 @@ public sealed class RuntimeIncident : Entity<RuntimeIncidentId>
         : base(id)
     {
         Severity = severity;
-        Code = string.IsNullOrWhiteSpace(code)
-            ? throw new ArgumentException("Incident code cannot be empty.", nameof(code))
-            : code.Trim();
-        Message = string.IsNullOrWhiteSpace(message)
-            ? throw new ArgumentException("Incident message cannot be empty.", nameof(message))
-            : message.Trim();
+        Code = Required(code, nameof(code));
+        Message = Required(message, nameof(message));
         OccurredAtUtc = occurredAtUtc;
     }
 
@@ -39,5 +35,16 @@ public sealed class RuntimeIncident : Entity<RuntimeIncidentId>
         DateTimeOffset occurredAtUtc)
     {
         return new RuntimeIncident(id, severity, code, message, occurredAtUtc);
+    }
+
+    private static string Required(string value, string parameterName)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1])
+            ? throw new ArgumentException(
+                $"{parameterName} must be non-empty canonical text.",
+                parameterName)
+            : value;
     }
 }

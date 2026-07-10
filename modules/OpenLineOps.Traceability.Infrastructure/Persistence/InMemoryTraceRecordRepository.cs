@@ -10,19 +10,22 @@ namespace OpenLineOps.Traceability.Infrastructure.Persistence;
 public sealed class InMemoryTraceRecordRepository : ITraceRecordRepository
 {
     private readonly ConcurrentDictionary<TraceRecordId, TraceRecord> _records = [];
-    private int _saveCount;
+    private int _addCount;
 
-    public int SaveCount => Volatile.Read(ref _saveCount);
+    public int AddCount => Volatile.Read(ref _addCount);
 
-    public ValueTask SaveAsync(TraceRecord traceRecord, CancellationToken cancellationToken = default)
+    public ValueTask<bool> TryAddAsync(TraceRecord traceRecord, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(traceRecord);
         cancellationToken.ThrowIfCancellationRequested();
 
-        _records[traceRecord.Id] = traceRecord;
-        Interlocked.Increment(ref _saveCount);
+        var added = _records.TryAdd(traceRecord.Id, traceRecord);
+        if (added)
+        {
+            Interlocked.Increment(ref _addCount);
+        }
 
-        return ValueTask.CompletedTask;
+        return ValueTask.FromResult(added);
     }
 
     public ValueTask<TraceRecord?> GetByIdAsync(
@@ -66,22 +69,43 @@ public sealed class InMemoryTraceRecordRepository : ITraceRecordRepository
 
     private static bool Matches(TraceRecord record, TraceRecordQuery query)
     {
-        return MatchesOptional(record.SerialNumber, query.SerialNumber)
+        return (query.ProductionRunId is null || record.ProductionRunId.Value == query.ProductionRunId)
+            && MatchesOptional(record.DutModelId, query.DutModelId)
+            && MatchesOptional(record.DutIdentityInputKey, query.DutIdentityInputKey)
+            && MatchesOptional(record.DutIdentityValue, query.DutIdentityValue)
             && MatchesOptional(record.BatchId, query.BatchId)
-            && MatchesOptional(record.StationId.Value, query.StationId)
             && MatchesOptional(record.FixtureId, query.FixtureId)
-            && MatchesOptional(record.ProcessDefinitionId.Value, query.ProcessDefinitionId)
-            && MatchesOptional(record.ProcessVersionId.Value, query.ProcessVersionId)
-            && MatchesOptional(record.ConfigurationSnapshotId.Value, query.ConfigurationSnapshotId)
-            && MatchesOptional(record.RecipeSnapshotId.Value, query.RecipeSnapshotId)
-            && MatchesOptional(record.DeviceId.Value, query.DeviceId)
+            && MatchesOptional(record.DeviceId, query.DeviceId)
+            && MatchesOptional(record.ActorId.Value, query.ActorId)
+            && MatchesOptional(record.RunStatus.ToString(), query.RunStatus)
             && MatchesOptional(record.Judgement.ToString(), query.Judgement)
             && MatchesOptional(record.ProjectId, query.ProjectId)
             && MatchesOptional(record.ApplicationId, query.ApplicationId)
             && MatchesOptional(record.ProjectSnapshotId, query.ProjectSnapshotId)
             && MatchesOptional(record.TopologyId, query.TopologyId)
+            && MatchesOptional(record.ProductionLineDefinitionId, query.ProductionLineDefinitionId)
+            && MatchesStage(record, query)
             && (query.CompletedFromUtc is null || record.CompletedAtUtc >= query.CompletedFromUtc)
             && (query.CompletedToUtc is null || record.CompletedAtUtc <= query.CompletedToUtc);
+    }
+
+    private static bool MatchesStage(TraceRecord record, TraceRecordQuery query)
+    {
+        var hasStageFilter = query.StageId is not null
+            || query.WorkstationId is not null
+            || query.StationId is not null
+            || query.ProcessDefinitionId is not null
+            || query.ProcessVersionId is not null
+            || query.ConfigurationSnapshotId is not null
+            || query.RecipeSnapshotId is not null;
+        return !hasStageFilter || record.Stages.Any(stage =>
+            MatchesOptional(stage.StageId, query.StageId)
+            && MatchesOptional(stage.WorkstationId, query.WorkstationId)
+            && MatchesOptional(stage.StationId.Value, query.StationId)
+            && MatchesOptional(stage.ProcessDefinitionId.Value, query.ProcessDefinitionId)
+            && MatchesOptional(stage.ProcessVersionId.Value, query.ProcessVersionId)
+            && MatchesOptional(stage.ConfigurationSnapshotId.Value, query.ConfigurationSnapshotId)
+            && MatchesOptional(stage.RecipeSnapshotId.Value, query.RecipeSnapshotId));
     }
 
     private static bool MatchesOptional(string? actual, string? expected)

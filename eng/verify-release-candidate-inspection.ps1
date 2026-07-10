@@ -61,6 +61,8 @@ function New-TestZip {
     )
 
     $zipPath = Join-Path $Root $Name
+    $zipDirectory = Split-Path $zipPath -Parent
+    New-Item -ItemType Directory -Path $zipDirectory -Force | Out-Null
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
@@ -126,7 +128,8 @@ function Write-TestProvenance {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Version,
-        [string] $RecordedVersion
+        [string] $RecordedVersion,
+        [string] $Mutation
     )
 
     $manifestPath = Join-Path $Root "release-manifest.json"
@@ -194,6 +197,31 @@ function Write-TestProvenance {
         artifacts = $artifacts
     }
 
+    switch ($Mutation) {
+        "property-case" {
+            $schemaVersion = $provenance["schemaVersion"]
+            $provenance.Remove("schemaVersion")
+            $provenance["SchemaVersion"] = $schemaVersion
+        }
+        "product-case" {
+            $provenance["product"] = "openlineops"
+        }
+        "release-path-backslash" {
+            $provenance["release"]["manifest"]["path"] = "metadata\release-manifest.json"
+        }
+        "artifact-sha-case" {
+            $artifacts[0]["sha256"] = $artifacts[0]["sha256"].ToUpperInvariant()
+        }
+        "unexpected-property" {
+            $provenance["manifestPath"] = "release-manifest.json"
+        }
+        "" {
+        }
+        default {
+            throw "Unsupported provenance mutation '$Mutation'."
+        }
+    }
+
     $provenancePath = Join-Path $Root "release-provenance.json"
     [System.IO.File]::WriteAllText(
         $provenancePath,
@@ -228,6 +256,50 @@ function Write-TestMetadataChecksums {
     [System.IO.File]::WriteAllText(
         (Join-Path $Root "release-metadata-checksums.sha256"),
         (($lines -join "`r`n") + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+function Set-TestMetadataChecksumMutation {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Mutation
+    )
+
+    $path = Join-Path $Root "release-metadata-checksums.sha256"
+    $lines = @(Get-Content -LiteralPath $path)
+    if ($lines.Count -eq 0) {
+        throw "Cannot mutate empty metadata checksums fixture: $path"
+    }
+
+    switch ($Mutation) {
+        "uppercase-hash" {
+            $lines[0] = $lines[0].Substring(0, 64).ToUpperInvariant() + $lines[0].Substring(64)
+        }
+        "path-case" {
+            $lines[0] = $lines[0].Substring(0, 66) + "Release-Manifest.json"
+        }
+        default {
+            throw "Unsupported metadata checksum mutation '$Mutation'."
+        }
+    }
+
+    [System.IO.File]::WriteAllText(
+        $path,
+        (($lines -join "`r`n") + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-DuplicateSchemaVersionProperty {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $json = [System.IO.File]::ReadAllText($Path)
+    if (-not $json.StartsWith("{", [System.StringComparison]::Ordinal)) {
+        throw "Cannot add a duplicate property to non-object JSON: $Path"
+    }
+
+    [System.IO.File]::WriteAllText(
+        $Path,
+        ('{"schemaVersion":1,' + $json.Substring(1)),
         [System.Text.UTF8Encoding]::new($false))
 }
 
@@ -286,7 +358,11 @@ function New-MinimalReleaseCandidate {
         [Parameter(Mandatory = $true)][string] $Name,
         [string[]] $ExtraSourceEntries = @(),
         [string] $ProvenanceVersion,
+        [string] $ProvenanceMutation,
         [string] $DependencyInventoryVersion,
+        [string] $MetadataChecksumMutation,
+        [switch] $BackslashDesktopEntry,
+        [switch] $WrongCaseDesktopEntry,
         [switch] $SkipDependencyInventory,
         [switch] $SkipMetadataChecksums,
         [switch] $TamperMetadataChecksums,
@@ -297,7 +373,7 @@ function New-MinimalReleaseCandidate {
     New-CleanDirectory $root
 
     $version = "0.0.0-$Name"
-    New-TestZip -Root $root -Name "source-openlineops-$version.zip" -Entries (@(
+    New-TestZip -Root $root -Name "source/source-openlineops-$version.zip" -Entries (@(
         "README.md",
         "THIRD-PARTY-NOTICES.md",
         "Directory.Build.props",
@@ -314,17 +390,25 @@ function New-MinimalReleaseCandidate {
         "eng/verify-open-source-metadata.ps1",
         "eng/verify-third-party-license-metadata.ps1"
     ) + $ExtraSourceEntries)
-    New-TestZip -Root $root -Name "api-openlineops-$version.zip" -Entries @("OpenLineOps.Api.dll")
-    New-TestZip -Root $root -Name "desktop-openlineops-$version.zip" -Entries @(
+    New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @("OpenLineOps.Api.dll")
+    $desktopEntries = @(
         "dist/index.html",
         "dist-electron/main/main.js",
         "dist-electron/preload/preload.js",
         "package/win-unpacked/OpenLineOps.exe",
         "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
         "package/win-unpacked/resources/app/package.json")
-    New-TestZip -Root $root -Name "plugin-host-openlineops-$version.zip" -Entries @("OpenLineOps.PluginHost.dll")
-    New-TestZip -Root $root -Name "script-worker-openlineops-$version.zip" -Entries @("OpenLineOps.ScriptWorker.dll")
-    New-TestZip -Root $root -Name "sample-plugin-loopback-device-$version.zip" -Entries @(
+    if ($BackslashDesktopEntry) {
+        $desktopEntries[0] = "dist\index.html"
+    }
+    if ($WrongCaseDesktopEntry) {
+        $desktopEntries[0] = "Dist/index.html"
+    }
+
+    New-TestZip -Root $root -Name "desktop/desktop-openlineops-$version.zip" -Entries $desktopEntries
+    New-TestZip -Root $root -Name "plugin-host/plugin-host-openlineops-$version.zip" -Entries @("OpenLineOps.PluginHost.dll")
+    New-TestZip -Root $root -Name "script-worker/script-worker-openlineops-$version.zip" -Entries @("OpenLineOps.ScriptWorker.dll")
+    New-TestZip -Root $root -Name "sample-plugin/sample-plugin-loopback-device-$version.zip" -Entries @(
         "manifest.json",
         "OpenLineOps.SamplePlugins.LoopbackDevice.dll")
 
@@ -334,11 +418,20 @@ function New-MinimalReleaseCandidate {
     }
 
     if (-not $SkipProvenance) {
-        Write-TestProvenance -Root $root -Version $version -RecordedVersion $ProvenanceVersion
+        Write-TestProvenance `
+            -Root $root `
+            -Version $version `
+            -RecordedVersion $ProvenanceVersion `
+            -Mutation $ProvenanceMutation
     }
 
     if (-not $SkipMetadataChecksums) {
         Write-TestMetadataChecksums -Root $root -Tamper:$TamperMetadataChecksums
+        if (-not [string]::IsNullOrWhiteSpace($MetadataChecksumMutation)) {
+            Set-TestMetadataChecksumMutation `
+                -Root $root `
+                -Mutation $MetadataChecksumMutation
+        }
     }
 
     return $root
@@ -444,6 +537,96 @@ Assert-InspectionFails `
     -Root $badMetadataChecksumsRoot `
     -Name "bad-metadata-checksums" `
     -ExpectedPattern "Metadata checksum for release-provenance\.json"
+
+$uppercaseMetadataHashRoot = New-MinimalReleaseCandidate `
+    -Name "uppercase-metadata-hash" `
+    -MetadataChecksumMutation "uppercase-hash"
+Assert-InspectionFails `
+    -Root $uppercaseMetadataHashRoot `
+    -Name "uppercase-metadata-hash" `
+    -ExpectedPattern "Invalid metadata checksum line"
+
+$metadataPathCaseRoot = New-MinimalReleaseCandidate `
+    -Name "metadata-path-case" `
+    -MetadataChecksumMutation "path-case"
+Assert-InspectionFails `
+    -Root $metadataPathCaseRoot `
+    -Name "metadata-path-case" `
+    -ExpectedPattern "Metadata checksums are missing release-manifest\.json"
+
+$provenancePropertyCaseRoot = New-MinimalReleaseCandidate `
+    -Name "provenance-property-case" `
+    -ProvenanceMutation "property-case"
+Assert-InspectionFails `
+    -Root $provenancePropertyCaseRoot `
+    -Name "provenance-property-case" `
+    -ExpectedPattern "missing exact property name\(s\): schemaVersion"
+
+$provenanceProductCaseRoot = New-MinimalReleaseCandidate `
+    -Name "provenance-product-case" `
+    -ProvenanceMutation "product-case"
+Assert-InspectionFails `
+    -Root $provenanceProductCaseRoot `
+    -Name "provenance-product-case" `
+    -ExpectedPattern "product must be exactly 'OpenLineOps'"
+
+$provenancePathAliasRoot = New-MinimalReleaseCandidate `
+    -Name "provenance-path-alias" `
+    -ProvenanceMutation "release-path-backslash"
+Assert-InspectionFails `
+    -Root $provenancePathAliasRoot `
+    -Name "provenance-path-alias" `
+    -ExpectedPattern "manifest path must be exactly 'release-manifest\.json'"
+
+$provenanceArtifactShaCaseRoot = New-MinimalReleaseCandidate `
+    -Name "provenance-artifact-sha-case" `
+    -ProvenanceMutation "artifact-sha-case"
+Assert-InspectionFails `
+    -Root $provenanceArtifactShaCaseRoot `
+    -Name "provenance-artifact-sha-case" `
+    -ExpectedPattern "mismatched sha256"
+
+$provenanceUnexpectedPropertyRoot = New-MinimalReleaseCandidate `
+    -Name "provenance-unexpected-property" `
+    -ProvenanceMutation "unexpected-property"
+Assert-InspectionFails `
+    -Root $provenanceUnexpectedPropertyRoot `
+    -Name "provenance-unexpected-property" `
+    -ExpectedPattern "unexpected or non-canonical property name\(s\): manifestPath"
+
+$duplicateProvenancePropertyRoot = New-MinimalReleaseCandidate `
+    -Name "duplicate-provenance-property"
+Add-DuplicateSchemaVersionProperty `
+    -Path (Join-Path $duplicateProvenancePropertyRoot "release-provenance.json")
+Assert-InspectionFails `
+    -Root $duplicateProvenancePropertyRoot `
+    -Name "duplicate-provenance-property" `
+    -ExpectedPattern "duplicate property 'schemaVersion'"
+
+$duplicateInventoryPropertyRoot = New-MinimalReleaseCandidate `
+    -Name "duplicate-inventory-property"
+Add-DuplicateSchemaVersionProperty `
+    -Path (Join-Path $duplicateInventoryPropertyRoot "release-dependency-inventory.json")
+Assert-InspectionFails `
+    -Root $duplicateInventoryPropertyRoot `
+    -Name "duplicate-inventory-property" `
+    -ExpectedPattern "duplicate property 'schemaVersion'"
+
+$backslashZipEntryRoot = New-MinimalReleaseCandidate `
+    -Name "backslash-zip-entry" `
+    -BackslashDesktopEntry
+Assert-InspectionFails `
+    -Root $backslashZipEntryRoot `
+    -Name "backslash-zip-entry" `
+    -ExpectedPattern "non-canonical backslash zip entry path"
+
+$wrongCaseZipEntryRoot = New-MinimalReleaseCandidate `
+    -Name "wrong-case-zip-entry" `
+    -WrongCaseDesktopEntry
+Assert-InspectionFails `
+    -Root $wrongCaseZipEntryRoot `
+    -Name "wrong-case-zip-entry" `
+    -ExpectedPattern "missing expected entry: dist/index\.html"
 
 Write-Host "Release candidate inspection verification passed."
 exit 0

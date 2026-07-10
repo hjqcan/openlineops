@@ -2,36 +2,23 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Discovery;
+using OpenLineOps.Plugins.Infrastructure.Serialization;
 
 namespace OpenLineOps.Plugins.Infrastructure.Discovery;
 
 public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNameCaseInsensitive = true,
-        Converters =
-        {
-            new JsonStringEnumConverter()
-        }
-    };
+    public const string ManifestFileName = "manifest.json";
 
     private readonly string _rootDirectory;
-    private readonly HashSet<string> _manifestFileNames;
 
-    public FileSystemPluginPackageCatalog(
-        string rootDirectory,
-        IEnumerable<string>? manifestFileNames = null)
+    public FileSystemPluginPackageCatalog(string rootDirectory)
     {
         _rootDirectory = string.IsNullOrWhiteSpace(rootDirectory)
             ? throw new ArgumentException("Plugin root directory is required.", nameof(rootDirectory))
             : Path.GetFullPath(rootDirectory);
-        _manifestFileNames = new HashSet<string>(
-            manifestFileNames ?? ["openlineops-plugin.json", "plugin.manifest.json", "plugin.json", "manifest.json"],
-            StringComparer.OrdinalIgnoreCase);
     }
 
     public async ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
@@ -50,7 +37,10 @@ public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
 
             await using var stream = File.OpenRead(manifestPath);
             var manifest = await JsonSerializer
-                .DeserializeAsync<PluginManifest>(stream, JsonOptions, cancellationToken)
+                .DeserializeAsync<PluginManifest>(
+                    stream,
+                    PluginJsonContracts.ManifestOptions,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             if (manifest is null)
@@ -58,10 +48,11 @@ public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
                 throw new InvalidDataException($"Plugin manifest '{manifestPath}' is empty or invalid.");
             }
 
+            var entryAssemblyRelativePath = PluginJsonContracts
+                .RequireCanonicalEntryAssembly(manifest.EntryAssembly);
             var packagePath = Path.GetDirectoryName(manifestPath) ?? _rootDirectory;
             var files = await InspectPackageAsync(packagePath, cancellationToken).ConfigureAwait(false);
             var manifestRelativePath = GetRelativePath(packagePath, manifestPath);
-            var entryAssemblyRelativePath = NormalizeRelativePath(manifest.EntryAssembly);
             var entryAssemblyPath = ResolveInsidePackage(packagePath, entryAssemblyRelativePath);
             var manifestFile = files.Single(file => string.Equals(
                 file.RelativePath,
@@ -93,7 +84,10 @@ public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
     {
         return Directory
             .EnumerateFiles(_rootDirectory, "*.json", SearchOption.AllDirectories)
-            .Where(path => _manifestFileNames.Contains(Path.GetFileName(path)))
+            .Where(path => string.Equals(
+                Path.GetFileName(path),
+                ManifestFileName,
+                StringComparison.Ordinal))
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal);
     }
@@ -177,16 +171,6 @@ public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
         }
 
         return relativePath;
-    }
-
-    private static string NormalizeRelativePath(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path))
-        {
-            return string.Empty;
-        }
-
-        return path.Replace('\\', '/').TrimStart('/');
     }
 
     private static string ResolveInsidePackage(string packagePath, string relativePath)

@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Commands;
 
@@ -6,6 +7,12 @@ public sealed record RuntimeCommandExecutionContext
 {
     public RuntimeCommandExecutionContext(
         RuntimeSessionId sessionId,
+        ProductionRunId productionRunId,
+        string productionLineDefinitionId,
+        string productionStageId,
+        int stageSequence,
+        string workstationId,
+        DutIdentity dutIdentity,
         StationId stationId,
         ConfigurationSnapshotId configurationSnapshotId,
         RuntimeStepId stepId,
@@ -25,6 +32,21 @@ public sealed record RuntimeCommandExecutionContext
         SessionId = sessionId.Value == Guid.Empty
             ? throw new ArgumentException("sessionId cannot be empty.", nameof(sessionId))
             : sessionId;
+        ProductionRunId = productionRunId.Value == Guid.Empty
+            ? throw new ArgumentException("productionRunId cannot be empty.", nameof(productionRunId))
+            : productionRunId;
+        ProductionLineDefinitionId = Required(
+            productionLineDefinitionId,
+            nameof(productionLineDefinitionId));
+        ProductionStageId = Required(productionStageId, nameof(productionStageId));
+        if (stageSequence <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stageSequence), "Stage sequence must be positive.");
+        }
+
+        StageSequence = stageSequence;
+        WorkstationId = Required(workstationId, nameof(workstationId));
+        DutIdentity = dutIdentity ?? throw new ArgumentNullException(nameof(dutIdentity));
         StationId = stationId ?? throw new ArgumentNullException(nameof(stationId));
         ConfigurationSnapshotId = configurationSnapshotId
             ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
@@ -48,6 +70,18 @@ public sealed record RuntimeCommandExecutionContext
     }
 
     public RuntimeSessionId SessionId { get; }
+
+    public ProductionRunId ProductionRunId { get; }
+
+    public string ProductionLineDefinitionId { get; }
+
+    public string ProductionStageId { get; }
+
+    public int StageSequence { get; }
+
+    public string WorkstationId { get; }
+
+    public DutIdentity DutIdentity { get; }
 
     public StationId StationId { get; }
 
@@ -82,7 +116,11 @@ public sealed record RuntimeCommandExecutionContext
     private static string Required(string value, string parameterName)
     {
         return string.IsNullOrWhiteSpace(value)
-            ? throw new ArgumentException($"{parameterName} cannot be empty.", parameterName)
-            : value.Trim();
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1])
+            ? throw new ArgumentException(
+                $"{parameterName} must be a non-empty canonical string.",
+                parameterName)
+            : value;
     }
 }

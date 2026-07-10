@@ -63,9 +63,15 @@ To verify an existing staged release without regenerating metadata, run:
 dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 ```
 
-Verify mode checks that each manifest artifact stays inside the artifact
-directory, exists on disk, has the recorded file name, inferred artifact kind,
-size, and SHA-256 hash, and matches the optional checksum file.
+Verify mode accepts one manifest representation only: `schemaVersion` is `1`,
+`product` is exactly `OpenLineOps`, `version` is canonical semantic-version
+text, `generatedAtUtc` is the canonical round-trip UTC value, and an
+optional `commit` is a lowercase 40- or 64-character Git object id. Property
+names are case-sensitive; duplicate and unknown properties are rejected.
+Each artifact must stay inside the artifact directory, use the exact on-disk
+path casing and portable path segments, avoid links or junctions, have the
+recorded file name, canonical top-level artifact kind, size, lowercase SHA-256
+hash, and an exact match in the optional checksum file.
 
 To inspect the full release candidate after staging, or after downloading the CI
 `openlineops-release-<run-number>` artifact, run:
@@ -94,15 +100,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-candidate
 
 ### Artifact Kind Requirements
 
-Release artifact kind is inferred from the top-level artifact directory or root file
-name prefix. Recommended release staging layout:
+Every release artifact must be stored under exactly one canonical top-level
+artifact-kind directory. The only accepted directory and manifest kind tokens are:
 
-- `api/` or `api-*.zip` for the API build output.
-- `desktop/` or `desktop-*.zip` for the Electron desktop package.
-- `plugin-host/` or `plugin-host-*.zip` for `OpenLineOps.PluginHost`.
-- `script-worker/` or `script-worker-*.zip` for `OpenLineOps.ScriptWorker`.
-- `sample-plugins/` or `sample-plugin-*.zip` for bundled sample plugins.
-- `source/` or `source-*.zip` for source archives.
+- `source/`
+- `api/`
+- `plugin-host/`
+- `script-worker/`
+- `sample-plugin/`
+- `desktop/`
+
+Tokens are case-sensitive. Aliases and root-file name prefixes are rejected. For
+example, place `api-openlineops-0.1.0.zip` at
+`api/api-openlineops-0.1.0.zip`; placing it at the artifact root does not assign
+the `api` kind.
 
 Use repeatable `--require-kind <kind>` arguments in release CI to fail fast when an
 expected package category is missing from the staged artifact directory.
@@ -167,16 +178,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.
 The script runs `dotnet publish` for the API, plugin host, script worker, and
 sample plugin; runs the desktop production build unless `-SkipDesktopBuild` is
 provided; creates a Windows unpacked Electron package under
-`apps/desktop/release/desktop/win-unpacked`; optionally signs that desktop
-package when `-SignDesktopPackage` and certificate selector arguments are
-provided; creates zip artifacts under `artifacts/release`; and generates
+`apps/desktop/release/desktop/win-unpacked` containing the IDE, a self-contained
+Windows API runtime, and the bundled sample plugin; optionally signs that
+desktop package when `-SignDesktopPackage` and certificate selector arguments
+are provided; creates zip artifacts under `artifacts/release`; and generates
 `release-manifest.json`, `checksums.sha256`, `release-notes.md`,
 `release-dependency-inventory.json`, `release-provenance.json`, and
 `release-metadata-checksums.sha256` with the required source and binary artifact
 kind gate enabled.
 
-By default, current desktop staging emits an unsigned `win-unpacked` development
-package plus `dist`, `dist-electron`, and desktop metadata for diagnostics.
+By default, current desktop staging emits an unsigned, directly runnable
+`win-unpacked` package plus `dist`, `dist-electron`, and desktop metadata for
+diagnostics. `OpenLineOps.exe` starts its bundled API automatically, stores
+mutable databases under the current user profile, and requires neither a source
+checkout nor a separately installed .NET runtime.
 Passing `-SignDesktopPackage` signs the unpacked package contents before archive
 and manifest generation when a real code-signing certificate is available. A
 signed installer or portable Electron package still remains required before a

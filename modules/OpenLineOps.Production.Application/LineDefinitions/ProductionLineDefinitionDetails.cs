@@ -35,6 +35,7 @@ public sealed record ProcessStageDetails(
     string DisplayName,
     string WorkstationId,
     string FlowDefinitionId,
+    string ConfigurationSnapshotId,
     string? ExternalTestProgramAdapterId,
     string? NextStageId);
 
@@ -49,8 +50,15 @@ public sealed record ExternalTestProgramAdapterDetails(
     IReadOnlyCollection<string> ArgumentTemplates,
     IReadOnlyCollection<ExternalTestProgramInputMappingDetails> InputMappings,
     IReadOnlyCollection<ExternalTestProgramResultMappingDetails> ResultMappings,
+    ExternalTestProgramOutcomeMappingDetails OutcomeMapping,
     long TimeoutMilliseconds);
 
 public sealed record ExternalTestProgramInputMappingDetails(string Source, string Target);
 
 public sealed record ExternalTestProgramResultMappingDetails(string SourcePath, string TargetKey);
+
+public sealed record ExternalTestProgramOutcomeMappingDetails(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);

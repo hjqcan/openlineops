@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,23 @@ import electronPath from 'electron';
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
 const repoRoot = path.resolve(desktopRoot, '..', '..');
+const packagedMode = process.argv.includes('--packaged');
+const packagedExecutable = path.join(
+  desktopRoot,
+  'release',
+  'desktop',
+  'win-unpacked',
+  'OpenLineOps.exe');
+const packagedScriptWorkerExecutable = path.join(
+  desktopRoot,
+  'release',
+  'desktop',
+  'win-unpacked',
+  'resources',
+  'app',
+  'runtime',
+  'script-worker',
+  'OpenLineOps.ScriptWorker.exe');
 const viteCliPath = path.join(desktopRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const smokeScreenshotDirectory = process.env.OPENLINEOPS_SMOKE_SCREENSHOT_DIR?.trim() ?? '';
 
@@ -21,37 +39,68 @@ let previewProcess;
 let electronProcess;
 let cdp;
 let activeProjectApplicationScope;
+const smokeProjectDirectories = [];
+let smokeUserDataDirectory;
 
 async function main() {
   assertNodeRuntime();
 
-  const previewPort = await getFreePort();
+  const previewPort = packagedMode ? null : await getFreePort();
   const apiPort = await getFreePort();
   const cdpPort = await getFreePort();
-  const previewUrl = `http://127.0.0.1:${previewPort}`;
+  const previewUrl = previewPort === null ? null : `http://127.0.0.1:${previewPort}`;
   const apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+  smokeUserDataDirectory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'openlineops-desktop-smoke-'));
 
-  previewProcess = spawnLogged(
-    process.execPath,
-    [viteCliPath, 'preview', '--host', '127.0.0.1', '--port', String(previewPort)],
-    { cwd: desktopRoot },
-    'vite');
+  if (previewUrl) {
+    previewProcess = spawnLogged(
+      process.execPath,
+      [viteCliPath, 'preview', '--host', '127.0.0.1', '--port', String(previewPort)],
+      { cwd: desktopRoot },
+      'vite');
 
-  await waitForHttp(previewUrl, 30000, 'Vite preview');
+    await waitForHttp(previewUrl, 30000, 'Vite preview');
+  } else {
+    const executableStat = await fs.stat(packagedExecutable).catch(() => null);
+    if (!executableStat?.isFile()) {
+      throw new Error(`Packaged OpenLineOps executable was not found: ${packagedExecutable}`);
+    }
+    const scriptWorkerStat = await fs.stat(packagedScriptWorkerExecutable).catch(() => null);
+    if (!scriptWorkerStat?.isFile()) {
+      throw new Error(
+        `Packaged process-isolated Python worker was not found: ${packagedScriptWorkerExecutable}`);
+    }
+  }
 
   electronProcess = spawnLogged(
-    electronPath,
-    [`--remote-debugging-port=${cdpPort}`, '--disable-gpu', desktopRoot],
+    packagedMode ? packagedExecutable : electronPath,
+    packagedMode
+      ? [
+          `--remote-debugging-port=${cdpPort}`,
+          '--disable-gpu',
+          `--user-data-dir=${smokeUserDataDirectory}`
+        ]
+      : [
+          `--remote-debugging-port=${cdpPort}`,
+          '--disable-gpu',
+          `--user-data-dir=${smokeUserDataDirectory}`,
+          desktopRoot
+        ],
     {
-      cwd: desktopRoot,
+      cwd: packagedMode ? path.dirname(packagedExecutable) : desktopRoot,
       env: {
         ...process.env,
         ASPNETCORE_ENVIRONMENT: 'Development',
         OPENLINEOPS_API_BASE_URL: apiBaseUrl,
         OPENLINEOPS_REPO_ROOT: repoRoot,
-        VITE_DEV_SERVER_URL: previewUrl,
-        OpenLineOps__Desktop__AllowedOrigins__0: previewUrl,
-        OpenLineOps__Desktop__AllowedOrigins__1: previewUrl.replace('127.0.0.1', 'localhost')
+        ...(previewUrl
+          ? {
+              VITE_DEV_SERVER_URL: previewUrl,
+              OpenLineOps__Desktop__AllowedOrigins__0: previewUrl,
+              OpenLineOps__Desktop__AllowedOrigins__1: previewUrl.replace('127.0.0.1', 'localhost')
+            }
+          : {})
       }
     },
     'electron');
@@ -71,14 +120,20 @@ async function main() {
     'automation IDE start center to render');
 
   await evaluate('window.__openlineopsSmokeEvents = {}');
-  await clickByTestId('start-backend');
+  const backendNeedsStart = await evaluate(
+    'Boolean(document.querySelector("[data-testid=\\"start-backend\\"]"))');
+  if (backendNeedsStart) {
+    await clickByTestId('start-backend');
+  }
   await waitForHealthyBackend();
+  await captureSmokeScreenshot('start-center.png');
 
   const smokeProjectPath = path.join(
     repoRoot,
     'artifacts',
     'desktop-smoke-projects',
     `project-${Date.now().toString(36)}`);
+  smokeProjectDirectories.push(smokeProjectPath);
   await waitForExpression(
     '(() => document.body.innerText.includes("Automation Projects")'
     + ' && Boolean(document.querySelector("[data-testid=\\"project-workspace-panel\\"]")))()',
@@ -111,7 +166,10 @@ async function main() {
   await assertProjectFileLayout(smokeProjectPath, 1);
   await clickByTestId('switch-project-workspace');
   await waitForExpression(
-    '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
+    '(() => {'
+    + ' const button = document.querySelector("[data-testid=\\"start-open-project-by-path\\"]");'
+    + ' return button instanceof HTMLButtonElement && button.disabled === false;'
+    + '})()',
     15000,
     'start center to render for project reopen');
   await clickByTestId('start-open-project-by-path');
@@ -245,6 +303,46 @@ async function main() {
     + ' && document.querySelector("[data-testid=\\"layout-geometry-x\\"]")?.value === "18")()',
     30000,
     'nested Slot local geometry to be edited and saved');
+  await clickByTestId('topology-dimension-3d');
+  await waitForExpression(
+    '(() => {'
+    + ' const viewport = document.querySelector("[data-testid=\\"topology-3d-viewport\\"]");'
+    + ' return viewport?.textContent?.includes("Station 01")'
+    + '   && viewport?.textContent?.includes("S1")'
+    + '   && Boolean(document.querySelector("[data-testid^=\\"topology-3d-element-\\"]"));'
+    + '})()',
+    30000,
+    'semantic 3D topology to project the persisted hierarchy');
+  await clickByTestId('topology-3d-rotate-right');
+  await clickByTestId('topology-3d-zoom-in');
+  const slot3DTestId = `topology-3d-element-${openedApplication.applicationId}.station.1.group.1.slot.1.shape`;
+  await dragElementByTestId(slot3DTestId, 24, 14);
+  await waitForExpression(
+    '(() => Number(document.querySelector("[data-testid=\\"layout-geometry-x\\"]")?.value) !== 18'
+    + ' && document.body.innerText.includes("Layout saved"))()',
+    30000,
+    '3D block drag to update the shared local geometry');
+  let edited3DGeometry = { x: Number.NaN, y: Number.NaN };
+  const geometryDeadline = Date.now() + 30000;
+  while (Date.now() < geometryDeadline) {
+    const persistedLayout = await apiRequest(
+      `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
+      + `/applications/${encodeURIComponent(openedApplication.applicationId)}`
+      + `/layouts/${encodeURIComponent(layoutId)}`);
+    const persistedSlot = persistedLayout.body?.elements?.find(
+      element => element.target?.targetId === `${openedApplication.applicationId}.station.1.group.1.slot.1`);
+    if (persistedLayout.status === 200 && persistedSlot?.x !== 18) {
+      edited3DGeometry = { x: persistedSlot.x, y: persistedSlot.y };
+      break;
+    }
+    await delay(200);
+  }
+  if (!Number.isFinite(edited3DGeometry.x)
+      || !Number.isFinite(edited3DGeometry.y)
+      || edited3DGeometry.x === 18) {
+    throw new Error(`3D drag did not produce persisted geometry: ${JSON.stringify(edited3DGeometry)}`);
+  }
+  await captureSmokeScreenshot('topology-3d-edit.png');
   await clickByTestId('nav-projects');
   await clickByTestId('switch-project-workspace');
   await waitForExpression(
@@ -274,8 +372,13 @@ async function main() {
     + `/layouts/${encodeURIComponent(layoutId)}`);
   const editedElement = layoutResponse.body?.elements?.find(
     element => element.target?.targetId === `${openedApplication.applicationId}.station.1.group.1.slot.1`);
-  if (layoutResponse.status !== 200 || editedElement?.x !== 18 || !editedElement?.parentElementId) {
-    throw new Error(`Edited layout geometry was not persisted: ${layoutResponse.text}`);
+  if (layoutResponse.status !== 200
+      || Math.abs(editedElement?.x - edited3DGeometry.x) > 0.01
+      || Math.abs(editedElement?.y - edited3DGeometry.y) > 0.01
+      || !editedElement?.parentElementId) {
+    throw new Error(
+      `Edited layout geometry was not persisted. Expected ${JSON.stringify(edited3DGeometry)}, `
+      + `actual ${JSON.stringify(editedElement)}: ${layoutResponse.text}`);
   }
   const topologyResponseAfterReopen = await apiRequest(topologyBasePath);
   const topologySystemIds = topologyResponseAfterReopen.body?.systems?.map(system => system.systemId) ?? [];
@@ -336,12 +439,41 @@ async function main() {
     + ' && Boolean(document.querySelector("[data-testid=\\"blockly-workspace\\"]")))()',
     15000,
     'process workbench to render');
+  await waitForExpression(
+    '(() => ['
+    + ' "apply-project-target-system-0",'
+    + ' "apply-project-target-capability-0",'
+    + ' "apply-project-target-driver-0",'
+    + ' "apply-project-target-slot-group-0",'
+    + ' "apply-project-target-slot-0",'
+    + ' "apply-project-target-dut-0"'
+    + '].every(testId => Boolean(document.querySelector(`[data-testid="${testId}"]`))))()',
+    15000,
+    'all six formal process target kinds to be available');
   await clickByTestId('insert-block-openlineops_move_axis');
   await waitForExpression(
     '(() => document.body.innerText.includes("Blockly block inserted Move Axis"))()',
     15000,
     'target-bound Move Axis block to insert into the Blockly node');
   await captureSmokeScreenshot('flow-designer.png');
+  await waitForExpression(
+    '(() => {'
+    + ' const workbench = document.querySelector(".process-workbench");'
+    + ' const host = document.querySelector("[data-testid=\\"blockly-workspace\\"]");'
+    + ' const block = Array.from(host?.querySelectorAll(".blocklyDraggable") ?? [])'
+    + '   .find(candidate => candidate.textContent?.toLowerCase().includes("move")'
+    + '     && candidate.textContent?.toLowerCase().includes("target"));'
+    + ' if (!workbench || !host || !block) return false;'
+    + ' const hostRect = host.getBoundingClientRect();'
+    + ' const blockRect = block.getBoundingClientRect();'
+    + ' return hostRect.height >= 340'
+    + '   && blockRect.width > 80 && blockRect.height > 20'
+    + '   && blockRect.bottom > Math.max(0, hostRect.top)'
+    + '   && blockRect.top < Math.min(hostRect.bottom, window.innerHeight)'
+    + '   && workbench.scrollWidth <= workbench.clientWidth + 1;'
+    + '})()',
+    15000,
+    'rendered Move Axis Blockly block to be visible in the first-screen editor');
   await clickByTestId('register-blockly-block');
   await waitForExpression(
     '(() => document.body.innerText.includes("Fixture Action")'
@@ -352,8 +484,7 @@ async function main() {
     'custom Blockly block to register from UI');
   await clickByTestId('register-blockly-block');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"block-version-history\\"]")?.textContent?.includes("v2")'
-    + ' && document.querySelector("[data-testid=\\"block-version-history\\"]")?.textContent?.includes("v1"))()',
+    '(() => document.querySelectorAll("[data-testid=\\"block-version-history\\"] .block-version-row").length === 2)()',
     30000,
     'custom Blockly block version history to load');
   await clickByTestId('restore-blockly-block-v1');
@@ -369,9 +500,19 @@ async function main() {
     'process graph command node to be added');
   await clickByTestId('apply-project-target-system-0');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Project target applied Station 01"))()',
+    `(() => document.body.innerText.includes("Project target applied Station 01")`
+    + ' && document.querySelector("[data-testid=\\"process-node-target-kind\\"]")?.value === "System"'
+    + ` && document.querySelector("[data-testid=\\"process-node-target-id\\"]")?.value === ${JSON.stringify(`${openedApplication.applicationId}.station.1`)}`
+    + ` && document.querySelector("[data-testid=\\"process-node-required-capability\\"]")?.value === ${JSON.stringify(capabilityId)})()`,
     15000,
     'project topology target to apply to the command node');
+  await clickByTestId('add-pythonscript-node');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"process-node-pythonscript-1\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"python-source-editor\\"]")))()',
+    15000,
+    'process-isolated Python node to be added');
+  await setInputByTestId('python-timeout-seconds', '60');
   await clickByTestId('add-decision-node');
   await waitForExpression(
     '(() => Boolean(document.querySelector("[data-testid=\\"process-node-decision-1\\"]")))()',
@@ -406,6 +547,19 @@ async function main() {
     || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.motion.axis.move')) {
     throw new Error(`Direct Blockly target binding was not persisted: ${JSON.stringify(savedBlocklyNode)}`);
   }
+  const savedCommandNode = savedDefinition.nodes
+    ?.find(node => node.nodeId === 'command-1' && node.kind === 'Command');
+  if (savedCommandNode?.targetKind !== 'System'
+    || savedCommandNode?.targetId !== `${openedApplication.applicationId}.station.1`
+    || savedCommandNode?.requiredCapability !== capabilityId
+    || savedCommandNode?.commandName !== 'MoveAxis') {
+    throw new Error(`Formal Command target binding was not persisted: ${JSON.stringify(savedCommandNode)}`);
+  }
+  const savedPythonNode = savedDefinition.nodes
+    ?.find(node => node.nodeId === 'pythonscript-1' && node.kind === 'PythonScript');
+  if (!savedPythonNode?.scriptSourceCode?.includes('manual Python action completed')) {
+    throw new Error(`Python source node was not persisted: ${JSON.stringify(savedPythonNode)}`);
+  }
   const countedTransition = savedDefinition.transitions
     ?.find(transition => transition.transitionId === 'decision-1-to-automation-retry');
   if (countedTransition?.loopPolicy !== 'Counted' || countedTransition?.maxTraversals !== 2) {
@@ -432,6 +586,7 @@ async function main() {
     30000,
     'direct Blockly process definition to publish');
   const publishedDefinition = await getPublishedDesktopProcessDefinition();
+  const configurationSnapshotId = await createPublishedEngineeringSnapshot(publishedDefinition);
   await clickByTestId('nav-production');
   await waitForExpression(
     '(() => document.body.innerText.includes("Line Designer")'
@@ -440,55 +595,42 @@ async function main() {
     30000,
     'production line designer to render');
   await clickByTestId('new-production-line');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="production-stage-configuration-0"]')?.value === ${JSON.stringify(configurationSnapshotId)})()`,
+    30000,
+    'production stage to bind its published Station and Flow configuration');
   await clickByTestId('save-production-line');
   await waitForExpression(
     '(() => document.body.innerText.includes("Production line saved line-"))()',
     30000,
     'DUT, workstation, and stage production line to save');
   await captureSmokeScreenshot('line-designer.png');
-  await assertProductionLinePersisted();
-  await clickByTestId('nav-processes');
+  const productionLineDefinitionId = await assertProductionLinePersisted();
   await waitForExpression(
-    '(() => Boolean(document.querySelector("[data-testid=\\"process-runtime-snapshot-id\\"]")))()',
+    '(() => document.querySelector("[data-testid=\\"publish-production-line-snapshot\\"]")?.disabled === false)()',
     30000,
-    'process runtime panel to restore after production line save');
-  await waitForExpression(
-    `(() => document.body.innerText.includes(${JSON.stringify(publishedDefinition.processDefinitionId)})`
-    + ' && document.querySelectorAll(".definition-row").length > 0)()',
-    30000,
-    'published process definition row to reload');
-  await clickByTestId(`process-definition-${publishedDefinition.processDefinitionId}`);
-  await waitForExpression(
-    `(() => document.querySelector("[data-testid=\\"runtime-selected-process\\"]")?.textContent?.trim()`
-    + ` === ${JSON.stringify(publishedDefinition.processDefinitionId)})()`,
-    30000,
-    'published process definition to reload after Line Designer');
-  const configurationSnapshotId = await createPublishedEngineeringSnapshot(publishedDefinition);
-  await setInputByTestId('process-runtime-snapshot-id', configurationSnapshotId);
-  await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"publish-project-snapshot\\"]")?.disabled === false)()',
-    30000,
-    'project snapshot publication prerequisites to reload');
-  await clickByTestId('publish-project-snapshot');
+    'saved production line to become publishable');
+  await clickByTestId('publish-production-line-snapshot');
   const projectSnapshotId = await waitForExpression(
     '(() => {'
-    + ' const result = document.querySelector("[data-testid=\\"project-snapshot-result\\"]");'
+    + ' const result = document.querySelector("[data-testid=\\"production-snapshot-result\\"]");'
     + ' const snapshotId = result?.querySelector("strong")?.textContent?.trim() ?? "";'
-    + ` return snapshotId.startsWith("project-snapshot-") && result?.textContent?.includes(${JSON.stringify(configurationSnapshotId)})`
+    + ` return snapshotId.startsWith("project-snapshot-") && result?.textContent?.includes(${JSON.stringify(productionLineDefinitionId)})`
     + '   ? snapshotId'
     + '   : "";'
     + '})()',
     45000,
-    'project snapshot to publish from process runtime panel');
+    'project snapshot to publish from the saved production line');
   const projectWithSnapshot = await getAutomationProjectByPath(smokeProjectPath);
   const publishedProjectSnapshot = projectWithSnapshot.snapshots
     ?.find(snapshot => snapshot.snapshotId === projectSnapshotId);
   if (projectWithSnapshot.activeSnapshotId !== projectSnapshotId || !publishedProjectSnapshot) {
     throw new Error(`Project snapshot was not activated: ${JSON.stringify(projectWithSnapshot)}`);
   }
-  if (publishedProjectSnapshot.processDefinitionId !== publishedDefinition.processDefinitionId
-    || publishedProjectSnapshot.processVersionId !== publishedDefinition.versionId
-    || publishedProjectSnapshot.configurationSnapshotId !== configurationSnapshotId
+  if (publishedProjectSnapshot.productionLineDefinitionId !== productionLineDefinitionId
+    || 'processDefinitionId' in publishedProjectSnapshot
+    || 'processVersionId' in publishedProjectSnapshot
+    || 'configurationSnapshotId' in publishedProjectSnapshot
     || !publishedProjectSnapshot.targetReferences?.some(target => target.targetId.includes('.station.1'))
     || !publishedProjectSnapshot.capabilityBindings?.some(binding => binding.providerKey === 'simulator.axis.x')
     || !publishedProjectSnapshot.blockVersionIds?.some(blockVersionId => blockVersionId.startsWith('openlineops_move_axis@'))) {
@@ -496,13 +638,33 @@ async function main() {
   }
   await clickByTestId('run-active-project');
   await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"production-run-dialog\\"]")?.open === true)()',
+    15000,
+    'Run Project identity dialog to render');
+  await setInputByTestId('production-run-dut-identity', `DUT-${openedProject.projectId}`);
+  await setInputByTestId('production-run-actor', 'desktop-smoke-operator');
+  await setInputByTestId('production-run-batch', `BATCH-${openedProject.projectId}`);
+  await setInputByTestId('production-run-fixture', 'fixture.desktop');
+  await setInputByTestId('production-run-device', 'device.desktop');
+  await clickByTestId('confirm-production-run');
+  await waitForExpression(
     `(() => {
       const events = window.__openlineopsSmokeEvents ?? {};
       const workbench = document.querySelector('[data-testid="topology-workbench"]');
-      return document.body.innerText.includes('Project run Completed')
+      const station = workbench?.querySelector('.station-system');
+      const childSystem = workbench?.querySelector('.system-system');
+      const group = workbench?.querySelector('.group-region');
+      const slot = workbench?.querySelector('.slot-shape');
+      return document.body.innerText.includes('Production run Completed')
         && workbench?.textContent?.includes('Live line overview')
         && workbench?.textContent?.includes('Station 01')
         && workbench?.textContent?.includes('Completed')
+        && workbench?.querySelector('[data-testid="topology-runtime-state-label"]')?.textContent?.includes('Last run completed')
+        && !workbench?.querySelector('[data-testid="topology-runtime-state-label"]')?.textContent?.includes('Project is running')
+        && station?.getAttribute('data-operational-state') === 'Completed'
+        && childSystem?.getAttribute('data-operational-state') === 'Idle'
+        && group?.getAttribute('data-operational-state') === 'Idle'
+        && slot?.getAttribute('data-operational-state') === 'Idle'
         && (events.RuntimeEvent ?? 0) > 0
         && (events.StationStatusChanged ?? 0) > 0
         && (events.TargetStatusChanged ?? 0) > 0;
@@ -510,22 +672,53 @@ async function main() {
     45000,
     'formal project snapshot runtime to open the topology Monitor view');
   await captureSmokeScreenshot('topology-monitor.png');
+  await clickByTestId('topology-dimension-3d');
+  await waitForExpression(
+    '(() => {'
+    + ' const systems = Array.from(document.querySelectorAll("[data-testid^=\\"topology-3d-element-\\"].system-shape"));'
+    + ' const station = systems.find(element => element.getAttribute("aria-label")?.startsWith("Station 01,"));'
+    + ' const childSystem = systems.find(element => element.getAttribute("aria-label")?.startsWith("System 1,"));'
+    + ' const viewport = document.querySelector("[data-testid=\\"topology-3d-viewport\\"]");'
+    + ' return viewport?.textContent?.includes("Station 01")'
+    + '   && station?.getAttribute("data-operational-state") === "Completed"'
+    + '   && childSystem?.getAttribute("data-operational-state") === "Idle";'
+    + '})()',
+    30000,
+    '3D monitor to project the exact station and target runtime states');
+  await captureSmokeScreenshot('topology-3d-monitor.png');
+
+  const traceRecordsAfterRuns = await expectApiStatus(
+    `/api/traceability/records?projectId=${encodeURIComponent(openedProject.projectId)}`,
+    {},
+    200,
+    'query trace records after the production run');
+  if (traceRecordsAfterRuns.body?.totalCount !== 1
+    || !traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
+    || traceRecordsAfterRuns.body?.items?.[0]?.traceRecordId
+      !== traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
+    || traceRecordsAfterRuns.body?.items?.[0]?.stageCount < 1) {
+    throw new Error(
+      `Expected one production run to create exactly one staged trace record: ${JSON.stringify(traceRecordsAfterRuns.body)}`);
+  }
 
   await clickByTestId('nav-trace');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Traceability Search")'
+    '(() => document.body.innerText.includes("Production Trace")'
     + ' && Boolean(document.querySelector("[data-testid=\\"trace-result-row\\"]")))()',
     30000,
-    'trace workbench to render formal project results');
+    'trace workbench to render production run results');
   await clickByTestId('trace-result-row');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("SN-")'
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("DUT-")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"trace-stage-card\\"]"))'
+    + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Commands")'
     + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Measurements"))()',
     30000,
-    'trace detail to load from the project run');
+    'trace detail to load nested production stage evidence');
+  await captureSmokeScreenshot('production-run-trace.png');
   await clickByTestId('trace-export-package');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.trace-package.v1"))()',
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.production-run-trace-package.v1"))()',
     30000,
     'trace export package to load');
 
@@ -577,7 +770,7 @@ async function main() {
     30000,
     'plugins to stop from UI');
 
-  console.log(`Electron smoke passed against ${apiBaseUrl}.`);
+  console.log(`${packagedMode ? 'Packaged ' : ''}Electron smoke passed against ${apiBaseUrl}.`);
 }
 
 async function waitForHealthyBackend() {
@@ -643,6 +836,51 @@ async function dragPaletteItemToCanvas(testId, xRatio, yRatio) {
     source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer, clientX, clientY }));
     return true;
   })()`);
+}
+
+async function dragElementByTestId(testId, deltaX, deltaY) {
+  const bounds = await evaluate(`(() => {
+    const element = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
+    if (!(element instanceof SVGGraphicsElement)) {
+      throw new Error('Missing SVG drag element: ${testId}');
+    }
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  })()`);
+  const startX = bounds.left + bounds.width / 2;
+  const startY = bounds.top + bounds.height / 2;
+  const endX = startX + deltaX;
+  const endY = startY + deltaY;
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: startX,
+    y: startY,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: startX + deltaX / 2,
+    y: startY + deltaY / 2,
+    button: 'left',
+    buttons: 1
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: endX,
+    y: endY,
+    button: 'left',
+    buttons: 1
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: endX,
+    y: endY,
+    button: 'left',
+    buttons: 0,
+    clickCount: 1
+  });
 }
 
 async function captureSmokeScreenshot(fileName) {
@@ -724,10 +962,13 @@ async function assertProductionLinePersisted() {
   const response = await apiRequest(
     `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
     + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/production-lines`);
-  if (response.status !== 200
-    || !response.body?.some(line => line.stageCount === 1 && line.dutModelCode === 'MAINBOARD-A')) {
+  const line = response.body?.find(
+    candidate => candidate.stageCount === 1 && candidate.dutModelCode === 'MAINBOARD-A');
+  if (response.status !== 200 || !line) {
     throw new Error(`Production line was not persisted: ${response.text}`);
   }
+
+  return line.lineDefinitionId;
 }
 
 async function getLatestDesktopProcessDefinition(predicate = () => true) {
@@ -806,6 +1047,7 @@ async function copyAndImportPortableApplication(sourceProjectPath, sourceProject
   }
 
   const targetProjectPath = `${sourceProjectPath}-portable-target`;
+  smokeProjectDirectories.push(targetProjectPath);
   const targetProjectId = `${sourceProject.projectId}-portable-target`;
   await expectApiStatus(
     '/api/automation-project-workspaces',
@@ -1148,7 +1390,8 @@ async function waitForCdpTarget(port, previewUrl, timeoutMs) {
   while (Date.now() < deadline) {
     try {
       const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
-      const target = targets.find(item => item.type === 'page' && item.url.startsWith(previewUrl));
+      const target = targets.find(item => item.type === 'page'
+        && (previewUrl ? item.url.startsWith(previewUrl) : item.url.startsWith('file:')));
       if (target?.webSocketDebuggerUrl) {
         return target;
       }
@@ -1290,6 +1533,22 @@ async function cleanup() {
 
   await stopChild(electronProcess);
   await stopChild(previewProcess);
+  for (const smokeProjectDirectory of new Set(smokeProjectDirectories)) {
+    await fs.rm(smokeProjectDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200
+    });
+  }
+  if (smokeUserDataDirectory) {
+    await fs.rm(smokeUserDataDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200
+    });
+  }
 }
 
 async function stopChild(child) {

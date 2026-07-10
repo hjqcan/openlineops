@@ -1,7 +1,5 @@
 export interface DesktopConfig {
   apiBaseUrl: string;
-  repoRoot: string;
-  apiProjectPath: string;
   logPath: string;
   isPackaged: boolean;
 }

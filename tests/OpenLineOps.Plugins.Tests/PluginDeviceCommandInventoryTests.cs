@@ -46,18 +46,44 @@ public sealed class PluginDeviceCommandInventoryTests
                 [Command("device.scanner:scan", "device.scanner", "Scan")]))),
             new PluginManifestValidator());
 
-        var command = await inventory.FindDeviceCommandAsync("device.scanner", "scan");
+        var command = await inventory.FindDeviceCommandAsync("device.scanner", "Scan");
 
         Assert.NotNull(command);
         Assert.Equal("device.scanner:scan", command.CommandDefinitionId);
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan "));
         Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "Calibrate"));
         Assert.Null(await inventory.FindDeviceCommandAsync("device.camera", "Scan"));
         Assert.Null(await inventory.FindDeviceCommandAsync(" ", "Scan"));
     }
 
+    [Fact]
+    public async Task InterfaceDefaultLookupRequiresExactCanonicalCommandIdentity()
+    {
+        IPluginDeviceCommandInventory inventory = new StaticDeviceCommandInventory(
+            new PluginDeviceCommandDescriptor(
+                "plugin.scanner",
+                "Scanner",
+                PluginKind.DeviceDriver,
+                "device.scanner:scan",
+                "device.scanner",
+                "Scan",
+                null,
+                null,
+                30000,
+                0));
+
+        Assert.NotNull(await inventory.FindDeviceCommandAsync("device.scanner", "Scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync("Device.Scanner", "Scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan "));
+    }
+
     private static PluginPackageDescriptor Package(PluginManifest manifest)
     {
-        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/openlineops-plugin.json");
+        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/manifest.json");
     }
 
     private static PluginManifest CreateManifest(
@@ -94,6 +120,16 @@ public sealed class PluginDeviceCommandInventoryTests
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
+        }
+    }
+
+    private sealed class StaticDeviceCommandInventory(
+        params PluginDeviceCommandDescriptor[] commands) : IPluginDeviceCommandInventory
+    {
+        public ValueTask<IReadOnlyCollection<PluginDeviceCommandDescriptor>> ListDeviceCommandsAsync(
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromResult<IReadOnlyCollection<PluginDeviceCommandDescriptor>>(commands);
         }
     }
 }

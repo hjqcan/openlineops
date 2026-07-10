@@ -203,9 +203,7 @@ public sealed class AutomationProjectService : IAutomationProjectService
                 new ProjectApplicationId(request.ApplicationId),
                 new AutomationTopologyId(request.TopologyId),
                 request.LayoutIds,
-                new ProcessDefinitionId(request.ProcessDefinitionId),
-                new ProcessVersionId(request.ProcessVersionId),
-                new ConfigurationSnapshotId(request.ConfigurationSnapshotId),
+                new ProductionLineDefinitionId(request.ProductionLineDefinitionId),
                 request.CapabilityBindings.Select(binding => new SnapshotCapabilityBinding(
                     binding.CapabilityId,
                     binding.BindingId,
@@ -315,19 +313,9 @@ public sealed class AutomationProjectService : IAutomationProjectService
                 "At least one LayoutId is required.");
         }
 
-        if (string.IsNullOrWhiteSpace(request.ProcessDefinitionId))
+        if (string.IsNullOrWhiteSpace(request.ProductionLineDefinitionId))
         {
-            return Required("Projects.ProcessDefinitionIdRequired", "ProcessDefinitionId");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.ProcessVersionId))
-        {
-            return Required("Projects.ProcessVersionIdRequired", "ProcessVersionId");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.ConfigurationSnapshotId))
-        {
-            return Required("Projects.ConfigurationSnapshotIdRequired", "ConfigurationSnapshotId");
+            return Required("Projects.ProductionLineDefinitionIdRequired", "ProductionLineDefinitionId");
         }
 
         if (request.CapabilityBindings is null)

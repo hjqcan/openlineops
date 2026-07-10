@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using OpenLineOps.Domain.Abstractions.EventBus;
-using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Infrastructure.Data.Core.Context;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
 using OpenLineOps.Operations.Domain.Aggregates;
@@ -9,14 +9,18 @@ namespace OpenLineOps.Operations.Infra.Data.Persistence;
 
 public sealed class OperationsDbContext(
     DbContextOptions<OperationsDbContext> options,
-    IDomainEventDispatcher? domainEventDispatcher = null,
+    IntegrationEventPublicationPolicy? integrationEventPublicationPolicy = null,
     IIntegrationEventPublisher? integrationEventPublisher = null,
-    IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null)
+    ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
+    IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null,
+    ILogger<BaseDbContext>? logger = null)
     : BaseDbContext(
         options,
-        domainEventDispatcher,
+        integrationEventPublicationPolicy,
         integrationEventPublisher: integrationEventPublisher,
-        integrationEventTransactionCoordinator: integrationEventTransactionCoordinator)
+        transactionalIntegrationEventPublisher: transactionalIntegrationEventPublisher,
+        integrationEventTransactionCoordinator: integrationEventTransactionCoordinator,
+        logger: logger)
 {
     private const string NpgsqlProviderName = "Npgsql.EntityFrameworkCore.PostgreSQL";
     private const string SqliteProviderName = "Microsoft.EntityFrameworkCore.Sqlite";
@@ -50,9 +54,16 @@ public sealed class OperationsDbContext(
 
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        return await SaveChangesAsync(acceptAllChangesOnSuccess: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    public override async Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
         await EnsureSchemaReadyAsync(cancellationToken).ConfigureAwait(false);
 
-        return await base.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken).ConfigureAwait(false);
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

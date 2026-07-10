@@ -1,6 +1,7 @@
 using System.Text.Json;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -32,15 +33,19 @@ public sealed class RuntimeFlowCommandExecutorTests
         Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
     }
 
-    [Fact]
-    public async Task ExecuteAsyncAcceptsLegacySnakeCaseDuration()
+    [Theory]
+    [InlineData("{\"duration_ms\":0}")]
+    [InlineData("{\"DURATION_MS\":0}")]
+    [InlineData("{\"durationMilliseconds\":\"0\"}")]
+    [InlineData("{\"durationMilliseconds\":0,\"extra\":true}")]
+    public async Task ExecuteAsyncRejectsNonCanonicalDurationPayload(string payload)
     {
         var executor = new RuntimeFlowCommandExecutor();
 
-        var result = await executor.ExecuteAsync(
-            CreateContext("{\"duration_ms\":0}", TimeSpan.FromSeconds(1)));
+        var result = await executor.ExecuteAsync(CreateContext(payload, TimeSpan.FromSeconds(1)));
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
+        Assert.False(string.IsNullOrWhiteSpace(result.Reason));
     }
 
     [Theory]
@@ -136,6 +141,12 @@ public sealed class RuntimeFlowCommandExecutorTests
     {
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
+            new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
+            "line.main",
+            "stage.main",
+            1,
+            "workstation.main",
+            new DutIdentity("dut.main", "serialNumber", "SN-001"),
             new StationId("station-a"),
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),

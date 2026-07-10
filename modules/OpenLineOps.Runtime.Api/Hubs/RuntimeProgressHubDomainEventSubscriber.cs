@@ -80,7 +80,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
         RuntimeSession session,
         CancellationToken cancellationToken)
     {
-        await _hubContext.Clients.All
+        await _hubContext.Clients.Group(ProductionRunGroup(session))
             .TargetStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -88,7 +88,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .TargetStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(StationSystemGroup(session))
             .TargetStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -99,11 +99,11 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
         RuntimeSession session,
         CancellationToken cancellationToken)
     {
-        await _hubContext.Clients.All
+        await _hubContext.Clients.Group(ProductionRunGroup(session))
             .StationStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(StationSystemGroup(session))
             .StationStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -114,7 +114,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
         RuntimeSession session,
         CancellationToken cancellationToken)
     {
-        await _hubContext.Clients.All
+        await _hubContext.Clients.Group(ProductionRunGroup(session))
             .RuntimeEvent(entry)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -122,7 +122,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .RuntimeEvent(entry)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(StationSystemGroup(session))
             .RuntimeEvent(entry)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -137,7 +137,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .AlarmRaised(alarm)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(StationSystemGroup(session))
             .AlarmRaised(alarm)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -152,6 +152,19 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             domainEvent.OccurredAtUtc,
             domainEvent.EventName,
             session.Id.Value,
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId.Value,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            new RuntimeDutIdentityResponse(
+                session.TraceMetadata.DutIdentity.ModelId,
+                session.TraceMetadata.DutIdentity.InputKey,
+                session.TraceMetadata.DutIdentity.Value),
             session.StationId.Value,
             "Unknown",
             null,
@@ -206,13 +219,25 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
     private static RuntimeStationStatusResponse ToStationStatus(RuntimeSession session)
     {
         return new RuntimeStationStatusResponse(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId.Value,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            new RuntimeDutIdentityResponse(
+                session.TraceMetadata.DutIdentity.ModelId,
+                session.TraceMetadata.DutIdentity.InputKey,
+                session.TraceMetadata.DutIdentity.Value),
             session.StationId.Value,
             session.Id.Value,
             session.ProcessDefinitionId.Value,
             session.ProcessVersionId.Value,
             session.ConfigurationSnapshotId.Value,
             session.RecipeSnapshotId.Value,
-            session.TraceMetadata.SerialNumber,
             session.TraceMetadata.BatchId,
             session.TraceMetadata.FixtureId,
             session.TraceMetadata.DeviceId,
@@ -224,6 +249,27 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             session.Incidents.Count,
             session.LastTransitionAtUtc,
             session.IsTerminal);
+    }
+
+    private static string StationSystemGroup(RuntimeSession session)
+    {
+        return RuntimeProgressHub.StationSystemGroup(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId.Value,
+            session.StationId.Value);
+    }
+
+    private static string ProductionRunGroup(RuntimeSession session)
+    {
+        return RuntimeProgressHub.ProductionRunGroup(
+            session.TraceMetadata.ProjectId,
+            session.TraceMetadata.ApplicationId,
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.TopologyId,
+            session.TraceMetadata.ProductionRunId.Value);
     }
 
     private static RuntimeTargetStatusResponse ToTargetStatus(

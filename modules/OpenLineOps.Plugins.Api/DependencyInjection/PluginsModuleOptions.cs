@@ -6,14 +6,6 @@ public sealed class PluginsModuleOptions
 
     public string PackageRoot { get; set; } = string.Empty;
 
-    public string[] ManifestFileNames { get; set; } =
-    [
-        "openlineops-plugin.json",
-        "plugin.manifest.json",
-        "plugin.json",
-        "manifest.json"
-    ];
-
     public string Activator { get; set; } = PluginActivators.ManifestOnly;
 
     public string EventLogProvider { get; set; } = PluginEventLogProviders.Sqlite;
@@ -64,12 +56,46 @@ public static class PluginActivators
     public const string ManifestOnly = "ManifestOnly";
     public const string AssemblyLoadContext = "AssemblyLoadContext";
     public const string ExternalProcess = "ExternalProcess";
+
+    public static PluginActivator Parse(string? value)
+    {
+        return value switch
+        {
+            ManifestOnly => PluginActivator.ManifestOnly,
+            AssemblyLoadContext => PluginActivator.AssemblyLoadContext,
+            ExternalProcess => PluginActivator.ExternalProcess,
+            _ => throw new InvalidOperationException(
+                $"Unsupported plugin activator '{value}'. Expected exactly '{ManifestOnly}', "
+                + $"'{AssemblyLoadContext}', or '{ExternalProcess}'.")
+        };
+    }
 }
 
 public static class PluginEventLogProviders
 {
     public const string Sqlite = "Sqlite";
-    public const string None = "None";
+
+    public static PluginEventLogProvider Parse(string? value)
+    {
+        return value switch
+        {
+            Sqlite => PluginEventLogProvider.Sqlite,
+            _ => throw new InvalidOperationException(
+                $"Unsupported plugin event-log provider '{value}'. Expected exactly '{Sqlite}'.")
+        };
+    }
+}
+
+public enum PluginActivator
+{
+    ManifestOnly,
+    AssemblyLoadContext,
+    ExternalProcess
+}
+
+public enum PluginEventLogProvider
+{
+    Sqlite
 }
 
 internal static class PluginPathDefaults

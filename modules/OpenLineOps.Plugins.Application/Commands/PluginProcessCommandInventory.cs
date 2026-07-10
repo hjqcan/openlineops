@@ -42,19 +42,17 @@ public sealed class PluginProcessCommandInventory : IPluginProcessCommandInvento
                     continue;
                 }
 
-                var capability = command.Capability.Trim();
-                var commandName = command.CommandName.Trim();
                 commands.TryAdd(
-                    CreateCommandKey(capability, commandName),
+                    CreateCommandKey(command.Capability, command.CommandName),
                     new PluginProcessCommandDescriptor(
                         package.Manifest.Id,
                         package.Manifest.Name,
                         package.Manifest.Kind,
-                        command.Id.Trim(),
-                        capability,
-                        commandName,
-                        TrimOptional(command.InputSchema),
-                        TrimOptional(command.OutputSchema),
+                        command.Id,
+                        command.Capability,
+                        command.CommandName,
+                        command.InputSchema,
+                        command.OutputSchema,
                         command.TimeoutMilliseconds,
                         command.MaxRetries,
                         package.RuntimeIdentity));
@@ -63,7 +61,7 @@ public sealed class PluginProcessCommandInventory : IPluginProcessCommandInvento
 
         return commands.Values
             .OrderBy(command => command.Capability, StringComparer.Ordinal)
-            .ThenBy(command => command.CommandName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(command => command.CommandName, StringComparer.Ordinal)
             .ThenBy(command => command.PluginId, StringComparer.Ordinal)
             .ToArray();
     }
@@ -81,8 +79,8 @@ public sealed class PluginProcessCommandInventory : IPluginProcessCommandInvento
         var commands = await ListProcessCommandsAsync(cancellationToken).ConfigureAwait(false);
 
         return commands.FirstOrDefault(candidate =>
-            string.Equals(candidate.Capability, capability.Trim(), StringComparison.Ordinal)
-            && string.Equals(candidate.CommandName, commandName.Trim(), StringComparison.OrdinalIgnoreCase));
+            string.Equals(candidate.Capability, capability, StringComparison.Ordinal)
+            && string.Equals(candidate.CommandName, commandName, StringComparison.Ordinal));
     }
 
     private static bool IsUsable(PluginProcessCommandDefinition command)
@@ -96,11 +94,6 @@ public sealed class PluginProcessCommandInventory : IPluginProcessCommandInvento
 
     private static string CreateCommandKey(string capability, string commandName)
     {
-        return $"{capability}\u001F{commandName.ToUpperInvariant()}";
-    }
-
-    private static string? TrimOptional(string? value)
-    {
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        return $"{capability}\u001F{commandName}";
     }
 }

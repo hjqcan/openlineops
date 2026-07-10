@@ -16,9 +16,11 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Api\OpenLineOps.Engineering.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Api\OpenLineOps.Plugins.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Api\OpenLineOps.Processes.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Production.Api\OpenLineOps.Production.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Api\OpenLineOps.Projects.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Api\OpenLineOps.Runtime.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Topology.Api\OpenLineOps.Topology.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Api\OpenLineOps.Traceability.Api.csproj" />
   </ItemGroup>
 
 </Project>

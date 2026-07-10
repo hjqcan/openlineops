@@ -8,7 +8,6 @@ public interface IProjectReleaseSourceResolver
     Task<Result<ProjectReleaseSourceMetadata>> ResolveAsync(
         ProjectApplicationWorkspaceScope scope,
         string topologyId,
-        string processDefinitionId,
-        string configurationSnapshotId,
+        string productionLineDefinitionId,
         CancellationToken cancellationToken = default);
 }

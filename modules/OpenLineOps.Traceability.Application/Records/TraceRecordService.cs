@@ -1,6 +1,8 @@
+using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Traceability.Application.Judgements;
 using OpenLineOps.Traceability.Application.Persistence;
 using OpenLineOps.Traceability.Application.Queries;
@@ -11,7 +13,7 @@ namespace OpenLineOps.Traceability.Application.Records;
 
 public sealed class TraceRecordService : ITraceRecordService
 {
-    private const string PackageFormatVersion = "openlineops.trace-package.v1";
+    private const string PackageFormatVersion = "openlineops.production-run-trace-package.v1";
 
     private readonly ITraceRecordRepository _repository;
     private readonly IClock _clock;
@@ -27,7 +29,7 @@ public sealed class TraceRecordService : ITraceRecordService
         _judgementGenerator = judgementGenerator;
     }
 
-    public async Task<Result<TraceRecordDetails>> CreateCompletedAsync(
+    public async Task<Result<TraceRecordDetails>> CreateAsync(
         CreateTraceRecordRequest request,
         CancellationToken cancellationToken = default)
     {
@@ -47,88 +49,61 @@ public sealed class TraceRecordService : ITraceRecordService
                 return Result.Failure<TraceRecordDetails>(judgement.Error);
             }
 
-            var traceRecordId = request.TraceRecordId is null
-                ? TraceRecordId.New()
-                : new TraceRecordId(request.TraceRecordId.Value);
-            var existing = await _repository
-                .GetByIdAsync(traceRecordId, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (existing is not null)
-            {
-                return Result.Failure<TraceRecordDetails>(ApplicationError.Conflict(
-                    "Traceability.RecordAlreadyExists",
-                    $"Trace record {traceRecordId} already exists."));
-            }
-
-            var traceRecord = TraceRecord.CreateCompleted(
-                traceRecordId,
-                new RuntimeSessionId(request.RuntimeSessionId),
-                request.SerialNumber!,
+            var runId = new ProductionRunId(request.ProductionRunId);
+            var traceRecord = TraceRecord.Create(
+                new TraceRecordId(runId.Value),
+                runId,
+                request.ProjectId!,
+                request.ApplicationId!,
+                request.ProjectSnapshotId!,
+                request.TopologyId!,
+                request.ProductionLineDefinitionId!,
+                request.DutModelId!,
+                request.DutIdentityInputKey!,
+                request.DutIdentityValue!,
                 request.BatchId,
-                new StationId(request.StationId!),
                 request.FixtureId,
-                new ProcessDefinitionId(request.ProcessDefinitionId!),
-                new ProcessVersionId(request.ProcessVersionId!),
-                new ConfigurationSnapshotId(request.ConfigurationSnapshotId!),
-                new RecipeSnapshotId(request.RecipeSnapshotId!),
-                new DeviceId(request.DeviceId!),
+                request.DeviceId,
+                new ActorId(request.ActorId!),
+                ParseEnum<TraceProductionRunStatus>(request.RunStatus!, "Traceability.InvalidRunStatus"),
                 judgement.Value,
+                request.CreatedAtUtc,
                 request.StartedAtUtc,
                 request.CompletedAtUtc,
-                new ActorId(request.RecordedBy!),
-                projectId: request.ProjectId,
-                applicationId: request.ApplicationId,
-                projectSnapshotId: request.ProjectSnapshotId,
-                topologyId: request.TopologyId);
+                request.FailureCode,
+                request.FailureReason,
+                request.Stages!.Select(ToStage),
+                (request.AuditEntries ?? []).Select(ToAuditEntry));
 
-            foreach (var measurementRequest in request.Measurements ?? [])
-            {
-                var result = traceRecord.AddMeasurement(ToMeasurement(measurementRequest));
-                if (!result.Succeeded)
-                {
-                    return Result.Failure<TraceRecordDetails>(
-                        ApplicationError.Validation(result.Code, result.Message));
-                }
-            }
-
-            foreach (var artifactRequest in request.Artifacts ?? [])
-            {
-                var result = traceRecord.AttachArtifact(ToArtifact(artifactRequest));
-                if (!result.Succeeded)
-                {
-                    return Result.Failure<TraceRecordDetails>(
-                        ApplicationError.Validation(result.Code, result.Message));
-                }
-            }
-
-            foreach (var auditEntryRequest in request.AuditEntries ?? [])
-            {
-                var result = traceRecord.RecordAudit(ToAuditEntry(auditEntryRequest));
-                if (!result.Succeeded)
-                {
-                    return Result.Failure<TraceRecordDetails>(
-                        ApplicationError.Validation(result.Code, result.Message));
-                }
-            }
-
-            await _repository
-                .SaveAsync(traceRecord, cancellationToken)
+            var added = await _repository
+                .TryAddAsync(traceRecord, cancellationToken)
                 .ConfigureAwait(false);
+            if (added)
+            {
+                return Result.Success(TraceRecordMapper.ToDetails(traceRecord));
+            }
 
-            return Result.Success(TraceRecordMapper.ToDetails(traceRecord));
+            var existing = await _repository
+                .GetByIdAsync(traceRecord.Id, cancellationToken)
+                .ConfigureAwait(false);
+            if (existing is null || !HasIdenticalEvidence(existing, traceRecord))
+            {
+                return Result.Failure<TraceRecordDetails>(ApplicationError.Conflict(
+                    "Traceability.RecordEvidenceConflict",
+                    $"Production run {runId} already has different immutable trace evidence."));
+            }
+
+            return Result.Failure<TraceRecordDetails>(ApplicationError.Conflict(
+                "Traceability.RecordAlreadyExists",
+                $"Trace record for production run {runId} already exists with identical evidence."));
         }
         catch (ArgumentOutOfRangeException exception)
         {
-            return Result.Failure<TraceRecordDetails>(ApplicationError.Validation(
-                "Traceability.InvalidRecordInput",
-                exception.Message));
+            return InvalidRecord(exception.Message);
         }
         catch (ArgumentException exception)
         {
-            return Result.Failure<TraceRecordDetails>(ApplicationError.Validation(
-                "Traceability.InvalidRecordInput",
-                exception.Message));
+            return InvalidRecord(exception.Message);
         }
     }
 
@@ -144,7 +119,6 @@ public sealed class TraceRecordService : ITraceRecordService
         var traceRecord = await _repository
             .GetByIdAsync(new TraceRecordId(traceRecordId), cancellationToken)
             .ConfigureAwait(false);
-
         return traceRecord is null
             ? Result.Failure<TraceRecordDetails>(NotFound(traceRecordId))
             : Result.Success(TraceRecordMapper.ToDetails(traceRecord));
@@ -156,24 +130,15 @@ public sealed class TraceRecordService : ITraceRecordService
     {
         ArgumentNullException.ThrowIfNull(query);
 
-        if (query.CompletedFromUtc is not null
-            && query.CompletedToUtc is not null
-            && query.CompletedToUtc < query.CompletedFromUtc)
+        var validationError = query.Validate();
+        if (validationError is not null)
         {
-            return Result.Failure<PagedResult<TraceRecordSummary>>(ApplicationError.Validation(
-                "Traceability.InvalidTimeRange",
-                "CompletedToUtc cannot be earlier than CompletedFromUtc."));
+            return Result.Failure<PagedResult<TraceRecordSummary>>(validationError);
         }
 
-        var result = await _repository
-            .QueryAsync(query, cancellationToken)
-            .ConfigureAwait(false);
-        var summaries = result.Items
-            .Select(TraceRecordMapper.ToSummary)
-            .ToArray();
-
+        var result = await _repository.QueryAsync(query, cancellationToken).ConfigureAwait(false);
         return Result.Success(new PagedResult<TraceRecordSummary>(
-            summaries,
+            result.Items.Select(TraceRecordMapper.ToSummary).ToArray(),
             result.PageNumber,
             result.PageSize,
             result.TotalCount));
@@ -184,7 +149,6 @@ public sealed class TraceRecordService : ITraceRecordService
         CancellationToken cancellationToken = default)
     {
         var details = await GetByIdAsync(traceRecordId, cancellationToken).ConfigureAwait(false);
-
         return details.IsFailure
             ? Result.Failure<TraceRecordExportPackage>(details.Error)
             : Result.Success(new TraceRecordExportPackage(
@@ -193,10 +157,63 @@ public sealed class TraceRecordService : ITraceRecordService
                 details.Value));
     }
 
+    private static TraceStageExecution ToStage(CreateTraceStageExecutionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return new TraceStageExecution(
+            request.StageId!,
+            request.Sequence,
+            request.WorkstationId!,
+            new StationId(request.StationId!),
+            new ProcessDefinitionId(request.ProcessDefinitionId!),
+            new ProcessVersionId(request.ProcessVersionId!),
+            new ConfigurationSnapshotId(request.ConfigurationSnapshotId!),
+            new RecipeSnapshotId(request.RecipeSnapshotId!),
+            request.RuntimeSessionId is null ? null : new RuntimeSessionId(request.RuntimeSessionId.Value),
+            request.RuntimeSessionStatus is null
+                ? null
+                : ParseEnum<TraceRuntimeSessionStatus>(
+                    request.RuntimeSessionStatus,
+                    "Traceability.InvalidRuntimeSessionStatus"),
+            ParseEnum<TraceStageStatus>(request.Status!, "Traceability.InvalidStageStatus"),
+            request.StartedAtUtc,
+            request.CompletedAtUtc,
+            request.FailureCode,
+            request.FailureReason,
+            request.CompletedStepCount,
+            request.CommandCount,
+            request.IncidentCount,
+            (request.Commands ?? []).Select(ToCommand),
+            (request.Measurements ?? []).Select(ToMeasurement),
+            (request.Artifacts ?? []).Select(ToArtifact),
+            (request.Incidents ?? []).Select(ToIncident));
+    }
+
+    private static TraceCommandRecord ToCommand(CreateTraceCommandRequest request)
+    {
+        return new TraceCommandRecord(
+            new RuntimeCommandId(request.RuntimeCommandId),
+            request.RuntimeStepId,
+            request.ActionId!,
+            ParseEnum<TraceTargetKind>(request.TargetKind!, "Traceability.InvalidTargetKind"),
+            request.TargetId!,
+            request.TargetCapabilityId!,
+            request.CommandName!,
+            ParseEnum<TraceCommandStatus>(request.Status!, "Traceability.InvalidCommandStatus"),
+            ParseOptionalEnum<TraceCommandSemanticOutcome>(
+                request.SemanticOutcome,
+                "Traceability.InvalidCommandSemanticOutcome"),
+            request.CreatedAtUtc,
+            request.DeadlineAtUtc,
+            request.AcceptedAtUtc,
+            request.StartedAtUtc,
+            request.CompletedAtUtc,
+            request.ResultPayload,
+            request.FailureReason);
+    }
+
     private static MeasurementRecord ToMeasurement(CreateMeasurementRecordRequest request)
     {
-        ValidateMeasurementRequest(request);
-
         return new MeasurementRecord(
             request.MeasurementRecordId is null
                 ? MeasurementRecordId.New()
@@ -205,18 +222,18 @@ public sealed class TraceRecordService : ITraceRecordService
             request.NumericValue,
             request.TextValue,
             request.Unit,
-            new DeviceId(request.DeviceId!),
-            request.RuntimeCommandId is null
-                ? null
-                : new RuntimeCommandId(request.RuntimeCommandId.Value),
+            request.DeviceId is null ? null : new DeviceId(request.DeviceId),
+            request.RuntimeCommandId is null ? null : new RuntimeCommandId(request.RuntimeCommandId.Value),
+            request.ActionId!,
+            ParseEnum<TraceTargetKind>(request.TargetKind!, "Traceability.InvalidTargetKind"),
+            request.TargetId!,
+            ParseEnum<TraceCommandStatus>(request.CommandStatus!, "Traceability.InvalidCommandStatus"),
             request.Passed,
             request.MeasuredAtUtc);
     }
 
     private static ArtifactRecord ToArtifact(CreateArtifactRecordRequest request)
     {
-        ValidateArtifactRequest(request);
-
         return new ArtifactRecord(
             request.ArtifactRecordId is null
                 ? ArtifactRecordId.New()
@@ -227,18 +244,26 @@ public sealed class TraceRecordService : ITraceRecordService
             request.MediaType,
             request.SizeBytes,
             request.Sha256,
-            new DeviceId(request.DeviceId!),
+            request.DeviceId is null ? null : new DeviceId(request.DeviceId),
             request.CapturedAtUtc);
+    }
+
+    private static TraceIncidentRecord ToIncident(CreateTraceIncidentRequest request)
+    {
+        return new TraceIncidentRecord(
+            request.RuntimeIncidentId,
+            ParseEnum<TraceIncidentSeverity>(
+                request.Severity!,
+                "Traceability.InvalidIncidentSeverity"),
+            request.Code!,
+            request.Message!,
+            request.OccurredAtUtc);
     }
 
     private static AuditEntry ToAuditEntry(CreateAuditEntryRequest request)
     {
-        ValidateAuditEntryRequest(request);
-
         return new AuditEntry(
-            request.AuditEntryId is null
-                ? AuditEntryId.New()
-                : new AuditEntryId(request.AuditEntryId.Value),
+            request.AuditEntryId is null ? AuditEntryId.New() : new AuditEntryId(request.AuditEntryId.Value),
             new ActorId(request.ActorId!),
             request.Action!,
             request.Detail,
@@ -247,158 +272,116 @@ public sealed class TraceRecordService : ITraceRecordService
 
     private static ApplicationError? ValidateCreateRequest(CreateTraceRecordRequest request)
     {
-        if (request.TraceRecordId == Guid.Empty)
+        if (request.ProductionRunId == Guid.Empty)
         {
             return ApplicationError.Validation(
-                "Traceability.TraceRecordIdInvalid",
-                "TraceRecordId cannot be an empty GUID.");
+                "Traceability.ProductionRunIdRequired",
+                "ProductionRunId is required.");
         }
 
-        if (request.RuntimeSessionId == Guid.Empty)
+        if (request.CreatedAtUtc == default || request.CompletedAtUtc == default)
         {
             return ApplicationError.Validation(
-                "Traceability.RuntimeSessionIdRequired",
-                "RuntimeSessionId is required.");
+                "Traceability.RunTimestampsRequired",
+                "CreatedAtUtc and CompletedAtUtc are required.");
         }
 
-        if (request.StartedAtUtc == default)
+        if (request.StartedAtUtc < request.CreatedAtUtc
+            || request.CompletedAtUtc < (request.StartedAtUtc ?? request.CreatedAtUtc))
         {
             return ApplicationError.Validation(
-                "Traceability.StartedAtRequired",
-                "StartedAtUtc is required.");
+                "Traceability.InvalidRunTimeRange",
+                "Production run timestamps must be chronological.");
         }
 
-        if (request.CompletedAtUtc == default)
+        var requiredError = RequiredCanonical(request.ProjectId, "ProjectId")
+            ?? RequiredCanonical(request.ApplicationId, "ApplicationId")
+            ?? RequiredCanonical(request.ProjectSnapshotId, "ProjectSnapshotId")
+            ?? RequiredCanonical(request.TopologyId, "TopologyId")
+            ?? RequiredCanonical(request.ProductionLineDefinitionId, "ProductionLineDefinitionId")
+            ?? RequiredCanonical(request.DutModelId, "DutModelId")
+            ?? RequiredCanonical(request.DutIdentityInputKey, "DutIdentityInputKey")
+            ?? RequiredCanonical(request.DutIdentityValue, "DutIdentityValue")
+            ?? RequiredCanonical(request.ActorId, "ActorId")
+            ?? RequiredCanonical(request.RunStatus, "RunStatus")
+            ?? OptionalCanonical(request.BatchId, "BatchId")
+            ?? OptionalCanonical(request.FixtureId, "FixtureId")
+            ?? OptionalCanonical(request.DeviceId, "DeviceId")
+            ?? OptionalCanonical(request.FailureCode, "FailureCode")
+            ?? OptionalCanonical(request.FailureReason, "FailureReason");
+        if (requiredError is not null)
+        {
+            return requiredError;
+        }
+
+        if (request.Stages is null || request.Stages.Count == 0)
         {
             return ApplicationError.Validation(
-                "Traceability.CompletedAtRequired",
-                "CompletedAtUtc is required.");
+                "Traceability.StagesRequired",
+                "A production run trace must contain at least one stage.");
         }
 
-        if (request.CompletedAtUtc < request.StartedAtUtc)
-        {
-            return ApplicationError.Validation(
-                "Traceability.CompletedBeforeStarted",
-                "CompletedAtUtc cannot be earlier than StartedAtUtc.");
-        }
-
-        return RequiredError(request.SerialNumber, "SerialNumber")
-            ?? RequiredError(request.StationId, "StationId")
-            ?? RequiredError(request.ProcessDefinitionId, "ProcessDefinitionId")
-            ?? RequiredError(request.ProcessVersionId, "ProcessVersionId")
-            ?? RequiredError(request.ConfigurationSnapshotId, "ConfigurationSnapshotId")
-            ?? RequiredError(request.RecipeSnapshotId, "RecipeSnapshotId")
-            ?? RequiredError(request.DeviceId, "DeviceId")
-            ?? RequiredError(request.RecordedBy, "RecordedBy");
+        return null;
     }
 
-    private static void ValidateMeasurementRequest(CreateMeasurementRecordRequest request)
+    private static ApplicationError? RequiredCanonical(string? value, string fieldName)
     {
-        if (request.MeasurementRecordId == Guid.Empty)
-        {
-            throw new ArgumentException("MeasurementRecordId cannot be an empty GUID.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Name))
-        {
-            throw new ArgumentException("Measurement name is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.DeviceId))
-        {
-            throw new ArgumentException("Measurement device id is required.");
-        }
-
-        if (request.NumericValue is null && string.IsNullOrWhiteSpace(request.TextValue))
-        {
-            throw new ArgumentException("Measurement must include a numeric or text value.");
-        }
-
-        if (request.RuntimeCommandId == Guid.Empty)
-        {
-            throw new ArgumentException("RuntimeCommandId cannot be an empty GUID.");
-        }
-
-        if (request.MeasuredAtUtc == default)
-        {
-            throw new ArgumentException("MeasuredAtUtc is required.");
-        }
+        return value is null || string.IsNullOrWhiteSpace(value)
+            ? ApplicationError.Validation($"Traceability.{fieldName}Required", $"{fieldName} is required.")
+            : !IsCanonical(value)
+                ? ApplicationError.Validation(
+                    $"Traceability.{fieldName}NotCanonical",
+                    $"{fieldName} must not contain leading or trailing whitespace.")
+                : null;
     }
 
-    private static void ValidateArtifactRequest(CreateArtifactRecordRequest request)
+    private static ApplicationError? OptionalCanonical(string? value, string fieldName)
     {
-        if (request.ArtifactRecordId == Guid.Empty)
-        {
-            throw new ArgumentException("ArtifactRecordId cannot be an empty GUID.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Name))
-        {
-            throw new ArgumentException("Artifact name is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Kind))
-        {
-            throw new ArgumentException("Artifact kind is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.StorageKey))
-        {
-            throw new ArgumentException("Artifact storage key is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.DeviceId))
-        {
-            throw new ArgumentException("Artifact device id is required.");
-        }
-
-        if (request.CapturedAtUtc == default)
-        {
-            throw new ArgumentException("CapturedAtUtc is required.");
-        }
+        return value is not null && !IsCanonical(value)
+            ? ApplicationError.Validation(
+                $"Traceability.{fieldName}NotCanonical",
+                $"{fieldName} must be null or a non-empty canonical string.")
+            : null;
     }
 
-    private static void ValidateAuditEntryRequest(CreateAuditEntryRequest request)
+    private static bool IsCanonical(string value)
     {
-        if (request.AuditEntryId == Guid.Empty)
-        {
-            throw new ArgumentException("AuditEntryId cannot be an empty GUID.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.ActorId))
-        {
-            throw new ArgumentException("Audit actor id is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Action))
-        {
-            throw new ArgumentException("Audit action is required.");
-        }
-
-        if (request.OccurredAtUtc == default)
-        {
-            throw new ArgumentException("OccurredAtUtc is required.");
-        }
+        return !string.IsNullOrWhiteSpace(value)
+            && !char.IsWhiteSpace(value[0])
+            && !char.IsWhiteSpace(value[^1]);
     }
 
     private static TEnum ParseEnum<TEnum>(string value, string errorCode)
-        where TEnum : struct
+        where TEnum : struct, Enum
     {
-        if (Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed))
+        if (CanonicalEnumToken.TryParse<TEnum>(value, out var parsed))
         {
             return parsed;
         }
 
-        throw new ArgumentException($"{errorCode}: '{value}' is not supported.");
+        throw new ArgumentException(
+            $"{errorCode}: '{value}' is not supported. Expected an exact, case-sensitive token: "
+            + CanonicalEnumToken.ExpectedTokens<TEnum>());
     }
 
-    private static ApplicationError? RequiredError(string? value, string fieldName)
+    private static TEnum? ParseOptionalEnum<TEnum>(string? value, string errorCode)
+        where TEnum : struct, Enum
     {
-        return string.IsNullOrWhiteSpace(value)
-            ? ApplicationError.Validation(
-                $"Traceability.{fieldName}Required",
-                $"{fieldName} is required.")
-            : null;
+        return value is null ? null : ParseEnum<TEnum>(value, errorCode);
+    }
+
+    private static Result<TraceRecordDetails> InvalidRecord(string message)
+    {
+        return Result.Failure<TraceRecordDetails>(ApplicationError.Validation(
+            "Traceability.InvalidRecordInput",
+            message));
+    }
+
+    private static bool HasIdenticalEvidence(TraceRecord left, TraceRecord right)
+    {
+        var leftJson = JsonSerializer.Serialize(TraceRecordMapper.ToDetails(left));
+        var rightJson = JsonSerializer.Serialize(TraceRecordMapper.ToDetails(right));
+        return string.Equals(leftJson, rightJson, StringComparison.Ordinal);
     }
 
     private static ApplicationError InvalidTraceRecordId()

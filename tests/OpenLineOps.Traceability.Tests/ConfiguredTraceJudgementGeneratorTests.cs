@@ -78,28 +78,84 @@ public sealed class ConfiguredTraceJudgementGeneratorTests
         Assert.Equal("Validation.Traceability.InvalidDefaultJudgement", result.Error.Code);
     }
 
+    [Fact]
+    public void GenerateRejectsCaseChangedJudgementToken()
+    {
+        var generator = new ConfiguredTraceJudgementGenerator(new TraceJudgementOptions());
+        var result = generator.Generate(CreateRequest(
+            judgement: "aborted",
+            measurements: [CreateMeasurement(passed: true)]));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Traceability.InvalidJudgement", result.Error.Code);
+        Assert.Contains("case-sensitive", result.Error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void GenerateRejectsExplicitBlankJudgement(string judgement)
+    {
+        var generator = new ConfiguredTraceJudgementGenerator(new TraceJudgementOptions());
+        var result = generator.Generate(CreateRequest(
+            judgement,
+            measurements: [CreateMeasurement(passed: true)]));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Traceability.InvalidJudgement", result.Error.Code);
+    }
+
     private static CreateTraceRecordRequest CreateRequest(
         string? judgement,
         IReadOnlyCollection<CreateMeasurementRecordRequest> measurements)
     {
         return new CreateTraceRecordRequest(
-            TraceRecordId: null,
-            RuntimeSessionId: Guid.NewGuid(),
-            SerialNumber: "SMX-JUDGEMENT",
+            ProductionRunId: Guid.NewGuid(),
+            ProjectId: "project-judgement",
+            ApplicationId: "application-judgement",
+            ProjectSnapshotId: "snapshot-judgement",
+            TopologyId: "topology-judgement",
+            ProductionLineDefinitionId: "line-judgement",
+            DutModelId: "dut-judgement",
+            DutIdentityInputKey: "serialNumber",
+            DutIdentityValue: "SMX-JUDGEMENT",
             BatchId: "batch-judgement",
-            StationId: "station-judgement",
             FixtureId: "fixture-judgement",
-            ProcessDefinitionId: "process-judgement",
-            ProcessVersionId: "process-judgement@1.0.0",
-            ConfigurationSnapshotId: "config-judgement",
-            RecipeSnapshotId: "recipe-judgement",
             DeviceId: "device-judgement",
+            ActorId: "operator-judgement",
+            RunStatus: "Completed",
             Judgement: judgement,
+            CreatedAtUtc: BaseTimeUtc,
             StartedAtUtc: BaseTimeUtc,
             CompletedAtUtc: BaseTimeUtc.AddMinutes(1),
-            RecordedBy: "operator-judgement",
-            Measurements: measurements,
-            Artifacts: [],
+            FailureCode: null,
+            FailureReason: null,
+            Stages:
+            [
+                new CreateTraceStageExecutionRequest(
+                    StageId: "stage-judgement",
+                    Sequence: 1,
+                    WorkstationId: "workstation-judgement",
+                    StationId: "station-judgement",
+                    ProcessDefinitionId: "process-judgement",
+                    ProcessVersionId: "process-judgement@1.0.0",
+                    ConfigurationSnapshotId: "config-judgement",
+                    RecipeSnapshotId: "recipe-judgement",
+                    RuntimeSessionId: Guid.NewGuid(),
+                    RuntimeSessionStatus: "Completed",
+                    Status: "Completed",
+                    StartedAtUtc: BaseTimeUtc,
+                    CompletedAtUtc: BaseTimeUtc.AddMinutes(1),
+                    FailureCode: null,
+                    FailureReason: null,
+                    CompletedStepCount: 0,
+                    CommandCount: 0,
+                    IncidentCount: 0,
+                    Commands: [],
+                    Measurements: measurements,
+                    Artifacts: [],
+                    Incidents: [])
+            ],
             AuditEntries: []);
     }
 
@@ -113,6 +169,10 @@ public sealed class ConfiguredTraceJudgementGeneratorTests
             Unit: "V",
             DeviceId: "device-judgement",
             RuntimeCommandId: Guid.NewGuid(),
+            ActionId: "action.measure.voltage",
+            TargetKind: "System",
+            TargetId: "system.measurement",
+            CommandStatus: passed == false ? "Failed" : "Completed",
             Passed: passed,
             MeasuredAtUtc: BaseTimeUtc.AddSeconds(30));
     }

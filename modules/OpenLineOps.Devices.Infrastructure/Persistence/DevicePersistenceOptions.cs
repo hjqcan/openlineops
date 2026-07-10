@@ -4,7 +4,7 @@ public sealed class DevicePersistenceOptions
 {
     public const string SectionName = "OpenLineOps:Devices:Persistence";
 
-    public string Provider { get; set; } = DevicePersistenceProviders.EfSqlite;
+    public string Provider { get; set; } = DevicePersistenceProviders.Sqlite;
 
     public string? ConnectionString { get; set; }
 
@@ -22,5 +22,27 @@ public static class DevicePersistenceProviders
 {
     public const string InMemory = "InMemory";
     public const string Sqlite = "Sqlite";
-    public const string EfSqlite = "EfSqlite";
+
+    public static DevicePersistenceProvider Parse(string? provider)
+    {
+        if (string.Equals(provider, Sqlite, StringComparison.Ordinal))
+        {
+            return DevicePersistenceProvider.Sqlite;
+        }
+
+        if (string.Equals(provider, InMemory, StringComparison.Ordinal))
+        {
+            return DevicePersistenceProvider.InMemory;
+        }
+
+        throw new InvalidOperationException(
+            $"Unsupported device persistence provider '{provider}'. "
+            + $"Expected exactly '{Sqlite}' or '{InMemory}'.");
+    }
+}
+
+public enum DevicePersistenceProvider
+{
+    Sqlite,
+    InMemory
 }

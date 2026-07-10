@@ -42,6 +42,37 @@ public sealed record ExternalTestProgramResultMapping
     public string TargetKey { get; }
 }
 
+public sealed record ExternalTestProgramOutcomeMapping
+{
+    public ExternalTestProgramOutcomeMapping(
+        string sourcePath,
+        string passedToken,
+        string failedToken,
+        string abortedToken)
+    {
+        SourcePath = ProductionIdGuard.NotBlank(sourcePath, nameof(sourcePath));
+        PassedToken = ProductionIdGuard.NotBlank(passedToken, nameof(passedToken));
+        FailedToken = ProductionIdGuard.NotBlank(failedToken, nameof(failedToken));
+        AbortedToken = ProductionIdGuard.NotBlank(abortedToken, nameof(abortedToken));
+
+        if (PassedToken == FailedToken
+            || PassedToken == AbortedToken
+            || FailedToken == AbortedToken)
+        {
+            throw new ArgumentException(
+                "External test program outcome tokens must be pairwise distinct exact values.");
+        }
+    }
+
+    public string SourcePath { get; }
+
+    public string PassedToken { get; }
+
+    public string FailedToken { get; }
+
+    public string AbortedToken { get; }
+}
+
 public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapterId>
 {
     public const string InvocationPayloadAdapterIdProperty = "externalTestProgramAdapterId";
@@ -60,6 +91,7 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
         IEnumerable<string> argumentTemplates,
         IEnumerable<ExternalTestProgramInputMapping> inputMappings,
         IEnumerable<ExternalTestProgramResultMapping> resultMappings,
+        ExternalTestProgramOutcomeMapping outcomeMapping,
         TimeSpan timeout)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
     {
@@ -79,7 +111,9 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
         CapabilityId = ProductionIdGuard.NotBlank(capabilityId, nameof(capabilityId));
         CommandName = ProductionIdGuard.NotBlank(commandName, nameof(commandName));
         Executable = NormalizeExecutable(executable);
-        ProviderKey = string.IsNullOrWhiteSpace(providerKey) ? null : providerKey.Trim();
+        ProviderKey = providerKey is null
+            ? null
+            : ProductionIdGuard.NotBlank(providerKey, nameof(providerKey));
         if ((Executable is null) == (ProviderKey is null))
         {
             throw new ArgumentException(
@@ -107,6 +141,7 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
             .ThenBy(mapping => mapping.SourcePath, StringComparer.Ordinal)
             .ToList();
         EnsureMappingsAreValid(_inputMappings, _resultMappings);
+        OutcomeMapping = outcomeMapping ?? throw new ArgumentNullException(nameof(outcomeMapping));
         Timeout = timeout;
     }
 
@@ -130,6 +165,8 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
 
     public IReadOnlyCollection<ExternalTestProgramResultMapping> ResultMappings => _resultMappings.AsReadOnly();
 
+    public ExternalTestProgramOutcomeMapping OutcomeMapping { get; }
+
     public TimeSpan Timeout { get; }
 
     public static ExternalTestProgramAdapter Create(
@@ -142,6 +179,7 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
         IEnumerable<string> argumentTemplates,
         IEnumerable<ExternalTestProgramInputMapping> inputMappings,
         IEnumerable<ExternalTestProgramResultMapping> resultMappings,
+        ExternalTestProgramOutcomeMapping outcomeMapping,
         TimeSpan timeout)
     {
         ArgumentNullException.ThrowIfNull(argumentTemplates);
@@ -158,19 +196,22 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
             argumentTemplates,
             inputMappings,
             resultMappings,
+            outcomeMapping,
             timeout);
     }
 
     private static string? NormalizeExecutable(string? executable)
     {
-        if (string.IsNullOrWhiteSpace(executable))
+        if (executable is null)
         {
             return null;
         }
 
-        if (Path.IsPathRooted(executable)
+        if (string.IsNullOrWhiteSpace(executable)
+            || Path.IsPathRooted(executable)
             || executable.Contains('\\')
-            || !string.Equals(executable, executable.Trim(), StringComparison.Ordinal))
+            || char.IsWhiteSpace(executable[0])
+            || char.IsWhiteSpace(executable[^1]))
         {
             throw new ArgumentException(
                 "External test executable must be a canonical Application-relative path.",

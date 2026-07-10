@@ -54,9 +54,7 @@ public static class AutomationProjectMapper
             snapshot.ApplicationId.Value,
             snapshot.TopologyId.Value,
             snapshot.LayoutIds.Order(StringComparer.Ordinal).ToArray(),
-            snapshot.ProcessDefinitionId.Value,
-            snapshot.ProcessVersionId.Value,
-            snapshot.ConfigurationSnapshotId.Value,
+            snapshot.ProductionLineDefinitionId.Value,
             snapshot.PublishedAtUtc,
             snapshot.CapabilityBindings
                 .Select(ToDetails)

@@ -37,6 +37,7 @@ internal sealed record ProcessStageDocument(
     string DisplayName,
     string WorkstationId,
     string FlowDefinitionId,
+    string ConfigurationSnapshotId,
     string? ExternalTestProgramAdapterId);
 
 internal sealed record ExternalTestProgramAdapterDocument(
@@ -49,8 +50,15 @@ internal sealed record ExternalTestProgramAdapterDocument(
     string[] ArgumentTemplates,
     ExternalTestProgramInputMappingDocument[] InputMappings,
     ExternalTestProgramResultMappingDocument[] ResultMappings,
+    ExternalTestProgramOutcomeMappingDocument OutcomeMapping,
     long TimeoutMilliseconds);
 
 internal sealed record ExternalTestProgramInputMappingDocument(string Source, string Target);
 
 internal sealed record ExternalTestProgramResultMappingDocument(string SourcePath, string TargetKey);
+
+internal sealed record ExternalTestProgramOutcomeMappingDocument(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);

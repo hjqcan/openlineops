@@ -47,9 +47,9 @@ public static class DevicesModuleServiceCollectionExtensions
         services.TryAddSingleton<DeviceRuntimeCommandExecutor>();
         services.TryAddSingleton<RuntimeFlowCommandExecutor>();
         services.TryAddSingleton<PluginRuntimeCommandExecutor>();
-        services.TryAddSingleton<PythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
-        services.TryAddSingleton<IRuntimeScriptExecutor, ConfigurableRuntimeScriptExecutor>();
+        services.TryAddSingleton<IRuntimeScriptExecutor>(serviceProvider =>
+            serviceProvider.GetRequiredService<ProcessIsolatedPythonScriptRuntimeScriptExecutor>());
         services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ProjectReleaseRuntimeCommandExecutor>());
         services.AddScoped<IDeviceConfigurationService, DeviceConfigurationService>();
 
@@ -60,32 +60,21 @@ public static class DevicesModuleServiceCollectionExtensions
         IServiceCollection services,
         DevicePersistenceOptions persistenceOptions)
     {
-        if (IsEfSqlite(persistenceOptions.Provider))
+        switch (DevicePersistenceProviders.Parse(persistenceOptions.Provider))
         {
-            services.AddEfSqliteDevicePersistence(persistenceOptions.ResolveSqliteConnectionString());
-            services.AddHostedService<EfSqliteDevicesDatabaseMigrator>();
-        }
-        else if (IsSqlite(persistenceOptions.Provider))
-        {
-            services.AddSingleton<IDeviceDefinitionRepository>(_ =>
-                new SqliteDeviceDefinitionRepository(persistenceOptions.ResolveSqliteConnectionString()));
-            services.AddSingleton<IDeviceInstanceRepository>(_ =>
-                new SqliteDeviceInstanceRepository(persistenceOptions.ResolveSqliteConnectionString()));
-        }
-        else if (IsInMemory(persistenceOptions.Provider))
-        {
-            services.AddSingleton<InMemoryDeviceDefinitionRepository>();
-            services.AddSingleton<IDeviceDefinitionRepository>(serviceProvider =>
-                serviceProvider.GetRequiredService<InMemoryDeviceDefinitionRepository>());
+            case DevicePersistenceProvider.Sqlite:
+                services.AddEfSqliteDevicePersistence(persistenceOptions.ResolveSqliteConnectionString());
+                services.AddHostedService<EfSqliteDevicesDatabaseMigrator>();
+                break;
+            case DevicePersistenceProvider.InMemory:
+                services.AddSingleton<InMemoryDeviceDefinitionRepository>();
+                services.AddSingleton<IDeviceDefinitionRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryDeviceDefinitionRepository>());
 
-            services.AddSingleton<InMemoryDeviceInstanceRepository>();
-            services.AddSingleton<IDeviceInstanceRepository>(serviceProvider =>
-                serviceProvider.GetRequiredService<InMemoryDeviceInstanceRepository>());
-        }
-        else
-        {
-            throw new InvalidOperationException(
-                $"Unsupported device persistence provider '{persistenceOptions.Provider}'.");
+                services.AddSingleton<InMemoryDeviceInstanceRepository>();
+                services.AddSingleton<IDeviceInstanceRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryDeviceInstanceRepository>());
+                break;
         }
     }
 
@@ -95,7 +84,7 @@ public static class DevicesModuleServiceCollectionExtensions
 
         return new DevicePersistenceOptions
         {
-            Provider = section?["Provider"] ?? DevicePersistenceProviders.EfSqlite,
+            Provider = section?["Provider"] ?? DevicePersistenceProviders.Sqlite,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-devices.sqlite"
         };
@@ -104,10 +93,13 @@ public static class DevicesModuleServiceCollectionExtensions
     private static PythonScriptRuntimeOptions LoadPythonScriptRuntimeOptions(IConfiguration? configuration)
     {
         var section = configuration?.GetSection(PythonScriptRuntimeOptions.SectionName);
+        var executionMode = section?["ExecutionMode"]
+            ?? PythonScriptRuntimeExecutionModes.ProcessIsolated;
+        PythonScriptRuntimeExecutionModes.RequireCurrent(executionMode);
 
         return new PythonScriptRuntimeOptions
         {
-            ExecutionMode = section?["ExecutionMode"] ?? PythonScriptRuntimeExecutionModes.InProcessTrusted,
+            ExecutionMode = executionMode,
             WorkerFileName = section?["WorkerFileName"],
             WorkerArguments = section?["WorkerArguments"],
             WorkerWorkingDirectory = section?["WorkerWorkingDirectory"],
@@ -118,14 +110,23 @@ public static class DevicesModuleServiceCollectionExtensions
     private static PythonScriptWorkerSandboxOptions LoadPythonScriptWorkerSandboxOptions(
         IConfigurationSection? section)
     {
+        var isolationMode = section?["IsolationMode"]
+            ?? PythonScriptWorkerIsolationModes.ExternalProcess;
+        _ = PythonScriptWorkerIsolationModes.Parse(isolationMode);
         var options = new PythonScriptWorkerSandboxOptions
         {
-            RequireLeastPrivilegeExecution = TryReadBoolean(section?["RequireLeastPrivilegeExecution"], defaultValue: false),
-            IsolationMode = section?["IsolationMode"] ?? PythonScriptWorkerIsolationModes.ExternalProcess,
+            RequireLeastPrivilegeExecution = ReadOptionalBoolean(
+                section?["RequireLeastPrivilegeExecution"],
+                defaultValue: false,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:RequireLeastPrivilegeExecution"),
+            IsolationMode = isolationMode,
             LeastPrivilegeIdentity = section?["LeastPrivilegeIdentity"],
             LeastPrivilegeLauncherExecutable = section?["LeastPrivilegeLauncherExecutable"],
             LeastPrivilegeArgumentsTemplate = section?["LeastPrivilegeArgumentsTemplate"],
-            LeastPrivilegeNoInteractivePrompt = TryReadBoolean(section?["LeastPrivilegeNoInteractivePrompt"], defaultValue: true),
+            LeastPrivilegeNoInteractivePrompt = ReadOptionalBoolean(
+                section?["LeastPrivilegeNoInteractivePrompt"],
+                defaultValue: true,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:LeastPrivilegeNoInteractivePrompt"),
             ContainerImage = section?["ContainerImage"],
             ContainerRuntimeExecutable = section?["ContainerRuntimeExecutable"],
             ContainerMountSource = section?["ContainerMountSource"],
@@ -134,11 +135,26 @@ public static class DevicesModuleServiceCollectionExtensions
             ContainerExecutablePath = section?["ContainerExecutablePath"],
             ContainerArgumentsTemplate = section?["ContainerArgumentsTemplate"] ?? "{WorkerArguments}",
             ContainerNetwork = section?["ContainerNetwork"] ?? "none",
-            ContainerNoNewPrivileges = TryReadBoolean(section?["ContainerNoNewPrivileges"], defaultValue: true),
-            ContainerDropAllCapabilities = TryReadBoolean(section?["ContainerDropAllCapabilities"], defaultValue: true),
-            ContainerReadOnlyRootFilesystem = TryReadBoolean(section?["ContainerReadOnlyRootFilesystem"], defaultValue: true),
-            ContainerMountReadOnly = TryReadBoolean(section?["ContainerMountReadOnly"], defaultValue: true),
-            ContainerPidsLimit = TryReadInt(section?["ContainerPidsLimit"], defaultValue: 128)
+            ContainerNoNewPrivileges = ReadOptionalBoolean(
+                section?["ContainerNoNewPrivileges"],
+                defaultValue: true,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:ContainerNoNewPrivileges"),
+            ContainerDropAllCapabilities = ReadOptionalBoolean(
+                section?["ContainerDropAllCapabilities"],
+                defaultValue: true,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:ContainerDropAllCapabilities"),
+            ContainerReadOnlyRootFilesystem = ReadOptionalBoolean(
+                section?["ContainerReadOnlyRootFilesystem"],
+                defaultValue: true,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:ContainerReadOnlyRootFilesystem"),
+            ContainerMountReadOnly = ReadOptionalBoolean(
+                section?["ContainerMountReadOnly"],
+                defaultValue: true,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:ContainerMountReadOnly"),
+            ContainerPidsLimit = ReadOptionalInt(
+                section?["ContainerPidsLimit"],
+                defaultValue: 128,
+                $"{PythonScriptRuntimeOptions.SectionName}:Sandbox:ContainerPidsLimit")
         };
 
         foreach (var argument in section?.GetSection("AdditionalContainerRunArguments").Get<string[]>() ?? [])
@@ -152,35 +168,32 @@ public static class DevicesModuleServiceCollectionExtensions
         return options;
     }
 
-    private static bool IsSqlite(string provider)
+    private static bool ReadOptionalBoolean(string? value, bool defaultValue, string configurationPath)
     {
-        return string.Equals(provider, DevicePersistenceProviders.Sqlite, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "SQLite", StringComparison.OrdinalIgnoreCase);
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        return value switch
+        {
+            "true" => true,
+            "false" => false,
+            _ => throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must be exactly 'true' or 'false'.")
+        };
     }
 
-    private static bool IsEfSqlite(string provider)
+    private static int ReadOptionalInt(string? value, int defaultValue, string configurationPath)
     {
-        return string.Equals(provider, DevicePersistenceProviders.EfSqlite, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "EntityFrameworkSqlite", StringComparison.OrdinalIgnoreCase);
-    }
+        if (value is null)
+        {
+            return defaultValue;
+        }
 
-    private static bool IsInMemory(string provider)
-    {
-        return string.Equals(provider, DevicePersistenceProviders.InMemory, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Memory", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool TryReadBoolean(string? value, bool defaultValue)
-    {
-        return bool.TryParse(value, out var parsed)
-            ? parsed
-            : defaultValue;
-    }
-
-    private static int TryReadInt(string? value, int defaultValue)
-    {
         return int.TryParse(value, out var parsed)
             ? parsed
-            : defaultValue;
+            : throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must be an integer.");
     }
 }

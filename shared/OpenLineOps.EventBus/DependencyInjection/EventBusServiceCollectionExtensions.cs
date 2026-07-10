@@ -2,6 +2,7 @@ using DotNetCore.CAP;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using OpenLineOps.Domain.Abstractions.EventBus;
 using OpenLineOps.EventBus.Cap;
 using OpenLineOps.EventBus.Configuration;
@@ -20,15 +21,23 @@ public static class EventBusServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(configuration);
 
         var options = LoadOptions(configuration);
-        ValidateOptions(options, configuration);
+        var publicationMode = IntegrationEventPublicationModes.Parse(options.PublicationMode);
+        ValidateOptions(options, publicationMode, configuration);
         services.AddSingleton(options);
+        services.AddSingleton(new IntegrationEventPublicationPolicy(publicationMode));
         services.TryAddSingleton<IntegrationDtoConverterRegistry>();
-        services.TryAddScoped<IIntegrationEventPublisher, CapIntegrationEventPublisher>();
-        services.TryAddScoped<ITransactionalIntegrationEventPublisher, CapIntegrationEventPublisher>();
-        if (options.EnableEfCoreTransactionCoordinator)
+        services.TryAddScoped<CapIntegrationEventPublisher>();
+        services.TryAddScoped<IIntegrationEventPublisher>(serviceProvider =>
+            serviceProvider.GetRequiredService<CapIntegrationEventPublisher>());
+        services.TryAddScoped<ITransactionalIntegrationEventPublisher>(serviceProvider =>
+            serviceProvider.GetRequiredService<CapIntegrationEventPublisher>());
+        if (publicationMode == IntegrationEventPublicationMode.Transactional)
         {
             services.TryAddScoped<IIntegrationEventTransactionCoordinator, CapEfCoreIntegrationEventTransactionCoordinator>();
         }
+
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IHostedService, IntegrationEventPublicationStartupValidator>());
 
         services.AddCap(capOptions =>
         {
@@ -90,14 +99,15 @@ public static class EventBusServiceCollectionExtensions
 
     private static void ValidateOptions(
         OpenLineOpsEventBusOptions options,
+        IntegrationEventPublicationMode publicationMode,
         IConfiguration configuration)
     {
         if (options.UseInMemory)
         {
-            if (options.EnableEfCoreTransactionCoordinator)
+            if (publicationMode == IntegrationEventPublicationMode.Transactional)
             {
                 throw new InvalidOperationException(
-                    "OpenLineOps EventBus EF Core transaction coordination requires PostgreSQL CAP storage. Set OpenLineOps:EventBus:UseInMemory to false or disable OpenLineOps:EventBus:EnableEfCoreTransactionCoordinator.");
+                    "Transactional integration event publication requires PostgreSQL CAP storage. Set OpenLineOps:EventBus:UseInMemory to false or choose PublicationMode 'PostCommit'.");
             }
 
             return;

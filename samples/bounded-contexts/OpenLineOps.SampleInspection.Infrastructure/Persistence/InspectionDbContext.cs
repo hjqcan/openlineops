@@ -1,14 +1,11 @@
 using Microsoft.EntityFrameworkCore;
-using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Infrastructure.Data.Core.Context;
 using OpenLineOps.SampleInspection.Domain.Plans;
 
 namespace OpenLineOps.SampleInspection.Infrastructure.Persistence;
 
-public sealed class InspectionDbContext(
-    DbContextOptions<InspectionDbContext> options,
-    IDomainEventDispatcher? domainEventDispatcher = null)
-    : BaseDbContext(options, domainEventDispatcher)
+public sealed class InspectionDbContext(DbContextOptions<InspectionDbContext> options)
+    : BaseDbContext(options)
 {
     public DbSet<InspectionPlan> InspectionPlans => Set<InspectionPlan>();
 

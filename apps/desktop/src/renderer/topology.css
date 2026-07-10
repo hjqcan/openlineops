@@ -439,6 +439,304 @@
   pointer-events: none;
 }
 
+.topology-3d-viewport {
+  position: relative;
+  width: 100%;
+  min-width: 420px;
+  overflow: hidden;
+  border: 1px solid #536169;
+  border-radius: 3px;
+  background:
+    radial-gradient(circle at 48% 36%, rgb(82 114 123 / 22%), transparent 42%),
+    linear-gradient(180deg, #1d292f 0%, #11191d 100%);
+  box-shadow: 0 18px 46px rgb(0 0 0 / 34%);
+  isolation: isolate;
+  user-select: none;
+}
+
+.topology-3d-viewport::before,
+.topology-3d-viewport::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+
+.topology-3d-viewport::before {
+  inset: 0;
+  z-index: 0;
+  background:
+    linear-gradient(90deg, transparent 49.9%, rgb(137 171 180 / 5%) 50%, transparent 50.1%),
+    linear-gradient(transparent 49.9%, rgb(137 171 180 / 4%) 50%, transparent 50.1%);
+  background-size: 84px 84px;
+  mask-image: radial-gradient(circle at center, #000 22%, transparent 78%);
+}
+
+.topology-3d-viewport::after {
+  inset: 9px;
+  z-index: 5;
+  border: 1px solid rgb(161 188 195 / 10%);
+  box-shadow: inset 0 0 70px rgb(0 0 0 / 25%);
+}
+
+.topology-3d-atmosphere {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.topology-3d-atmosphere::before {
+  position: absolute;
+  top: 9%;
+  left: 12%;
+  width: 76%;
+  height: 54%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgb(72 151 153 / 9%), transparent 68%);
+  filter: blur(26px);
+  content: "";
+}
+
+.topology-3d-scene {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+.topology-3d-viewport.orbiting .topology-3d-scene { cursor: grabbing; }
+
+.topology-3d-floor {
+  stroke: #526970;
+  stroke-width: 1.4px;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-3d-grid {
+  pointer-events: none;
+}
+
+.topology-3d-grid line {
+  stroke: rgb(120 151 160 / 12%);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-3d-grid line.major {
+  stroke: rgb(133 173 181 / 25%);
+  stroke-width: 1.15px;
+}
+
+.topology-3d-prism {
+  --topology-3d-state: var(--topology-idle);
+  --topology-3d-top: #33505a;
+  --topology-3d-side: #22363e;
+  outline: none;
+  cursor: default;
+}
+
+.topology-3d-viewport.editable .topology-3d-prism { cursor: grab; }
+.topology-3d-viewport.editable .topology-3d-prism.dragging { cursor: grabbing; opacity: .82; }
+.topology-3d-prism.status-running { --topology-3d-state: var(--topology-running); }
+.topology-3d-prism.status-completed { --topology-3d-state: var(--topology-completed); }
+.topology-3d-prism.status-failed { --topology-3d-state: var(--topology-failed); }
+.topology-3d-prism.status-offline { --topology-3d-state: var(--topology-offline); opacity: .7; }
+
+.topology-3d-prism.system-shape:not(.station-system) {
+  --topology-3d-top: #365d70;
+  --topology-3d-side: #203e4c;
+}
+
+.topology-3d-prism.group-region {
+  --topology-3d-top: #66552f;
+  --topology-3d-side: #3e341e;
+}
+
+.topology-3d-prism.slot-shape {
+  --topology-3d-top: #356b4e;
+  --topology-3d-side: #214735;
+}
+
+.topology-3d-face {
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  transition: fill 120ms ease, opacity 120ms ease, stroke 120ms ease;
+}
+
+.topology-3d-face.top {
+  fill: var(--topology-3d-top);
+  stroke: var(--topology-3d-state);
+  stroke-width: 1.8px;
+}
+
+.topology-3d-face.side {
+  fill: var(--topology-3d-side);
+  stroke: rgb(5 12 15 / 46%);
+  stroke-width: 1px;
+}
+
+.topology-3d-face.side-north,
+.topology-3d-face.side-west { opacity: .68; }
+
+.topology-3d-face.side-south { filter: brightness(1.06); }
+.topology-3d-face.side-east { filter: brightness(.88); }
+
+.topology-3d-prism:hover .topology-3d-face.top,
+.topology-3d-prism:focus .topology-3d-face.top,
+.topology-3d-prism.selected .topology-3d-face.top {
+  stroke: #ff9b5f;
+  stroke-width: 3px;
+}
+
+.topology-3d-label {
+  pointer-events: none;
+}
+
+.topology-3d-label rect {
+  fill: rgb(18 28 33 / 92%);
+  stroke: rgb(144 170 176 / 32%);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-3d-label circle {
+  fill: var(--topology-3d-state);
+  stroke: rgb(255 255 255 / 28%);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-3d-label text {
+  fill: #e8f0f0;
+  font: 700 9px Bahnschrift, "Segoe UI", sans-serif;
+  letter-spacing: .015em;
+  dominant-baseline: middle;
+}
+
+.topology-3d-axis {
+  pointer-events: none;
+}
+
+.topology-3d-axis circle {
+  fill: rgb(18 28 33 / 78%);
+  stroke: rgb(145 171 179 / 18%);
+}
+
+.topology-3d-axis line {
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-3d-axis .x { stroke: #e06d46; }
+.topology-3d-axis .y { stroke: #5fa9c5; }
+.topology-3d-axis .z { stroke: #56b77b; }
+
+.topology-3d-axis text {
+  fill: #9fb1b7;
+  font: 700 8px "Cascadia Code", Consolas, monospace;
+}
+
+.topology-3d-camera-controls {
+  position: absolute;
+  top: 17px;
+  right: 17px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid rgb(127 154 162 / 26%);
+  border-radius: 4px;
+  background: rgb(17 26 31 / 88%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(7px);
+}
+
+.topology-3d-camera-readout {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 6px;
+  align-items: center;
+  min-width: 93px;
+  padding: 0 6px 0 3px;
+  color: #f08a51;
+}
+
+.topology-3d-camera-readout svg { grid-row: 1 / span 2; }
+.topology-3d-camera-readout strong { color: #dce7e9; font-size: 7px; letter-spacing: .12em; }
+.topology-3d-camera-readout small { color: #80949b; font: 7px "Cascadia Code", Consolas, monospace; }
+
+.topology-3d-camera-controls button {
+  display: grid;
+  place-items: center;
+  min-width: 27px;
+  height: 25px;
+  padding: 0 7px;
+  border: 1px solid #43545b;
+  border-radius: 3px;
+  background: #29363c;
+  color: #b7c5c9;
+  font: 700 8px Bahnschrift, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.topology-3d-camera-controls button:hover {
+  border-color: #e17a46;
+  background: #34444b;
+  color: #fff;
+}
+
+.topology-3d-coordinate-badge {
+  position: absolute;
+  right: 17px;
+  bottom: 16px;
+  z-index: 10;
+  display: grid;
+  justify-items: end;
+  padding: 7px 9px;
+  border-right: 2px solid #e17a46;
+  background: rgb(17 26 31 / 78%);
+  pointer-events: none;
+}
+
+.topology-3d-coordinate-badge span {
+  color: #e17a46;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .13em;
+}
+
+.topology-3d-coordinate-badge strong {
+  color: #dce7e9;
+  font: 9px "Cascadia Code", Consolas, monospace;
+}
+
+.topology-3d-coordinate-badge small {
+  color: #788b92;
+  font-size: 7px;
+}
+
+.topology-3d-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: #6f8f98;
+  text-align: center;
+  pointer-events: none;
+}
+
+.topology-3d-empty strong { color: #e1eaeb; font-size: 12px; }
+.topology-3d-empty span { color: #80949b; font-size: 8px; }
+
 .topology-canvas-empty,
 .topology-layout-empty {
   display: grid;
@@ -751,10 +1049,10 @@
   background: var(--topology-idle);
 }
 
-.status-running .topology-slot-face i { background: var(--topology-running); }
-.status-completed .topology-slot-face i { background: var(--topology-completed); }
-.status-failed .topology-slot-face i { background: var(--topology-failed); }
-.status-offline .topology-slot-face i { background: var(--topology-offline); }
+.topology-layout-element.slot-shape.status-running .topology-slot-face i { background: var(--topology-running); }
+.topology-layout-element.slot-shape.status-completed .topology-slot-face i { background: var(--topology-completed); }
+.topology-layout-element.slot-shape.status-failed .topology-slot-face i { background: var(--topology-failed); }
+.topology-layout-element.slot-shape.status-offline .topology-slot-face i { background: var(--topology-offline); }
 
 .topology-slot-face strong {
   overflow: hidden;

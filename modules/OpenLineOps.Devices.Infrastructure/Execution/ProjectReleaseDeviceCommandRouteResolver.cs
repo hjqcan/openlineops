@@ -1,7 +1,9 @@
+using System.Text.Json;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Engineering.Domain.Identifiers;
+using OpenLineOps.Engineering.Domain.Snapshots;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Domain.Identifiers;
@@ -44,24 +46,18 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
         var snapshot = project.Snapshots.SingleOrDefault(candidate =>
             string.Equals(candidate.Id.Value, request.ProjectSnapshotId, StringComparison.Ordinal)
             && string.Equals(candidate.ApplicationId.Value, request.ApplicationId, StringComparison.Ordinal));
-        if (snapshot is null)
-        {
-            return null;
-        }
-
         var application = project.Applications.SingleOrDefault(candidate =>
             string.Equals(candidate.Id.Value, request.ApplicationId, StringComparison.Ordinal));
-        if (application is null)
+        if (snapshot is null || application is null)
         {
             return null;
         }
 
         var scope = new ProjectApplicationWorkspaceScope(
             project.Id.Value,
-            request.ApplicationId,
+            application.Id.Value,
             project.ProjectPath,
             application.ProjectFilePath);
-
         OpenedProjectReleaseArtifact? release;
         try
         {
@@ -77,15 +73,52 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             return null;
         }
 
-        if (release is null
+        if (release is null)
+        {
+            return null;
+        }
+
+        var line = release.Metadata.ProductionLine;
+        if (!string.Equals(
+                line.LineDefinitionId,
+                request.ProductionLineDefinitionId,
+                StringComparison.Ordinal)
+            || !string.Equals(line.DutModel.DutModelId, request.DutModelId, StringComparison.Ordinal)
             || !string.Equals(
-                release.Metadata.ConfigurationSnapshotId,
-                request.ConfigurationSnapshotId,
+                line.DutModel.IdentityInputKey,
+                request.DutIdentityInputKey,
                 StringComparison.Ordinal))
         {
             return null;
         }
 
+        var stageMatches = (
+                from stage in line.Stages
+                join workstation in line.Workstations
+                    on stage.WorkstationId equals workstation.WorkstationId
+                where string.Equals(stage.StageId, request.ProductionStageId, StringComparison.Ordinal)
+                      && stage.Sequence == request.StageSequence
+                      && string.Equals(
+                          stage.WorkstationId,
+                          request.WorkstationId,
+                          StringComparison.Ordinal)
+                      && string.Equals(
+                          stage.ConfigurationSnapshotId,
+                          request.ConfigurationSnapshotId,
+                          StringComparison.Ordinal)
+                      && string.Equals(
+                          workstation.StationSystemId,
+                          request.StationId,
+                          StringComparison.Ordinal)
+                select new { Stage = stage, Workstation = workstation })
+            .Take(2)
+            .ToArray();
+        if (stageMatches.Length != 1)
+        {
+            return null;
+        }
+
+        var stageRoute = stageMatches[0];
         var targetMatches = release.Metadata.TargetReferences.Count(target =>
             string.Equals(target.Kind, request.TargetKind, StringComparison.Ordinal)
             && string.Equals(target.TargetId, request.TargetId, StringComparison.Ordinal));
@@ -99,7 +132,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             return null;
         }
 
-        var resolvedTopologyBindings = release.Metadata.CapabilityBindings
+        var topologyBindings = release.Metadata.CapabilityBindings
             .Where(binding => string.Equals(
                 binding.CapabilityId,
                 request.CapabilityId.Value,
@@ -108,13 +141,12 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
                     || string.Equals(binding.BindingId, request.TargetId, StringComparison.Ordinal)))
             .Take(2)
             .ToArray();
-        if (resolvedTopologyBindings.Length != 1)
+        if (topologyBindings.Length != 1)
         {
             return null;
         }
 
-        var topologyBinding = resolvedTopologyBindings[0];
-
+        var topologyBinding = topologyBindings[0];
         var releaseScope = new ProjectApplicationWorkspaceScope(
             release.ProjectId,
             release.ApplicationId,
@@ -124,7 +156,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             .ListProjectsAsync(releaseScope, cancellationToken)
             .ConfigureAwait(false);
         var configurationSnapshots = projects
-            .SelectMany(project => project.Snapshots)
+            .SelectMany(candidate => candidate.Snapshots)
             .Where(candidate => string.Equals(
                 candidate.Id.Value,
                 request.ConfigurationSnapshotId,
@@ -136,19 +168,211 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             return null;
         }
 
+        var configurationSnapshot = configurationSnapshots[0];
         var stationProfile = await _configurationRepository
             .GetByIdAsync(
                 releaseScope,
-                new StationProfileId(configurationSnapshots[0].StationProfileId.Value),
+                new StationProfileId(configurationSnapshot.StationProfileId.Value),
                 cancellationToken)
             .ConfigureAwait(false);
         if (stationProfile is null
-            || !string.Equals(stationProfile.StationSystemId, request.StationId, StringComparison.Ordinal)
-            || !string.Equals(release.Metadata.StationSystemId, request.StationId, StringComparison.Ordinal))
+            || !string.Equals(
+                stationProfile.StationSystemId,
+                stageRoute.Workstation.StationSystemId,
+                StringComparison.Ordinal))
         {
             return null;
         }
 
+        var adapterMarker = ReadExternalTestProgramAdapterId(request.InputPayload);
+        if (adapterMarker.IsInvalid)
+        {
+            return null;
+        }
+
+        if (adapterMarker.AdapterId is not null)
+        {
+            return ResolveExternalTestProgramRoute(
+                request,
+                release,
+                releaseScope,
+                configurationSnapshot,
+                stageRoute.Stage,
+                stageRoute.Workstation,
+                topologyBinding,
+                adapterMarker.AdapterId);
+        }
+
+        return ResolveProviderRoute(request, release, configurationSnapshot, topologyBinding);
+    }
+
+    private static ProjectReleaseExternalTestProgramCommandRoute? ResolveExternalTestProgramRoute(
+        DeviceCommandRouteRequest request,
+        OpenedProjectReleaseArtifact release,
+        ProjectApplicationWorkspaceScope releaseScope,
+        ConfigurationSnapshot configurationSnapshot,
+        ProjectReleaseProductionStage stage,
+        ProjectReleaseWorkstation workstation,
+        ProjectReleaseCapabilityBinding topologyBinding,
+        string requestedAdapterId)
+    {
+        if (!string.Equals(
+                stage.ExternalTestProgramAdapterId,
+                requestedAdapterId,
+                StringComparison.Ordinal)
+            || !string.Equals(request.TargetKind, "System", StringComparison.Ordinal)
+            || !string.Equals(
+                request.TargetId,
+                workstation.StationSystemId,
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var adapters = release.Metadata.ProductionLine.ExternalTestProgramAdapters
+            .Where(candidate => string.Equals(
+                candidate.AdapterId,
+                requestedAdapterId,
+                StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (adapters.Length != 1)
+        {
+            return null;
+        }
+
+        var adapter = adapters[0];
+        long requestTimeoutMilliseconds;
+        try
+        {
+            requestTimeoutMilliseconds = checked(
+                request.Timeout.Ticks / TimeSpan.TicksPerMillisecond);
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
+
+        if (!string.Equals(adapter.CapabilityId, request.CapabilityId.Value, StringComparison.Ordinal)
+            || !string.Equals(adapter.CommandName, request.CommandName, StringComparison.Ordinal)
+            || adapter.TimeoutMilliseconds != requestTimeoutMilliseconds)
+        {
+            return null;
+        }
+
+        ProjectReleaseRuntimeCommandRoute? providerRoute = null;
+        ProjectReleaseSourceFile? executableFile = null;
+        if (string.Equals(
+                adapter.LaunchKind,
+                ProjectReleaseExternalTestProgramLaunchKinds.ApplicationExecutable,
+                StringComparison.Ordinal))
+        {
+            if (adapter.Executable is null
+                || adapter.ProviderKey is not null
+                || !string.Equals(
+                    topologyBinding.ProviderKind,
+                    ProjectReleaseRuntimeProviderKinds.ExternalSystem,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    topologyBinding.ProviderKey,
+                    adapter.AdapterId,
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var applicationRelativePath = Path.GetRelativePath(
+                    release.SourceRootPath,
+                    releaseScope.ApplicationRootPath)
+                .Replace('\\', '/');
+            var executableRelativePath = $"{applicationRelativePath}/{adapter.Executable}";
+            var executableFiles = release.Files
+                .Where(file => string.Equals(
+                    file.RelativePath,
+                    executableRelativePath,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (executableFiles.Length != 1)
+            {
+                return null;
+            }
+
+            executableFile = executableFiles[0];
+        }
+        else if (string.Equals(
+                     adapter.LaunchKind,
+                     ProjectReleaseExternalTestProgramLaunchKinds.Provider,
+                     StringComparison.Ordinal))
+        {
+            if (adapter.Executable is not null
+                || adapter.ProviderKey is null
+                || !string.Equals(
+                    topologyBinding.ProviderKey,
+                    adapter.ProviderKey,
+                    StringComparison.Ordinal)
+                || topologyBinding.ProviderKind is not (
+                    ProjectReleaseRuntimeProviderKinds.ExternalSystem
+                    or ProjectReleaseRuntimeProviderKinds.ProcessCommandProvider
+                    or ProjectReleaseRuntimeProviderKinds.PluginCommand))
+            {
+                return null;
+            }
+
+            providerRoute = ResolveProviderRoute(
+                request,
+                release,
+                configurationSnapshot,
+                topologyBinding);
+            if (providerRoute is null)
+            {
+                return null;
+            }
+        }
+        else
+        {
+            return null;
+        }
+
+        return new ProjectReleaseExternalTestProgramCommandRoute(
+            topologyBinding.ProviderKind,
+            topologyBinding.ProviderKey,
+            new DeviceCapabilityId(adapter.CapabilityId),
+            adapter.AdapterId,
+            adapter.LaunchKind,
+            releaseScope.ApplicationRootPath,
+            release.Metadata.ProductionLine.DutModel.DutModelId,
+            release.Metadata.ProductionLine.DutModel.ModelCode,
+            release.Metadata.ProductionLine.DutModel.IdentityInputKey,
+            adapter.Executable,
+            executableFile?.SizeBytes,
+            executableFile?.Sha256,
+            adapter.ArgumentTemplates.ToArray(),
+            adapter.InputMappings
+                .Select(mapping => new ExternalTestProgramRouteInputMapping(
+                    mapping.Source,
+                    mapping.Target))
+                .ToArray(),
+            adapter.ResultMappings
+                .Select(mapping => new ExternalTestProgramRouteResultMapping(
+                    mapping.SourcePath,
+                    mapping.TargetKey))
+                .ToArray(),
+            new ExternalTestProgramRouteOutcomeMapping(
+                adapter.OutcomeMapping.SourcePath,
+                adapter.OutcomeMapping.PassedToken,
+                adapter.OutcomeMapping.FailedToken,
+                adapter.OutcomeMapping.AbortedToken),
+            adapter.TimeoutMilliseconds,
+            providerRoute);
+    }
+
+    private static ProjectReleaseRuntimeCommandRoute? ResolveProviderRoute(
+        DeviceCommandRouteRequest request,
+        OpenedProjectReleaseArtifact release,
+        ConfigurationSnapshot configurationSnapshot,
+        ProjectReleaseCapabilityBinding topologyBinding)
+    {
         if (string.Equals(
                 topologyBinding.ProviderKind,
                 ProjectReleaseRuntimeProviderKinds.ProcessCommandProvider,
@@ -159,7 +383,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
                 new DeviceCapabilityId(topologyBinding.CapabilityId));
         }
 
-        var deviceBindings = configurationSnapshots[0].DeviceBindings
+        var deviceBindings = configurationSnapshot.DeviceBindings
             .Where(binding => string.Equals(
                 binding.CapabilityId.Value,
                 request.CapabilityId.Value,
@@ -203,7 +427,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
                                       && string.Equals(
                                           command.CommandName,
                                           request.CommandName,
-                                          StringComparison.OrdinalIgnoreCase))
+                                          StringComparison.Ordinal))
                     .Select(command => new { Dependency = dependency, Command = command }))
                 .Take(2)
                 .ToArray();
@@ -255,8 +479,63 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             new DeviceCapabilityId(deviceBinding.CapabilityId.Value));
     }
 
+    private static ExternalTestProgramAdapterMarker ReadExternalTestProgramAdapterId(
+        string? inputPayload)
+    {
+        if (inputPayload is null)
+        {
+            return ExternalTestProgramAdapterMarker.None;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(inputPayload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return ExternalTestProgramAdapterMarker.None;
+            }
+
+            var properties = document.RootElement
+                .EnumerateObject()
+                .Where(property => string.Equals(
+                    property.Name,
+                    ProjectReleaseExternalTestProgramContract.AdapterIdProperty,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (properties.Length == 0)
+            {
+                return ExternalTestProgramAdapterMarker.None;
+            }
+
+            if (properties.Length != 1 || properties[0].Value.ValueKind != JsonValueKind.String)
+            {
+                return ExternalTestProgramAdapterMarker.Invalid;
+            }
+
+            var value = properties[0].Value.GetString();
+            return string.IsNullOrWhiteSpace(value)
+                   || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+                ? ExternalTestProgramAdapterMarker.Invalid
+                : new ExternalTestProgramAdapterMarker(value, IsInvalid: false);
+        }
+        catch (JsonException)
+        {
+            return ExternalTestProgramAdapterMarker.None;
+        }
+    }
+
     private static string NormalizeCommandName(string commandName)
     {
         return commandName.Replace(" ", "-", StringComparison.Ordinal);
+    }
+
+    private readonly record struct ExternalTestProgramAdapterMarker(
+        string? AdapterId,
+        bool IsInvalid)
+    {
+        public static ExternalTestProgramAdapterMarker None => new(null, IsInvalid: false);
+
+        public static ExternalTestProgramAdapterMarker Invalid => new(null, IsInvalid: true);
     }
 }

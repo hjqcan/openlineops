@@ -2,13 +2,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using OpenLineOps.Plugins.Application.Discovery;
+using OpenLineOps.Plugins.Infrastructure.Serialization;
 
 namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public sealed class ExternalPluginPackageTrustPolicy
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     private readonly ExternalPluginSandboxOptions _options;
 
     public ExternalPluginPackageTrustPolicy(ExternalPluginSandboxOptions? options = null)
@@ -43,7 +42,13 @@ public sealed class ExternalPluginPackageTrustPolicy
                 $"Plugin package '{package.Manifest.Id}' is not trusted because no entry assembly SHA-256 hash is configured.");
         }
 
-        if (!string.Equals(actualHash, NormalizeHash(expectedHash), StringComparison.OrdinalIgnoreCase))
+        if (!IsCanonicalSha256(expectedHash))
+        {
+            return ExternalPluginPackageTrustResult.Rejected(
+                $"Plugin package '{package.Manifest.Id}' configured SHA-256 must be exactly 64 lowercase hexadecimal characters.");
+        }
+
+        if (!string.Equals(actualHash, expectedHash, StringComparison.Ordinal))
         {
             return ExternalPluginPackageTrustResult.Rejected(
                 $"Plugin package '{package.Manifest.Id}' entry assembly hash does not match the configured trusted hash.");
@@ -81,7 +86,9 @@ public sealed class ExternalPluginPackageTrustPolicy
         try
         {
             var signatureJson = File.ReadAllText(signaturePath);
-            signature = JsonSerializer.Deserialize<ExternalPluginPackageSignature>(signatureJson, JsonOptions);
+            signature = JsonSerializer.Deserialize<ExternalPluginPackageSignature>(
+                signatureJson,
+                PluginJsonContracts.SignatureOptions);
         }
         catch (JsonException exception)
         {
@@ -110,7 +117,7 @@ public sealed class ExternalPluginPackageTrustPolicy
         if (!string.Equals(
                 signature.Algorithm,
                 ExternalPluginPackageSignatureAlgorithms.RsaSha256,
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.Ordinal))
         {
             return ExternalPluginPackageTrustResult.Rejected(
                 $"Plugin package '{package.Manifest.Id}' signature algorithm '{signature.Algorithm}' is not supported.");
@@ -207,15 +214,14 @@ public sealed class ExternalPluginPackageTrustPolicy
         using var stream = File.OpenRead(path);
         var hash = SHA256.HashData(stream);
 
-        return Convert.ToHexString(hash);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private static string NormalizeHash(string hash)
+    private static bool IsCanonicalSha256(string hash)
     {
-        return hash
-            .Replace(":", "", StringComparison.Ordinal)
-            .Replace("-", "", StringComparison.Ordinal)
-            .Trim();
+        return hash.Length == 64
+            && string.Equals(hash, hash.ToLowerInvariant(), StringComparison.Ordinal)
+            && hash.All(Uri.IsHexDigit);
     }
 }
 

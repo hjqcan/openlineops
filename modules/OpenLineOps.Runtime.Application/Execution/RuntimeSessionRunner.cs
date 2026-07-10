@@ -10,6 +10,7 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Sessions;
@@ -19,7 +20,7 @@ namespace OpenLineOps.Runtime.Application.Execution;
 
 public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 {
-    private static readonly StringComparer BranchLabelComparer = StringComparer.OrdinalIgnoreCase;
+    private static readonly StringComparer BranchLabelComparer = StringComparer.Ordinal;
     private readonly IRuntimeSessionRepository _sessionRepository;
     private readonly IRuntimeDomainEventPublisher _domainEventPublisher;
     private readonly IRuntimeCommandExecutor _commandExecutor;
@@ -50,8 +51,10 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return Result.Failure<RuntimeSessionRunResult>(validationError);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         var session = RuntimeSession.Create(
-            _idProvider.NewSessionId(),
+            request.SessionId,
             request.StationId,
             request.Process.ProcessDefinitionId,
             request.Process.ProcessVersionId,
@@ -60,7 +63,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             _clock.UtcNow,
             request.TraceMetadata);
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         var startResult = session.Start(_clock.UtcNow);
         if (!startResult.Succeeded)
@@ -68,7 +71,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToApplicationFailure(startResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return request.Process.UsesGraph
             ? await RunGraphAsync(session, request.Process, cancellationToken).ConfigureAwait(false)
@@ -234,7 +237,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToApplicationFailure(completeResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return Result.Success(CreateRunResult(session));
     }
@@ -244,6 +247,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         ExecutableRuntimeNode node,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var step = session.StartStep(
             _idProvider.NewStepId(),
             node.NodeId,
@@ -252,7 +256,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             node.ActionId,
             node.Target);
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         var command = session.CreateCommand(
             _idProvider.NewCommandId(),
@@ -274,10 +278,16 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(startResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         var executionContext = new RuntimeCommandExecutionContext(
             session.Id,
+            session.TraceMetadata.ProductionRunId,
+            session.TraceMetadata.ProductionLineDefinitionId,
+            session.TraceMetadata.ProductionStageId,
+            session.TraceMetadata.StageSequence,
+            session.TraceMetadata.WorkstationId,
+            session.TraceMetadata.DutIdentity,
             session.StationId,
             session.ConfigurationSnapshotId,
             step.Id,
@@ -306,6 +316,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 step.Id,
                 command.Id,
                 executionResult.Payload,
+                executionResult.SemanticOutcome,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Failed => await FailNodeAsync(
                 session,
@@ -313,6 +324,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 command.Id,
                 "Runtime.CommandFailed",
                 executionResult.Reason ?? "Command failed.",
+                executionResult.Payload,
+                executionResult.SemanticOutcome,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Rejected => await RejectNodeAsync(
                 session,
@@ -331,6 +344,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 step.Id,
                 command.Id,
                 executionResult.Reason ?? "Command canceled.",
+                executionResult.Payload,
+                executionResult.SemanticOutcome,
                 cancellationToken.IsCancellationRequested
                     ? CancellationToken.None
                     : cancellationToken).ConfigureAwait(false),
@@ -353,6 +368,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         {
             return RuntimeCommandExecutionResult.Canceled("Command execution was canceled.");
         }
+        catch (Exception exception) when (exception is not OperationCanceledException
+                                           and not OutOfMemoryException)
+        {
+            return RuntimeCommandExecutionResult.Failed(
+                $"Command executor threw {exception.GetType().FullName ?? exception.GetType().Name}.");
+        }
     }
 
     private async ValueTask<Result<RuntimeNodeExecutionResult>> CompleteNodeAsync(
@@ -360,9 +381,14 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string? payload,
+        RuntimeCommandSemanticOutcome? semanticOutcome,
         CancellationToken cancellationToken)
     {
-        var commandResult = session.CompleteCommand(commandId, payload, _clock.UtcNow);
+        var commandResult = session.CompleteCommand(
+            commandId,
+            payload,
+            _clock.UtcNow,
+            semanticOutcome);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -374,7 +400,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(stepResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), payload));
     }
@@ -385,9 +411,16 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandId commandId,
         string code,
         string reason,
+        string? payload,
+        RuntimeCommandSemanticOutcome? semanticOutcome,
         CancellationToken cancellationToken)
     {
-        var commandResult = session.FailCommand(commandId, reason, _clock.UtcNow);
+        var commandResult = session.FailCommand(
+            commandId,
+            reason,
+            _clock.UtcNow,
+            payload,
+            semanticOutcome);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -448,9 +481,16 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string reason,
+        string? payload,
+        RuntimeCommandSemanticOutcome? semanticOutcome,
         CancellationToken cancellationToken)
     {
-        var commandResult = session.CancelCommand(commandId, _clock.UtcNow);
+        var commandResult = session.CancelCommand(
+            commandId,
+            _clock.UtcNow,
+            reason,
+            payload,
+            semanticOutcome);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -468,7 +508,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(sessionResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
     }
@@ -492,7 +532,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(sessionResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
     }
@@ -509,7 +549,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToApplicationFailure(sessionResult);
         }
 
-        await PersistAndPublishAsync(session, cancellationToken).ConfigureAwait(false);
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return Result.Success(CreateRunResult(session));
     }
@@ -702,7 +742,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         foreach (var branchValue in branchValues)
         {
             var matched = transitions.FirstOrDefault(transition =>
-                string.Equals(transition.Label, branchValue, StringComparison.OrdinalIgnoreCase));
+                string.Equals(transition.Label, branchValue, StringComparison.Ordinal));
             if (matched is not null)
             {
                 return Result.Success<ExecutableRuntimeTransition?>(matched);
@@ -710,8 +750,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         }
 
         var defaultTransition = transitions.FirstOrDefault(transition =>
-            string.Equals(transition.Label, "default", StringComparison.OrdinalIgnoreCase))
-            ?? transitions.FirstOrDefault(transition => string.IsNullOrWhiteSpace(transition.Label));
+            string.Equals(transition.Label, "default", StringComparison.Ordinal))
+            ?? transitions.FirstOrDefault(transition => transition.Label is null);
         if (defaultTransition is not null)
         {
             return Result.Success<ExecutableRuntimeTransition?>(defaultTransition);
@@ -738,10 +778,6 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             if (root is JsonObject jsonObject)
             {
                 var values = new List<string>();
-                AddStringProperty(values, jsonObject, "decision");
-                AddStringProperty(values, jsonObject, "route");
-                AddStringProperty(values, jsonObject, "branch");
-                AddStringProperty(values, jsonObject, "next");
                 AddStringProperty(values, jsonObject, "status");
 
                 return values
@@ -754,12 +790,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 && jsonValue.TryGetValue<string>(out var text)
                 && !string.IsNullOrWhiteSpace(text))
             {
-                return [text.Trim()];
+                return [text];
             }
         }
         catch (JsonException)
         {
-            return [payload.Trim()];
+            return [payload];
         }
 
         return [];
@@ -778,7 +814,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return;
         }
 
-        values.Add(text.Trim());
+        values.Add(text);
     }
 
     private static Result<RuntimeSessionRunResult> ToApplicationFailure(RuntimeOperationResult result)

@@ -52,24 +52,7 @@ Publish-time syntax validation uses `PythonScript.SyntaxStaticCheck.PythonSyntax
 ## Runtime execution modes
 
 Python execution is configured under `OpenLineOps:Runtime:Scripting:Python`.
-
-Trusted in-process development mode:
-
-```json
-{
-  "OpenLineOps": {
-    "Runtime": {
-      "Scripting": {
-        "Python": {
-          "ExecutionMode": "InProcessTrusted"
-        }
-      }
-    }
-  }
-}
-```
-
-Process-isolated production mode:
+The only accepted execution mode is process-isolated:
 
 ```json
 {
@@ -85,7 +68,7 @@ Process-isolated production mode:
             "IsolationMode": "Container",
             "ContainerRuntimeExecutable": "podman",
             "ContainerImage": "openlineops/script-worker:1.0.0",
-            "NetworkDisabled": true
+            "ContainerNetwork": "none"
           }
         }
       }
@@ -94,13 +77,32 @@ Process-isolated production mode:
 }
 ```
 
-The isolated adapter starts a worker process for the script command, exchanges one JSON request/result over standard streams, and kills the process tree on cancellation or timeout. Container and least-privilege launch policies remain infrastructure concerns.
+The adapter starts a worker process for every script command, exchanges one JSON
+request/result over standard streams, and kills the process tree on cancellation
+or timeout. There is no in-process fallback. Container and least-privilege launch
+policies remain infrastructure concerns.
+
+Execution and isolation tokens are case-sensitive. `ExecutionMode` accepts only
+`ProcessIsolated`; sandbox `IsolationMode` accepts only
+`ExternalProcess`, `LeastPrivilegeIdentity`, or `Container`. Select Docker, Podman, or
+another compatible container engine with `ContainerRuntimeExecutable`. Unknown, empty,
+or differently cased mode tokens fail during module registration.
+
+Each script receives immutable, command-scoped values: `input_payload`,
+`script_version`, `session_id`, `production_run_id`,
+`production_line_definition_id`, `production_stage_id`, `stage_sequence`,
+`workstation_id`, `dut_model_id`, `dut_identity_input_key`,
+`dut_identity_value`, `station_id`, `configuration_snapshot_id`, `project_id`,
+`application_id`, `project_snapshot_id`, `node_id`, `command_id`, `action_id`,
+`target_capability`, `target_kind`, `target_id`, and `command_name`. Assign the
+script output to `result`; the worker serializes it as one JSON value for the
+standard Runtime command and Trace lifecycle.
 
 ## Safety rules
 
 - Treat Python as dynamic code and make its presence explicit in the process graph and release.
-- Use `InProcessTrusted` only for trusted first-party development scenarios.
-- Prefer process or container isolation for production.
+- Execute every script through the dedicated worker process; use container or
+  least-privilege identity isolation where the deployment policy requires it.
 - Never expose `pythonnet` types outside Infrastructure.
 - Record script results, exceptions, timeout and cancellation through the standard runtime command and trace lifecycle.
 - Do not recreate Blockly-to-Python generation, dual-source persistence, editor-mode switches, or automation-plan dispatch compatibility paths.

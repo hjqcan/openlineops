@@ -69,14 +69,14 @@ public sealed class ExternalPluginProcessStartInfoBuilderTests
         Assert.Contains("openlineops/plugin-host:1.0.0", arguments);
         Assert.Contains("dotnet", arguments);
         Assert.Contains("/opt/openlineops/plugin/Plugin.dll", arguments);
-        Assert.Contains("/opt/openlineops/plugin/openlineops-plugin.json", arguments);
+        Assert.Contains("/opt/openlineops/plugin/manifest.json", arguments);
         Assert.Contains("External.Process.Test.Plugin", arguments);
         Assert.DoesNotContain(request.EntryAssemblyPath, arguments);
         Assert.Contains(
             "OPENLINEOPS_PLUGIN_ENTRY_ASSEMBLY=/opt/openlineops/plugin/Plugin.dll",
             arguments);
         Assert.Contains(
-            "OPENLINEOPS_PLUGIN_MANIFEST_PATH=/opt/openlineops/plugin/openlineops-plugin.json",
+            "OPENLINEOPS_PLUGIN_MANIFEST_PATH=/opt/openlineops/plugin/manifest.json",
             arguments);
         Assert.Contains(
             "OPENLINEOPS_PLUGIN_SANDBOX_MAX_COMMAND_TIMEOUT_MS=7000",
@@ -166,22 +166,27 @@ public sealed class ExternalPluginProcessStartInfoBuilderTests
         Assert.Equal("docker", startInfo.FileName);
     }
 
-    [Fact]
-    public void BuildUsesPodmanForPodmanIsolationByDefault()
+    [Theory]
+    [InlineData("Podman")]
+    [InlineData("Docker")]
+    [InlineData("container")]
+    [InlineData("")]
+    public void BuildRejectsNonCanonicalIsolationMode(string isolationMode)
     {
         var request = CreateStartRequest();
         var options = new ExternalProcessPluginHostOptions
         {
             Sandbox = new ExternalPluginSandboxOptions
             {
-                IsolationMode = "Podman",
+                IsolationMode = isolationMode,
                 ContainerImage = "openlineops/plugin-host:1.0.0"
             }
         };
 
-        var startInfo = ExternalPluginProcessStartInfoBuilder.Build(options, request);
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ExternalPluginProcessStartInfoBuilder.Build(options, request));
 
-        Assert.Equal("podman", startInfo.FileName);
+        Assert.Contains("Expected exactly", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,7 +231,7 @@ public sealed class ExternalPluginProcessStartInfoBuilderTests
     {
         var packagePath = Path.GetFullPath(
             Path.Combine(Path.GetTempPath(), "openlineops-plugin-startinfo"));
-        var manifestPath = Path.Combine(packagePath, "openlineops-plugin.json");
+        var manifestPath = Path.Combine(packagePath, "manifest.json");
         var entryAssemblyPath = Path.Combine(packagePath, "Plugin.dll");
         var manifest = new PluginManifest(
             "openlineops.external-process-test-plugin",

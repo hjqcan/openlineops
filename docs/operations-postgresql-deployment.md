@@ -6,7 +6,7 @@ the CAP outbox.
 
 The local development defaults remain unchanged:
 
-- Operations persistence defaults to `EfSqlite`.
+- Operations persistence defaults to the canonical `Sqlite` provider, backed by EF Core.
 - EventBus defaults to in-memory CAP storage and in-memory message queue.
 - EF Core/CAP transaction coordination is disabled unless explicitly enabled.
 
@@ -32,7 +32,7 @@ flowchart LR
 Operations uses EF Core through `OperationsDbContext`. CAP stores outbox records in
 PostgreSQL when `OpenLineOps:EventBus:UseInMemory` is `false`.
 
-If `OpenLineOps:EventBus:EnableEfCoreTransactionCoordinator` is `true`, OpenLineOps
+If `OpenLineOps:EventBus:PublicationMode` is `Transactional`, OpenLineOps
 uses CAP's EF Core transaction extension so the alarm row and CAP outbox row are
 committed together. Enable this only when the Operations EF database and CAP
 PostgreSQL storage point to the same PostgreSQL database.
@@ -41,8 +41,8 @@ PostgreSQL storage point to the same PostgreSQL database.
 
 Operations persistence:
 
-- `OpenLineOps:Operations:Persistence:Provider`: set to `PostgreSql`. `Postgres`
-  and `PostgreSQL` are accepted aliases.
+- `OpenLineOps:Operations:Persistence:Provider`: set exactly to `PostgreSql`.
+  Provider tokens are case-sensitive; aliases are rejected during startup.
 - `OpenLineOps:Operations:Persistence:ConnectionString`: PostgreSQL connection
   string for the Operations EF Core store.
 
@@ -52,15 +52,15 @@ EventBus:
 - `OpenLineOps:EventBus:UseInMemory`: set to `false` for PostgreSQL CAP storage.
 - `OpenLineOps:EventBus:ConnectionStringName`: defaults to `OpenLineOpsEventBus`.
 - `OpenLineOps:EventBus:PostgreSqlSchema`: defaults to `cap`.
-- `OpenLineOps:EventBus:EnableEfCoreTransactionCoordinator`: set to `true` only
-  for same-database EF/CAP transactional outbox.
+- `OpenLineOps:EventBus:PublicationMode`: explicitly set to `Transactional` only
+  for a same-database EF/CAP transactional outbox; otherwise explicitly use `PostCommit`.
 - `OpenLineOps:EventBus:RabbitMq:Enabled`: set to `true` for cross-process
   deployment messaging. Set to `false` for local PostgreSQL integration profiles
   that only need outbox persistence verification.
 
-OpenLineOps fails fast when `UseInMemory=false` and the named EventBus connection
-string is missing. It also rejects `EnableEfCoreTransactionCoordinator=true` while
-EventBus storage is still in-memory.
+OpenLineOps fails fast when the publication mode is missing, when `UseInMemory=false`
+and the named EventBus connection string is missing, or when `PublicationMode=Transactional`
+is combined with in-memory EventBus storage.
 
 ## Production-Like JSON Profile
 
@@ -82,7 +82,7 @@ Keep secrets out of committed files. This JSON shows the required shape only.
       "UseInMemory": false,
       "ConnectionStringName": "OpenLineOpsEventBus",
       "PostgreSqlSchema": "cap",
-      "EnableEfCoreTransactionCoordinator": true,
+      "PublicationMode": "Transactional",
       "RabbitMq": {
         "Enabled": true,
         "HostName": "rabbitmq",
@@ -115,7 +115,7 @@ $env:OpenLineOps__Operations__Persistence__ConnectionString = "Host=localhost;Da
 $env:OpenLineOps__EventBus__UseInMemory = "false"
 $env:OpenLineOps__EventBus__ConnectionStringName = "OpenLineOpsEventBus"
 $env:OpenLineOps__EventBus__PostgreSqlSchema = "cap"
-$env:OpenLineOps__EventBus__EnableEfCoreTransactionCoordinator = "true"
+$env:OpenLineOps__EventBus__PublicationMode = "Transactional"
 $env:OpenLineOps__EventBus__RabbitMq__Enabled = "true"
 $env:OpenLineOps__EventBus__RabbitMq__HostName = "localhost"
 $env:OpenLineOps__EventBus__RabbitMq__UserName = "openlineops"
@@ -131,7 +131,7 @@ export OpenLineOps__Operations__Persistence__ConnectionString='Host=localhost;Da
 export OpenLineOps__EventBus__UseInMemory='false'
 export OpenLineOps__EventBus__ConnectionStringName='OpenLineOpsEventBus'
 export OpenLineOps__EventBus__PostgreSqlSchema='cap'
-export OpenLineOps__EventBus__EnableEfCoreTransactionCoordinator='true'
+export OpenLineOps__EventBus__PublicationMode='Transactional'
 export OpenLineOps__EventBus__RabbitMq__Enabled='true'
 export OpenLineOps__EventBus__RabbitMq__HostName='localhost'
 export OpenLineOps__EventBus__RabbitMq__UserName='openlineops'
@@ -159,7 +159,7 @@ enabled and use CAP's in-memory message queue:
       "UseInMemory": false,
       "ConnectionStringName": "OpenLineOpsEventBus",
       "PostgreSqlSchema": "cap",
-      "EnableEfCoreTransactionCoordinator": true,
+      "PublicationMode": "Transactional",
       "RabbitMq": {
         "Enabled": false
       }
@@ -233,8 +233,8 @@ The RabbitMQ readiness test proves:
   explicitly needs server persistence.
 - Use the same PostgreSQL database for Operations and CAP when transaction
   coordination is enabled.
-- Disable `EnableEfCoreTransactionCoordinator` for mixed providers, separate
-  databases, SQLite-only desktop mode, or in-memory CAP mode.
+- Use `PublicationMode=PostCommit` for mixed providers, separate databases,
+  SQLite-only desktop mode, or in-memory CAP mode.
 - Enable RabbitMQ for cross-process event delivery.
 - Keep PostgreSQL and RabbitMQ credentials in environment variables or a secret
   store, not in committed configuration files.
@@ -261,8 +261,9 @@ profile selects PostgreSQL and RabbitMQ, `/health/ready` registers these depende
 
 The checks are only registered when the corresponding provider is configured:
 
-- Operations check: `OpenLineOps:Operations:Persistence:Provider` is `PostgreSql`,
-  `Postgres`, or `PostgreSQL`, and the Operations connection string is present.
+- Operations check: `OpenLineOps:Operations:Persistence:Provider` is exactly
+  `PostgreSql`, and the Operations connection string is present. Readiness uses
+  the same canonical provider parser as Operations module registration.
 - EventBus check: `OpenLineOps:EventBus:UseInMemory` is `false`, the connection
   string name is present, and the named connection string exists.
 - RabbitMQ check: `OpenLineOps:EventBus:UseInMemory` is `false` and

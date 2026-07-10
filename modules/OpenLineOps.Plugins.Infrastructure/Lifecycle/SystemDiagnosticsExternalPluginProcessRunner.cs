@@ -12,11 +12,13 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
     private readonly IExternalPluginProcessEventSink _eventSink;
 
     public SystemDiagnosticsExternalPluginProcessRunner(
-        ExternalProcessPluginHostOptions? options = null,
-        IExternalPluginProcessEventSink? eventSink = null)
+        ExternalProcessPluginHostOptions options,
+        IExternalPluginProcessEventSink eventSink)
     {
-        _options = options ?? new ExternalProcessPluginHostOptions();
-        _eventSink = eventSink ?? NullExternalPluginProcessEventSink.Instance;
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(eventSink);
+        _options = options;
+        _eventSink = eventSink;
     }
 
     public async ValueTask<IExternalPluginProcess> StartAsync(

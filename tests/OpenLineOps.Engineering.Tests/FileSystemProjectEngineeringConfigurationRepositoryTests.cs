@@ -161,6 +161,40 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
     }
 
     [Fact]
+    public async Task RecipeStatusRequiresExactCanonicalToken()
+    {
+        var scope = Scope("application.canonical-status", _projectDirectory);
+        var configuration = CreateConfiguration(
+            "Canonical Status",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@canonical-status",
+            "5.0",
+            "100",
+            "device.canonical.primary",
+            "canonical-primary",
+            "device.canonical.secondary",
+            "canonical-secondary");
+        var repository = new FileSystemProjectEngineeringConfigurationRepository();
+        await repository.SaveAsync(scope, configuration.Recipe);
+        var path = FindDocumentPath(_projectDirectory, "resourceId", RecipeIdValue);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+
+        Assert.Equal("Published", document["snapshot"]?["status"]?.GetValue<string>());
+        Assert.NotNull(await repository.GetByIdAsync(scope, configuration.Recipe.Id));
+
+        document["snapshot"]!["status"] = "published";
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new FileSystemProjectEngineeringConfigurationRepository().GetByIdAsync(
+                scope,
+                configuration.Recipe.Id));
+        Assert.Contains("status", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("published", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RemovedHostProjectIdFieldIsRejectedFromEngineeringResource()
     {
         var scope = Scope("application.strict", _projectDirectory);
@@ -342,7 +376,6 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
                 && parameter.Value == expectedParameter.Value);
         }
 
-        Assert.Empty(recipe.DomainEvents);
         Assert.Single(recipes);
         Assert.Equal(expected.Recipe.Id, recipes.Single().Id);
 
@@ -359,7 +392,6 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         Assert.Equal(expected.Project.DisplayName, project.DisplayName);
         Assert.Equal(expected.Project.CreatedAtUtc, project.CreatedAtUtc);
         Assert.Equal(new ConfigurationSnapshotId(SnapshotIdValue), project.ActiveSnapshotId);
-        Assert.Empty(project.DomainEvents);
         var expectedSnapshot = Assert.Single(expected.Project.Snapshots);
         var snapshot = Assert.Single(project.Snapshots);
         Assert.Equal(expectedSnapshot.Id, snapshot.Id);

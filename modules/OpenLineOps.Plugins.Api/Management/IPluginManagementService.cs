@@ -1,4 +1,5 @@
 using OpenLineOps.Plugins.Api.Models;
+using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Plugins.Api.Management;
 
@@ -15,7 +16,7 @@ public interface IPluginManagementService
 
     Task<IReadOnlyCollection<ExternalPluginProcessEventResponse>> ListEventsAsync(
         string? pluginId,
-        string? kind,
+        ExternalPluginProcessEventKind? kind,
         int skip,
         int take,
         CancellationToken cancellationToken = default);

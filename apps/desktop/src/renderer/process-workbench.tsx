@@ -27,23 +27,17 @@ import type {
   ProcessDefinitionSummary,
   ProcessGraphValidationReport,
   ProcessNodeResponse,
-  PublishedProjectSnapshotResponse,
-  RegisterProcessBlocklyBlockDefinitionRequest,
-  StartedProjectSnapshotRuntimeSessionResponse
+  RegisterProcessBlocklyBlockDefinitionRequest
 } from './contracts';
 import {
   createProcessDefinition,
   getAutomationTopology,
   getProcessDefinition,
-  linkProjectProcessDefinition,
   listProcessBlocklyBlocks,
   listProcessBlocklyBlockVersions,
   listProcessDefinitions,
-  publishProjectSnapshot,
   publishProcessDefinition,
   registerProcessBlocklyBlock,
-  saveAutomationProjectManifest,
-  startProjectSnapshotRuntimeSession,
   updateProcessDefinition,
   validateProcessDefinition
 } from './api';
@@ -51,12 +45,12 @@ import {
 type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'Blockly' | 'PythonScript';
 type AddableProcessNodeKind = Exclude<ProcessNodeKind, 'Start'>;
 type TransitionLoopPolicy = 'None' | 'Counted';
+type ProcessTargetKind = 'System' | 'SlotGroup' | 'Slot' | 'Dut' | 'Capability' | 'Driver';
 
 interface ProcessWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
   isBackendHealthy: boolean;
-  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
 
@@ -66,6 +60,8 @@ interface ProcessNodeDraft {
   displayName: string;
   requiredCapability: string;
   commandName: string;
+  targetKind: ProcessTargetKind;
+  targetId: string;
   timeoutSeconds: number;
   inputPayload: string;
   scriptVersion: string;
@@ -91,28 +87,23 @@ interface ProcessDraft {
   transitions: ProcessTransitionDraft[];
 }
 
-interface RuntimeLaunchDraft {
-  configurationSnapshotId: string;
-  serialNumber: string;
-  batchId: string;
-  fixtureId: string;
-  deviceId: string;
-  actorId: string;
-}
-
 interface ProjectTargetOption {
   testId: string;
-  targetKind: string;
+  targetKind: ProcessTargetKind;
   targetId: string;
   label: string;
   detail: string;
+  capabilities: ProjectTargetCapabilityOption[];
+}
+
+interface ProjectTargetCapabilityOption {
   capabilityId: string;
   commandName: string;
   providerKey: string;
-  inputPayload: string;
 }
 
 const projectTargetFieldType = 'field_openlineops_project_target';
+const projectCapabilityFieldType = 'field_openlineops_project_capability';
 const projectTargetsByWorkspace = new WeakMap<Blockly.Workspace, ProjectTargetOption[]>();
 const registeredProcessBlockTypes = new Set<string>();
 
@@ -129,12 +120,12 @@ class ProjectTargetDropdown extends Blockly.FieldDropdown {
         .filter(target => target.targetKind === targetKind);
       const currentValue = this.getValue();
       const options: Blockly.MenuOption[] = targets.map(target => [
-        `${target.label} · ${target.targetId}`,
+        target.label,
         target.targetId
       ]);
 
       if (currentValue && !targets.some(target => target.targetId === currentValue)) {
-        options.push([`Missing target · ${currentValue}`, currentValue]);
+        options.push([`Missing target: ${currentValue}`, currentValue]);
       }
 
       return options.length > 0
@@ -145,6 +136,43 @@ class ProjectTargetDropdown extends Blockly.FieldDropdown {
 
   static fromJson(): ProjectTargetDropdown {
     return new ProjectTargetDropdown();
+  }
+
+  protected override doClassValidation_(newValue?: string): string | null {
+    return typeof newValue === 'string' ? newValue : null;
+  }
+}
+
+class ProjectCapabilityDropdown extends Blockly.FieldDropdown {
+  constructor() {
+    super(function (this: Blockly.FieldDropdown): Blockly.MenuOption[] {
+      const sourceBlock = this.getSourceBlock();
+      if (!sourceBlock) {
+        return [['Select capability', '']];
+      }
+
+      const targetKind = String(sourceBlock.getFieldValue('TARGET_KIND') ?? '');
+      const targetId = String(sourceBlock.getFieldValue('TARGET_ID') ?? '');
+      const target = (projectTargetsByWorkspace.get(sourceBlock.workspace) ?? [])
+        .find(candidate => candidate.targetKind === targetKind && candidate.targetId === targetId);
+      const currentValue = this.getValue();
+      const options: Blockly.MenuOption[] = (target?.capabilities ?? []).map(capability => [
+        `${capability.commandName} · ${capability.capabilityId}`,
+        capability.capabilityId
+      ]);
+
+      if (currentValue && !target?.capabilities.some(capability => capability.capabilityId === currentValue)) {
+        options.push([`Missing capability: ${currentValue}`, currentValue]);
+      }
+
+      return options.length > 0
+        ? options
+        : [['No capability for selected target', '']];
+    });
+  }
+
+  static fromJson(): ProjectCapabilityDropdown {
+    return new ProjectCapabilityDropdown();
   }
 
   protected override doClassValidation_(newValue?: string): string | null {
@@ -168,12 +196,19 @@ const addableNodeKinds: AddableProcessNodeKind[] = [
   'Delay',
   'End'
 ];
+const processTargetKinds: ProcessTargetKind[] = [
+  'System',
+  'Capability',
+  'Driver',
+  'SlotGroup',
+  'Slot',
+  'Dut'
+];
 
 export function ProcessWorkbench({
   activeWorkspace,
   activeApplicationId,
   isBackendHealthy,
-  onWorkspaceChanged,
   onMessage
 }: ProcessWorkbenchProps): React.ReactElement {
   const [definitions, setDefinitions] = useState<ProcessDefinitionSummary[]>([]);
@@ -182,9 +217,6 @@ export function ProcessWorkbench({
   const [loadedDefinitionStatus, setLoadedDefinitionStatus] = useState<string | null>(null);
   const [validationReport, setValidationReport] = useState<ProcessGraphValidationReport | null>(null);
   const [draft, setDraft] = useState<ProcessDraft>(() => createDraft());
-  const [launchDraft, setLaunchDraft] = useState<RuntimeLaunchDraft>(() => createRuntimeLaunchDraft());
-  const [lastStartedSession, setLastStartedSession] =
-    useState<StartedProjectSnapshotRuntimeSessionResponse | null>(null);
   const [blockCatalog, setBlockCatalog] =
     useState<ProcessBlocklyBlockDefinition[]>([]);
   const [customBlockDraft, setCustomBlockDraft] =
@@ -193,19 +225,12 @@ export function ProcessWorkbench({
   const [blockHistory, setBlockHistory] = useState<ProcessBlocklyBlockDefinition[]>([]);
   const [blockHistoryBusy, setBlockHistoryBusy] = useState(false);
   const [projectTopology, setProjectTopology] = useState<AutomationTopologyResponse | null>(null);
-  const [lastProjectSnapshot, setLastProjectSnapshot] = useState<PublishedProjectSnapshotResponse | null>(null);
   const [busy, setBusy] = useState(false);
 
   const activeApplication = activeWorkspace?.project.applications.find(
     application => application.applicationId === activeApplicationId)
     ?? activeWorkspace?.project.applications[0]
     ?? null;
-  const selectedApplicationSnapshot = useMemo(
-    () => findApplicationSnapshot(
-      activeWorkspace,
-      activeApplication?.applicationId ?? null,
-      lastProjectSnapshot),
-    [activeApplication?.applicationId, activeWorkspace, lastProjectSnapshot]);
   const projectApplicationApiScope = useMemo(
     () => activeWorkspace && activeApplication
       ? {
@@ -224,17 +249,9 @@ export function ProcessWorkbench({
   const selectedNode = useMemo(
     () => draft.nodes.find(node => node.nodeId === draft.selectedNodeId) ?? draft.nodes[0] ?? null,
     [draft.nodes, draft.selectedNodeId]);
-  const previewScriptNode = selectedNode?.kind === 'Blockly' || selectedNode?.kind === 'PythonScript'
-    ? selectedNode
-    : draft.nodes.find(node => node.kind === 'Blockly')
-      ?? draft.nodes.find(node => node.kind === 'PythonScript')
-      ?? null;
-  const previewWorkspaceJson = previewScriptNode?.kind === 'Blockly'
-    ? previewScriptNode.blocklyWorkspaceJson
+  const previewWorkspaceJson = selectedNode?.kind === 'Blockly'
+    ? selectedNode.blocklyWorkspaceJson
     : '';
-  const previewSourceCode = previewScriptNode?.kind === 'PythonScript'
-    ? previewScriptNode.manualSourceCode
-    : null;
   const orderedNodes = useMemo(
     () => orderNodesByTransitions(draft.nodes, draft.transitions),
     [draft.nodes, draft.transitions]);
@@ -295,8 +312,6 @@ export function ProcessWorkbench({
     setSelectedBlockHistoryType('');
     setBlockHistory([]);
     setBlockHistoryBusy(false);
-    setLastStartedSession(null);
-    setLastProjectSnapshot(null);
   }, [editorScopeKey]);
 
   useEffect(() => {
@@ -370,8 +385,6 @@ export function ProcessWorkbench({
     setDraft(updater);
     setSelectedDefinition(null);
     setValidationReport(null);
-    setLastStartedSession(null);
-    setLastProjectSnapshot(null);
   }, []);
 
   const resetDraft = useCallback(() => {
@@ -380,9 +393,6 @@ export function ProcessWorkbench({
     setEditingDefinitionId(null);
     setLoadedDefinitionStatus(null);
     setValidationReport(null);
-    setLaunchDraft(createRuntimeLaunchDraft());
-    setLastStartedSession(null);
-    setLastProjectSnapshot(null);
   }, [blockCatalog]);
 
   const saveDraft = useCallback(async () => {
@@ -412,7 +422,6 @@ export function ProcessWorkbench({
       setSelectedDefinition(response.body);
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
-      setLastProjectSnapshot(null);
       onMessage(`Saved ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
@@ -459,8 +468,6 @@ export function ProcessWorkbench({
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body));
-      setLastStartedSession(null);
-      setLastProjectSnapshot(null);
       onMessage(`Published ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
@@ -486,109 +493,11 @@ export function ProcessWorkbench({
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body));
-      setLastStartedSession(null);
-      setLastProjectSnapshot(null);
       onMessage(`${response.body.processDefinitionId} loaded`);
     } finally {
       setBusy(false);
     }
   }, [blockCatalog, onMessage, projectApplicationApiScope]);
-
-  const startPublishedRuntimeSession = useCallback(async () => {
-    const projectSnapshotId = selectedApplicationSnapshot?.snapshotId ?? null;
-
-    if (!activeWorkspace) {
-      onMessage('Open a project Application before starting runtime');
-      return;
-    }
-
-    if (!projectSnapshotId) {
-      onMessage('Publish a project snapshot before starting runtime');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const response = await startProjectSnapshotRuntimeSession(
-        activeWorkspace.project.projectId,
-        projectSnapshotId,
-        toStartProjectSnapshotRuntimeSessionRequest(launchDraft));
-      if (!response.ok || !response.body) {
-        onMessage(`Runtime start failed: ${response.status} ${response.text}`);
-        return;
-      }
-
-      setLastStartedSession(response.body);
-      onMessage(`Started ${response.body.sessionId} ${response.body.status}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [activeWorkspace, launchDraft, onMessage, selectedApplicationSnapshot?.snapshotId, selectedDefinition]);
-
-  const publishCurrentProjectSnapshot = useCallback(async () => {
-    if (!activeWorkspace || !activeApplication || !activeApplication.topologyId || !selectedDefinition || !projectTopology) {
-      onMessage('Open a project with topology and publish a process before publishing a project snapshot');
-      return;
-    }
-
-    if (selectedDefinition.status !== 'Published') {
-      onMessage('Publish the process definition before publishing a project snapshot');
-      return;
-    }
-
-    if (!launchDraft.configurationSnapshotId.trim()) {
-      onMessage('Configuration snapshot id is required before publishing a project snapshot');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const linkResponse = await linkProjectProcessDefinition(
-        activeWorkspace.project.projectId,
-        activeApplication.applicationId,
-        selectedDefinition.processDefinitionId);
-      if (!linkResponse.ok || !linkResponse.body) {
-        onMessage(`Project process link failed: ${linkResponse.status} ${linkResponse.text}`);
-        return;
-      }
-
-      const snapshotId = `project-snapshot-${Date.now().toString(36)}`;
-      const publishResponse = await publishProjectSnapshot(activeWorkspace.project.projectId, {
-        snapshotId,
-        applicationId: activeApplication.applicationId,
-        processDefinitionId: selectedDefinition.processDefinitionId,
-        configurationSnapshotId: launchDraft.configurationSnapshotId.trim()
-      });
-      if (!publishResponse.ok || !publishResponse.body) {
-        onMessage(`Project snapshot publish failed: ${publishResponse.status} ${publishResponse.text}`);
-        return;
-      }
-
-      const savedWorkspace = await saveAutomationProjectManifest(activeWorkspace.project.projectId);
-      if (!savedWorkspace.ok || !savedWorkspace.body) {
-        onMessage(`Project manifest save failed: ${savedWorkspace.status} ${savedWorkspace.text}`);
-        return;
-      }
-
-      const snapshot = publishResponse.body.snapshots
-        .find(item => item.snapshotId === snapshotId)
-        ?? publishResponse.body.snapshots.at(-1)
-        ?? null;
-      setLastProjectSnapshot(snapshot);
-      onWorkspaceChanged(savedWorkspace.body);
-      onMessage(`Project snapshot published ${snapshotId}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [
-    activeApplication,
-    activeWorkspace,
-    launchDraft.configurationSnapshotId,
-    onMessage,
-    onWorkspaceChanged,
-    projectTopology,
-    selectedDefinition
-  ]);
 
   const updateDraftField = useCallback(<TKey extends keyof ProcessDraft>(
     key: TKey,
@@ -902,7 +811,7 @@ export function ProcessWorkbench({
         </div>
 
         <div className="process-layout">
-          <section className="process-form">
+          <aside className="process-form">
             <GraphMetadataEditor
               draft={draft}
               definitionIdDisabled={editingDefinitionId !== null}
@@ -913,42 +822,65 @@ export function ProcessWorkbench({
               node={selectedNode}
               nodes={draft.nodes}
               transitions={draft.transitions}
-              blockCatalog={blockCatalog}
-              projectTargets={projectTargets}
               onSelectNode={selectNode}
               onRemoveNode={removeSelectedNode}
               onUpdateNode={updateSelectedNode}
             />
-          </section>
+          </aside>
 
-          <section className="process-preview">
-            <ProcessGraphCanvas
-              nodes={orderedNodes}
-              transitions={draft.transitions}
-              selectedNodeId={draft.selectedNodeId}
-              onSelectNode={selectNode}
-            />
-            <TransitionEditor
-              nodes={draft.nodes}
-              transitions={draft.transitions}
-              onAddTransition={addTransition}
-              onRemoveTransition={removeTransition}
-              onUpdateTransition={updateTransition}
-            />
-            <div className="source-preview">
-              <div className="source-header">
-                <Braces size={16} />
-                <span>{previewSourceCode === null ? 'Direct Flow IR' : 'Manual Python'}</span>
+          <section className="process-stage">
+            <details className="process-overview" open>
+              <summary>
+                <div>
+                  <Workflow size={15} />
+                  <strong>Flow Overview</strong>
+                </div>
+                <span>{draft.nodes.length} nodes / {draft.transitions.length} transitions</span>
+              </summary>
+              <div className="process-overview-content">
+                <ProcessGraphCanvas
+                  nodes={orderedNodes}
+                  transitions={draft.transitions}
+                  selectedNodeId={draft.selectedNodeId}
+                  onSelectNode={selectNode}
+                />
+                <TransitionEditor
+                  nodes={draft.nodes}
+                  transitions={draft.transitions}
+                  onAddTransition={addTransition}
+                  onRemoveTransition={removeTransition}
+                  onUpdateTransition={updateTransition}
+                />
               </div>
-              {previewSourceCode === null ? (
-                <p>Blockly is compiled directly into immutable Flow IR when the process is published.</p>
-              ) : (
-                <pre>{previewSourceCode}</pre>
-              )}
-            </div>
-            <div className="workspace-preview">
-              <strong>Workspace JSON</strong>
-              <code>{previewWorkspaceJson || 'No Blockly workspace in the selected graph.'}</code>
+            </details>
+
+            <NodeActionEditor
+              node={selectedNode}
+              transitions={draft.transitions}
+              blockCatalog={blockCatalog}
+              projectTargets={projectTargets}
+              onUpdateNode={updateSelectedNode}
+            />
+
+            <div className="process-diagnostics">
+              <div className="flow-ir-note">
+                <Braces size={15} />
+                <div>
+                  <strong>{selectedNode?.kind === 'PythonScript' ? 'Frozen Python Action' : 'Direct Flow IR'}</strong>
+                  <span>{selectedNode?.kind === 'PythonScript'
+                    ? 'The advanced Python source is frozen into the published process release.'
+                    : 'Visual actions compile directly into immutable Flow IR when published.'}</span>
+                </div>
+              </div>
+              {selectedNode?.kind === 'Blockly' ? (
+                <details className="workspace-preview">
+                  <summary>
+                    <strong>Workspace JSON</strong>
+                    <span>{previewWorkspaceJson.length} bytes / diagnostics</span>
+                  </summary>
+                  <code>{previewWorkspaceJson}</code>
+                </details>
+              ) : null}
             </div>
           </section>
         </div>
@@ -1027,20 +959,6 @@ export function ProcessWorkbench({
           onInsert={insertBlocklyBlock}
         />
 
-        <RuntimeLaunchPanel
-          activeWorkspace={activeWorkspace}
-          activeApplicationId={activeApplication?.applicationId ?? null}
-          topology={projectTopology}
-          isBackendHealthy={isBackendHealthy}
-          busy={busy}
-          selectedDefinition={selectedDefinition}
-          launchDraft={launchDraft}
-          lastStartedSession={lastStartedSession}
-          lastProjectSnapshot={lastProjectSnapshot}
-          onChange={setLaunchDraft}
-          onPublishProjectSnapshot={publishCurrentProjectSnapshot}
-          onStart={startPublishedRuntimeSession}
-        />
       </div>
     </section>
   );
@@ -1112,8 +1030,6 @@ function NodeInspector({
   node,
   nodes,
   transitions,
-  blockCatalog,
-  projectTargets,
   onSelectNode,
   onRemoveNode,
   onUpdateNode
@@ -1121,8 +1037,6 @@ function NodeInspector({
   node: ProcessNodeDraft | null;
   nodes: ProcessNodeDraft[];
   transitions: ProcessTransitionDraft[];
-  blockCatalog: ProcessBlocklyBlockDefinition[];
-  projectTargets: ProjectTargetOption[];
   onSelectNode(nodeId: string): void;
   onRemoveNode(): void;
   onUpdateNode(updater: (node: ProcessNodeDraft) => ProcessNodeDraft): void;
@@ -1149,39 +1063,39 @@ function NodeInspector({
         </button>
       </div>
 
-      <label>
-        <span>Selected Node</span>
-        <select value={node.nodeId} onChange={event => onSelectNode(event.target.value)}>
-          {nodes.map(item => (
-            <option key={item.nodeId} value={item.nodeId}>
-              {item.displayName} ({item.kind})
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="node-list" role="list" aria-label="Process nodes">
+        {nodes.map(item => (
+          <button
+            type="button"
+            key={item.nodeId}
+            className={item.nodeId === node.nodeId ? 'selected' : ''}
+            onClick={() => onSelectNode(item.nodeId)}
+            role="listitem"
+          >
+            <span>{item.kind}</span>
+            <strong>{item.displayName}</strong>
+            <small>{item.nodeId}</small>
+          </button>
+        ))}
+      </div>
 
-      <label>
-        <span>Node ID</span>
-        <input value={node.nodeId} readOnly />
-      </label>
+      <div className="node-identity-grid">
+        <label>
+          <span>Node ID</span>
+          <input value={node.nodeId} readOnly />
+        </label>
 
-      <label>
-        <span>Display Name</span>
-        <input
-          value={node.displayName}
-          onChange={event => onUpdateNode(current => ({
-            ...current,
-            displayName: event.target.value
-          }))}
-        />
-      </label>
-
-      <NodeKindFields
-        node={node}
-        blockCatalog={blockCatalog}
-        projectTargets={projectTargets}
-        onUpdateNode={onUpdateNode}
-      />
+        <label>
+          <span>Display Name</span>
+          <input
+            value={node.displayName}
+            onChange={event => onUpdateNode(current => ({
+              ...current,
+              displayName: event.target.value
+            }))}
+          />
+        </label>
+      </div>
 
       <div className="node-degree-list">
         <span>Transitions</span>
@@ -1192,84 +1106,150 @@ function NodeInspector({
   );
 }
 
-function NodeKindFields({
+function NodeActionEditor({
   node,
+  transitions,
   blockCatalog,
   projectTargets,
   onUpdateNode
 }: {
-  node: ProcessNodeDraft;
+  node: ProcessNodeDraft | null;
+  transitions: ProcessTransitionDraft[];
   blockCatalog: ProcessBlocklyBlockDefinition[];
   projectTargets: ProjectTargetOption[];
   onUpdateNode(updater: (node: ProcessNodeDraft) => ProcessNodeDraft): void;
-}): React.ReactElement | null {
+}): React.ReactElement {
+  if (!node) {
+    return <div className="node-action-editor empty-state">Select a node to edit its action.</div>;
+  }
+
+  const editorHeader = (
+    <div className="node-action-header">
+      <div>
+        <span>Active Action</span>
+        <strong>{node.displayName}</strong>
+      </div>
+      <span className="node-kind-chip">{node.kind}</span>
+    </div>
+  );
+
   if (node.kind === 'Command') {
+    const commandTargets = projectTargets.filter(target => target.targetKind === node.targetKind);
+    const selectedTarget = commandTargets.find(target => target.targetId === node.targetId);
+    const capabilityOptions = selectedTarget?.capabilities ?? [];
+    const targetIsMissing = node.targetId.length > 0 && !selectedTarget;
+    const capabilityIsMissing = node.requiredCapability.length > 0
+      && !capabilityOptions.some(capability => capability.capabilityId === node.requiredCapability);
+
     return (
-      <>
-        <label>
-          <span>Required Capability</span>
-          <input
-            value={node.requiredCapability}
-            data-testid="process-node-required-capability"
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              requiredCapability: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Command Name</span>
-          <input
-            value={node.commandName}
-            data-testid="process-node-command-name"
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              commandName: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Timeout Seconds</span>
-          <input
-            type="number"
-            min="1"
-            value={node.timeoutSeconds}
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
-            }))}
-          />
-        </label>
-        <label>
-          <span>Input Payload</span>
-          <input
-            value={node.inputPayload}
-            data-testid="process-node-input-payload"
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              inputPayload: event.target.value
-            }))}
-          />
-        </label>
-      </>
+      <section className="node-action-editor" data-testid="node-action-editor">
+        {editorHeader}
+        <div className="action-editor-form command-action-form">
+          <label>
+            <span>Target Kind</span>
+            <select
+              value={node.targetKind}
+              data-testid="process-node-target-kind"
+              onChange={event => onUpdateNode(current => ({
+                ...selectCommandTargetKind(current, event.target.value as ProcessTargetKind, projectTargets)
+              }))}
+            >
+              {processTargetKinds.map(kind => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Target</span>
+            <select
+              value={node.targetId}
+              data-testid="process-node-target-id"
+              onChange={event => onUpdateNode(current =>
+                selectCommandTargetId(current, event.target.value, projectTargets))}
+            >
+              <option value="">Select target</option>
+              {targetIsMissing ? <option value={node.targetId}>Missing: {node.targetId}</option> : null}
+              {commandTargets.map(target => (
+                <option key={target.targetId} value={target.targetId}>{target.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Required Capability</span>
+            <select
+              value={node.requiredCapability}
+              data-testid="process-node-required-capability"
+              onChange={event => onUpdateNode(current =>
+                selectCommandCapability(current, event.target.value, projectTargets))}
+            >
+              <option value="">Select capability</option>
+              {capabilityIsMissing
+                ? <option value={node.requiredCapability}>Missing: {node.requiredCapability}</option>
+                : null}
+              {capabilityOptions.map(capability => (
+                <option key={capability.capabilityId} value={capability.capabilityId}>
+                  {capability.commandName} · {capability.capabilityId}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Command Name</span>
+            <input
+              value={node.commandName}
+              data-testid="process-node-command-name"
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                commandName: event.target.value
+              }))}
+            />
+          </label>
+          <label>
+            <span>Timeout Seconds</span>
+            <input
+              type="number"
+              min="1"
+              value={node.timeoutSeconds}
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
+              }))}
+            />
+          </label>
+          <label className="action-editor-wide">
+            <span>Input Payload</span>
+            <input
+              value={node.inputPayload}
+              data-testid="process-node-input-payload"
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                inputPayload: event.target.value
+              }))}
+            />
+          </label>
+        </div>
+      </section>
     );
   }
 
   if (node.kind === 'Blockly') {
     return (
-      <>
-        <label>
-          <span>Timeout Seconds</span>
-          <input
-            type="number"
-            min="1"
-            value={node.timeoutSeconds}
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
-            }))}
-          />
-        </label>
+      <section className="node-action-editor blockly-action-editor" data-testid="node-action-editor">
+        {editorHeader}
+        <div className="action-editor-toolbar">
+          <label>
+            <span>Execution Timeout</span>
+            <input
+              type="number"
+              min="1"
+              value={node.timeoutSeconds}
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
+              }))}
+            />
+            <small>seconds</small>
+          </label>
+          <span>Drag blocks, bind topology targets, then publish.</span>
+        </div>
         <BlocklyWorkspaceEditor
           workspaceJson={node.blocklyWorkspaceJson}
           blockCatalog={blockCatalog}
@@ -1279,60 +1259,101 @@ function NodeKindFields({
             blocklyWorkspaceJson: change.workspaceJson
           }))}
         />
-      </>
+      </section>
     );
   }
 
   if (node.kind === 'PythonScript') {
     return (
-      <>
-        <label>
-          <span>Timeout Seconds</span>
-          <input
-            type="number"
-            min="1"
-            value={node.timeoutSeconds}
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
-            }))}
-          />
-        </label>
-        <label>
-          <span>Script Version</span>
-          <input
-            value={node.scriptVersion}
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              scriptVersion: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Input Payload</span>
-          <input
-            value={node.inputPayload}
-            onChange={event => onUpdateNode(current => ({
-              ...current,
-              inputPayload: event.target.value
-            }))}
-          />
-        </label>
+      <section className="node-action-editor python-action-editor" data-testid="node-action-editor">
+        {editorHeader}
+        <div className="action-editor-form python-action-settings">
+          <label>
+            <span>Timeout Seconds</span>
+            <input
+              type="number"
+              min="1"
+              value={node.timeoutSeconds}
+              data-testid="python-timeout-seconds"
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                timeoutSeconds: toPositiveInteger(event.target.value, current.timeoutSeconds)
+              }))}
+            />
+          </label>
+          <label>
+            <span>Script Version</span>
+            <input
+              value={node.scriptVersion}
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                scriptVersion: event.target.value
+              }))}
+            />
+          </label>
+          <label>
+            <span>Input Payload</span>
+            <input
+              value={node.inputPayload}
+              onChange={event => onUpdateNode(current => ({
+                ...current,
+                inputPayload: event.target.value
+              }))}
+            />
+          </label>
+        </div>
         <label className="source-editor">
           <span>Python Source</span>
           <textarea
             value={node.manualSourceCode}
+            data-testid="python-source-editor"
+            spellCheck={false}
             onChange={event => onUpdateNode(current => ({
               ...current,
               manualSourceCode: event.target.value
             }))}
           />
         </label>
-      </>
+      </section>
     );
   }
 
-  return null;
+  const outgoingTransitions = transitions.filter(transition => transition.fromNodeId === node.nodeId);
+  const isDecision = node.kind === 'Decision';
+  const description = isDecision
+    ? 'Decision branches are defined by labeled outgoing transitions. Open Transitions in Flow Overview to edit routing.'
+    : node.kind === 'Delay'
+      ? 'This routing marker preserves graph order. Timed waits belong in the Blockly workspace as explicit Wait actions.'
+      : node.kind === 'Start'
+        ? 'The process enters this node once, then follows its configured outgoing transition.'
+        : 'The process completes when execution reaches this terminal node.';
+
+  return (
+    <section className="node-action-editor routing-action-editor" data-testid="node-action-editor">
+      {editorHeader}
+      <div className="routing-action-body">
+        <div className="routing-action-copy">
+          <span>{isDecision ? 'Branch Routing' : `${node.kind} Semantics`}</span>
+          <strong>{isDecision ? 'Labels select the next route' : 'Explicit graph control'}</strong>
+          <p>{description}</p>
+        </div>
+        <div className="routing-edge-list">
+          <span>Outgoing routes</span>
+          {outgoingTransitions.length > 0 ? outgoingTransitions.map(transition => (
+            <div key={transition.transitionId}>
+              <strong>{transition.label || 'default'}</strong>
+              <span>{'->'} {transition.toNodeId}</span>
+              <small>{transition.loopPolicy === 'Counted'
+                ? `counted / ${transition.maxTraversals}`
+                : 'single pass'}</small>
+            </div>
+          )) : (
+            <small>No outgoing transition</small>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function BlocklyWorkspaceEditor({
@@ -1377,7 +1398,7 @@ function BlocklyWorkspaceEditor({
       zoom: {
         controls: true,
         wheel: true,
-        startScale: 0.85,
+        startScale: 0.72,
         maxScale: 1.4,
         minScale: 0.55
       },
@@ -1508,7 +1529,9 @@ function ProjectTargetPanel({
                 <strong>{target.label}</strong>
                 <small>{target.detail}</small>
               </span>
-              <em>{target.capabilityId || target.targetKind}</em>
+              <em>{target.capabilities.length === 1
+                ? target.capabilities[0].capabilityId
+                : `${target.capabilities.length} capabilities`}</em>
             </button>
           ))}
         </div>
@@ -1746,9 +1769,13 @@ function TransitionEditor({
   ): void;
 }): React.ReactElement {
   return (
-    <div className="transition-editor">
-      <div className="transition-editor-header">
+    <details className="transition-editor">
+      <summary>
         <strong>Transitions</strong>
+        <span>{transitions.length} routes / click to edit</span>
+      </summary>
+      <div className="transition-editor-header">
+        <span>Routing table</span>
         <button
           type="button"
           className="button ghost"
@@ -1837,198 +1864,8 @@ function TransitionEditor({
           </div>
         ))}
       </div>
-    </div>
+    </details>
   );
-}
-
-function RuntimeLaunchPanel({
-  activeWorkspace,
-  activeApplicationId,
-  topology,
-  isBackendHealthy,
-  busy,
-  selectedDefinition,
-  launchDraft,
-  lastStartedSession,
-  lastProjectSnapshot,
-  onChange,
-  onPublishProjectSnapshot,
-  onStart
-}: {
-  activeWorkspace: AutomationProjectWorkspaceResponse | null;
-  activeApplicationId: string | null;
-  topology: AutomationTopologyResponse | null;
-  isBackendHealthy: boolean;
-  busy: boolean;
-  selectedDefinition: ProcessDefinitionResponse | null;
-  launchDraft: RuntimeLaunchDraft;
-  lastStartedSession: StartedProjectSnapshotRuntimeSessionResponse | null;
-  lastProjectSnapshot: PublishedProjectSnapshotResponse | null;
-  onChange(updater: (current: RuntimeLaunchDraft) => RuntimeLaunchDraft): void;
-  onPublishProjectSnapshot(): void;
-  onStart(): void;
-}): React.ReactElement {
-  const isPublished = selectedDefinition?.status === 'Published';
-  const launchSnapshotId = findApplicationSnapshot(
-    activeWorkspace,
-    activeApplicationId,
-    lastProjectSnapshot)?.snapshotId ?? null;
-  const canPublishProjectSnapshot = isBackendHealthy
-    && activeWorkspace !== null
-    && activeApplicationId !== null
-    && topology !== null
-    && isPublished
-    && launchDraft.configurationSnapshotId.trim().length > 0
-    && !busy;
-  const canStart = isBackendHealthy
-    && activeWorkspace !== null
-    && launchSnapshotId !== null
-    && !busy;
-
-  return (
-    <div className="runtime-launch-box">
-      <div className="runtime-launch-header">
-        <div>
-          <strong>Project Snapshot Runtime</strong>
-          <span data-testid="runtime-selected-process">
-            {isPublished ? selectedDefinition.processDefinitionId : 'Publish a graph first'}
-          </span>
-        </div>
-        <button
-          type="button"
-          className="button primary"
-          disabled={!canStart}
-          onClick={onStart}
-          data-testid="start-published-process-session"
-        >
-          <Play size={15} />
-          Start
-        </button>
-      </div>
-      <div className="project-snapshot-actions">
-        <button
-          type="button"
-          className="button"
-          disabled={!canPublishProjectSnapshot}
-          onClick={onPublishProjectSnapshot}
-          data-testid="publish-project-snapshot"
-        >
-          <GitBranch size={15} />
-          Publish Snapshot
-        </button>
-        <span>{launchSnapshotId ?? 'No project snapshot'}</span>
-      </div>
-      <label>
-        <span>Configuration Snapshot ID</span>
-        <input
-          value={launchDraft.configurationSnapshotId}
-          onChange={event => onChange(current => ({
-            ...current,
-            configurationSnapshotId: event.target.value
-          }))}
-          data-testid="process-runtime-snapshot-id"
-        />
-      </label>
-      <div className="runtime-launch-grid">
-        <label>
-          <span>Serial</span>
-          <input
-            value={launchDraft.serialNumber}
-            onChange={event => onChange(current => ({
-              ...current,
-              serialNumber: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Batch</span>
-          <input
-            value={launchDraft.batchId}
-            onChange={event => onChange(current => ({
-              ...current,
-              batchId: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Fixture</span>
-          <input
-            value={launchDraft.fixtureId}
-            onChange={event => onChange(current => ({
-              ...current,
-              fixtureId: event.target.value
-            }))}
-          />
-        </label>
-        <label>
-          <span>Device</span>
-          <input
-            value={launchDraft.deviceId}
-            onChange={event => onChange(current => ({
-              ...current,
-              deviceId: event.target.value
-            }))}
-          />
-        </label>
-      </div>
-      <label>
-        <span>Actor</span>
-        <input
-          value={launchDraft.actorId}
-          onChange={event => onChange(current => ({
-            ...current,
-            actorId: event.target.value
-          }))}
-        />
-      </label>
-      {lastProjectSnapshot ? (
-        <div className="project-snapshot-result" data-testid="project-snapshot-result">
-          <strong>{lastProjectSnapshot.snapshotId}</strong>
-          <span>{lastProjectSnapshot.processVersionId}</span>
-          <small>{lastProjectSnapshot.configurationSnapshotId}</small>
-          <small>Release {lastProjectSnapshot.releaseContentSha256.slice(0, 12)}</small>
-        </div>
-      ) : null}
-      {lastStartedSession ? (
-        <div className="runtime-start-result" data-testid="runtime-start-result">
-          <strong>{lastStartedSession.status}</strong>
-          <span>{lastStartedSession.sessionId}</span>
-          {lastStartedSession.snapshotId ? (
-            <small>{lastStartedSession.snapshotId}</small>
-          ) : null}
-          <small>
-            {lastStartedSession.completedSteps} steps,
-            {' '}
-            {lastStartedSession.commandCount} commands,
-            {' '}
-            {lastStartedSession.incidentCount} incidents
-          </small>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function findApplicationSnapshot(
-  workspace: AutomationProjectWorkspaceResponse | null,
-  applicationId: string | null,
-  preferredSnapshot: PublishedProjectSnapshotResponse | null
-): PublishedProjectSnapshotResponse | null {
-  if (!workspace || !applicationId) {
-    return null;
-  }
-
-  if (preferredSnapshot?.applicationId === applicationId) {
-    return preferredSnapshot;
-  }
-
-  const snapshots = workspace.project.snapshots.filter(
-    snapshot => snapshot.applicationId === applicationId);
-  return snapshots.find(snapshot => snapshot.snapshotId === workspace.project.activeSnapshotId)
-    ?? snapshots
-      .slice()
-      .sort((left, right) => right.publishedAtUtc.localeCompare(left.publishedAtUtc))[0]
-    ?? null;
 }
 
 function createProjectTargetOptions(
@@ -2041,40 +1878,38 @@ function createProjectTargetOptions(
   }
 
   const capabilitiesById = new Map(topology.capabilities.map(capability => [capability.capabilityId, capability]));
-  const bindingsByCapabilityId = new Map(topology.driverBindings.map(binding => [binding.capabilityId, binding]));
+  const systemsById = new Map(topology.systems.map(system => [system.systemId, system]));
+  const capabilitiesForIds = (capabilityIds: string[]): ProjectTargetCapabilityOption[] =>
+    [...new Set(capabilityIds)]
+      .sort((left, right) => left.localeCompare(right))
+      .flatMap(capabilityId => {
+        const capability = capabilitiesById.get(capabilityId);
+        if (!capability) {
+          return [];
+        }
+
+        const binding = topology.driverBindings.find(candidate => candidate.capabilityId === capabilityId);
+        return [{
+          capabilityId,
+          commandName: capability.commandName,
+          providerKey: binding?.providerKey ?? ''
+        }];
+      });
   const createOption = (
     testId: string,
-    targetKind: string,
+    targetKind: ProcessTargetKind,
     targetId: string,
     label: string,
     detail: string,
-    capabilityId = ''
+    capabilityIds: string[] = []
   ): ProjectTargetOption => {
-    const capability = capabilityId ? capabilitiesById.get(capabilityId) : null;
-    const binding = capabilityId ? bindingsByCapabilityId.get(capabilityId) : null;
-    const commandName = capability?.commandName ?? '';
-    const providerKey = binding?.providerKey ?? '';
-
     return {
       testId,
       targetKind,
       targetId,
       label,
       detail,
-      capabilityId,
-      commandName,
-      providerKey,
-      inputPayload: JSON.stringify({
-        projectId: workspace.project.projectId,
-        applicationId: application.applicationId,
-        topologyId: topology.topologyId,
-        targetKind,
-        targetId,
-        targetLabel: label,
-        capabilityId: capabilityId || null,
-        commandName: commandName || null,
-        providerKey: providerKey || null
-      })
+      capabilities: capabilitiesForIds(capabilityIds)
     };
   };
 
@@ -2084,21 +1919,33 @@ function createProjectTargetOptions(
     system.systemId,
     system.displayName,
     `${system.kind} · ${system.systemType}${system.parentSystemId ? ` under ${system.parentSystemId}` : ''}`,
-    system.providedCapabilityIds[0] ?? system.requiredCapabilityIds[0] ?? ''));
+    [...system.providedCapabilityIds, ...system.requiredCapabilityIds]));
 
   const slotGroupTargets = topology.slotGroups.map((group, index) => createOption(
     `slot-group-${index}`,
     'SlotGroup',
     group.slotGroupId,
     group.displayName,
-    `${group.kind}, ${group.slotIds.length}/${group.capacity} slots`));
+    `${group.kind}, ${group.slotIds.length}/${group.capacity} slots`,
+    capabilitiesForSystem(systemsById, group.parentSystemId)));
 
   const slotTargets = topology.slots.map((slot, index) => createOption(
     `slot-${index}`,
     'Slot',
     slot.slotId,
     slot.displayName,
-    `${slot.address}, ${slot.materialKind}`));
+    `${slot.address}, ${slot.materialKind}`,
+    capabilitiesForSystem(systemsById, slot.parentSystemId)));
+
+  const dutTargets = topology.slots
+    .filter(slot => slot.materialKind === 'Dut')
+    .map((slot, index) => createOption(
+      `dut-${index}`,
+      'Dut',
+      slot.slotId,
+      slot.displayName,
+      `${slot.address}, DUT`,
+      capabilitiesForSystem(systemsById, slot.parentSystemId)));
 
   const capabilityTargets = topology.capabilities.map((capability, index) => createOption(
     `capability-${index}`,
@@ -2106,7 +1953,7 @@ function createProjectTargetOptions(
     capability.capabilityId,
     capability.commandName,
     `${capability.safetyClass}, ${capability.timeoutSeconds}s`,
-    capability.capabilityId));
+    [capability.capabilityId]));
 
   const driverTargets = topology.driverBindings.map((binding, index) => createOption(
     `driver-${index}`,
@@ -2114,15 +1961,26 @@ function createProjectTargetOptions(
     binding.bindingId,
     binding.providerKey,
     `${binding.providerKind} for ${binding.capabilityId}`,
-    binding.capabilityId));
+    [binding.capabilityId]));
 
   return [
     ...systemTargets,
+    ...capabilityTargets,
+    ...driverTargets,
     ...slotGroupTargets,
     ...slotTargets,
-    ...capabilityTargets,
-    ...driverTargets
+    ...dutTargets
   ];
+}
+
+function capabilitiesForSystem(
+  systemsById: Map<string, AutomationTopologyResponse['systems'][number]>,
+  systemId: string
+): string[] {
+  const system = systemsById.get(systemId);
+  return system
+    ? [...system.providedCapabilityIds, ...system.requiredCapabilityIds]
+    : [];
 }
 
 function applyProjectTargetToNode(
@@ -2130,16 +1988,70 @@ function applyProjectTargetToNode(
   target: ProjectTargetOption
 ): ProcessNodeDraft {
   if (node.kind === 'Command') {
+    const onlyCapability = target.capabilities.length === 1
+      ? target.capabilities[0]
+      : null;
     return {
       ...node,
-      displayName: target.commandName ? `Execute ${target.label}` : node.displayName,
-      requiredCapability: target.capabilityId || node.requiredCapability,
-      commandName: target.commandName || node.commandName,
-      inputPayload: target.inputPayload
+      displayName: `Execute ${target.label}`,
+      targetKind: target.targetKind,
+      targetId: target.targetId,
+      requiredCapability: onlyCapability?.capabilityId ?? '',
+      commandName: onlyCapability?.commandName ?? ''
     };
   }
 
   return node;
+}
+
+function selectCommandTargetKind(
+  node: ProcessNodeDraft,
+  targetKind: ProcessTargetKind,
+  projectTargets: ProjectTargetOption[]
+): ProcessNodeDraft {
+  const firstTarget = projectTargets.find(target => target.targetKind === targetKind);
+  return firstTarget
+    ? applyProjectTargetToNode({ ...node, targetKind }, firstTarget)
+    : {
+        ...node,
+        targetKind,
+        targetId: '',
+        requiredCapability: '',
+        commandName: ''
+      };
+}
+
+function selectCommandTargetId(
+  node: ProcessNodeDraft,
+  targetId: string,
+  projectTargets: ProjectTargetOption[]
+): ProcessNodeDraft {
+  const target = projectTargets.find(candidate =>
+    candidate.targetKind === node.targetKind && candidate.targetId === targetId);
+  return target
+    ? applyProjectTargetToNode(node, target)
+    : {
+        ...node,
+        targetId,
+        requiredCapability: '',
+        commandName: ''
+      };
+}
+
+function selectCommandCapability(
+  node: ProcessNodeDraft,
+  capabilityId: string,
+  projectTargets: ProjectTargetOption[]
+): ProcessNodeDraft {
+  const capability = projectTargets
+    .find(target => target.targetKind === node.targetKind && target.targetId === node.targetId)
+    ?.capabilities
+    .find(candidate => candidate.capabilityId === capabilityId);
+  return {
+    ...node,
+    requiredCapability: capabilityId,
+    commandName: capability?.commandName ?? ''
+  };
 }
 
 function createDraft(): ProcessDraft {
@@ -2177,19 +2089,6 @@ function createDraft(): ProcessDraft {
   };
 }
 
-function createRuntimeLaunchDraft(): RuntimeLaunchDraft {
-  const seed = Date.now().toString(36);
-
-  return {
-    configurationSnapshotId: '',
-    serialNumber: `SN-${seed.toUpperCase()}`,
-    batchId: `batch-${seed}`,
-    fixtureId: 'fixture-desktop',
-    deviceId: 'device-desktop',
-    actorId: 'desktop-operator'
-  };
-}
-
 function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
   return {
     blockType: 'user_fixture_action',
@@ -2207,7 +2106,6 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
             ['Slot group', 'SlotGroup'],
             ['Slot', 'Slot'],
             ['DUT', 'Dut'],
-            ['System', 'System'],
             ['Capability', 'Capability'],
             ['Driver', 'Driver']
           ]
@@ -2324,6 +2222,9 @@ function fromNodeResponse(node: ProcessNodeResponse): ProcessNodeDraft {
   const kind = parseNodeKind(node.kind);
   const blocklyWorkspaceJson = normalizeBlocklyWorkspaceJson(node.blocklyWorkspaceJson);
   const manualSourceCode = node.scriptSourceCode ?? createDefaultManualPythonSource();
+  const commandTarget = kind === 'Command'
+    ? readCommandTarget(node)
+    : { targetKind: 'Capability' as const, targetId: '' };
 
   return {
     nodeId: node.nodeId,
@@ -2331,6 +2232,8 @@ function fromNodeResponse(node: ProcessNodeResponse): ProcessNodeDraft {
     displayName: node.displayName,
     requiredCapability: node.requiredCapability ?? defaultRequiredCapability(kind),
     commandName: node.commandName ?? defaultCommandName(kind),
+    targetKind: commandTarget.targetKind,
+    targetId: commandTarget.targetId,
     timeoutSeconds: node.timeoutSeconds ?? defaultTimeoutSeconds(kind),
     inputPayload: node.inputPayload ?? defaultInputPayload(kind),
     scriptVersion: node.scriptVersion ?? '1',
@@ -2351,6 +2254,8 @@ function createNode(
     displayName: defaultDisplayName(kind),
     requiredCapability: defaultRequiredCapability(kind),
     commandName: defaultCommandName(kind),
+    targetKind: defaultTargetKind(kind),
+    targetId: defaultTargetId(kind),
     timeoutSeconds: defaultTimeoutSeconds(kind),
     inputPayload: defaultInputPayload(kind),
     scriptVersion: '1',
@@ -2378,28 +2283,14 @@ function toCreateRequest(draft: ProcessDraft): CreateProcessDefinitionRequest {
   };
 }
 
-function toStartProjectSnapshotRuntimeSessionRequest(draft: RuntimeLaunchDraft): {
-  serialNumber: string | null;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
-  actorId: string | null;
-} {
-  return {
-    serialNumber: toOptionalString(draft.serialNumber),
-    batchId: toOptionalString(draft.batchId),
-    fixtureId: toOptionalString(draft.fixtureId),
-    deviceId: toOptionalString(draft.deviceId),
-    actorId: toOptionalString(draft.actorId)
-  };
-}
-
 function toCreateNodeRequest(node: ProcessNodeDraft): CreateProcessNodeRequest {
   if (node.kind === 'Command') {
     return {
       ...baseNodeRequest(node),
       requiredCapability: toOptionalString(node.requiredCapability),
       commandName: toOptionalString(node.commandName),
+      targetKind: node.targetKind,
+      targetId: toOptionalString(node.targetId),
       timeoutSeconds: node.timeoutSeconds,
       inputPayload: toOptionalString(node.inputPayload)
     };
@@ -2437,6 +2328,8 @@ function baseNodeRequest(node: ProcessNodeDraft): CreateProcessNodeRequest {
     displayName: node.displayName,
     requiredCapability: null,
     commandName: null,
+    targetKind: null,
+    targetId: null,
     timeoutSeconds: null,
     inputPayload: null,
     blocklyWorkspaceJson: null,
@@ -2520,11 +2413,14 @@ function appendBlocklyBlock(
   const defaultTarget = projectTargets.find(target => target.targetKind === targetKind);
   if (defaultTarget) {
     fields.TARGET_ID = defaultTarget.targetId;
+    const onlyCapability = defaultTarget.capabilities.length === 1
+      ? defaultTarget.capabilities[0]
+      : null;
     if (Object.hasOwn(fields, 'CAPABILITY')) {
-      fields.CAPABILITY = defaultTarget.capabilityId;
+      fields.CAPABILITY = onlyCapability?.capabilityId ?? '';
     }
     if (Object.hasOwn(fields, 'COMMAND')) {
-      fields.COMMAND = defaultTarget.commandName;
+      fields.COMMAND = onlyCapability?.commandName ?? '';
     }
   }
 
@@ -2601,12 +2497,20 @@ function loadWorkspaceState(
   workspaceJson: string,
   workspace: Blockly.Workspace | Blockly.WorkspaceSvg
 ): void {
-  Blockly.serialization.workspaces.load(JSON.parse(workspaceJson), workspace);
+  Blockly.Events.disable();
+  try {
+    Blockly.serialization.workspaces.load(JSON.parse(workspaceJson), workspace);
+  } finally {
+    Blockly.Events.enable();
+  }
 }
 
 function registerProcessBlocklyBlocks(blockCatalog: ProcessBlocklyBlockDefinition[]): void {
   if (!Blockly.registry.hasItem(Blockly.registry.Type.FIELD, projectTargetFieldType)) {
     Blockly.fieldRegistry.register(projectTargetFieldType, ProjectTargetDropdown);
+  }
+  if (!Blockly.registry.hasItem(Blockly.registry.Type.FIELD, projectCapabilityFieldType)) {
+    Blockly.fieldRegistry.register(projectCapabilityFieldType, ProjectCapabilityDropdown);
   }
 
   const blockRegistry = Blockly.Blocks as Record<string, unknown>;
@@ -2641,14 +2545,25 @@ function prepareBlocklyBlockJson(blocklyJson: Record<string, unknown>): Record<s
   }
 
   cloned.args0 = cloned.args0.map(argument => {
-    if (!isRecord(argument) || argument.name !== 'TARGET_ID') {
+    if (!isRecord(argument)) {
       return argument;
     }
 
-    return {
-      ...argument,
-      type: projectTargetFieldType
-    };
+    if (argument.name === 'TARGET_ID') {
+      return {
+        ...argument,
+        type: projectTargetFieldType
+      };
+    }
+
+    if (argument.name === 'CAPABILITY') {
+      return {
+        ...argument,
+        type: projectCapabilityFieldType
+      };
+    }
+
+    return argument;
   });
   return cloned;
 }
@@ -2664,7 +2579,7 @@ function synchronizeTargetBindingFields(
   const change = event as Blockly.Events.BlockChange;
   if (change.type !== Blockly.Events.BLOCK_CHANGE
     || change.element !== 'field'
-    || (change.name !== 'TARGET_KIND' && change.name !== 'TARGET_ID')
+    || (change.name !== 'TARGET_KIND' && change.name !== 'TARGET_ID' && change.name !== 'CAPABILITY')
     || !change.blockId) {
     return;
   }
@@ -2686,11 +2601,24 @@ function synchronizeTargetBindingFields(
   const selectedTarget = targets.find(target =>
     target.targetKind === targetKind && target.targetId === targetId);
   if (!selectedTarget) {
+    block.getField('CAPABILITY')?.setValue('');
+    block.getField('COMMAND')?.setValue('');
     return;
   }
 
-  block.getField('CAPABILITY')?.setValue(selectedTarget.capabilityId);
-  block.getField('COMMAND')?.setValue(selectedTarget.commandName);
+  if (change.name === 'CAPABILITY') {
+    const capabilityId = String(block.getFieldValue('CAPABILITY') ?? '');
+    const capability = selectedTarget.capabilities.find(candidate =>
+      candidate.capabilityId === capabilityId);
+    block.getField('COMMAND')?.setValue(capability?.commandName ?? '');
+    return;
+  }
+
+  const onlyCapability = selectedTarget.capabilities.length === 1
+    ? selectedTarget.capabilities[0]
+    : null;
+  block.getField('CAPABILITY')?.setValue(onlyCapability?.capabilityId ?? '');
+  block.getField('COMMAND')?.setValue(onlyCapability?.commandName ?? '');
 }
 
 function createBlocklyToolbox(blockCatalog: ProcessBlocklyBlockDefinition[]): Blockly.utils.toolbox.ToolboxDefinition {
@@ -2913,7 +2841,25 @@ function parseNodeKind(value: string): ProcessNodeKind {
     || value === 'Blockly'
     || value === 'PythonScript'
     ? value
-    : 'Command';
+      : 'Command';
+}
+
+function readCommandTarget(node: ProcessNodeResponse): {
+  targetKind: ProcessTargetKind;
+  targetId: string;
+} {
+  if (!processTargetKinds.some(kind => kind === node.targetKind)) {
+    throw new Error(`Command node ${node.nodeId} has invalid target kind ${node.targetKind ?? '<missing>'}`);
+  }
+
+  if (!node.targetId || node.targetId.trim() !== node.targetId) {
+    throw new Error(`Command node ${node.nodeId} has an invalid target id`);
+  }
+
+  return {
+    targetKind: node.targetKind as ProcessTargetKind,
+    targetId: node.targetId
+  };
 }
 
 function parseTransitionLoopPolicy(value: string | null): TransitionLoopPolicy {
@@ -2945,6 +2891,14 @@ function defaultRequiredCapability(kind: ProcessNodeKind): string {
 
 function defaultCommandName(kind: ProcessNodeKind): string {
   return kind === 'Command' ? 'Echo' : '';
+}
+
+function defaultTargetKind(_kind: ProcessNodeKind): ProcessTargetKind {
+  return 'Capability';
+}
+
+function defaultTargetId(kind: ProcessNodeKind): string {
+  return kind === 'Command' ? 'device.loopback' : '';
 }
 
 function defaultTimeoutSeconds(kind: ProcessNodeKind): number {

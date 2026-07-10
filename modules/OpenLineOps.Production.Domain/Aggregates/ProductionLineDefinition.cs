@@ -176,9 +176,15 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
     private static void EnsureUnique(IEnumerable<string> values, string description)
     {
         var valueArray = values.ToArray();
+        if (valueArray.Distinct(StringComparer.Ordinal).Count() != valueArray.Length)
+        {
+            throw new ArgumentException($"Production line {description} must be unique.");
+        }
+
         if (valueArray.Distinct(StringComparer.OrdinalIgnoreCase).Count() != valueArray.Length)
         {
-            throw new ArgumentException($"Production line {description} must be unique ignoring case.");
+            throw new ArgumentException(
+                $"Production line {description} cannot contain identities that differ only by case.");
         }
     }
 

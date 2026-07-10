@@ -18,7 +18,7 @@ public interface IPluginProcessCommandInventory
         var commands = await ListProcessCommandsAsync(cancellationToken).ConfigureAwait(false);
 
         return commands.FirstOrDefault(candidate =>
-            string.Equals(candidate.Capability, capability.Trim(), StringComparison.Ordinal)
-            && string.Equals(candidate.CommandName, commandName.Trim(), StringComparison.OrdinalIgnoreCase));
+            string.Equals(candidate.Capability, capability, StringComparison.Ordinal)
+            && string.Equals(candidate.CommandName, commandName, StringComparison.Ordinal));
     }
 }

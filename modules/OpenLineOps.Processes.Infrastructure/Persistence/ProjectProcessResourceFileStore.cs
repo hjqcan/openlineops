@@ -89,6 +89,13 @@ internal static class ProjectProcessResourceFileStore
         string expectedSha256,
         CancellationToken cancellationToken)
     {
+        if (!IsCanonicalSha256(expectedSha256))
+        {
+            throw new InvalidDataException(
+                $"Project process artifact '{path}' declares non-canonical SHA-256 '{expectedSha256}'. " +
+                "Expected exactly 64 lowercase hexadecimal characters.");
+        }
+
         if (!File.Exists(path))
         {
             throw new InvalidDataException($"Project process artifact '{path}' was not found.");
@@ -96,7 +103,7 @@ internal static class ProjectProcessResourceFileStore
 
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
         var actualSha256 = ComputeSha256(bytes);
-        if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(actualSha256, expectedSha256, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 $"Project process artifact '{path}' digest is {actualSha256}, expected {expectedSha256}.");
@@ -108,6 +115,12 @@ internal static class ProjectProcessResourceFileStore
     public static string ComputeSha256(byte[] bytes)
     {
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    public static bool IsCanonicalSha256(string? value)
+    {
+        return value is { Length: 64 }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 
     private static async ValueTask SaveAtomicAsync(

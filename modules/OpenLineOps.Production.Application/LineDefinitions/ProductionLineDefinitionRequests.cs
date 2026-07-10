@@ -25,6 +25,7 @@ public sealed record ProcessStageRequest(
     string DisplayName,
     string WorkstationId,
     string FlowDefinitionId,
+    string ConfigurationSnapshotId,
     string? ExternalTestProgramAdapterId);
 
 public sealed record ExternalTestProgramAdapterRequest(
@@ -37,8 +38,15 @@ public sealed record ExternalTestProgramAdapterRequest(
     IReadOnlyCollection<string> ArgumentTemplates,
     IReadOnlyCollection<ExternalTestProgramInputMappingRequest> InputMappings,
     IReadOnlyCollection<ExternalTestProgramResultMappingRequest> ResultMappings,
+    ExternalTestProgramOutcomeMappingRequest OutcomeMapping,
     long TimeoutMilliseconds);
 
 public sealed record ExternalTestProgramInputMappingRequest(string Source, string Target);
 
 public sealed record ExternalTestProgramResultMappingRequest(string SourcePath, string TargetKey);
+
+public sealed record ExternalTestProgramOutcomeMappingRequest(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);

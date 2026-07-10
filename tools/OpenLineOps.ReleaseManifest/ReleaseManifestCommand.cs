@@ -24,6 +24,17 @@ public static class ReleaseManifestCommand
 
         try
         {
+            if (options.JsonVerificationPaths is not null)
+            {
+                foreach (var path in options.JsonVerificationPaths)
+                {
+                    JsonPropertyUniquenessVerifier.VerifyFile(path);
+                    Console.WriteLine($"JSON properties verified: {path}");
+                }
+
+                return 0;
+            }
+
             if (options.VerifyOptions is not null)
             {
                 var result = ReleaseManifestVerifier.Verify(options.VerifyOptions);
@@ -61,8 +72,12 @@ public static class ReleaseManifestCommand
 
     private const string UsageText = """
         Usage:
-          OpenLineOps.ReleaseManifest --version <semver> --artifacts <directory> --output <release-manifest.json> --checksums <checksums.sha256> [--notes <release-notes.md>] [--product <name>] [--commit <sha>] [--require-kind <kind>]...
+          OpenLineOps.ReleaseManifest --version <semver> --artifacts <directory> --output <release-manifest.json> --checksums <checksums.sha256> [--notes <release-notes.md>] [--commit <sha>] [--require-kind <kind>]...
           OpenLineOps.ReleaseManifest --verify --artifacts <directory> --manifest <release-manifest.json> [--checksums <checksums.sha256>] [--require-kind <kind>]...
+          OpenLineOps.ReleaseManifest --verify-json <document.json> [--verify-json <document.json>]...
+
+        Canonical artifact directories and kind values:
+          source, api, plugin-host, script-worker, sample-plugin, desktop
 
         Example:
           dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind api --require-kind desktop
@@ -111,7 +126,7 @@ public static class ReleaseManifestCommand
         }
 
         var known = new HashSet<string>(
-            ["version", "artifacts", "output", "manifest", "checksums", "notes", "product", "commit", "require-kind"],
+            ["version", "artifacts", "output", "manifest", "checksums", "notes", "commit", "require-kind", "verify-json"],
             StringComparer.OrdinalIgnoreCase);
         var unknown = values.Keys.FirstOrDefault(key => !known.Contains(key));
         if (unknown is not null)
@@ -127,16 +142,31 @@ public static class ReleaseManifestCommand
             return false;
         }
 
+        if (values.TryGetValue("verify-json", out var jsonPaths))
+        {
+            if (values.Count != 1 || flags.Count != 0 || jsonPaths.Count == 0
+                || jsonPaths.Any(string.IsNullOrWhiteSpace))
+            {
+                error = "Option '--verify-json' cannot be combined with release generation or verification options.";
+                return false;
+            }
+
+            options = new ParsedOptions(
+                GenerateOptions: null,
+                VerifyOptions: null,
+                JsonVerificationPaths: jsonPaths
+                    .Select(path => ResolvePath(currentDirectory, path))
+                    .ToArray());
+            return true;
+        }
+
         if (!TryGetRequired(values, "artifacts", out var artifacts, out error))
         {
             return false;
         }
 
         var requiredArtifactKinds = values.TryGetValue("require-kind", out var kinds)
-            ? kinds
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => value.Trim())
-                .ToArray()
+            ? kinds.ToArray()
             : [];
 
         if (flags.Contains("verify"))
@@ -159,7 +189,8 @@ public static class ReleaseManifestCommand
                     ChecksumsPath: TryGetSingle(values, "checksums", out var verifyChecksums)
                         ? ResolvePath(currentDirectory, verifyChecksums)
                         : null,
-                    RequiredArtifactKinds: requiredArtifactKinds));
+                    RequiredArtifactKinds: requiredArtifactKinds),
+                JsonVerificationPaths: null);
 
             return true;
         }
@@ -178,7 +209,6 @@ public static class ReleaseManifestCommand
 
         options = new ParsedOptions(
             GenerateOptions: new ReleaseManifestOptions(
-                Product: TryGetSingle(values, "product", out var product) ? product : "OpenLineOps",
                 Version: version,
                 ArtifactsDirectory: ResolvePath(currentDirectory, artifacts),
                 ManifestPath: ResolvePath(currentDirectory, output),
@@ -187,7 +217,8 @@ public static class ReleaseManifestCommand
                 Commit: TryGetSingle(values, "commit", out var commit) ? commit : null,
                 GeneratedAtUtc: DateTimeOffset.UtcNow,
                 RequiredArtifactKinds: requiredArtifactKinds),
-            VerifyOptions: null);
+            VerifyOptions: null,
+            JsonVerificationPaths: null);
 
         return true;
     }
@@ -197,7 +228,7 @@ public static class ReleaseManifestCommand
         out string error)
     {
         var generateOptions = new HashSet<string>(
-            ["version", "artifacts", "output", "checksums", "notes", "product", "commit", "require-kind"],
+            ["version", "artifacts", "output", "checksums", "notes", "commit", "require-kind"],
             StringComparer.OrdinalIgnoreCase);
         var verifyOnly = values.Keys.FirstOrDefault(key => !generateOptions.Contains(key));
         if (verifyOnly is not null)
@@ -280,5 +311,6 @@ public static class ReleaseManifestCommand
 
     private sealed record ParsedOptions(
         ReleaseManifestOptions? GenerateOptions,
-        ReleaseManifestVerificationOptions? VerifyOptions);
+        ReleaseManifestVerificationOptions? VerifyOptions,
+        IReadOnlyList<string>? JsonVerificationPaths);
 }

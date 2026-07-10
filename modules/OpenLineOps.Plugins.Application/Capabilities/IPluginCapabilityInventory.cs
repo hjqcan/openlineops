@@ -18,7 +18,7 @@ public interface IPluginCapabilityInventory
 
         return capabilities.Any(candidate => string.Equals(
             candidate.Capability,
-            capability.Trim(),
+            capability,
             StringComparison.Ordinal));
     }
 }

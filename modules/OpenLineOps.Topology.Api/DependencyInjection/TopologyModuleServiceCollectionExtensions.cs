@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Topology.Api.ReleaseReading;
 using OpenLineOps.Topology.Api.Time;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.ProjectWorkspaces;
@@ -17,6 +18,7 @@ public static class TopologyModuleServiceCollectionExtensions
         services.TryAddSingleton<IProjectAutomationTopologyRepository, FileSystemProjectAutomationTopologyRepository>();
         services.TryAddSingleton<IProjectSiteLayoutRepository, FileSystemProjectSiteLayoutRepository>();
         services.AddScoped<IProjectAutomationTopologyService, ProjectAutomationTopologyService>();
+        services.AddScoped<ProjectReleaseTopologyReader>();
 
         return services;
     }

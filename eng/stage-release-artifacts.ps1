@@ -586,9 +586,10 @@ $archives = @(
 )
 
 foreach ($archive in $archives) {
+    $artifactKindDirectory = Join-Path $resolvedArtifactsRoot $archive.Kind
     Compress-StagedDirectory `
         -SourceDirectory $archive.Source `
-        -DestinationArchive (Join-Path $resolvedArtifactsRoot $archive.Archive)
+        -DestinationArchive (Join-Path $artifactKindDirectory $archive.Archive)
 }
 
 $manifestPath = Join-Path $resolvedArtifactsRoot "release-manifest.json"

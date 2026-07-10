@@ -12,16 +12,16 @@ public static class RuntimeFlowCommand
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        return string.Equals(context.TargetCapability.Value, Capability, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(context.CommandName, WaitCommandName, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(context.TargetCapability.Value, Capability, StringComparison.Ordinal)
+            && string.Equals(context.CommandName, WaitCommandName, StringComparison.Ordinal);
     }
 
     public static bool IsResultPatch(RuntimeCommandExecutionContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        return string.Equals(context.TargetCapability.Value, Capability, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(context.CommandName, ResultPatchCommandName, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(context.TargetCapability.Value, Capability, StringComparison.Ordinal)
+            && string.Equals(context.CommandName, ResultPatchCommandName, StringComparison.Ordinal);
     }
 
     public static bool IsInternal(RuntimeCommandExecutionContext context) =>

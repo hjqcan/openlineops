@@ -49,7 +49,7 @@ public sealed class AlarmTests
         Assert.True(result.Succeeded);
         Assert.Equal(AlarmStatus.Acknowledged, alarm.Status);
         Assert.Equal("operator-a", alarm.AcknowledgedBy);
-        Assert.Contains(alarm.DomainEvents, domainEvent => domainEvent is AlarmAcknowledgedDomainEvent);
+        Assert.Single(alarm.DomainEvents);
     }
 
     [Fact]
@@ -63,7 +63,7 @@ public sealed class AlarmTests
         Assert.Equal(AlarmStatus.Resolved, alarm.Status);
         Assert.False(alarm.IsOpen);
         Assert.Equal("Recovered.", alarm.ResolutionNote);
-        Assert.Contains(alarm.DomainEvents, domainEvent => domainEvent is AlarmResolvedDomainEvent);
+        Assert.Single(alarm.DomainEvents);
     }
 
     [Fact]

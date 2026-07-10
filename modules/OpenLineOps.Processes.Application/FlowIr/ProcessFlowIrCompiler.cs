@@ -169,7 +169,9 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             node.DisplayName,
             capability,
             node.CommandName!,
-            new FlowIrTargetReference(FlowIrTargetReferenceKind.Capability, capability),
+            new FlowIrTargetReference(
+                ToFlowIrTargetKind(node.TargetKind!.Value),
+                node.TargetId!),
             node.InputPayload,
             CreateExecutionPolicy(node.CommandTimeout!.Value),
             PythonScript: null,
@@ -294,6 +296,20 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             ProcessNodeKind.PythonScript => FlowIrNodeKind.PythonScript,
             ProcessNodeKind.Blockly => FlowIrNodeKind.Blockly,
             _ => throw new InvalidOperationException($"Unsupported process node kind {node.Kind}.")
+        };
+    }
+
+    private static FlowIrTargetReferenceKind ToFlowIrTargetKind(ProcessActionTargetKind kind)
+    {
+        return kind switch
+        {
+            ProcessActionTargetKind.System => FlowIrTargetReferenceKind.System,
+            ProcessActionTargetKind.SlotGroup => FlowIrTargetReferenceKind.SlotGroup,
+            ProcessActionTargetKind.Slot => FlowIrTargetReferenceKind.Slot,
+            ProcessActionTargetKind.Dut => FlowIrTargetReferenceKind.Dut,
+            ProcessActionTargetKind.Capability => FlowIrTargetReferenceKind.Capability,
+            ProcessActionTargetKind.Driver => FlowIrTargetReferenceKind.Driver,
+            _ => throw new InvalidOperationException($"Unsupported command target kind {kind}.")
         };
     }
 

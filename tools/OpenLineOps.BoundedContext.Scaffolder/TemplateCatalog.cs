@@ -527,8 +527,8 @@ internal static class TemplateCatalog
     {
         return $$"""
             using Microsoft.EntityFrameworkCore;
+            using Microsoft.Extensions.Logging;
             using OpenLineOps.Domain.Abstractions.EventBus;
-            using OpenLineOps.Domain.Abstractions.Events;
             using OpenLineOps.Infrastructure.Data.Core.Context;
             using OpenLineOps.Infrastructure.Data.Core.EventBus;
             using OpenLineOps.{{model.ContextName}}.Domain.Aggregates;
@@ -537,14 +537,18 @@ internal static class TemplateCatalog
 
             public sealed class {{model.ContextName}}DbContext(
                 DbContextOptions<{{model.ContextName}}DbContext> options,
-                IDomainEventDispatcher? domainEventDispatcher = null,
+                IntegrationEventPublicationPolicy? integrationEventPublicationPolicy = null,
                 IIntegrationEventPublisher? integrationEventPublisher = null,
-                IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null)
+                ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
+                IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null,
+                ILogger<BaseDbContext>? logger = null)
                 : BaseDbContext(
                     options,
-                    domainEventDispatcher,
+                    integrationEventPublicationPolicy,
                     integrationEventPublisher: integrationEventPublisher,
-                    integrationEventTransactionCoordinator: integrationEventTransactionCoordinator)
+                    transactionalIntegrationEventPublisher: transactionalIntegrationEventPublisher,
+                    integrationEventTransactionCoordinator: integrationEventTransactionCoordinator,
+                    logger: logger)
             {
                 public DbSet<{{model.AggregateName}}> {{model.AggregatePluralName}} => Set<{{model.AggregateName}}>();
 
@@ -984,7 +988,7 @@ internal static class TemplateCatalog
             using Microsoft.Data.Sqlite;
             using Microsoft.EntityFrameworkCore;
             using OpenLineOps.Domain.Abstractions.EventBus;
-            using OpenLineOps.Domain.Abstractions.Events;
+            using OpenLineOps.Infrastructure.Data.Core.EventBus;
             using OpenLineOps.{{model.ContextName}}.Domain.Aggregates;
             using OpenLineOps.{{model.ContextName}}.Domain.Events;
             using OpenLineOps.{{model.ContextName}}.Domain.Events.Converters;
@@ -996,12 +1000,11 @@ internal static class TemplateCatalog
             public sealed class {{model.AggregateName}}PersistenceTests
             {
                 [Fact]
-                public async Task EfDataCoreRepositoryPersistsAggregateAndDispatchesDomainEvents()
+                public async Task EfDataCoreRepositoryPersistsAggregateAndPublishesIntegrationEvents()
                 {
                     await using var connection = new SqliteConnection("Data Source=:memory:");
                     await connection.OpenAsync();
 
-                    var dispatcher = new CapturingDomainEventDispatcher();
                     var publisher = new CapturingIntegrationEventPublisher();
                     var options = new DbContextOptionsBuilder<{{model.ContextName}}DbContext>()
                         .UseSqlite(connection)
@@ -1011,7 +1014,10 @@ internal static class TemplateCatalog
                         "{{model.AggregateDisplayName}}",
                         new DateTimeOffset(2026, 6, 30, 8, 0, 0, TimeSpan.Zero));
 
-                    await using (var context = new {{model.ContextName}}DbContext(options, dispatcher, publisher))
+                    await using (var context = new {{model.ContextName}}DbContext(
+                                     options,
+                                     new IntegrationEventPublicationPolicy(IntegrationEventPublicationMode.PostCommit),
+                                     integrationEventPublisher: publisher))
                     {
                         await context.Database.MigrateAsync();
 
@@ -1037,8 +1043,7 @@ internal static class TemplateCatalog
                     }
 
                     var createdEvent = Assert.IsType<{{model.AggregateName}}CreatedDomainEvent>(
-                        Assert.Single(dispatcher.Dispatched));
-                    Assert.Same(createdEvent, Assert.Single(publisher.Published));
+                        Assert.Single(publisher.Published));
 
                     var integrationDto = createdEvent.ToIntegrationDto();
 
@@ -1063,19 +1068,6 @@ internal static class TemplateCatalog
                     Assert.Empty(pendingMigrations);
                 }
 
-                private sealed class CapturingDomainEventDispatcher : IDomainEventDispatcher
-                {
-                    public List<IDomainEvent> Dispatched { get; } = [];
-
-                    public Task DispatchAsync(
-                        IReadOnlyCollection<IDomainEvent> domainEvents,
-                        CancellationToken cancellationToken = default)
-                    {
-                        Dispatched.AddRange(domainEvents);
-                        return Task.CompletedTask;
-                    }
-                }
-
                 private sealed class CapturingIntegrationEventPublisher : IIntegrationEventPublisher
                 {
                     public List<object> Published { get; } = [];
@@ -1097,6 +1089,8 @@ internal static class TemplateCatalog
         return $$"""
             using Microsoft.Data.Sqlite;
             using Microsoft.EntityFrameworkCore;
+            using OpenLineOps.Domain.Abstractions.EventBus;
+            using OpenLineOps.Infrastructure.Data.Core.EventBus;
             using OpenLineOps.{{model.ContextName}}.Application.Contract.{{model.AggregatePluralName}};
             using OpenLineOps.{{model.ContextName}}.Application.Services;
             using OpenLineOps.{{model.ContextName}}.Infra.Data.Persistence;
@@ -1115,7 +1109,10 @@ internal static class TemplateCatalog
                         .UseSqlite(connection)
                         .Options;
 
-                    await using var context = new {{model.ContextName}}DbContext(options);
+                    await using var context = new {{model.ContextName}}DbContext(
+                        options,
+                        new IntegrationEventPublicationPolicy(IntegrationEventPublicationMode.PostCommit),
+                        integrationEventPublisher: new CapturingIntegrationEventPublisher());
                     await context.Database.MigrateAsync();
 
                     var repository = new Ef{{model.AggregateName}}Repository(context);
@@ -1127,6 +1124,16 @@ internal static class TemplateCatalog
 
                     Assert.Equal("{{model.AggregateSampleId}}", details.Id);
                     Assert.Equal("{{model.AggregateDisplayName}}", details.DisplayName);
+                }
+
+                private sealed class CapturingIntegrationEventPublisher : IIntegrationEventPublisher
+                {
+                    public Task PublishAsync(
+                        IEnumerable<object> domainEvents,
+                        CancellationToken cancellationToken = default)
+                    {
+                        return Task.CompletedTask;
+                    }
                 }
             }
             """;

@@ -1,5 +1,6 @@
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Application.Validation;
@@ -268,11 +269,13 @@ internal sealed class ProcessDefinitionAuthoringEngine
         ProcessDefinition definition,
         CreateProcessNodeRequest request)
     {
-        if (!Enum.TryParse<ProcessNodeKind>(request.Kind, ignoreCase: true, out var nodeKind))
+        if (!CanonicalEnumToken.TryParse<ProcessNodeKind>(request.Kind, out var nodeKind))
         {
             return ApplicationError.Validation(
                 "Processes.InvalidNodeKind",
-                $"Process node {request.NodeId} has unsupported kind {request.Kind}.");
+                $"Process node {request.NodeId} has unsupported kind {request.Kind}. " +
+                $"Expected an exact, case-sensitive token: " +
+                $"{CanonicalEnumToken.ExpectedTokens<ProcessNodeKind>()}.");
         }
 
         var nodeId = new ProcessNodeId(request.NodeId);
@@ -283,6 +286,36 @@ internal sealed class ProcessDefinitionAuthoringEngine
             return ApplicationError.Validation(
                 "Processes.CommandMetadataForbidden",
                 $"Process node {request.NodeId} kind {nodeKind} cannot contain command metadata.");
+        }
+
+        ProcessActionTargetKind? commandTargetKind = null;
+        if (nodeKind == ProcessNodeKind.Command)
+        {
+            if (!CanonicalEnumToken.TryParse<ProcessActionTargetKind>(request.TargetKind, out var parsedTargetKind))
+            {
+                return ApplicationError.Validation(
+                    "Processes.InvalidCommandTargetKind",
+                    $"Command node {request.NodeId} has unsupported target kind {request.TargetKind}. " +
+                    $"Expected an exact, case-sensitive token: " +
+                    $"{CanonicalEnumToken.ExpectedTokens<ProcessActionTargetKind>()}.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.TargetId)
+                || !string.Equals(request.TargetId, request.TargetId.Trim(), StringComparison.Ordinal))
+            {
+                return ApplicationError.Validation(
+                    "Processes.CommandTargetIdInvalid",
+                    $"Command node {request.NodeId} must declare a canonical target id.");
+            }
+
+            commandTargetKind = parsedTargetKind;
+        }
+        else if (!string.IsNullOrWhiteSpace(request.TargetKind)
+                 || !string.IsNullOrWhiteSpace(request.TargetId))
+        {
+            return ApplicationError.Validation(
+                "Processes.CommandTargetMetadataForbidden",
+                $"Process node {request.NodeId} kind {nodeKind} cannot contain command target metadata.");
         }
 
         if (nodeKind != ProcessNodeKind.PythonScript
@@ -326,6 +359,8 @@ internal sealed class ProcessDefinitionAuthoringEngine
                 string.IsNullOrWhiteSpace(request.RequiredCapability)
                     ? null
                     : new ProcessCapabilityId(request.RequiredCapability),
+                commandTargetKind,
+                request.TargetId,
                 request.CommandName,
                 request.TimeoutSeconds is null
                     ? null
@@ -418,19 +453,20 @@ internal sealed class ProcessDefinitionAuthoringEngine
     private static Result<ProcessTransitionLoopPolicy> ParseLoopPolicy(
         CreateProcessTransitionRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.LoopPolicy))
+        if (request.LoopPolicy is null)
         {
             return Result.Success(ProcessTransitionLoopPolicy.None);
         }
 
-        return Enum.TryParse<ProcessTransitionLoopPolicy>(
+        return CanonicalEnumToken.TryParse<ProcessTransitionLoopPolicy>(
             request.LoopPolicy,
-            ignoreCase: true,
             out var loopPolicy)
             ? Result.Success(loopPolicy)
             : Result.Failure<ProcessTransitionLoopPolicy>(ApplicationError.Validation(
                 "Processes.InvalidTransitionLoopPolicy",
-                $"Process transition {request.TransitionId} has unsupported loop policy {request.LoopPolicy}."));
+                $"Process transition {request.TransitionId} has unsupported loop policy {request.LoopPolicy}. " +
+                $"Expected an exact, case-sensitive token: " +
+                $"{CanonicalEnumToken.ExpectedTokens<ProcessTransitionLoopPolicy>()}."));
     }
 
     private static ApplicationError? ValidateCreateRequest(CreateProcessDefinitionRequest request)
@@ -480,4 +516,3 @@ internal sealed class ProcessDefinitionAuthoringEngine
             $"Process definition {processDefinitionId} was not found.");
     }
 }
-

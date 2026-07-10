@@ -18,9 +18,19 @@ public static class RunnerSnapshotSelector
     {
         ArgumentNullException.ThrowIfNull(project);
 
-        var useActive = string.IsNullOrWhiteSpace(requestedSnapshot)
-            || string.Equals(requestedSnapshot.Trim(), "active", StringComparison.OrdinalIgnoreCase);
-        var snapshotId = useActive ? project.ActiveSnapshotId : requestedSnapshot!.Trim();
+        if (requestedSnapshot is not null
+            && (string.IsNullOrWhiteSpace(requestedSnapshot)
+                || char.IsWhiteSpace(requestedSnapshot[0])
+                || char.IsWhiteSpace(requestedSnapshot[^1])))
+        {
+            return Failure(
+                "Runner.SnapshotSelectionInvalid",
+                "Snapshot selection must be null or a non-empty canonical value.");
+        }
+
+        var useActive = requestedSnapshot is null
+            || string.Equals(requestedSnapshot, "active", StringComparison.Ordinal);
+        var snapshotId = useActive ? project.ActiveSnapshotId : requestedSnapshot;
         if (string.IsNullOrWhiteSpace(snapshotId))
         {
             return Failure(

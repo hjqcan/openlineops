@@ -34,9 +34,7 @@ public sealed class AutomationProjectServiceTests
                 "application.main",
                 "topology.main",
                 ["layout.main"],
-                "process.main",
-                "process.main.v1",
-                "configuration.main.v1",
+                "line.main",
                 [
                     new SnapshotCapabilityBindingRequest(
                         "motion.axis.move",

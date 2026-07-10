@@ -1,6 +1,5 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Projects.Domain.Applications;
-using OpenLineOps.Projects.Domain.Events;
 using OpenLineOps.Projects.Domain.Identifiers;
 using OpenLineOps.Projects.Domain.Operations;
 using OpenLineOps.Projects.Domain.Snapshots;
@@ -166,9 +165,7 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
         ProjectApplicationId applicationId,
         AutomationTopologyId topologyId,
         IEnumerable<string> layoutIds,
-        ProcessDefinitionId processDefinitionId,
-        ProcessVersionId processVersionId,
-        ConfigurationSnapshotId configurationSnapshotId,
+        ProductionLineDefinitionId productionLineDefinitionId,
         IEnumerable<SnapshotCapabilityBinding> capabilityBindings,
         IEnumerable<ProjectTargetReference> targetReferences,
         IEnumerable<string> blockVersionIds,
@@ -203,18 +200,7 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
                 $"Topology {topologyId} is not linked to application {applicationId}.");
         }
 
-        if (!application.ProcessDefinitionIds.Contains(processDefinitionId))
-        {
-            return ProjectOperationResult.Rejected(
-                "Projects.ProcessNotLinked",
-                $"Process definition {processDefinitionId} is not linked to application {applicationId}.");
-        }
-
-        var layouts = layoutIds
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var layouts = layoutIds.ToArray();
         if (layouts.Length == 0)
         {
             return ProjectOperationResult.Rejected(
@@ -244,9 +230,7 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
             applicationId,
             topologyId,
             layouts,
-            processDefinitionId,
-            processVersionId,
-            configurationSnapshotId,
+            productionLineDefinitionId,
             bindings,
             targets,
             blockVersionIds,
@@ -256,8 +240,6 @@ public sealed class AutomationProject : AggregateRoot<AutomationProjectId>
 
         _snapshots.Add(snapshot);
         ActiveSnapshotId = snapshot.Id;
-
-        RaiseDomainEvent(new ProjectSnapshotPublishedDomainEvent(Id, snapshot.Id, applicationId, topologyId, publishedAtUtc));
 
         return ProjectOperationResult.Accepted("Project snapshot published.");
     }

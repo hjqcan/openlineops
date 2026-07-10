@@ -10,11 +10,12 @@ public enum RunnerParseStatus
 public sealed record RunnerRunOptions(
     string ProjectTarget,
     string Snapshot,
-    string? SerialNumber,
+    Guid ProductionRunId,
+    string DutIdentityValue,
     string? BatchId,
     string? FixtureId,
     string? DeviceId,
-    string? ActorId);
+    string ActorId);
 
 public sealed record RunnerParseResult(
     RunnerParseStatus Status,
@@ -24,8 +25,8 @@ public sealed record RunnerParseResult(
 public static class RunnerCommandLineParser
 {
     private static readonly HashSet<string> ValueOptions = new(
-        ["snapshot", "serial", "batch", "fixture", "device", "actor"],
-        StringComparer.OrdinalIgnoreCase);
+        ["snapshot", "run-id", "dut", "batch", "fixture", "device", "actor"],
+        StringComparer.Ordinal);
 
     public static RunnerParseResult Parse(IReadOnlyList<string> arguments)
     {
@@ -46,13 +47,13 @@ public static class RunnerCommandLineParser
             return Error("A command is required.");
         }
 
-        if (!string.Equals(arguments[0], "run", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(arguments[0], "run", StringComparison.Ordinal))
         {
             return Error($"Unknown command '{arguments[0]}'.");
         }
 
         string? projectTarget = null;
-        var optionValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var optionValues = new Dictionary<string, string>(StringComparer.Ordinal);
         var parseOptions = true;
 
         for (var index = 1; index < arguments.Count; index++)
@@ -101,6 +102,11 @@ public static class RunnerCommandLineParser
                     return Error($"Value for '--{optionName}' cannot be empty.");
                 }
 
+                if (char.IsWhiteSpace(optionValue[0]) || char.IsWhiteSpace(optionValue[^1]))
+                {
+                    return Error($"Value for '--{optionName}' must not have leading or trailing whitespace.");
+                }
+
                 optionValues.Add(optionName, optionValue);
                 continue;
             }
@@ -115,6 +121,11 @@ public static class RunnerCommandLineParser
                 return Error("Project target cannot be empty.");
             }
 
+            if (char.IsWhiteSpace(argument[0]) || char.IsWhiteSpace(argument[^1]))
+            {
+                return Error("Project target must not have leading or trailing whitespace.");
+            }
+
             projectTarget = argument;
         }
 
@@ -123,16 +134,38 @@ public static class RunnerCommandLineParser
             return Error("A project directory or .oloproj path is required.");
         }
 
+        var dutIdentityValue = GetOption(optionValues, "dut");
+        if (dutIdentityValue is null)
+        {
+            return Error("Option '--dut' is required.");
+        }
+
+        var actorId = GetOption(optionValues, "actor");
+        if (actorId is null)
+        {
+            return Error("Option '--actor' is required.");
+        }
+
+        var productionRunId = Guid.NewGuid();
+        var productionRunIdText = GetOption(optionValues, "run-id");
+        if (productionRunIdText is not null
+            && (!Guid.TryParseExact(productionRunIdText, "D", out productionRunId)
+                || productionRunId == Guid.Empty))
+        {
+            return Error("Value for '--run-id' must be a non-empty GUID in D format.");
+        }
+
         return new RunnerParseResult(
             RunnerParseStatus.Run,
             new RunnerRunOptions(
                 projectTarget,
                 GetOption(optionValues, "snapshot") ?? "active",
-                GetOption(optionValues, "serial"),
+                productionRunId,
+                dutIdentityValue,
                 GetOption(optionValues, "batch"),
                 GetOption(optionValues, "fixture"),
                 GetOption(optionValues, "device"),
-                GetOption(optionValues, "actor")),
+                actorId),
             ErrorMessage: null);
     }
 
@@ -143,14 +176,14 @@ public static class RunnerCommandLineParser
 
     private static bool IsHelpCommand(string argument)
     {
-        return string.Equals(argument, "help", StringComparison.OrdinalIgnoreCase)
+        return string.Equals(argument, "help", StringComparison.Ordinal)
             || IsHelpOption(argument);
     }
 
     private static bool IsHelpOption(string argument)
     {
-        return string.Equals(argument, "--help", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(argument, "-h", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(argument, "--help", StringComparison.Ordinal)
+            || string.Equals(argument, "-h", StringComparison.Ordinal);
     }
 
     private static RunnerParseResult Help()

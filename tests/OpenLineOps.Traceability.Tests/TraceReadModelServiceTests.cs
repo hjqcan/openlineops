@@ -1,6 +1,5 @@
 using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Traceability.Application.ReadModels;
-using OpenLineOps.Traceability.Domain.Identifiers;
 using OpenLineOps.Traceability.Domain.Records;
 using OpenLineOps.Traceability.Infrastructure.Persistence;
 
@@ -8,46 +7,68 @@ namespace OpenLineOps.Traceability.Tests;
 
 public sealed class TraceReadModelServiceTests
 {
-    private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
-
     [Fact]
-    public async Task GetStationDashboardAsyncReturnsCountsAndRecentTraces()
+    public async Task StationDashboardCountsProductionRunsAndAggregatesMatchingStageEvidence()
     {
         var repository = new InMemoryTraceRecordRepository();
         var service = new TraceReadModelService(repository);
-        var passed = CreateTrace("00000000-0000-0000-0000-000000000101", "SMX-DASH-1", "station-dashboard", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(1));
-        var failed = CreateTrace("00000000-0000-0000-0000-000000000102", "SMX-DASH-2", "station-dashboard", ResultJudgement.Failed, BaseTimeUtc.AddMinutes(2), failedMeasurements: 1);
-        var otherStation = CreateTrace("00000000-0000-0000-0000-000000000103", "SMX-DASH-3", "station-other", ResultJudgement.Aborted, BaseTimeUtc.AddMinutes(3));
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000101",
+            "SMX-DASH-1",
+            TraceTestData.BaseTimeUtc.AddMinutes(1),
+            stationId: "station-dashboard"));
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000102",
+            "SMX-DASH-2",
+            TraceTestData.BaseTimeUtc.AddMinutes(2),
+            stationId: "station-dashboard",
+            judgement: ResultJudgement.Failed));
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000103",
+            "SMX-DASH-3",
+            TraceTestData.BaseTimeUtc.AddMinutes(3),
+            stationId: "station-other"));
 
-        await repository.SaveAsync(passed);
-        await repository.SaveAsync(failed);
-        await repository.SaveAsync(otherStation);
-
-        var result = await service.GetStationDashboardAsync(new StationTraceDashboardQuery("station-dashboard", RecentLimit: 2));
+        var result = await service.GetStationDashboardAsync(
+            new StationTraceDashboardQuery("station-dashboard", RecentLimit: 2));
 
         Assert.True(result.IsSuccess, result.Error.Message);
         Assert.Equal(2, result.Value.TotalCount);
         Assert.Equal(1, result.Value.PassedCount);
         Assert.Equal(1, result.Value.FailedCount);
-        Assert.Equal(0, result.Value.AbortedCount);
-        Assert.Equal(BaseTimeUtc.AddMinutes(1), result.Value.FirstCompletedAtUtc);
-        Assert.Equal(BaseTimeUtc.AddMinutes(2), result.Value.LastCompletedAtUtc);
-        Assert.Equal(["SMX-DASH-2", "SMX-DASH-1"], result.Value.RecentTraces.Select(trace => trace.SerialNumber));
+        Assert.Equal(["SMX-DASH-2", "SMX-DASH-1"],
+            result.Value.RecentTraces.Select(trace => trace.DutIdentityValue));
         Assert.Equal(1, result.Value.RecentTraces.First().FailedMeasurementCount);
+        Assert.Equal(1, result.Value.RecentTraces.First().StageCount);
     }
 
     [Fact]
-    public async Task SearchForEngineeringAsyncFiltersRowsAndBuildsFacets()
+    public async Task EngineeringSearchFiltersNestedStageAndBuildsRunFacets()
     {
         var repository = new InMemoryTraceRecordRepository();
         var service = new TraceReadModelService(repository);
-        var first = CreateTrace("00000000-0000-0000-0000-000000000201", "SMX-ENG-1", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(1), processVersionId: "process-a@1.0.0", projectSnapshotId: "snapshot-read-model");
-        var second = CreateTrace("00000000-0000-0000-0000-000000000202", "SMX-ENG-2", "station-b", ResultJudgement.Failed, BaseTimeUtc.AddMinutes(2), processVersionId: "process-a@1.0.0", failedMeasurements: 1, projectSnapshotId: "snapshot-read-model");
-        var ignored = CreateTrace("00000000-0000-0000-0000-000000000203", "SMX-ENG-3", "station-a", ResultJudgement.Passed, BaseTimeUtc.AddMinutes(3), processVersionId: "process-a@1.0.0", projectSnapshotId: "snapshot-other");
-
-        await repository.SaveAsync(first);
-        await repository.SaveAsync(second);
-        await repository.SaveAsync(ignored);
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000201",
+            "SMX-ENG-1",
+            TraceTestData.BaseTimeUtc.AddMinutes(1),
+            stationId: "station-a",
+            processVersionId: "process-a@1.0.0",
+            projectSnapshotId: "snapshot-read-model"));
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000202",
+            "SMX-ENG-2",
+            TraceTestData.BaseTimeUtc.AddMinutes(2),
+            stationId: "station-b",
+            processVersionId: "process-a@1.0.0",
+            judgement: ResultJudgement.Failed,
+            projectSnapshotId: "snapshot-read-model"));
+        await repository.TryAddAsync(TraceTestData.CreateTrace(
+            "00000000-0000-0000-0000-000000000203",
+            "SMX-ENG-3",
+            TraceTestData.BaseTimeUtc.AddMinutes(3),
+            stationId: "station-a",
+            processVersionId: "process-a@1.0.0",
+            projectSnapshotId: "snapshot-other"));
 
         var result = await service.SearchForEngineeringAsync(new EngineeringTraceSearchQuery(
             ProcessVersionId: "process-a@1.0.0",
@@ -56,67 +77,26 @@ public sealed class TraceReadModelServiceTests
 
         Assert.True(result.IsSuccess, result.Error.Message);
         Assert.Equal(2, result.Value.Results.TotalCount);
-        Assert.Equal(["SMX-ENG-1", "SMX-ENG-2"], result.Value.Results.Items.Select(row => row.SerialNumber));
+        Assert.Equal(["SMX-ENG-1", "SMX-ENG-2"],
+            result.Value.Results.Items.Select(row => row.DutIdentityValue));
         Assert.Equal(2, Assert.Single(result.Value.Facets.ProcessVersions).Count);
         Assert.Equal("snapshot-read-model", Assert.Single(result.Value.Facets.ProjectSnapshots).Value);
-        Assert.Equal(["Failed", "Passed"], result.Value.Facets.Judgements.Select(facet => facet.Value).Order());
-        var failedRow = result.Value.Results.Items.Single(row => row.SerialNumber == "SMX-ENG-2");
+        Assert.Equal(["Failed", "Passed"],
+            result.Value.Facets.Judgements.Select(facet => facet.Value).Order());
+        var failedRow = result.Value.Results.Items.Single(row => row.DutIdentityValue == "SMX-ENG-2");
         Assert.Equal(1, failedRow.FailedMeasurementCount);
-        Assert.Equal("snapshot-read-model", failedRow.ProjectSnapshotId);
+        Assert.Equal("Failed", failedRow.RunStatus);
     }
 
-    private static TraceRecord CreateTrace(
-        string traceRecordId,
-        string serialNumber,
-        string stationId,
-        ResultJudgement judgement,
-        DateTimeOffset completedAtUtc,
-        string processVersionId = "process-a@1.0.0",
-        int failedMeasurements = 0,
-        string projectSnapshotId = "snapshot-dashboard")
+    [Theory]
+    [InlineData(" station-a")]
+    [InlineData("station-a ")]
+    public async Task StationDashboardRejectsNonCanonicalStationId(string stationId)
     {
-        var traceRecord = TraceRecord.CreateCompleted(
-            new TraceRecordId(Guid.Parse(traceRecordId)),
-            new RuntimeSessionId(Guid.NewGuid()),
-            serialNumber,
-            "batch-read-model",
-            new StationId(stationId),
-            "fixture-read-model",
-            new ProcessDefinitionId("process-a"),
-            new ProcessVersionId(processVersionId),
-            new ConfigurationSnapshotId("config-read-model"),
-            new RecipeSnapshotId("recipe-read-model"),
-            new DeviceId("device-read-model"),
-            judgement,
-            BaseTimeUtc,
-            completedAtUtc,
-            new ActorId("operator-read-model"),
-            projectId: "project-read-model",
-            applicationId: "application-read-model",
-            projectSnapshotId: projectSnapshotId,
-            topologyId: "topology-read-model");
+        var service = new TraceReadModelService(new InMemoryTraceRecordRepository());
+        var result = await service.GetStationDashboardAsync(new StationTraceDashboardQuery(stationId));
 
-        traceRecord.AddMeasurement(new MeasurementRecord(
-            MeasurementRecordId.New(),
-            "voltage",
-            3.3m,
-            null,
-            "V",
-            new DeviceId("device-read-model"),
-            new RuntimeCommandId(Guid.NewGuid()),
-            failedMeasurements == 0,
-            completedAtUtc.AddSeconds(-5)));
-        traceRecord.AttachArtifact(new ArtifactRecord(
-            ArtifactRecordId.New(),
-            "log",
-            ArtifactKind.Log,
-            $"trace/{serialNumber}/log.txt",
-            "text/plain",
-            128,
-            null,
-            new DeviceId("device-read-model"),
-            completedAtUtc));
-
-        return traceRecord;
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Traceability.StationIdNotCanonical", result.Error.Code);
     }
 }

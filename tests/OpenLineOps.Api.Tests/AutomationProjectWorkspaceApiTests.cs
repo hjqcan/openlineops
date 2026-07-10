@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
@@ -191,6 +192,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         var processDefinitionId = $"process-scoped-composition-{suffix}";
         var processVersionId = $"{processDefinitionId}@1.0.0";
         var configurationSnapshotId = $"configuration-scoped-composition-{suffix}";
+        var productionLineDefinitionId = $"line-scoped-{suffix}";
         var capabilityId = $"capability-scoped-composition-{suffix}";
         var bindingId = $"binding-scoped-composition-{suffix}";
         var snapshotId = $"snapshot-scoped-composition-{suffix}";
@@ -217,8 +219,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 {
                     snapshotId,
                     applicationId,
-                    processDefinitionId,
-                    configurationSnapshotId
+                    productionLineDefinitionId
                 });
             using var publishBody = await ReadJsonAsync(publishResponse);
 
@@ -226,10 +227,13 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             Assert.Equal(snapshotId, publishBody.RootElement.GetProperty("activeSnapshotId").GetString());
             var snapshot = Assert.Single(publishBody.RootElement.GetProperty("snapshots").EnumerateArray());
             Assert.Equal(topologyId, snapshot.GetProperty("topologyId").GetString());
+            Assert.Equal(
+                productionLineDefinitionId,
+                snapshot.GetProperty("productionLineDefinitionId").GetString());
             Assert.Equal(layoutId, Assert.Single(snapshot.GetProperty("layoutIds").EnumerateArray()).GetString());
-            Assert.Equal(processDefinitionId, snapshot.GetProperty("processDefinitionId").GetString());
-            Assert.Equal(processVersionId, snapshot.GetProperty("processVersionId").GetString());
-            Assert.Equal(configurationSnapshotId, snapshot.GetProperty("configurationSnapshotId").GetString());
+            Assert.False(snapshot.TryGetProperty("processDefinitionId", out _));
+            Assert.False(snapshot.TryGetProperty("processVersionId", out _));
+            Assert.False(snapshot.TryGetProperty("configurationSnapshotId", out _));
             var binding = Assert.Single(snapshot.GetProperty("capabilityBindings").EnumerateArray());
             Assert.Equal(capabilityId, binding.GetProperty("capabilityId").GetString());
             Assert.Equal(bindingId, binding.GetProperty("bindingId").GetString());
@@ -266,7 +270,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     }
 
     [Fact]
-    public async Task PublishedProjectSnapshotCanStartRuntimeSession()
+    public async Task PublishedProjectSnapshotCanRunItsFrozenProductionLine()
     {
         var suffix = Guid.NewGuid().ToString("N");
         var projectId = $"project-scoped-runtime-{suffix}";
@@ -276,6 +280,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         var processDefinitionId = $"process-scoped-runtime-{suffix}";
         const string processVersionId = "packaging-line-eol@1.0.0";
         var configurationSnapshotId = $"configuration-scoped-runtime-{suffix}";
+        var productionLineDefinitionId = $"line-scoped-{suffix}";
         const string capabilityId = "device.scanner";
         var bindingId = $"binding-scoped-runtime-{suffix}";
         var snapshotId = $"snapshot-scoped-runtime-{suffix}";
@@ -302,8 +307,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 {
                     snapshotId,
                     applicationId,
-                    processDefinitionId,
-                    configurationSnapshotId
+                    productionLineDefinitionId
                 });
             using var publishBody = await ReadJsonAsync(publishResponse);
             Assert.Equal(HttpStatusCode.Created, publishResponse.StatusCode);
@@ -317,10 +321,11 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             File.Delete(liveFlowPath);
 
             using var startResponse = await _client.PostAsJsonAsync(
-                $"/api/automation-projects/{projectId}/snapshots/{snapshotId}/runtime-sessions",
+                $"/api/automation-projects/{projectId}/snapshots/{snapshotId}/production-runs",
                 new
                 {
-                    serialNumber = $"SN-{suffix}",
+                    productionRunId = Guid.NewGuid(),
+                    dutIdentityValue = $"DUT-{suffix}",
                     batchId = $"BATCH-{suffix}",
                     fixtureId = $"FIX-{suffix}",
                     deviceId = $"DEV-{suffix}",
@@ -328,13 +333,45 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 });
             using var startBody = await ReadJsonAsync(startResponse);
             Assert.Equal(HttpStatusCode.Created, startResponse.StatusCode);
-            var sessionId = startBody.RootElement.GetProperty("sessionId").GetGuid();
+            var productionRunId = startBody.RootElement.GetProperty("productionRunId").GetGuid();
+            Assert.NotEqual(Guid.Empty, productionRunId);
+            Assert.Equal(
+                $"/api/runtime/production-runs/{productionRunId:D}",
+                startResponse.Headers.Location?.OriginalString);
             Assert.Equal(snapshotId, startBody.RootElement.GetProperty("snapshotId").GetString());
             Assert.Equal(projectId, startBody.RootElement.GetProperty("projectId").GetString());
             Assert.Equal(applicationId, startBody.RootElement.GetProperty("applicationId").GetString());
             Assert.Equal(topologyId, startBody.RootElement.GetProperty("topologyId").GetString());
-            Assert.Equal(configurationSnapshotId, startBody.RootElement.GetProperty("configurationSnapshotId").GetString());
+            Assert.Equal(
+                productionLineDefinitionId,
+                startBody.RootElement.GetProperty("productionLineDefinitionId").GetString());
+            Assert.Equal($"DUT-{suffix}", startBody.RootElement.GetProperty("dutIdentityValue").GetString());
+            Assert.Equal("api-test", startBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal($"BATCH-{suffix}", startBody.RootElement.GetProperty("batchId").GetString());
+            Assert.Equal($"FIX-{suffix}", startBody.RootElement.GetProperty("fixtureId").GetString());
+            Assert.Equal($"DEV-{suffix}", startBody.RootElement.GetProperty("deviceId").GetString());
             Assert.Equal("Completed", startBody.RootElement.GetProperty("status").GetString());
+            Assert.True(startBody.RootElement.GetProperty("isTerminal").GetBoolean());
+            Assert.Equal(
+                startBody.RootElement.GetProperty("completedAtUtc").GetDateTimeOffset(),
+                startBody.RootElement.GetProperty("lastTransitionAtUtc").GetDateTimeOffset());
+            var stage = Assert.Single(startBody.RootElement.GetProperty("stages").EnumerateArray());
+            Assert.Equal("Completed", stage.GetProperty("status").GetString());
+            Assert.Equal(processDefinitionId, stage.GetProperty("processDefinitionId").GetString());
+            Assert.Equal(processVersionId, stage.GetProperty("processVersionId").GetString());
+            Assert.Equal(configurationSnapshotId, stage.GetProperty("configurationSnapshotId").GetString());
+            var sessionId = stage.GetProperty("runtimeSessionId").GetGuid();
+
+            using var productionRunResponse = await _client.GetAsync(
+                $"/api/runtime/production-runs/{productionRunId:D}");
+            using var productionRunBody = await ReadJsonAsync(productionRunResponse);
+            Assert.Equal(HttpStatusCode.OK, productionRunResponse.StatusCode);
+            Assert.Equal(productionRunId, productionRunBody.RootElement.GetProperty("productionRunId").GetGuid());
+            Assert.Equal("api-test", productionRunBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal($"DUT-{suffix}", productionRunBody.RootElement
+                .GetProperty("dutIdentity")
+                .GetProperty("value")
+                .GetString());
 
             using var sessionResponse = await _client.GetAsync($"/api/runtime/sessions/{sessionId}");
             using var sessionBody = await ReadJsonAsync(sessionResponse);
@@ -343,15 +380,286 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             Assert.Equal(processVersionId, sessionBody.RootElement.GetProperty("processVersionId").GetString());
             Assert.Equal(configurationSnapshotId, sessionBody.RootElement.GetProperty("configurationSnapshotId").GetString());
             Assert.Equal(snapshotId, sessionBody.RootElement.GetProperty("projectSnapshotId").GetString());
-            Assert.Equal($"SN-{suffix}", sessionBody.RootElement.GetProperty("serialNumber").GetString());
+            Assert.Equal(productionRunId, sessionBody.RootElement.GetProperty("productionRunId").GetGuid());
+            Assert.Equal(productionLineDefinitionId, sessionBody.RootElement
+                .GetProperty("productionLineDefinitionId")
+                .GetString());
+            Assert.Equal(stage.GetProperty("stageId").GetString(), sessionBody.RootElement
+                .GetProperty("stageId")
+                .GetString());
+            Assert.Equal(stage.GetProperty("sequence").GetInt32(), sessionBody.RootElement
+                .GetProperty("stageSequence")
+                .GetInt32());
+            Assert.Equal(stage.GetProperty("workstationId").GetString(), sessionBody.RootElement
+                .GetProperty("workstationId")
+                .GetString());
+            Assert.Equal("api-test", sessionBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal($"DUT-{suffix}", sessionBody.RootElement
+                .GetProperty("dutIdentity")
+                .GetProperty("value")
+                .GetString());
+            Assert.False(sessionBody.RootElement.TryGetProperty("serialNumber", out _));
 
             using var traceResponse = await _client.GetAsync(
                 $"/api/traceability/read-models/engineering-search?projectSnapshotId={Uri.EscapeDataString(snapshotId)}");
             using var traceBody = await ReadJsonAsync(traceResponse);
             Assert.Equal(HttpStatusCode.OK, traceResponse.StatusCode);
             var traceRow = Assert.Single(traceBody.RootElement.GetProperty("results").GetProperty("items").EnumerateArray());
-            Assert.Equal(sessionId, traceRow.GetProperty("runtimeSessionId").GetGuid());
+            Assert.Equal(productionRunId, traceRow.GetProperty("productionRunId").GetGuid());
             Assert.Equal(snapshotId, traceRow.GetProperty("projectSnapshotId").GetString());
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSnapshotPublicationRejectsMissingProductionLine()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-missing-production-{suffix}";
+        var applicationId = $"application-missing-production-{suffix}";
+        var processDefinitionId = $"process-missing-production-{suffix}";
+        var configurationSnapshotId = $"configuration-missing-production-{suffix}";
+        var projectDirectory = ProjectReleaseTestDirectory(suffix);
+
+        try
+        {
+            await CreateScopedReleaseSourceAsync(
+                projectDirectory,
+                projectId,
+                applicationId,
+                $"topology-missing-production-{suffix}",
+                $"layout-missing-production-{suffix}",
+                processDefinitionId,
+                $"{processDefinitionId}@1.0.0",
+                configurationSnapshotId,
+                $"capability-missing-production-{suffix}",
+                $"binding-missing-production-{suffix}",
+                suffix,
+                createProductionLine: false);
+
+            using var response = await _client.PostAsJsonAsync(
+                $"/api/automation-projects/{projectId}/snapshots",
+                new
+                {
+                    snapshotId = $"snapshot-missing-production-{suffix}",
+                    applicationId,
+                    productionLineDefinitionId = $"line-missing-{suffix}"
+                });
+            using var body = await ReadJsonAsync(response);
+
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.Equal(
+                "NotFound.Projects.ReleaseProductionLineNotFound",
+                body.RootElement.GetProperty("title").GetString());
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSnapshotPublicationRejectsRemovedTopLevelRuntimeSelectionFields()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/automation-projects/project.old-publication-shape/snapshots",
+            new
+            {
+                snapshotId = "snapshot.old-publication-shape",
+                applicationId = "application.old-publication-shape",
+                productionLineDefinitionId = "line.old-publication-shape",
+                processDefinitionId = "process.removed",
+                processVersionId = "process.removed@1",
+                configurationSnapshotId = "configuration.removed"
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProjectSnapshotPublicationFreezesRepeatedFlowStagesWithIndependentConfigurations()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-repeated-flow-{suffix}";
+        var applicationId = $"application-repeated-flow-{suffix}";
+        var topologyId = $"topology-repeated-flow-{suffix}";
+        var processDefinitionId = $"process-repeated-flow-{suffix}";
+        var processVersionId = $"{processDefinitionId}@1.0.0";
+        var firstConfigurationId = $"configuration-repeated-flow-a-{suffix}";
+        var secondConfigurationId = $"configuration-repeated-flow-b-{suffix}";
+        var productionLineDefinitionId = $"line-scoped-{suffix}";
+        var projectDirectory = ProjectReleaseTestDirectory(suffix);
+
+        try
+        {
+            await CreateScopedReleaseSourceAsync(
+                projectDirectory,
+                projectId,
+                applicationId,
+                topologyId,
+                $"layout-repeated-flow-{suffix}",
+                processDefinitionId,
+                processVersionId,
+                firstConfigurationId,
+                $"capability-repeated-flow-{suffix}",
+                $"binding-repeated-flow-{suffix}",
+                suffix);
+
+            var engineeringBase =
+                $"/api/automation-projects/{projectId}/applications/{applicationId}/engineering";
+            using (var secondConfigurationResponse = await _client.PostAsJsonAsync(
+                       $"{engineeringBase}/projects/engineering-{suffix}/configuration-snapshots",
+                       new
+                       {
+                           snapshotId = secondConfigurationId,
+                           processDefinitionId,
+                           processVersionId,
+                           recipeId = $"recipe-{suffix}",
+                           stationProfileId = $"station-{suffix}"
+                       }))
+            {
+                Assert.Equal(HttpStatusCode.Created, secondConfigurationResponse.StatusCode);
+            }
+
+            using (var replaceLineResponse = await _client.PutAsJsonAsync(
+                       $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines/{productionLineDefinitionId}",
+                       new
+                       {
+                           lineDefinitionId = productionLineDefinitionId,
+                           displayName = "Repeated Flow Line",
+                           topologyId,
+                           dutModel = new
+                           {
+                               dutModelId = $"dut-scoped-{suffix}",
+                               modelCode = $"MODEL-{suffix}",
+                               identityInputKey = "serialNumber"
+                           },
+                           workstations = new[]
+                           {
+                               new
+                               {
+                                   workstationId = "workstation.main",
+                                   displayName = "Main Workstation",
+                                   stationSystemId = "station.main"
+                               }
+                           },
+                           stages = new[]
+                           {
+                               new
+                               {
+                                   stageId = "stage.first",
+                                   sequence = 1,
+                                   displayName = "First",
+                                   workstationId = "workstation.main",
+                                   flowDefinitionId = processDefinitionId,
+                                   configurationSnapshotId = firstConfigurationId,
+                                   externalTestProgramAdapterId = (string?)null
+                               },
+                               new
+                               {
+                                   stageId = "stage.second",
+                                   sequence = 2,
+                                   displayName = "Second",
+                                   workstationId = "workstation.main",
+                                   flowDefinitionId = processDefinitionId,
+                                   configurationSnapshotId = secondConfigurationId,
+                                   externalTestProgramAdapterId = (string?)null
+                               }
+                           },
+                           externalTestProgramAdapters = Array.Empty<object>()
+                       }))
+            {
+                Assert.Equal(HttpStatusCode.OK, replaceLineResponse.StatusCode);
+            }
+
+            using var publishResponse = await _client.PostAsJsonAsync(
+                $"/api/automation-projects/{projectId}/snapshots",
+                new
+                {
+                    snapshotId = $"snapshot-repeated-flow-{suffix}",
+                    applicationId,
+                    productionLineDefinitionId
+                });
+            using var publishBody = await ReadJsonAsync(publishResponse);
+            Assert.Equal(HttpStatusCode.Created, publishResponse.StatusCode);
+            var snapshot = Assert.Single(publishBody.RootElement.GetProperty("snapshots").EnumerateArray());
+            var manifestPath = Path.Combine(
+                projectDirectory,
+                snapshot.GetProperty("releaseManifestPath").GetString()!
+                    .Replace('/', Path.DirectorySeparatorChar));
+            using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+            var stages = manifest.RootElement
+                .GetProperty("metadata")
+                .GetProperty("productionLine")
+                .GetProperty("stages")
+                .EnumerateArray()
+                .ToArray();
+
+            Assert.Equal(2, stages.Length);
+            Assert.All(stages, stage => Assert.Equal(
+                processDefinitionId,
+                stage.GetProperty("flowDefinitionId").GetString()));
+            Assert.Equal(
+                [firstConfigurationId, secondConfigurationId],
+                stages.Select(stage => stage.GetProperty("configurationSnapshotId").GetString()));
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectSnapshotPublicationRejectsStaleProductionWorkstationReference()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-stale-production-{suffix}";
+        var applicationId = $"application-stale-production-{suffix}";
+        var processDefinitionId = $"process-stale-production-{suffix}";
+        var configurationSnapshotId = $"configuration-stale-production-{suffix}";
+        var productionLineDefinitionId = $"line-scoped-{suffix}";
+        var projectDirectory = ProjectReleaseTestDirectory(suffix);
+
+        try
+        {
+            await CreateScopedReleaseSourceAsync(
+                projectDirectory,
+                projectId,
+                applicationId,
+                $"topology-stale-production-{suffix}",
+                $"layout-stale-production-{suffix}",
+                processDefinitionId,
+                $"{processDefinitionId}@1.0.0",
+                configurationSnapshotId,
+                $"capability-stale-production-{suffix}",
+                $"binding-stale-production-{suffix}",
+                suffix);
+
+            var linePath = Assert.Single(Directory.GetFiles(
+                projectDirectory,
+                "line.json",
+                SearchOption.AllDirectories));
+            var line = JsonNode.Parse(await File.ReadAllTextAsync(linePath))!.AsObject();
+            line["workstations"]!.AsArray()[0]!["stationSystemId"] = "station.stale";
+            await File.WriteAllTextAsync(linePath, line.ToJsonString());
+
+            using var response = await _client.PostAsJsonAsync(
+                $"/api/automation-projects/{projectId}/snapshots",
+                new
+                {
+                    snapshotId = $"snapshot-stale-production-{suffix}",
+                    applicationId,
+                    productionLineDefinitionId
+                });
+            using var body = await ReadJsonAsync(response);
+
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            Assert.Equal(
+                "Conflict.Projects.ReleaseProductionWorkstationInvalid",
+                body.RootElement.GetProperty("title").GetString());
         }
         finally
         {
@@ -472,7 +780,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         string configurationSnapshotId,
         string capabilityId,
         string bindingId,
-        string suffix)
+        string suffix,
+        bool createProductionLine = true)
     {
         using var createWorkspaceResponse = await _client.PostAsJsonAsync(
             "/api/automation-project-workspaces",
@@ -568,6 +877,49 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             processDefinitionId,
             processVersionId,
             capabilityId);
+
+        if (createProductionLine)
+        {
+            var productionLineDefinitionId = $"line-scoped-{suffix}";
+            using var createProductionLineResponse = await _client.PostAsJsonAsync(
+                $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines",
+                new
+                {
+                    lineDefinitionId = productionLineDefinitionId,
+                    displayName = "Scoped Release Production Line",
+                    topologyId,
+                    dutModel = new
+                    {
+                        dutModelId = $"dut-scoped-{suffix}",
+                        modelCode = $"MODEL-{suffix}",
+                        identityInputKey = "serialNumber"
+                    },
+                    workstations = new[]
+                    {
+                        new
+                        {
+                            workstationId = "workstation.main",
+                            displayName = "Main Workstation",
+                            stationSystemId = "station.main"
+                        }
+                    },
+                    stages = new[]
+                    {
+                        new
+                        {
+                            stageId = "stage.main",
+                            sequence = 1,
+                            displayName = "Main Stage",
+                            workstationId = "workstation.main",
+                            flowDefinitionId = processDefinitionId,
+                            configurationSnapshotId,
+                            externalTestProgramAdapterId = (string?)null
+                        }
+                    },
+                    externalTestProgramAdapters = Array.Empty<object>()
+                });
+            Assert.Equal(HttpStatusCode.Created, createProductionLineResponse.StatusCode);
+        }
 
         using var linkTopologyResponse = await _client.PutAsJsonAsync(
             $"/api/automation-projects/{projectId}/applications/{applicationId}/topology",
@@ -747,6 +1099,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                     displayName = "Start",
                     requiredCapability = (string?)null,
                     commandName = (string?)null,
+                    targetKind = (string?)null,
+                    targetId = (string?)null,
                     timeoutSeconds = (int?)null,
                     inputPayload = (string?)null
                 },
@@ -757,6 +1111,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                     displayName = "Inspect",
                     requiredCapability = (string?)capabilityId,
                     commandName = (string?)"Inspect",
+                    targetKind = (string?)"Capability",
+                    targetId = (string?)capabilityId,
                     timeoutSeconds = (int?)30,
                     inputPayload = (string?)"scan-ok"
                 },
@@ -767,6 +1123,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                     displayName = "End",
                     requiredCapability = (string?)null,
                     commandName = (string?)null,
+                    targetKind = (string?)null,
+                    targetId = (string?)null,
                     timeoutSeconds = (int?)null,
                     inputPayload = (string?)null
                 }

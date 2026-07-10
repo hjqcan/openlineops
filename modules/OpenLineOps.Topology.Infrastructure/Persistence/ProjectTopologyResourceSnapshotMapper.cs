@@ -1,4 +1,5 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
@@ -273,9 +274,11 @@ internal static class ProjectTopologyResourceSnapshotMapper
     private static TEnum ParseEnum<TEnum>(string value, string field)
         where TEnum : struct, Enum
     {
-        return Enum.TryParse<TEnum>(value, ignoreCase: false, out var parsed) && Enum.IsDefined(parsed)
+        return CanonicalEnumToken.TryParse<TEnum>(value, out var parsed)
             ? parsed
-            : throw new InvalidDataException($"Unsupported {field} '{value}'.");
+            : throw new InvalidDataException(
+                $"Unsupported {field} '{value}'. Expected an exact, case-sensitive " +
+                $"{typeof(TEnum).Name} token: {CanonicalEnumToken.ExpectedTokens<TEnum>()}.");
     }
 
     private static T Required<T>(T? value, string field)

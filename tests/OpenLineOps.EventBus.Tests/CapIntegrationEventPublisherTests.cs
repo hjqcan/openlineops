@@ -62,7 +62,7 @@ public sealed class CapIntegrationEventPublisherTests
     }
 
     [Fact]
-    public async Task PublishAsyncDoesNotThrowWhenCapPublishFails()
+    public async Task PublishAsyncThrowsWhenCapPublishFails()
     {
         var capPublisher = new CapturingCapPublisher
         {
@@ -71,7 +71,8 @@ public sealed class CapIntegrationEventPublisherTests
         var publisher = CreatePublisher(capPublisher);
         var domainEvent = CreateAlarmRaisedDomainEvent();
 
-        await publisher.PublishAsync([domainEvent]);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => publisher.PublishAsync([domainEvent]));
 
         Assert.Empty(capPublisher.Messages);
     }

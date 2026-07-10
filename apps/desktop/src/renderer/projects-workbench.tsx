@@ -974,7 +974,7 @@ function ProjectSnapshots({
       ) : snapshots.map(snapshot => (
         <article key={snapshot.snapshotId}>
           <strong>{snapshot.snapshotId}</strong>
-          <span>{snapshot.processVersionId} · {snapshot.layoutIds.length} layouts</span>
+          <span>{snapshot.productionLineDefinitionId} · {snapshot.layoutIds.length} layouts</span>
           <small>
             Release {snapshot.releaseContentSha256.slice(0, 12)} · {formatDate(snapshot.publishedAtUtc)}
           </small>

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using OpenLineOps.Infrastructure.Data.Core.Identifiers;
+using OpenLineOps.Infrastructure.Data.Core.ValueConversion;
 using OpenLineOps.SampleInspection.Domain.Identifiers;
 using OpenLineOps.SampleInspection.Domain.Plans;
 
@@ -30,7 +31,7 @@ internal sealed class InspectionPlanConfiguration : IEntityTypeConfiguration<Ins
             .IsRequired();
 
         builder.Property(plan => plan.Status)
-            .HasConversion<string>()
+            .HasConversion(new CanonicalEnumToStringConverter<InspectionPlanStatus>())
             .HasMaxLength(32)
             .IsRequired();
 

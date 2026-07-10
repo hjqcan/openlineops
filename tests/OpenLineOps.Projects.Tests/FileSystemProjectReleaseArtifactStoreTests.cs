@@ -19,7 +19,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public async Task PublishAndOpenRoundTripCopiesApplicationSourceAndNormalizesMetadata()
+    public async Task PublishAndOpenRoundTripCopiesApplicationSourceAndNormalizesNonDigestMetadata()
     {
         var scope = CreateScope("project.release", "application.main");
         WriteTopologyResources(scope, "topology.main", "layout.a", "layout.b");
@@ -40,7 +40,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(scope.ApplicationId, opened.ApplicationId);
         Assert.Equal(PublishedAtUtc, opened.PublishedAtUtc);
         Assert.Equal(descriptor.ContentSha256, opened.ContentSha256);
-        Assert.Equal(5, opened.Files.Count);
+        Assert.Equal(8, opened.Files.Count);
         Assert.All(opened.Files, file =>
         {
             Assert.Equal(64, file.Sha256.Length);
@@ -51,11 +51,12 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(["capability.a", "capability.b"], opened.Metadata.CapabilityBindings
             .Select(binding => binding.CapabilityId));
         Assert.Equal(["Slot", "System"], opened.Metadata.TargetReferences.Select(target => target.Kind));
-        Assert.Equal("openlineops.flow-ir/v1", opened.Metadata.FlowIrSchemaVersion);
-        Assert.Equal("{}", opened.Metadata.FlowIrCanonicalJson);
+        var frozenStage = Assert.Single(opened.Metadata.ProductionLine.Stages);
+        Assert.Equal("openlineops.flow-ir/v1", frozenStage.FlowIrSchemaVersion);
+        Assert.Equal("{}", frozenStage.FlowIrCanonicalJson);
         Assert.Equal(
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-            opened.Metadata.FlowIrSha256);
+            frozenStage.FlowIrSha256);
 
         var releaseSourceScope = new ProjectApplicationWorkspaceScope(
             opened.ProjectId,
@@ -200,6 +201,63 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task PublishRejectsSourceChangedWhileCopyIsBeingFrozen()
+    {
+        var scope = CreateScope("project.concurrent-source-change", "application.main");
+        var sourcePath = Path.Combine(GetApplicationSourcePath(scope), "aaa-large-source.bin");
+        var original = new byte[32 * 1024 * 1024];
+        Array.Fill(original, (byte)0x41);
+        await File.WriteAllBytesAsync(sourcePath, original);
+        var changed = new byte[original.Length];
+        Array.Fill(changed, (byte)0x42);
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var publishTask = store.PublishAsync(
+                scope,
+                "snapshot.concurrent-source-change",
+                PublishedAtUtc,
+                CreateMetadata())
+            .AsTask();
+        var mutationTask = Task.Run(async () =>
+        {
+            var stagingDirectory = Path.Combine(scope.ProjectPath, "releases", ".staging");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (!timeout.IsCancellationRequested)
+            {
+                if (Directory.Exists(stagingDirectory)
+                    && Directory.EnumerateFiles(
+                            stagingDirectory,
+                            "aaa-large-source.bin",
+                            SearchOption.AllDirectories)
+                        .Any())
+                {
+                    try
+                    {
+                        await File.WriteAllBytesAsync(sourcePath, changed, timeout.Token);
+                        return;
+                    }
+                    catch (IOException)
+                    {
+                    }
+                }
+
+                await Task.Delay(1, timeout.Token);
+            }
+
+            throw new TimeoutException("The release copy did not expose the deterministic mutation window.");
+        });
+
+        var exception = await Assert.ThrowsAsync<IOException>(async () => await publishTask);
+        await mutationTask;
+
+        Assert.Contains("changed while", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Directory.Exists(Path.Combine(
+            scope.ProjectPath,
+            "releases",
+            "snapshot.concurrent-source-change")));
+    }
+
+    [Fact]
     public async Task OpenRejectsTamperedSourceFile()
     {
         var scope = CreateScope("project.tamper", "application.main");
@@ -217,12 +275,87 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             descriptor.ApplicationProjectRelativePath);
         await File.WriteAllTextAsync(
             Path.Combine(GetApplicationSourcePath(releaseScope), "configuration", "project.json"),
-            "configuration-v2");
+            "configuration-updated");
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
 
-        Assert.Contains("SHA-256", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("project.json", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OpenRejectsTamperedProductionLine()
+    {
+        var scope = CreateScope("project.production-tamper", "application.main");
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.production-tamper",
+            PublishedAtUtc,
+            CreateMetadata());
+        var releasedLine = Path.Combine(
+            descriptor.SourceRootPath,
+            "applications",
+            scope.ApplicationId,
+            "production",
+            "lines",
+            "line.main",
+            "line.json");
+        await File.WriteAllTextAsync(
+            releasedLine,
+            $$"""
+            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.tampered"}
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+
+        Assert.Contains("line.json", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishRejectsMissingProductionLine()
+    {
+        var scope = CreateScope("project.production-missing", "application.main");
+        Directory.Delete(
+            Path.Combine(GetApplicationSourcePath(scope), "production"),
+            recursive: true);
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.PublishAsync(
+                scope,
+                "snapshot.production-missing",
+                PublishedAtUtc,
+                CreateMetadata()));
+
+        Assert.Contains("production", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PublishRejectsProductionStageConfigurationMissingFromApplication()
+    {
+        var scope = CreateScope("project.stage-configuration-missing", "application.main");
+        var metadata = CreateMetadata();
+        var frozenStage = Assert.Single(metadata.ProductionLine.Stages) with
+        {
+            ConfigurationSnapshotId = "configuration.missing"
+        };
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with { Stages = [frozenStage] }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.PublishAsync(
+                scope,
+                "snapshot.stage-configuration-missing",
+                PublishedAtUtc,
+                metadata));
+
+        Assert.Contains("configuration.missing", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("missing", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -231,7 +364,9 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var scope = CreateScope("project.flow-ir-hash", "application.main");
         WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
         var store = new FileSystemProjectReleaseArtifactStore();
-        var metadata = CreateMetadata() with { FlowIrSha256 = new string('a', 64) };
+        var metadata = WithStage(
+            CreateMetadata(),
+            stage => stage with { FlowIrSha256 = new string('a', 64) });
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.PublishAsync(
@@ -240,7 +375,107 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 PublishedAtUtc,
                 metadata));
 
-        Assert.Contains("FlowIrSha256", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Production stage stage.eol Flow IR SHA-256", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("flowIr")]
+    [InlineData("packageContent")]
+    [InlineData("manifest")]
+    [InlineData("entryAssembly")]
+    [InlineData("packageFile")]
+    public async Task PublishRejectsDigestValuesWithSurroundingWhitespace(string digestField)
+    {
+        var scope = CreateScope($"project.digest-whitespace-{digestField}", "application.main");
+        var packagePath = Path.Combine(_testRoot, $"plugin-package-{digestField}");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.motion\"}");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-v1");
+        var dependency = CreatePackageDependency(packagePath);
+        var metadata = CreateMetadata() with
+        {
+            CapabilityBindings =
+            [
+                new ProjectReleaseCapabilityBinding(
+                    "capability.main",
+                    "binding.main",
+                    "PluginCommand",
+                    "plugin.motion")
+            ],
+            PackageDependencies = [dependency]
+        };
+
+        metadata = digestField switch
+        {
+            "flowIr" => metadata with
+            {
+                ProductionLine = metadata.ProductionLine with
+                {
+                    Stages =
+                    [
+                        Assert.Single(metadata.ProductionLine.Stages) with
+                        {
+                            FlowIrSha256 = $" {Assert.Single(metadata.ProductionLine.Stages).FlowIrSha256} "
+                        }
+                    ]
+                }
+            },
+            "packageContent" => metadata with
+            {
+                PackageDependencies =
+                [
+                    dependency with
+                    {
+                        PackageContentSha256 = $" {dependency.PackageContentSha256} "
+                    }
+                ]
+            },
+            "manifest" => metadata with
+            {
+                PackageDependencies =
+                [
+                    dependency with
+                    {
+                        ManifestSha256 = $" {dependency.ManifestSha256} "
+                    }
+                ]
+            },
+            "entryAssembly" => metadata with
+            {
+                PackageDependencies =
+                [
+                    dependency with
+                    {
+                        EntryAssemblySha256 = $" {dependency.EntryAssemblySha256} "
+                    }
+                ]
+            },
+            "packageFile" => metadata with
+            {
+                PackageDependencies =
+                [
+                    dependency with
+                    {
+                        Files = dependency.Files
+                            .Select((file, index) => index == 0
+                                ? file with { Sha256 = $" {file.Sha256} " }
+                                : file)
+                            .ToArray()
+                    }
+                ]
+            },
+            _ => throw new InvalidOperationException($"Unknown digest field {digestField}.")
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.PublishAsync(
+                scope,
+                $"snapshot.digest-whitespace-{digestField}",
+                PublishedAtUtc,
+                metadata));
+
+        Assert.Contains("lowercase 64-character SHA-256", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -250,13 +485,15 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var scope = CreateScope("project.flow-ir-json", "application.main");
         WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
         var store = new FileSystemProjectReleaseArtifactStore();
-        var metadata = CreateMetadata() with
-        {
-            FlowIrCanonicalJson = invalidJson,
-            FlowIrSha256 = Convert.ToHexString(
-                    SHA256.HashData(Encoding.UTF8.GetBytes(invalidJson)))
-                .ToLowerInvariant()
-        };
+        var metadata = WithStage(
+            CreateMetadata(),
+            stage => stage with
+            {
+                FlowIrCanonicalJson = invalidJson,
+                FlowIrSha256 = Convert.ToHexString(
+                        SHA256.HashData(Encoding.UTF8.GetBytes(invalidJson)))
+                    .ToLowerInvariant()
+            });
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.PublishAsync(
@@ -379,6 +616,57 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task OpenRejectsUppercaseReleaseDigestAlias()
+    {
+        var scope = CreateScope("project.uppercase-digest", "application.main");
+        WriteTopologyResources(scope);
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.uppercase-digest",
+            PublishedAtUtc,
+            CreateMetadata());
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.OpenAsync(
+                scope,
+                descriptor.SnapshotId,
+                descriptor.ContentSha256.ToUpperInvariant()));
+
+        Assert.Contains("lowercase", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("topology", "topologyId", "layoutId", "forbidden identity 'layoutId'")]
+    [InlineData("layouts", "layoutId", "topologyId", "no valid 'layoutId'")]
+    public async Task PublishRejectsCrossKindEmbeddedResourceIdentityAlias(
+        string resourceDirectoryName,
+        string canonicalIdentityProperty,
+        string aliasIdentityProperty,
+        string expectedError)
+    {
+        var scope = CreateScope($"project.cross-identity-{resourceDirectoryName}", "application.main");
+        WriteTopologyResources(scope);
+        var sourcePath = Directory.GetFiles(
+            Path.Combine(GetApplicationSourcePath(scope), resourceDirectoryName),
+            "*.json").Single();
+        var source = JsonNode.Parse(await File.ReadAllTextAsync(sourcePath))!.AsObject();
+        var identity = source[canonicalIdentityProperty]!.GetValue<string>();
+        source.Remove(canonicalIdentityProperty);
+        source[aliasIdentityProperty] = identity;
+        await File.WriteAllTextAsync(sourcePath, source.ToJsonString());
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.PublishAsync(
+                scope,
+                $"snapshot.cross-identity-{resourceDirectoryName}",
+                PublishedAtUtc,
+                CreateMetadata()));
+
+        Assert.Contains(expectedError, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReleaseOpensAfterWholeProjectFolderMoves()
     {
         var originalProjectPath = Path.Combine(_testRoot, "original-project");
@@ -487,14 +775,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         return new ProjectReleaseSourceMetadata(
             topologyId,
-            "station.eol",
             ["layout.main"],
-            "process.main",
-            "process.main@1.0.0",
-            "openlineops.flow-ir/v1",
-            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-            "{}",
-            "configuration.main.v1",
+            CreateProductionMetadata(topologyId, ["block.main@1"]),
             [new ProjectReleaseCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main")],
             [new ProjectReleaseTargetReference("System", "station.eol")],
             ["block.main@1"],
@@ -505,14 +787,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         return new ProjectReleaseSourceMetadata(
             " topology.main ",
-            " station.eol ",
             ["layout.b", " layout.a ", "layout.b"],
-            " process.main ",
-            " process.main@1.0.0 ",
-            " openlineops.flow-ir/v1 ",
-            " 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a ",
-            "{}",
-            " configuration.main.v1 ",
+            CreateProductionMetadata("topology.main", ["block.inspect@1", "block.move@2"]),
             [
                 new ProjectReleaseCapabilityBinding("capability.b", "binding.b", " Simulator ", "simulator.b"),
                 new ProjectReleaseCapabilityBinding(" capability.a ", "binding.a", "Simulator", "simulator.a"),
@@ -524,6 +800,45 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ],
             ["block.move@2", " block.inspect@1 ", "block.move@2"],
             []);
+    }
+
+    private static ProjectReleaseSourceMetadata WithStage(
+        ProjectReleaseSourceMetadata metadata,
+        Func<ProjectReleaseProductionStage, ProjectReleaseProductionStage> update)
+    {
+        var stage = update(Assert.Single(metadata.ProductionLine.Stages));
+        return metadata with
+        {
+            ProductionLine = metadata.ProductionLine with { Stages = [stage] }
+        };
+    }
+
+    private static ProjectReleaseProductionLine CreateProductionMetadata(
+        string topologyId,
+        IReadOnlyCollection<string> blockVersionIds)
+    {
+        return new ProjectReleaseProductionLine(
+            "line.main",
+            "Main Line",
+            topologyId,
+            new ProjectReleaseDutModel("dut.main", "MAINBOARD-A", "serialNumber"),
+            [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+            [
+                new ProjectReleaseProductionStage(
+                    "stage.eol",
+                    1,
+                    "EOL",
+                    "workstation.eol",
+                    "process.main",
+                    "configuration.main.v1",
+                    "process.main@1.0.0",
+                    "openlineops.flow-ir/v1",
+                    "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                    "{}",
+                    blockVersionIds,
+                    ExternalTestProgramAdapterId: null)
+            ],
+            ExternalTestProgramAdapters: []);
     }
 
     private static string WriteSourceFile(
@@ -559,6 +874,22 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
 
         Directory.CreateDirectory(topologyDirectory);
         Directory.CreateDirectory(layoutDirectory);
+        var productionLineDirectory = Path.Combine(
+            GetApplicationSourcePath(scope),
+            "production",
+            "lines",
+            "line.main");
+        var engineeringProjectsDirectory = Path.Combine(
+            GetApplicationSourcePath(scope),
+            "configuration",
+            "projects");
+        var stationProfilesDirectory = Path.Combine(
+            GetApplicationSourcePath(scope),
+            "configuration",
+            "station-profiles");
+        Directory.CreateDirectory(productionLineDirectory);
+        Directory.CreateDirectory(engineeringProjectsDirectory);
+        Directory.CreateDirectory(stationProfilesDirectory);
         File.WriteAllText(
             Path.Combine(topologyDirectory, "topology.json"),
             $$"""
@@ -572,6 +903,23 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
                 """);
         }
+
+
+        File.WriteAllText(
+            Path.Combine(productionLineDirectory, "line.json"),
+            $$"""
+            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.main"}
+            """);
+        File.WriteAllText(
+            Path.Combine(engineeringProjectsDirectory, "project-main.json"),
+            $$$"""
+            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"{{{scope.ApplicationId}}}","resourceKind":"project","resourceId":"engineering.main","snapshot":{"projectId":"engineering.main","workspaceId":"workspace.main","displayName":"Main","createdAtUtc":"2026-07-10T08:00:00+00:00","activeSnapshotId":"configuration.main.v1","snapshots":[{"snapshotId":"configuration.main.v1","projectId":"engineering.main","processDefinitionId":"process.main","processVersionId":"process.main@1.0.0","recipeId":"recipe.main","recipeVersionId":"recipe.main@1","stationProfileId":"station.profile.main","status":"Published","publishedAtUtc":"2026-07-10T08:00:00+00:00","deviceBindings":[]}]}}
+            """);
+        File.WriteAllText(
+            Path.Combine(stationProfilesDirectory, "station-profile-main.json"),
+            $$$"""
+            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"{{{scope.ApplicationId}}}","resourceKind":"station-profile","resourceId":"station.profile.main","snapshot":{"stationProfileId":"station.profile.main","stationSystemId":"station.eol","displayName":"EOL","deviceBindings":[]}}
+            """);
     }
 
     private static string ReadReleasedFlow(OpenedProjectReleaseArtifact release)

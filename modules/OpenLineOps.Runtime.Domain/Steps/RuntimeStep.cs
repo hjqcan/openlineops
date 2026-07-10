@@ -19,9 +19,7 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
         NodeId = nodeId;
         ActionId = actionId ?? throw new ArgumentNullException(nameof(actionId));
         Target = target ?? throw new ArgumentNullException(nameof(target));
-        DisplayName = string.IsNullOrWhiteSpace(displayName)
-            ? nodeId.Value
-            : displayName.Trim();
+        DisplayName = Required(displayName, nameof(displayName));
         StartedAtUtc = startedAtUtc;
         Status = RuntimeStepStatus.Running;
     }
@@ -102,9 +100,7 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
 
     internal RuntimeOperationResult Fail(string reason, DateTimeOffset failedAtUtc)
     {
-        FailureReason = string.IsNullOrWhiteSpace(reason)
-            ? "Step failed."
-            : reason.Trim();
+        FailureReason = Required(reason, nameof(reason));
 
         return TransitionTo(RuntimeStepStatus.Failed, failedAtUtc);
     }
@@ -136,9 +132,18 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
 
     private static string? NormalizeOptional(string? value)
     {
+        return value is null ? null : Required(value, nameof(value));
+    }
+
+    private static string Required(string value, string parameterName)
+    {
         return string.IsNullOrWhiteSpace(value)
-            ? null
-            : value.Trim();
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1])
+            ? throw new ArgumentException(
+                $"{parameterName} must be non-empty canonical text.",
+                parameterName)
+            : value;
     }
 
 }

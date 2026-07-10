@@ -31,11 +31,13 @@ public sealed class PostgresOperationsAlarmRepositoryIntegrationTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["OpenLineOps:Operations:Persistence:Provider"] = OperationsPersistenceProviders.PostgreSql,
-                ["OpenLineOps:Operations:Persistence:ConnectionString"] = _postgres.ConnectionString
+                ["OpenLineOps:Operations:Persistence:ConnectionString"] = _postgres.ConnectionString,
+                ["OpenLineOps:EventBus:PublicationMode"] = "PostCommit"
             })
             .Build();
         var services = new ServiceCollection();
         services.AddOpenLineOpsOperationsModule(configuration);
+        services.AddOpenLineOpsEventBus(configuration);
 
         using var serviceProvider = services.BuildServiceProvider();
         using (var scope = serviceProvider.CreateScope())
@@ -83,7 +85,7 @@ public sealed class PostgresOperationsAlarmRepositoryIntegrationTests
                 ["OpenLineOps:EventBus:UseInMemory"] = "false",
                 ["OpenLineOps:EventBus:ConnectionStringName"] = "OpenLineOpsEventBus",
                 ["OpenLineOps:EventBus:PostgreSqlSchema"] = "cap",
-                ["OpenLineOps:EventBus:EnableEfCoreTransactionCoordinator"] = "true",
+                ["OpenLineOps:EventBus:PublicationMode"] = "Transactional",
                 ["OpenLineOps:EventBus:RabbitMq:Enabled"] = "false"
             })
             .Build();

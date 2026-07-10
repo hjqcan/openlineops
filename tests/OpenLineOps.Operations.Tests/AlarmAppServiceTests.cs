@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using OpenLineOps.Domain.Abstractions.EventBus;
+using OpenLineOps.Infrastructure.Data.Core.EventBus;
 using OpenLineOps.Operations.Application.Contract.Alarms;
 using OpenLineOps.Operations.Application.Services;
 using OpenLineOps.Operations.Domain.Shared.Enums;
@@ -20,7 +22,10 @@ public sealed class AlarmAppServiceTests
             .Options;
 
         AlarmDetails details;
-        await using (var context = new OperationsDbContext(options))
+        await using (var context = new OperationsDbContext(
+                         options,
+                         new IntegrationEventPublicationPolicy(IntegrationEventPublicationMode.PostCommit),
+                         integrationEventPublisher: new CapturingIntegrationEventPublisher()))
         {
             await context.Database.MigrateAsync();
 
@@ -79,5 +84,15 @@ public sealed class AlarmAppServiceTests
         Assert.Equal("operator-b", restored.AcknowledgedBy);
         Assert.Equal("operator-b", restored.ResolvedBy);
         Assert.Equal("Device recovered.", restored.ResolutionNote);
+    }
+
+    private sealed class CapturingIntegrationEventPublisher : IIntegrationEventPublisher
+    {
+        public Task PublishAsync(
+            IEnumerable<object> domainEvents,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
     }
 }

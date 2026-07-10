@@ -43,6 +43,17 @@ function Add-Failure {
     $Failures.Add($Message) | Out-Null
 }
 
+function Test-ContainsOrdinal {
+    param(
+        [Parameter(Mandatory = $true)][string[]] $Values,
+        [Parameter(Mandatory = $true)][string] $Expected
+    )
+
+    return @($Values | Where-Object {
+        [string]::Equals($_, $Expected, [System.StringComparison]::Ordinal)
+    }).Count -gt 0
+}
+
 function Add-Warning {
     param([Parameter(Mandatory = $true)][string] $Message)
     $Warnings.Add($Message) | Out-Null
@@ -190,7 +201,13 @@ function Test-ReleaseArtifacts {
 function Test-DesktopReleasePackage {
     param([Parameter(Mandatory = $true)][string] $ResolvedArtifactsRoot)
 
-    $desktopArchives = @(Get-ChildItem -LiteralPath $ResolvedArtifactsRoot -Filter "desktop-*.zip" -File)
+    $desktopArtifactDirectory = Join-Path $ResolvedArtifactsRoot "desktop"
+    $desktopArchives = if (Test-Path -LiteralPath $desktopArtifactDirectory -PathType Container) {
+        @(Get-ChildItem -LiteralPath $desktopArtifactDirectory -Filter "desktop-*.zip" -File)
+    }
+    else {
+        @()
+    }
     if ($desktopArchives.Count -ne 1) {
         Add-Failure "Expected exactly one desktop release archive, found $($desktopArchives.Count)."
         return
@@ -199,12 +216,22 @@ function Test-DesktopReleasePackage {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($desktopArchives[0].FullName)
     try {
-        $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace([char]92, [char]47) })
-        if ($entries -notcontains "package/win-unpacked/OpenLineOps.exe") {
+        $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+        foreach ($entryName in $entries) {
+            if ($entryName.Contains([char]92)) {
+                Add-Failure "Desktop release archive contains a non-canonical backslash zip entry path: $entryName"
+            }
+        }
+
+        if (-not (Test-ContainsOrdinal `
+            -Values $entries `
+            -Expected "package/win-unpacked/OpenLineOps.exe")) {
             Add-Failure "Desktop release archive is missing package/win-unpacked/OpenLineOps.exe."
         }
 
-        if ($entries -notcontains "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt") {
+        if (-not (Test-ContainsOrdinal `
+            -Values $entries `
+            -Expected "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt")) {
             Add-Failure "Desktop release archive is missing package notes."
         }
 
@@ -219,7 +246,12 @@ function Test-DesktopReleaseSignature {
     param([Parameter(Mandatory = $true)]$Archive)
 
     $entry = $Archive.Entries |
-        Where-Object { $_.FullName.Replace([char]92, [char]47) -eq "package/win-unpacked/OpenLineOps.exe" } |
+        Where-Object {
+            [string]::Equals(
+                $_.FullName,
+                "package/win-unpacked/OpenLineOps.exe",
+                [System.StringComparison]::Ordinal)
+        } |
         Select-Object -First 1
 
     if ($entry -eq $null) {

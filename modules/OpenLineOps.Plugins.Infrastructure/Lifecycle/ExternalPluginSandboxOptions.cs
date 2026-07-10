@@ -70,17 +70,33 @@ public static class ExternalPluginIsolationModes
     public const string LeastPrivilegeIdentity = "LeastPrivilegeIdentity";
     public const string Container = "Container";
 
+    public static ExternalPluginIsolationMode Parse(string? value)
+    {
+        return value switch
+        {
+            ExternalProcess => ExternalPluginIsolationMode.ExternalProcess,
+            LeastPrivilegeIdentity => ExternalPluginIsolationMode.LeastPrivilegeIdentity,
+            Container => ExternalPluginIsolationMode.Container,
+            _ => throw new InvalidOperationException(
+                $"Unsupported external plugin isolation mode '{value}'. Expected exactly "
+                + $"'{ExternalProcess}', '{LeastPrivilegeIdentity}', or '{Container}'.")
+        };
+    }
+
     public static bool IsLeastPrivilegeIdentity(string value)
     {
-        return string.Equals(value, LeastPrivilegeIdentity, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Sudo", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "RunAs", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value, LeastPrivilegeIdentity, StringComparison.Ordinal);
     }
 
     public static bool IsContainer(string value)
     {
-        return string.Equals(value, Container, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Docker", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(value, "Podman", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value, Container, StringComparison.Ordinal);
     }
+}
+
+public enum ExternalPluginIsolationMode
+{
+    ExternalProcess,
+    LeastPrivilegeIdentity,
+    Container
 }

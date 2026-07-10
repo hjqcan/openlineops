@@ -26,9 +26,7 @@ public static class PluginsModuleServiceCollectionExtensions
         services.AddSingleton(hostOptions);
 
         services.AddSingleton<IPluginPackageCatalog>(_ =>
-            new FileSystemPluginPackageCatalog(
-                options.ResolvePackageRoot(),
-                options.ManifestFileNames));
+            new FileSystemPluginPackageCatalog(options.ResolvePackageRoot()));
         services.AddSingleton<IPluginManifestValidator>(_ =>
             new PluginManifestValidator(new PluginCompatibilityOptions(
                 options.PlatformVersion,
@@ -74,25 +72,33 @@ public static class PluginsModuleServiceCollectionExtensions
             EventLogDatabasePath = section?["EventLog:DatabasePath"] ?? "data/openlineops-plugin-events.sqlite",
             PlatformVersion = section?["Compatibility:PlatformVersion"] ?? "1.0.0",
             ContractVersion = section?["Compatibility:ContractVersion"] ?? "1.0.0",
-            RegisterRoutingInventories = TryReadBoolean(section?["RegisterRoutingInventories"], defaultValue: false),
+            RegisterRoutingInventories = ReadOptionalBoolean(
+                section?["RegisterRoutingInventories"],
+                defaultValue: false,
+                $"{PluginsModuleOptions.SectionName}:RegisterRoutingInventories"),
             ExternalHostExecutablePath = section?["ExternalHost:ExecutablePath"],
             ExternalHostArgumentsTemplate = section?["ExternalHost:ArgumentsTemplate"]
         };
 
-        var manifestFileNames = section?.GetSection("ManifestFileNames").Get<string[]>();
-        if (manifestFileNames is { Length: > 0 })
-        {
-            options.ManifestFileNames = manifestFileNames;
-        }
-
+        _ = PluginActivators.Parse(options.Activator);
+        _ = PluginEventLogProviders.Parse(options.EventLogProvider);
         return options;
     }
 
-    private static bool TryReadBoolean(string? value, bool defaultValue)
+    private static bool ReadOptionalBoolean(string? value, bool defaultValue, string configurationPath)
     {
-        return bool.TryParse(value, out var parsed)
-            ? parsed
-            : defaultValue;
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        return value switch
+        {
+            "true" => true,
+            "false" => false,
+            _ => throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must be exactly 'true' or 'false'.")
+        };
     }
 
     private static ExternalProcessPluginHostOptions LoadHostOptions(
@@ -106,15 +112,26 @@ public static class PluginsModuleServiceCollectionExtensions
             ArgumentsTemplate = options.ExternalHostArgumentsTemplate
                 ?? "\"{EntryAssemblyPath}\" --openlineops-plugin-host --manifest \"{ManifestPath}\""
         };
+        var sandboxSection = section?.GetSection("Sandbox");
+        var isolationMode = sandboxSection?["IsolationMode"]
+            ?? ExternalPluginIsolationModes.ExternalProcess;
+        _ = ExternalPluginIsolationModes.Parse(isolationMode);
+        hostOptions.Sandbox.IsolationMode = isolationMode;
 
-        if (TimeSpan.TryParse(section?["StartupProbeDelay"], out var startupProbeDelay))
+        var startupProbeDelayValue = section?["StartupProbeDelay"];
+        if (startupProbeDelayValue is not null)
         {
-            hostOptions.StartupProbeDelay = startupProbeDelay;
+            hostOptions.StartupProbeDelay = ReadTimeSpan(
+                startupProbeDelayValue,
+                $"{PluginsModuleOptions.SectionName}:ExternalHost:StartupProbeDelay");
         }
 
-        if (TimeSpan.TryParse(section?["ShutdownTimeout"], out var shutdownTimeout))
+        var shutdownTimeoutValue = section?["ShutdownTimeout"];
+        if (shutdownTimeoutValue is not null)
         {
-            hostOptions.ShutdownTimeout = shutdownTimeout;
+            hostOptions.ShutdownTimeout = ReadTimeSpan(
+                shutdownTimeoutValue,
+                $"{PluginsModuleOptions.SectionName}:ExternalHost:ShutdownTimeout");
         }
 
         return hostOptions;
@@ -124,58 +141,45 @@ public static class PluginsModuleServiceCollectionExtensions
         IServiceCollection services,
         PluginsModuleOptions options)
     {
-        if (string.Equals(options.EventLogProvider, PluginEventLogProviders.None, StringComparison.OrdinalIgnoreCase))
+        switch (PluginEventLogProviders.Parse(options.EventLogProvider))
         {
-            services.AddSingleton<NoOpExternalPluginProcessEventLog>();
-            services.AddSingleton<IExternalPluginProcessEventLog>(serviceProvider =>
-                serviceProvider.GetRequiredService<NoOpExternalPluginProcessEventLog>());
-            services.AddSingleton<IExternalPluginProcessEventSink>(serviceProvider =>
-                serviceProvider.GetRequiredService<NoOpExternalPluginProcessEventLog>());
-
-            return;
+            case PluginEventLogProvider.Sqlite:
+                services.AddSingleton(_ =>
+                    new SqliteExternalPluginProcessEventLog(options.ResolveEventLogConnectionString()));
+                services.AddSingleton<IExternalPluginProcessEventLog>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteExternalPluginProcessEventLog>());
+                services.AddSingleton<IExternalPluginProcessEventSink>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteExternalPluginProcessEventLog>());
+                return;
+            default:
+                throw new InvalidOperationException(
+                    $"Unsupported plugin event-log provider '{options.EventLogProvider}'.");
         }
-
-        services.AddSingleton(_ =>
-            new SqliteExternalPluginProcessEventLog(options.ResolveEventLogConnectionString()));
-        services.AddSingleton<IExternalPluginProcessEventLog>(serviceProvider =>
-            serviceProvider.GetRequiredService<SqliteExternalPluginProcessEventLog>());
-        services.AddSingleton<IExternalPluginProcessEventSink>(serviceProvider =>
-            serviceProvider.GetRequiredService<SqliteExternalPluginProcessEventLog>());
     }
 
     private static IPluginInstanceActivator CreateActivator(
         PluginsModuleOptions options,
         IServiceProvider serviceProvider)
     {
-        if (string.Equals(options.Activator, PluginActivators.AssemblyLoadContext, StringComparison.OrdinalIgnoreCase))
+        return PluginActivators.Parse(options.Activator) switch
         {
-            return new AssemblyLoadContextPluginInstanceActivator();
-        }
-
-        if (string.Equals(options.Activator, PluginActivators.ExternalProcess, StringComparison.OrdinalIgnoreCase))
-        {
-            return new ExternalProcessPluginInstanceActivator(
+            PluginActivator.ManifestOnly => new ManifestOnlyPluginInstanceActivator(),
+            PluginActivator.AssemblyLoadContext => new AssemblyLoadContextPluginInstanceActivator(),
+            PluginActivator.ExternalProcess => new ExternalProcessPluginInstanceActivator(
                 serviceProvider.GetRequiredService<IExternalPluginProcessRunner>(),
                 serviceProvider.GetRequiredService<IExternalPluginProcessRegistry>(),
                 serviceProvider.GetRequiredService<ExternalProcessPluginHostOptions>(),
-                serviceProvider.GetRequiredService<IExternalPluginProcessEventSink>());
-        }
-
-        return new ManifestOnlyPluginInstanceActivator();
+                serviceProvider.GetRequiredService<IExternalPluginProcessEventSink>()),
+            _ => throw new InvalidOperationException(
+                $"Unsupported plugin activator '{options.Activator}'.")
+        };
     }
 
-    private sealed class NoOpExternalPluginProcessEventLog : IExternalPluginProcessEventLog
+    private static TimeSpan ReadTimeSpan(string value, string configurationPath)
     {
-        public void Record(ExternalPluginProcessEvent processEvent)
-        {
-        }
-
-        public ValueTask<IReadOnlyList<ExternalPluginProcessEvent>> ListAsync(
-            ExternalPluginProcessEventQuery? query = null,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult<IReadOnlyList<ExternalPluginProcessEvent>>([]);
-        }
+        return TimeSpan.TryParse(value, out var parsed)
+            ? parsed
+            : throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must be a valid TimeSpan.");
     }
 }

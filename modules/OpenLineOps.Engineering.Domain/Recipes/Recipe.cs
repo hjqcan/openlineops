@@ -1,5 +1,4 @@
 using OpenLineOps.Domain.Abstractions.Entities;
-using OpenLineOps.Engineering.Domain.Events;
 using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Engineering.Domain.Operations;
 
@@ -63,8 +62,6 @@ public sealed class Recipe : AggregateRoot<RecipeId>
         };
 
         recipe._parameters.AddRange(parameters);
-        recipe.ClearDomainEvents();
-
         return recipe;
     }
 
@@ -101,8 +98,6 @@ public sealed class Recipe : AggregateRoot<RecipeId>
 
         Status = RecipeStatus.Published;
         PublishedAtUtc = publishedAtUtc;
-
-        RaiseDomainEvent(new RecipePublishedDomainEvent(Id, VersionId, publishedAtUtc));
 
         return EngineeringOperationResult.Accepted("Recipe published.");
     }

@@ -6,14 +6,8 @@ using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Traceability.Api.Models;
 using OpenLineOps.Traceability.Application.Queries;
 using OpenLineOps.Traceability.Application.Records;
-using CreateApiArtifactRecordRequest = OpenLineOps.Traceability.Api.Models.CreateArtifactRecordRequest;
-using CreateApiAuditEntryRequest = OpenLineOps.Traceability.Api.Models.CreateAuditEntryRequest;
-using CreateApiMeasurementRecordRequest = OpenLineOps.Traceability.Api.Models.CreateMeasurementRecordRequest;
-using CreateApiTraceRecordRequest = OpenLineOps.Traceability.Api.Models.CreateTraceRecordRequest;
-using CreateApplicationArtifactRecordRequest = OpenLineOps.Traceability.Application.Records.CreateArtifactRecordRequest;
-using CreateApplicationAuditEntryRequest = OpenLineOps.Traceability.Application.Records.CreateAuditEntryRequest;
-using CreateApplicationMeasurementRecordRequest = OpenLineOps.Traceability.Application.Records.CreateMeasurementRecordRequest;
-using CreateApplicationTraceRecordRequest = OpenLineOps.Traceability.Application.Records.CreateTraceRecordRequest;
+using ApiCreateRequest = OpenLineOps.Traceability.Api.Models.CreateTraceRecordRequest;
+using AppCreateRequest = OpenLineOps.Traceability.Application.Records.CreateTraceRecordRequest;
 
 namespace OpenLineOps.Traceability.Api.Controllers;
 
@@ -34,26 +28,18 @@ public sealed class TraceRecordsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<TraceRecordResponse>> CreateAsync(
-        CreateApiTraceRecordRequest request,
+        ApiCreateRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = Validate(request);
-        if (validationErrors.Count > 0)
-        {
-            return BadRequest(new ValidationProblemDetails(validationErrors));
-        }
-
         var result = await _traceRecordService
-            .CreateCompletedAsync(ToApplicationRequest(request), cancellationToken)
+            .CreateAsync(ToApplicationRequest(request), cancellationToken)
             .ConfigureAwait(false);
-
         if (result.IsFailure)
         {
             return ToProblem(result.Error);
         }
 
         var response = ToResponse(result.Value);
-
         return Created($"/api/traceability/records/{response.TraceRecordId}", response);
     }
 
@@ -61,37 +47,62 @@ public sealed class TraceRecordsController : ControllerBase
     [ProducesResponseType<PagedTraceRecordSummaryResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<PagedTraceRecordSummaryResponse>> QueryAsync(
-        [FromQuery] string? serialNumber,
+        [FromQuery] Guid? productionRunId,
+        [FromQuery] string? dutModelId,
+        [FromQuery] string? dutIdentityInputKey,
+        [FromQuery] string? dutIdentityValue,
         [FromQuery] string? batchId,
-        [FromQuery] string? stationId,
         [FromQuery] string? fixtureId,
+        [FromQuery] string? deviceId,
+        [FromQuery] string? actorId,
+        [FromQuery] string? runStatus,
+        [FromQuery] string? judgement,
         [FromQuery] string? projectId,
         [FromQuery] string? applicationId,
         [FromQuery] string? projectSnapshotId,
         [FromQuery] string? topologyId,
+        [FromQuery] string? productionLineDefinitionId,
+        [FromQuery] string? stageId,
+        [FromQuery] string? workstationId,
+        [FromQuery] string? stationId,
+        [FromQuery] string? processDefinitionId,
+        [FromQuery] string? processVersionId,
+        [FromQuery] string? configurationSnapshotId,
+        [FromQuery] string? recipeSnapshotId,
         [FromQuery] DateTimeOffset? completedFromUtc,
         [FromQuery] DateTimeOffset? completedToUtc,
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 50,
         CancellationToken cancellationToken = default)
     {
-        var result = await _traceRecordService
-            .QueryAsync(
-                new TraceRecordQuery(
-                    serialNumber,
-                    batchId,
-                    stationId,
-                    fixtureId,
-                    completedFromUtc,
-                    completedToUtc,
-                    new PagedRequest(pageNumber, pageSize),
-                    projectId: projectId,
-                    applicationId: applicationId,
-                    projectSnapshotId: projectSnapshotId,
-                    topologyId: topologyId),
-                cancellationToken)
-            .ConfigureAwait(false);
-
+        var result = await _traceRecordService.QueryAsync(
+            new TraceRecordQuery(
+                productionRunId,
+                dutModelId,
+                dutIdentityInputKey,
+                dutIdentityValue,
+                batchId,
+                fixtureId,
+                deviceId,
+                actorId,
+                runStatus,
+                judgement,
+                projectId,
+                applicationId,
+                projectSnapshotId,
+                topologyId,
+                productionLineDefinitionId,
+                stageId,
+                workstationId,
+                stationId,
+                processDefinitionId,
+                processVersionId,
+                configurationSnapshotId,
+                recipeSnapshotId,
+                completedFromUtc,
+                completedToUtc,
+                new PagedRequest(pageNumber, pageSize)),
+            cancellationToken).ConfigureAwait(false);
         return result.IsFailure
             ? ToProblem(result.Error)
             : Ok(new PagedTraceRecordSummaryResponse(
@@ -104,7 +115,6 @@ public sealed class TraceRecordsController : ControllerBase
 
     [HttpGet("{traceRecordId:guid}")]
     [ProducesResponseType<TraceRecordResponse>(StatusCodes.Status200OK)]
-    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<TraceRecordResponse>> GetByIdAsync(
         Guid traceRecordId,
@@ -113,15 +123,11 @@ public sealed class TraceRecordsController : ControllerBase
         var result = await _traceRecordService
             .GetByIdAsync(traceRecordId, cancellationToken)
             .ConfigureAwait(false);
-
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
     }
 
     [HttpGet("{traceRecordId:guid}/export")]
     [ProducesResponseType<TraceRecordExportPackageResponse>(StatusCodes.Status200OK)]
-    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<TraceRecordExportPackageResponse>> ExportAsync(
         Guid traceRecordId,
@@ -130,7 +136,6 @@ public sealed class TraceRecordsController : ControllerBase
         var result = await _traceRecordService
             .ExportAsync(traceRecordId, cancellationToken)
             .ConfigureAwait(false);
-
         return result.IsFailure
             ? ToProblem(result.Error)
             : Ok(new TraceRecordExportPackageResponse(
@@ -139,38 +144,84 @@ public sealed class TraceRecordsController : ControllerBase
                 ToResponse(result.Value.TraceRecord)));
     }
 
-    private static CreateApplicationTraceRecordRequest ToApplicationRequest(
-        CreateApiTraceRecordRequest request)
+    private static AppCreateRequest ToApplicationRequest(ApiCreateRequest request)
     {
-        return new CreateApplicationTraceRecordRequest(
-            request.TraceRecordId,
-            request.RuntimeSessionId,
-            request.SerialNumber,
+        return new AppCreateRequest(
+            request.ProductionRunId,
+            request.ProjectId,
+            request.ApplicationId,
+            request.ProjectSnapshotId,
+            request.TopologyId,
+            request.ProductionLineDefinitionId,
+            request.DutModelId,
+            request.DutIdentityInputKey,
+            request.DutIdentityValue,
             request.BatchId,
-            request.StationId,
             request.FixtureId,
+            request.DeviceId,
+            request.ActorId,
+            request.RunStatus,
+            request.Judgement,
+            request.CreatedAtUtc,
+            request.StartedAtUtc,
+            request.CompletedAtUtc,
+            request.FailureCode,
+            request.FailureReason,
+            request.Stages?.Select(ToApplicationRequest).ToArray(),
+            request.AuditEntries?.Select(ToApplicationRequest).ToArray());
+    }
+
+    private static Application.Records.CreateTraceStageExecutionRequest ToApplicationRequest(
+        Models.CreateTraceStageExecutionRequest request)
+    {
+        return new Application.Records.CreateTraceStageExecutionRequest(
+            request.StageId,
+            request.Sequence,
+            request.WorkstationId,
+            request.StationId,
             request.ProcessDefinitionId,
             request.ProcessVersionId,
             request.ConfigurationSnapshotId,
             request.RecipeSnapshotId,
-            request.DeviceId,
-            request.Judgement,
+            request.RuntimeSessionId,
+            request.RuntimeSessionStatus,
+            request.Status,
             request.StartedAtUtc,
             request.CompletedAtUtc,
-            request.RecordedBy,
+            request.FailureCode,
+            request.FailureReason,
+            request.CompletedStepCount,
+            request.CommandCount,
+            request.IncidentCount,
+            request.Commands?.Select(ToApplicationRequest).ToArray(),
             request.Measurements?.Select(ToApplicationRequest).ToArray(),
             request.Artifacts?.Select(ToApplicationRequest).ToArray(),
-            request.AuditEntries?.Select(ToApplicationRequest).ToArray(),
-            request.ProjectId,
-            request.ApplicationId,
-            request.ProjectSnapshotId,
-            request.TopologyId);
+            request.Incidents?.Select(ToApplicationRequest).ToArray());
     }
 
-    private static CreateApplicationMeasurementRecordRequest ToApplicationRequest(
-        CreateApiMeasurementRecordRequest request)
-    {
-        return new CreateApplicationMeasurementRecordRequest(
+    private static Application.Records.CreateTraceCommandRequest ToApplicationRequest(
+        Models.CreateTraceCommandRequest request) =>
+        new(
+            request.RuntimeCommandId,
+            request.RuntimeStepId,
+            request.ActionId,
+            request.TargetKind,
+            request.TargetId,
+            request.TargetCapabilityId,
+            request.CommandName,
+            request.Status,
+            request.SemanticOutcome,
+            request.CreatedAtUtc,
+            request.DeadlineAtUtc,
+            request.AcceptedAtUtc,
+            request.StartedAtUtc,
+            request.CompletedAtUtc,
+            request.ResultPayload,
+            request.FailureReason);
+
+    private static Application.Records.CreateMeasurementRecordRequest ToApplicationRequest(
+        Models.CreateMeasurementRecordRequest request) =>
+        new(
             request.MeasurementRecordId,
             request.Name,
             request.NumericValue,
@@ -178,14 +229,16 @@ public sealed class TraceRecordsController : ControllerBase
             request.Unit,
             request.DeviceId,
             request.RuntimeCommandId,
+            request.ActionId,
+            request.TargetKind,
+            request.TargetId,
+            request.CommandStatus,
             request.Passed,
             request.MeasuredAtUtc);
-    }
 
-    private static CreateApplicationArtifactRecordRequest ToApplicationRequest(
-        CreateApiArtifactRecordRequest request)
-    {
-        return new CreateApplicationArtifactRecordRequest(
+    private static Application.Records.CreateArtifactRecordRequest ToApplicationRequest(
+        Models.CreateArtifactRecordRequest request) =>
+        new(
             request.ArtifactRecordId,
             request.Name,
             request.Kind,
@@ -195,70 +248,113 @@ public sealed class TraceRecordsController : ControllerBase
             request.Sha256,
             request.DeviceId,
             request.CapturedAtUtc);
-    }
 
-    private static CreateApplicationAuditEntryRequest ToApplicationRequest(
-        CreateApiAuditEntryRequest request)
-    {
-        return new CreateApplicationAuditEntryRequest(
-            request.AuditEntryId,
-            request.ActorId,
-            request.Action,
-            request.Detail,
-            request.OccurredAtUtc);
-    }
+    private static Application.Records.CreateTraceIncidentRequest ToApplicationRequest(
+        Models.CreateTraceIncidentRequest request) =>
+        new(request.RuntimeIncidentId, request.Severity, request.Code, request.Message, request.OccurredAtUtc);
 
-    private static TraceRecordResponse ToResponse(TraceRecordDetails details)
-    {
-        return new TraceRecordResponse(
+    private static Application.Records.CreateAuditEntryRequest ToApplicationRequest(
+        Models.CreateAuditEntryRequest request) =>
+        new(request.AuditEntryId, request.ActorId, request.Action, request.Detail, request.OccurredAtUtc);
+
+    private static TraceRecordResponse ToResponse(TraceRecordDetails details) =>
+        new(
             details.TraceRecordId,
-            details.RuntimeSessionId,
+            details.ProductionRunId,
             details.ProjectId,
             details.ApplicationId,
             details.ProjectSnapshotId,
             details.TopologyId,
-            details.SerialNumber,
+            details.ProductionLineDefinitionId,
+            details.DutModelId,
+            details.DutIdentityInputKey,
+            details.DutIdentityValue,
             details.BatchId,
-            details.StationId,
             details.FixtureId,
-            details.ProcessDefinitionId,
-            details.ProcessVersionId,
-            details.ConfigurationSnapshotId,
-            details.RecipeSnapshotId,
             details.DeviceId,
+            details.ActorId,
+            details.RunStatus,
             details.Judgement,
+            details.CreatedAtUtc,
             details.StartedAtUtc,
             details.CompletedAtUtc,
-            details.RecordedBy,
-            details.Measurements.Select(ToResponse).ToArray(),
-            details.Artifacts.Select(ToResponse).ToArray(),
+            details.FailureCode,
+            details.FailureReason,
+            details.Stages.Select(ToResponse).ToArray(),
             details.AuditEntries.Select(ToResponse).ToArray());
-    }
 
-    private static TraceRecordSummaryResponse ToSummaryResponse(TraceRecordSummary summary)
-    {
-        return new TraceRecordSummaryResponse(
+    private static TraceRecordSummaryResponse ToSummaryResponse(TraceRecordSummary summary) =>
+        new(
             summary.TraceRecordId,
-            summary.RuntimeSessionId,
+            summary.ProductionRunId,
             summary.ProjectId,
             summary.ApplicationId,
             summary.ProjectSnapshotId,
             summary.TopologyId,
-            summary.SerialNumber,
+            summary.ProductionLineDefinitionId,
+            summary.DutModelId,
+            summary.DutIdentityInputKey,
+            summary.DutIdentityValue,
             summary.BatchId,
-            summary.StationId,
             summary.FixtureId,
-            summary.ProcessVersionId,
-            summary.ConfigurationSnapshotId,
-            summary.RecipeSnapshotId,
             summary.DeviceId,
+            summary.ActorId,
+            summary.RunStatus,
             summary.Judgement,
-            summary.CompletedAtUtc);
-    }
+            summary.CompletedAtUtc,
+            summary.StageCount,
+            summary.FailedStageCount,
+            summary.CommandCount,
+            summary.MeasurementCount,
+            summary.ArtifactCount,
+            summary.IncidentCount);
 
-    private static MeasurementRecordResponse ToResponse(MeasurementRecordDetails measurement)
-    {
-        return new MeasurementRecordResponse(
+    private static TraceStageExecutionResponse ToResponse(TraceStageExecutionDetails stage) =>
+        new(
+            stage.StageId,
+            stage.Sequence,
+            stage.WorkstationId,
+            stage.StationId,
+            stage.ProcessDefinitionId,
+            stage.ProcessVersionId,
+            stage.ConfigurationSnapshotId,
+            stage.RecipeSnapshotId,
+            stage.RuntimeSessionId,
+            stage.RuntimeSessionStatus,
+            stage.Status,
+            stage.StartedAtUtc,
+            stage.CompletedAtUtc,
+            stage.FailureCode,
+            stage.FailureReason,
+            stage.CompletedStepCount,
+            stage.CommandCount,
+            stage.IncidentCount,
+            stage.Commands.Select(ToResponse).ToArray(),
+            stage.Measurements.Select(ToResponse).ToArray(),
+            stage.Artifacts.Select(ToResponse).ToArray(),
+            stage.Incidents.Select(ToResponse).ToArray());
+
+    private static TraceCommandResponse ToResponse(TraceCommandDetails command) =>
+        new(
+            command.RuntimeCommandId,
+            command.RuntimeStepId,
+            command.ActionId,
+            command.TargetKind,
+            command.TargetId,
+            command.TargetCapabilityId,
+            command.CommandName,
+            command.Status,
+            command.SemanticOutcome,
+            command.CreatedAtUtc,
+            command.DeadlineAtUtc,
+            command.AcceptedAtUtc,
+            command.StartedAtUtc,
+            command.CompletedAtUtc,
+            command.ResultPayload,
+            command.FailureReason);
+
+    private static MeasurementRecordResponse ToResponse(MeasurementRecordDetails measurement) =>
+        new(
             measurement.MeasurementRecordId,
             measurement.Name,
             measurement.NumericValue,
@@ -266,13 +362,15 @@ public sealed class TraceRecordsController : ControllerBase
             measurement.Unit,
             measurement.DeviceId,
             measurement.RuntimeCommandId,
+            measurement.ActionId,
+            measurement.TargetKind,
+            measurement.TargetId,
+            measurement.CommandStatus,
             measurement.Passed,
             measurement.MeasuredAtUtc);
-    }
 
-    private static ArtifactRecordResponse ToResponse(ArtifactRecordDetails artifact)
-    {
-        return new ArtifactRecordResponse(
+    private static ArtifactRecordResponse ToResponse(ArtifactRecordDetails artifact) =>
+        new(
             artifact.ArtifactRecordId,
             artifact.Name,
             artifact.Kind,
@@ -282,17 +380,17 @@ public sealed class TraceRecordsController : ControllerBase
             artifact.Sha256,
             artifact.DeviceId,
             artifact.CapturedAtUtc);
-    }
 
-    private static AuditEntryResponse ToResponse(AuditEntryDetails auditEntry)
-    {
-        return new AuditEntryResponse(
+    private static TraceIncidentResponse ToResponse(TraceIncidentDetails incident) =>
+        new(incident.RuntimeIncidentId, incident.Severity, incident.Code, incident.Message, incident.OccurredAtUtc);
+
+    private static AuditEntryResponse ToResponse(AuditEntryDetails auditEntry) =>
+        new(
             auditEntry.AuditEntryId,
             auditEntry.ActorId,
             auditEntry.Action,
             auditEntry.Detail,
             auditEntry.OccurredAtUtc);
-    }
 
     private ObjectResult ToProblem(ApplicationError error)
     {
@@ -302,68 +400,6 @@ public sealed class TraceRecordsController : ControllerBase
             "NotFound" => StatusCodes.Status404NotFound,
             _ => StatusCodes.Status409Conflict
         };
-
-        return Problem(
-            title: error.Code,
-            detail: error.Message,
-            statusCode: statusCode);
-    }
-
-    private static Dictionary<string, string[]> Validate(CreateApiTraceRecordRequest? request)
-    {
-        var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
-
-        if (request is null)
-        {
-            errors[nameof(request)] = ["Request body is required."];
-            return errors;
-        }
-
-        if (request.TraceRecordId == Guid.Empty)
-        {
-            errors[nameof(request.TraceRecordId)] = ["TraceRecordId cannot be an empty GUID."];
-        }
-
-        if (request.RuntimeSessionId == Guid.Empty)
-        {
-            errors[nameof(request.RuntimeSessionId)] = ["RuntimeSessionId is required."];
-        }
-
-        if (request.StartedAtUtc == default)
-        {
-            errors[nameof(request.StartedAtUtc)] = ["StartedAtUtc is required."];
-        }
-
-        if (request.CompletedAtUtc == default)
-        {
-            errors[nameof(request.CompletedAtUtc)] = ["CompletedAtUtc is required."];
-        }
-
-        if (request.CompletedAtUtc < request.StartedAtUtc)
-        {
-            errors[nameof(request.CompletedAtUtc)] = ["CompletedAtUtc cannot be earlier than StartedAtUtc."];
-        }
-
-        AddRequired(errors, nameof(request.SerialNumber), request.SerialNumber);
-        AddRequired(errors, nameof(request.StationId), request.StationId);
-        AddRequired(errors, nameof(request.ProcessDefinitionId), request.ProcessDefinitionId);
-        AddRequired(errors, nameof(request.ProcessVersionId), request.ProcessVersionId);
-        AddRequired(errors, nameof(request.ConfigurationSnapshotId), request.ConfigurationSnapshotId);
-        AddRequired(errors, nameof(request.RecipeSnapshotId), request.RecipeSnapshotId);
-        AddRequired(errors, nameof(request.DeviceId), request.DeviceId);
-        AddRequired(errors, nameof(request.RecordedBy), request.RecordedBy);
-
-        return errors;
-    }
-
-    private static void AddRequired(
-        Dictionary<string, string[]> errors,
-        string key,
-        string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            errors[key] = ["Value is required."];
-        }
+        return Problem(title: error.Code, detail: error.Message, statusCode: statusCode);
     }
 }

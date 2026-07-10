@@ -8,140 +8,172 @@ namespace OpenLineOps.Api.Tests;
 public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
-
     private readonly HttpClient _client;
 
     public TraceRecordsApiTests(WebApplicationFactory<Program> factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
-        {
-            AllowAutoRedirect = false
-        });
+        _client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
     }
 
     [Fact]
-    public async Task CreateTraceRecordReturnsCreatedAndCanBeQueriedAndExported()
+    public async Task CreateProductionRunTraceReturnsNestedEvidenceAndCanQueryGetAndExport()
     {
         var suffix = Guid.NewGuid().ToString("N");
-        var serialNumber = $"SMX-API-{suffix}";
-
+        var dutIdentity = $"SMX-API-{suffix}";
+        var productionRunId = Guid.NewGuid();
         using var response = await _client.PostAsJsonAsync(
             "/api/traceability/records",
-            CreateTraceRecordRequest(serialNumber, "batch-api-main", BaseTimeUtc.AddMinutes(3)));
+            CreateTraceRequest(productionRunId, dutIdentity, "batch-api-main", BaseTimeUtc.AddMinutes(3)));
         using var body = await ReadJsonAsync(response);
-        var traceRecordId = body.RootElement.GetProperty("traceRecordId").GetGuid();
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        Assert.Contains($"/api/traceability/records/{traceRecordId}", response.Headers.Location?.OriginalString, StringComparison.Ordinal);
-        Assert.Equal(serialNumber, body.RootElement.GetProperty("serialNumber").GetString());
-        Assert.Equal("station-api-trace", body.RootElement.GetProperty("stationId").GetString());
-        Assert.Equal("process-api-trace@1.0.0", body.RootElement.GetProperty("processVersionId").GetString());
-        Assert.Equal("config-api-trace", body.RootElement.GetProperty("configurationSnapshotId").GetString());
-        Assert.Equal(1, body.RootElement.GetProperty("measurements").GetArrayLength());
-        Assert.Equal(1, body.RootElement.GetProperty("artifacts").GetArrayLength());
-        Assert.Equal(1, body.RootElement.GetProperty("auditEntries").GetArrayLength());
+        Assert.Equal(productionRunId, body.RootElement.GetProperty("traceRecordId").GetGuid());
+        Assert.Equal(productionRunId, body.RootElement.GetProperty("productionRunId").GetGuid());
+        Assert.Equal(dutIdentity, body.RootElement.GetProperty("dutIdentityValue").GetString());
+        Assert.Equal("Completed", body.RootElement.GetProperty("runStatus").GetString());
+        var stage = body.RootElement.GetProperty("stages")[0];
+        Assert.Equal("stage-api-trace", stage.GetProperty("stageId").GetString());
+        Assert.Equal("station-api-trace", stage.GetProperty("stationId").GetString());
+        Assert.Equal("process-api-trace@1.0.0", stage.GetProperty("processVersionId").GetString());
+        Assert.Equal(1, stage.GetProperty("commands").GetArrayLength());
+        Assert.Equal("action.inspect.width", stage.GetProperty("commands")[0].GetProperty("actionId").GetString());
+        Assert.Equal("Passed", stage.GetProperty("commands")[0].GetProperty("semanticOutcome").GetString());
+        Assert.Equal(1, stage.GetProperty("measurements").GetArrayLength());
+        Assert.Equal(1, stage.GetProperty("artifacts").GetArrayLength());
 
-        using var queryResponse = await _client.GetAsync($"/api/traceability/records?serialNumber={serialNumber}");
+        using var queryResponse = await _client.GetAsync(
+            $"/api/traceability/records?dutIdentityValue={dutIdentity}&stationId=station-api-trace");
         using var queryBody = await ReadJsonAsync(queryResponse);
-
         Assert.Equal(HttpStatusCode.OK, queryResponse.StatusCode);
         Assert.Equal(1, queryBody.RootElement.GetProperty("totalCount").GetInt64());
-        Assert.Equal(traceRecordId, queryBody.RootElement.GetProperty("items")[0].GetProperty("traceRecordId").GetGuid());
+        Assert.Equal(productionRunId, queryBody.RootElement.GetProperty("items")[0]
+            .GetProperty("productionRunId").GetGuid());
 
-        using var getResponse = await _client.GetAsync($"/api/traceability/records/{traceRecordId}");
+        using var getResponse = await _client.GetAsync($"/api/traceability/records/{productionRunId}");
         using var getBody = await ReadJsonAsync(getResponse);
-
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
-        Assert.Equal("trace/SMX-API/vision.png", getBody.RootElement.GetProperty("artifacts")[0].GetProperty("storageKey").GetString());
+        Assert.Equal("trace/SMX-API/vision.png", getBody.RootElement.GetProperty("stages")[0]
+            .GetProperty("artifacts")[0].GetProperty("storageKey").GetString());
 
-        using var exportResponse = await _client.GetAsync($"/api/traceability/records/{traceRecordId}/export");
+        using var exportResponse = await _client.GetAsync(
+            $"/api/traceability/records/{productionRunId}/export");
         using var exportBody = await ReadJsonAsync(exportResponse);
-
         Assert.Equal(HttpStatusCode.OK, exportResponse.StatusCode);
-        Assert.Equal("openlineops.trace-package.v1", exportBody.RootElement.GetProperty("packageFormatVersion").GetString());
-        Assert.Equal(traceRecordId, exportBody.RootElement.GetProperty("traceRecord").GetProperty("traceRecordId").GetGuid());
+        Assert.Equal("openlineops.production-run-trace-package.v1",
+            exportBody.RootElement.GetProperty("packageFormatVersion").GetString());
+        Assert.Equal(productionRunId, exportBody.RootElement.GetProperty("traceRecord")
+            .GetProperty("productionRunId").GetGuid());
     }
 
     [Fact]
-    public async Task CreateTraceRecordWithoutJudgementGeneratesFailedFromMeasurementRule()
+    public async Task DuplicateProductionRunTraceReturnsConflictAndDoesNotCreateSecondRecord()
     {
-        var suffix = Guid.NewGuid().ToString("N");
-        var serialNumber = $"SMX-JUDGEMENT-{suffix}";
+        var productionRunId = Guid.NewGuid();
+        var request = CreateTraceRequest(
+            productionRunId,
+            $"SMX-DUPLICATE-{Guid.NewGuid():N}",
+            $"batch-duplicate-{Guid.NewGuid():N}",
+            BaseTimeUtc.AddMinutes(4));
+        using var first = await _client.PostAsJsonAsync("/api/traceability/records", request);
+        using var duplicate = await _client.PostAsJsonAsync("/api/traceability/records", request);
 
-        using var response = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
-            CreateTraceRecordRequestWithoutJudgement(serialNumber, BaseTimeUtc.AddMinutes(4)));
-        using var body = await ReadJsonAsync(response);
-        var traceRecordId = body.RootElement.GetProperty("traceRecordId").GetGuid();
-
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        Assert.Equal("Failed", body.RootElement.GetProperty("judgement").GetString());
-
-        using var queryResponse = await _client.GetAsync($"/api/traceability/records?serialNumber={serialNumber}");
-        using var queryBody = await ReadJsonAsync(queryResponse);
-
-        Assert.Equal(HttpStatusCode.OK, queryResponse.StatusCode);
-        Assert.Equal(traceRecordId, queryBody.RootElement.GetProperty("items")[0].GetProperty("traceRecordId").GetGuid());
-        Assert.Equal("Failed", queryBody.RootElement.GetProperty("items")[0].GetProperty("judgement").GetString());
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
     }
 
     [Fact]
-    public async Task QueryTraceRecordsSupportsStablePagination()
+    public async Task QueryProductionRunTracesUsesStablePagination()
     {
         var suffix = Guid.NewGuid().ToString("N");
         var batchId = $"batch-api-page-{suffix}";
-
-        using var third = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
-            CreateTraceRecordRequest($"SMX-PAGE-3-{suffix}", batchId, BaseTimeUtc.AddMinutes(3)));
-        using var first = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
-            CreateTraceRecordRequest($"SMX-PAGE-1-{suffix}", batchId, BaseTimeUtc.AddMinutes(1)));
-        using var second = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
-            CreateTraceRecordRequest($"SMX-PAGE-2-{suffix}", batchId, BaseTimeUtc.AddMinutes(2)));
+        foreach (var (identity, minute) in new[] { ("3", 3), ("1", 1), ("2", 2) })
+        {
+            using var response = await _client.PostAsJsonAsync(
+                "/api/traceability/records",
+                CreateTraceRequest(
+                    Guid.NewGuid(),
+                    $"SMX-PAGE-{identity}-{suffix}",
+                    batchId,
+                    BaseTimeUtc.AddMinutes(minute)));
+            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        }
 
         using var pageOneResponse = await _client.GetAsync(
             $"/api/traceability/records?batchId={batchId}&pageNumber=1&pageSize=2");
-        using var pageOneBody = await ReadJsonAsync(pageOneResponse);
+        using var pageOne = await ReadJsonAsync(pageOneResponse);
         using var pageTwoResponse = await _client.GetAsync(
             $"/api/traceability/records?batchId={batchId}&pageNumber=2&pageSize=2");
-        using var pageTwoBody = await ReadJsonAsync(pageTwoResponse);
-
-        Assert.Equal(HttpStatusCode.Created, third.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, second.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, pageOneResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, pageTwoResponse.StatusCode);
-        Assert.Equal(3, pageOneBody.RootElement.GetProperty("totalCount").GetInt64());
-        Assert.Equal(2, pageOneBody.RootElement.GetProperty("items").GetArrayLength());
-        Assert.Equal($"SMX-PAGE-1-{suffix}", pageOneBody.RootElement.GetProperty("items")[0].GetProperty("serialNumber").GetString());
-        Assert.Equal($"SMX-PAGE-2-{suffix}", pageOneBody.RootElement.GetProperty("items")[1].GetProperty("serialNumber").GetString());
-        Assert.Equal($"SMX-PAGE-3-{suffix}", pageTwoBody.RootElement.GetProperty("items")[0].GetProperty("serialNumber").GetString());
+        using var pageTwo = await ReadJsonAsync(pageTwoResponse);
+        Assert.Equal([$"SMX-PAGE-1-{suffix}", $"SMX-PAGE-2-{suffix}"],
+            pageOne.RootElement.GetProperty("items").EnumerateArray()
+                .Select(item => item.GetProperty("dutIdentityValue").GetString()));
+        Assert.Equal($"SMX-PAGE-3-{suffix}", pageTwo.RootElement.GetProperty("items")[0]
+            .GetProperty("dutIdentityValue").GetString());
     }
 
-    [Fact]
-    public async Task CreateTraceRecordWithMissingRequiredLinkReturnsBadRequest()
+    [Theory]
+    [InlineData("completed", "Slot", "Completed", "Image", "Error")]
+    [InlineData("Completed", "slot", "Completed", "Image", "Error")]
+    [InlineData("Completed", "Slot", "completed", "Image", "Error")]
+    [InlineData("Completed", "Slot", "Completed", "image", "Error")]
+    [InlineData("Failed", "Slot", "Failed", "Image", "error")]
+    public async Task CreateRejectsCaseChangedNestedRuntimeEvidenceTokens(
+        string runtimeSessionStatus,
+        string targetKind,
+        string commandStatus,
+        string artifactKind,
+        string incidentSeverity)
     {
         using var response = await _client.PostAsJsonAsync(
             "/api/traceability/records",
-            new
-            {
-                runtimeSessionId = Guid.NewGuid(),
-                serialNumber = "",
-                batchId = "batch-invalid",
-                stationId = "station-api-trace",
-                fixtureId = "fixture-api-trace",
-                processDefinitionId = "process-api-trace",
-                processVersionId = "process-api-trace@1.0.0",
-                configurationSnapshotId = "config-api-trace",
-                recipeSnapshotId = "recipe-api-trace@1.0.0",
-                deviceId = "vision-camera-api",
-                judgement = "Passed",
-                startedAtUtc = BaseTimeUtc,
-                completedAtUtc = BaseTimeUtc.AddMinutes(1),
-                recordedBy = "operator-api"
-            });
+            CreateTraceRequest(
+                Guid.NewGuid(),
+                $"SMX-CASE-{Guid.NewGuid():N}",
+                $"batch-case-{Guid.NewGuid():N}",
+                BaseTimeUtc.AddMinutes(5),
+                runtimeSessionStatus: runtimeSessionStatus,
+                targetKind: targetKind,
+                commandStatus: commandStatus,
+                artifactKind: artifactKind,
+                incidentSeverity: incidentSeverity));
+        var content = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("case-sensitive", content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueryRejectsPaddedFilterInsteadOfNormalizingIt()
+    {
+        using var response = await _client.GetAsync(
+            "/api/traceability/records?dutIdentityValue=%20SMX-INVALID");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateRejectsCaseChangedCommandSemanticOutcome()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/traceability/records",
+            CreateTraceRequest(
+                Guid.NewGuid(),
+                $"SMX-SEMANTIC-{Guid.NewGuid():N}",
+                $"batch-semantic-{Guid.NewGuid():N}",
+                BaseTimeUtc.AddMinutes(5),
+                semanticOutcome: "passed"));
+        var content = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("case-sensitive", content, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("runStatus=completed")]
+    [InlineData("judgement=passed")]
+    public async Task QueryRejectsCaseChangedEnumFilters(string query)
+    {
+        using var response = await _client.GetAsync($"/api/traceability/records?{query}");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -150,57 +182,146 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
     public async Task GetMissingTraceRecordReturnsNotFound()
     {
         using var response = await _client.GetAsync($"/api/traceability/records/{Guid.NewGuid()}");
-
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    private static object CreateTraceRecordRequest(
-        string serialNumber,
+    internal static object CreateTraceRequest(
+        Guid productionRunId,
+        string dutIdentityValue,
         string batchId,
-        DateTimeOffset completedAtUtc)
+        DateTimeOffset completedAtUtc,
+        string runtimeSessionStatus = "Completed",
+        string targetKind = "Slot",
+        string commandStatus = "Completed",
+        string artifactKind = "Image",
+        string incidentSeverity = "Error",
+        string judgement = "Passed",
+        string stationId = "station-api-trace",
+        string processVersionId = "process-api-trace@1.0.0",
+        string? semanticOutcome = null)
     {
+        var runtimeSessionId = Guid.NewGuid();
+        var runtimeCommandId = Guid.NewGuid();
+        var failed = string.Equals(commandStatus, "Failed", StringComparison.Ordinal)
+            || string.Equals(judgement, "Failed", StringComparison.Ordinal);
         return new
         {
-            runtimeSessionId = Guid.NewGuid(),
-            serialNumber,
+            productionRunId,
+            projectId = "project-api-trace",
+            applicationId = "application-api-trace",
+            projectSnapshotId = "snapshot-api-trace",
+            topologyId = "topology-api-trace",
+            productionLineDefinitionId = "line-api-trace",
+            dutModelId = "dut-model-api",
+            dutIdentityInputKey = "serialNumber",
+            dutIdentityValue,
             batchId,
-            stationId = "station-api-trace",
             fixtureId = "fixture-api-trace",
-            processDefinitionId = "process-api-trace",
-            processVersionId = "process-api-trace@1.0.0",
-            configurationSnapshotId = "config-api-trace",
-            recipeSnapshotId = "recipe-api-trace@1.0.0",
             deviceId = "vision-camera-api",
-            judgement = "Passed",
+            actorId = "operator-api",
+            runStatus = failed ? "Failed" : "Completed",
+            judgement,
+            createdAtUtc = BaseTimeUtc,
             startedAtUtc = BaseTimeUtc,
             completedAtUtc,
-            recordedBy = "operator-api",
-            measurements = new[]
+            failureCode = failed ? "Runtime.StageFailed" : null,
+            failureReason = failed ? "Inspection failed." : null,
+            stages = new[]
             {
                 new
                 {
-                    name = "width",
-                    numericValue = 12.34m,
-                    textValue = (string?)null,
-                    unit = "mm",
-                    deviceId = "vision-camera-api",
-                    runtimeCommandId = Guid.NewGuid(),
-                    passed = true,
-                    measuredAtUtc = completedAtUtc.AddSeconds(-10)
-                }
-            },
-            artifacts = new[]
-            {
-                new
-                {
-                    name = "vision-image",
-                    kind = "Image",
-                    storageKey = "trace/SMX-API/vision.png",
-                    mediaType = "image/png",
-                    sizeBytes = 1024,
-                    sha256 = "sha256-api",
-                    deviceId = "vision-camera-api",
-                    capturedAtUtc = completedAtUtc.AddSeconds(-5)
+                    stageId = "stage-api-trace",
+                    sequence = 1,
+                    workstationId = "workstation-api-trace",
+                    stationId,
+                    processDefinitionId = "process-api-trace",
+                    processVersionId,
+                    configurationSnapshotId = "config-api-trace",
+                    recipeSnapshotId = "recipe-api-trace@1.0.0",
+                    runtimeSessionId,
+                    runtimeSessionStatus,
+                    status = failed ? "Failed" : "Completed",
+                    startedAtUtc = BaseTimeUtc,
+                    completedAtUtc,
+                    failureCode = failed ? "Runtime.CommandFailed" : null,
+                    failureReason = failed ? "Inspection failed." : null,
+                    completedStepCount = failed ? 0 : 1,
+                    commandCount = 1,
+                    incidentCount = failed ? 1 : 0,
+                    commands = new[]
+                    {
+                        new
+                        {
+                            runtimeCommandId,
+                            runtimeStepId = Guid.NewGuid(),
+                            actionId = "action.inspect.width",
+                            targetKind,
+                            targetId = "slot.fixture-api.1",
+                            targetCapabilityId = "capability.inspect",
+                            commandName = "Inspect",
+                            status = commandStatus,
+                            semanticOutcome = semanticOutcome ?? commandStatus switch
+                            {
+                                "Completed" => "Passed",
+                                "Failed" => "Failed",
+                                "Canceled" => "Aborted",
+                                _ => null
+                            },
+                            createdAtUtc = completedAtUtc.AddSeconds(-20),
+                            deadlineAtUtc = completedAtUtc.AddSeconds(10),
+                            acceptedAtUtc = completedAtUtc.AddSeconds(-19),
+                            startedAtUtc = completedAtUtc.AddSeconds(-18),
+                            completedAtUtc = completedAtUtc.AddSeconds(-10),
+                            resultPayload = failed ? null : "ok",
+                            failureReason = failed ? "Inspection failed." : null
+                        }
+                    },
+                    measurements = new[]
+                    {
+                        new
+                        {
+                            measurementRecordId = runtimeCommandId,
+                            name = "width",
+                            numericValue = 12.34m,
+                            textValue = (string?)null,
+                            unit = "mm",
+                            deviceId = "vision-camera-api",
+                            runtimeCommandId,
+                            actionId = "action.inspect.width",
+                            targetKind,
+                            targetId = "slot.fixture-api.1",
+                            commandStatus,
+                            passed = !failed,
+                            measuredAtUtc = completedAtUtc.AddSeconds(-10)
+                        }
+                    },
+                    artifacts = new[]
+                    {
+                        new
+                        {
+                            name = "vision-image",
+                            kind = artifactKind,
+                            storageKey = "trace/SMX-API/vision.png",
+                            mediaType = "image/png",
+                            sizeBytes = 1024,
+                            sha256 = new string('a', 64),
+                            deviceId = "vision-camera-api",
+                            capturedAtUtc = completedAtUtc.AddSeconds(-5)
+                        }
+                    },
+                    incidents = failed
+                        ? new[]
+                        {
+                            new
+                            {
+                                runtimeIncidentId = Guid.NewGuid(),
+                                severity = incidentSeverity,
+                                code = "Runtime.CommandFailed",
+                                message = "Inspection failed.",
+                                occurredAtUtc = completedAtUtc.AddSeconds(-9)
+                            }
+                        }
+                        : []
                 }
             },
             auditEntries = new[]
@@ -208,45 +329,9 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                 new
                 {
                     actorId = "operator-api",
-                    action = "TraceRecord.Completed",
+                    action = failed ? "ProductionRun.Failed" : "ProductionRun.Completed",
                     detail = "API integration test trace.",
                     occurredAtUtc = completedAtUtc
-                }
-            }
-        };
-    }
-
-    private static object CreateTraceRecordRequestWithoutJudgement(
-        string serialNumber,
-        DateTimeOffset completedAtUtc)
-    {
-        return new
-        {
-            runtimeSessionId = Guid.NewGuid(),
-            serialNumber,
-            batchId = "batch-api-judgement",
-            stationId = "station-api-trace",
-            fixtureId = "fixture-api-trace",
-            processDefinitionId = "process-api-trace",
-            processVersionId = "process-api-trace@1.0.0",
-            configurationSnapshotId = "config-api-trace",
-            recipeSnapshotId = "recipe-api-trace@1.0.0",
-            deviceId = "vision-camera-api",
-            startedAtUtc = BaseTimeUtc,
-            completedAtUtc,
-            recordedBy = "operator-api",
-            measurements = new[]
-            {
-                new
-                {
-                    name = "width",
-                    numericValue = 12.34m,
-                    textValue = (string?)null,
-                    unit = "mm",
-                    deviceId = "vision-camera-api",
-                    runtimeCommandId = Guid.NewGuid(),
-                    passed = false,
-                    measuredAtUtc = completedAtUtc.AddSeconds(-10)
                 }
             }
         };

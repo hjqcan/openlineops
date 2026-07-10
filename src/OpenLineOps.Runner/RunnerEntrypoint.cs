@@ -4,24 +4,29 @@ using OpenLineOps.Devices.Api.DependencyInjection;
 using OpenLineOps.Engineering.Api.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
 using OpenLineOps.Processes.Api.DependencyInjection;
+using OpenLineOps.Production.Api.DependencyInjection;
 using OpenLineOps.Projects.Api.DependencyInjection;
+using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Topology.Api.DependencyInjection;
+using OpenLineOps.Traceability.Api.DependencyInjection;
 
 namespace OpenLineOps.Runner;
 
 public static class RunnerEntrypoint
 {
     public const string UsageText = """
-        OpenLineOps Runner - one-shot immutable Project Snapshot execution
+        OpenLineOps Runner - one-shot immutable Production Line execution
 
         Usage:
-          OpenLineOps.Runner run <project-directory-or-.oloproj> [--snapshot <id|active>] [--serial <value>] [--batch <value>] [--fixture <value>] [--device <value>] [--actor <value>]
+          OpenLineOps.Runner run <project-directory-or-.oloproj> --dut <identity> --actor <actor-id> [--snapshot <id|active>] [--run-id <guid>] [--batch <value>] [--fixture <value>] [--device <value>]
 
         Notes:
           --snapshot defaults to "active".
+          --run-id defaults to a newly generated Production Run id; provide it to make retries idempotent.
           Runtime configuration uses appsettings.json, appsettings.<environment>.json, and environment variables.
-          Only snapshots with an immutable release descriptor can run; editable application source is never a fallback.
+          Every Production stage executes from the immutable release; editable application source is never a fallback.
+          The IDE and Runner share one project execution lease; interrupted Runs are terminalized before the next launch.
 
         Stable exit codes:
           0   completed successfully
@@ -29,8 +34,8 @@ public static class RunnerEntrypoint
           3   project manifest could not be opened
           4   requested/active snapshot could not be selected
           5   selected snapshot has no immutable release
-          6   immutable release or runtime start was rejected
-          7   runtime session reached a non-completed terminal state
+          6   immutable release or Production Run start was rejected
+          7   Production Run failed
           8   canceled
           70  unexpected internal/configuration error
         """;
@@ -68,13 +73,16 @@ public static class RunnerEntrypoint
 
         try
         {
-            var configuration = BuildConfiguration(currentDirectory);
+            var configuration = BuildConfiguration(parseResult.Options!, currentDirectory);
             var services = new ServiceCollection();
+            services.AddLogging();
             services.AddSingleton<IConfiguration>(configuration);
             services.AddOpenLineOpsProjectsModule();
             services.AddOpenLineOpsTopologyModule();
             services.AddOpenLineOpsRuntimeModule(configuration);
+            services.AddOpenLineOpsTraceabilityModule(configuration);
             services.AddOpenLineOpsProcessesModule();
+            services.AddOpenLineOpsProductionModule();
             services.AddOpenLineOpsEngineeringModule();
             services.AddOpenLineOpsPluginsModule(configuration);
             services.AddOpenLineOpsDevicesModule(configuration);
@@ -121,25 +129,61 @@ public static class RunnerEntrypoint
         }
     }
 
-    private static IConfigurationRoot BuildConfiguration(string currentDirectory)
+    private static IConfigurationRoot BuildConfiguration(
+        RunnerRunOptions options,
+        string currentDirectory)
     {
         var environmentName = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
             ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
             ?? "Production";
         var baseDirectory = AppContext.BaseDirectory;
+        string projectDirectory;
+        try
+        {
+            projectDirectory = ProjectExecutionDataDirectory.ProjectDirectoryFromTarget(
+                options.ProjectTarget,
+                currentDirectory);
+        }
+        catch (Exception exception) when (exception is ArgumentException
+                                           or InvalidDataException
+                                           or IOException
+                                           or UnauthorizedAccessException)
+        {
+            // RunnerCommand owns the machine-readable project-target error. This
+            // provisional configuration scope is never used to open a project.
+            projectDirectory = currentDirectory;
+        }
+        var runnerDataDirectory = ProjectExecutionDataDirectory.ForProjectDirectory(projectDirectory);
         var builder = new ConfigurationBuilder();
 
         AddJsonFiles(builder, baseDirectory, environmentName);
         if (!string.Equals(
                 Path.GetFullPath(baseDirectory).TrimEnd(Path.DirectorySeparatorChar),
-                Path.GetFullPath(currentDirectory).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(projectDirectory).TrimEnd(Path.DirectorySeparatorChar),
                 StringComparison.OrdinalIgnoreCase))
         {
-            AddJsonFiles(builder, currentDirectory, environmentName);
+            AddJsonFiles(builder, projectDirectory, environmentName);
         }
 
         return builder
             .AddEnvironmentVariables()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Runtime:Persistence:Provider"] = "Sqlite",
+                ["OpenLineOps:Runtime:Persistence:ConnectionString"] = null,
+                ["OpenLineOps:Runtime:Persistence:DatabasePath"] = Path.Combine(
+                    runnerDataDirectory,
+                    "openlineops-runtime.sqlite"),
+                ["OpenLineOps:Traceability:Persistence:Provider"] = "Sqlite",
+                ["OpenLineOps:Traceability:Persistence:ConnectionString"] = null,
+                ["OpenLineOps:Traceability:Persistence:DatabasePath"] = Path.Combine(
+                    runnerDataDirectory,
+                    "openlineops-traceability.sqlite"),
+                ["OpenLineOps:Traceability:ArtifactStorage:Provider"] = "FileSystem",
+                ["OpenLineOps:Traceability:ArtifactStorage:RootPath"] = Path.Combine(
+                    runnerDataDirectory,
+                    "trace-artifacts")
+            })
             .Build();
     }
 

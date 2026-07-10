@@ -30,76 +30,81 @@ public sealed class TraceReadModelsController : ControllerBase
         [FromQuery] int recentLimit = 10,
         CancellationToken cancellationToken = default)
     {
-        var result = await _readModelService
-            .GetStationDashboardAsync(
-                new StationTraceDashboardQuery(
-                    stationId,
-                    completedFromUtc,
-                    completedToUtc,
-                    recentLimit),
-                cancellationToken)
-            .ConfigureAwait(false);
-
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+        var result = await _readModelService.GetStationDashboardAsync(
+            new StationTraceDashboardQuery(
+                stationId,
+                completedFromUtc,
+                completedToUtc,
+                recentLimit),
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
     }
 
     [HttpGet("engineering-search")]
     [ProducesResponseType<EngineeringTraceSearchResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<EngineeringTraceSearchResponse>> SearchForEngineeringAsync(
-        [FromQuery] string? serialNumber,
+        [FromQuery] Guid? productionRunId,
+        [FromQuery] string? dutModelId,
+        [FromQuery] string? dutIdentityInputKey,
+        [FromQuery] string? dutIdentityValue,
         [FromQuery] string? batchId,
-        [FromQuery] string? stationId,
         [FromQuery] string? fixtureId,
-        [FromQuery] string? processDefinitionId,
-        [FromQuery] string? processVersionId,
-        [FromQuery] string? configurationSnapshotId,
-        [FromQuery] string? recipeSnapshotId,
         [FromQuery] string? deviceId,
+        [FromQuery] string? actorId,
+        [FromQuery] string? runStatus,
         [FromQuery] string? judgement,
         [FromQuery] string? projectId,
         [FromQuery] string? applicationId,
         [FromQuery] string? projectSnapshotId,
         [FromQuery] string? topologyId,
+        [FromQuery] string? productionLineDefinitionId,
+        [FromQuery] string? stageId,
+        [FromQuery] string? workstationId,
+        [FromQuery] string? stationId,
+        [FromQuery] string? processDefinitionId,
+        [FromQuery] string? processVersionId,
+        [FromQuery] string? configurationSnapshotId,
+        [FromQuery] string? recipeSnapshotId,
         [FromQuery] DateTimeOffset? completedFromUtc,
         [FromQuery] DateTimeOffset? completedToUtc,
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 50,
         CancellationToken cancellationToken = default)
     {
-        var result = await _readModelService
-            .SearchForEngineeringAsync(
-                new EngineeringTraceSearchQuery(
-                    serialNumber,
-                    batchId,
-                    stationId,
-                    fixtureId,
-                    processDefinitionId,
-                    processVersionId,
-                    configurationSnapshotId,
-                    recipeSnapshotId,
-                    deviceId,
-                    judgement,
-                    completedFromUtc,
-                    completedToUtc,
-                    new PagedRequest(pageNumber, pageSize),
-                    projectId,
-                    applicationId,
-                    projectSnapshotId,
-                    topologyId),
-                cancellationToken)
-            .ConfigureAwait(false);
-
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+        var result = await _readModelService.SearchForEngineeringAsync(
+            new EngineeringTraceSearchQuery(
+                productionRunId,
+                dutModelId,
+                dutIdentityInputKey,
+                dutIdentityValue,
+                batchId,
+                fixtureId,
+                deviceId,
+                actorId,
+                runStatus,
+                judgement,
+                projectId,
+                applicationId,
+                projectSnapshotId,
+                topologyId,
+                productionLineDefinitionId,
+                stageId,
+                workstationId,
+                stationId,
+                processDefinitionId,
+                processVersionId,
+                configurationSnapshotId,
+                recipeSnapshotId,
+                completedFromUtc,
+                completedToUtc,
+                new PagedRequest(pageNumber, pageSize)),
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
     }
 
-    private static StationTraceDashboardResponse ToResponse(StationTraceDashboardReadModel dashboard)
-    {
-        return new StationTraceDashboardResponse(
+    private static StationTraceDashboardResponse ToResponse(StationTraceDashboardReadModel dashboard) =>
+        new(
             dashboard.StationId,
             dashboard.CompletedFromUtc,
             dashboard.CompletedToUtc,
@@ -112,32 +117,35 @@ public sealed class TraceReadModelsController : ControllerBase
             dashboard.LastCompletedAtUtc,
             dashboard.IsWindowTruncated,
             dashboard.RecentTraces.Select(ToResponse).ToArray());
-    }
 
-    private static StationRecentTraceResponse ToResponse(StationRecentTraceReadModel trace)
-    {
-        return new StationRecentTraceResponse(
+    private static StationRecentTraceResponse ToResponse(StationRecentTraceReadModel trace) =>
+        new(
             trace.TraceRecordId,
-            trace.RuntimeSessionId,
+            trace.ProductionRunId,
             trace.ProjectId,
             trace.ApplicationId,
             trace.ProjectSnapshotId,
             trace.TopologyId,
-            trace.SerialNumber,
+            trace.ProductionLineDefinitionId,
+            trace.DutModelId,
+            trace.DutIdentityInputKey,
+            trace.DutIdentityValue,
             trace.BatchId,
             trace.FixtureId,
-            trace.ProcessVersionId,
             trace.DeviceId,
+            trace.RunStatus,
             trace.Judgement,
             trace.CompletedAtUtc,
+            trace.StageCount,
+            trace.CommandCount,
+            trace.FailedCommandCount,
             trace.MeasurementCount,
             trace.FailedMeasurementCount,
-            trace.ArtifactCount);
-    }
+            trace.ArtifactCount,
+            trace.IncidentCount);
 
-    private static EngineeringTraceSearchResponse ToResponse(EngineeringTraceSearchReadModel search)
-    {
-        return new EngineeringTraceSearchResponse(
+    private static EngineeringTraceSearchResponse ToResponse(EngineeringTraceSearchReadModel search) =>
+        new(
             new PagedEngineeringTraceSearchRowsResponse(
                 search.Results.Items.Select(ToResponse).ToArray(),
                 search.Results.PageNumber,
@@ -146,49 +154,50 @@ public sealed class TraceReadModelsController : ControllerBase
                 search.Results.TotalPages),
             ToResponse(search.Facets),
             search.AreFacetsTruncated);
-    }
 
-    private static EngineeringTraceSearchRowResponse ToResponse(EngineeringTraceSearchRowReadModel row)
-    {
-        return new EngineeringTraceSearchRowResponse(
+    private static EngineeringTraceSearchRowResponse ToResponse(EngineeringTraceSearchRowReadModel row) =>
+        new(
             row.TraceRecordId,
-            row.RuntimeSessionId,
+            row.ProductionRunId,
             row.ProjectId,
             row.ApplicationId,
             row.ProjectSnapshotId,
             row.TopologyId,
-            row.SerialNumber,
+            row.ProductionLineDefinitionId,
+            row.DutModelId,
+            row.DutIdentityInputKey,
+            row.DutIdentityValue,
             row.BatchId,
-            row.StationId,
             row.FixtureId,
-            row.ProcessDefinitionId,
-            row.ProcessVersionId,
-            row.ConfigurationSnapshotId,
-            row.RecipeSnapshotId,
             row.DeviceId,
+            row.ActorId,
+            row.RunStatus,
             row.Judgement,
+            row.CreatedAtUtc,
             row.StartedAtUtc,
             row.CompletedAtUtc,
+            row.StageCount,
+            row.FailedStageCount,
+            row.CommandCount,
+            row.FailedCommandCount,
             row.MeasurementCount,
             row.FailedMeasurementCount,
-            row.ArtifactCount);
-    }
+            row.ArtifactCount,
+            row.IncidentCount);
 
     private static EngineeringTraceSearchFacetsResponse ToResponse(
-        EngineeringTraceSearchFacetsReadModel facets)
-    {
-        return new EngineeringTraceSearchFacetsResponse(
+        EngineeringTraceSearchFacetsReadModel facets) =>
+        new(
             facets.Judgements.Select(ToResponse).ToArray(),
+            facets.RunStatuses.Select(ToResponse).ToArray(),
             facets.Stations.Select(ToResponse).ToArray(),
             facets.Devices.Select(ToResponse).ToArray(),
+            facets.ProductionLines.Select(ToResponse).ToArray(),
             facets.ProcessVersions.Select(ToResponse).ToArray(),
             facets.ProjectSnapshots.Select(ToResponse).ToArray());
-    }
 
-    private static TraceFacetCountResponse ToResponse(TraceFacetCountReadModel facet)
-    {
-        return new TraceFacetCountResponse(facet.Value, facet.Count);
-    }
+    private static TraceFacetCountResponse ToResponse(TraceFacetCountReadModel facet) =>
+        new(facet.Value, facet.Count);
 
     private ObjectResult ToProblem(ApplicationError error)
     {
@@ -198,10 +207,6 @@ public sealed class TraceReadModelsController : ControllerBase
             "NotFound" => StatusCodes.Status404NotFound,
             _ => StatusCodes.Status409Conflict
         };
-
-        return Problem(
-            title: error.Code,
-            detail: error.Message,
-            statusCode: statusCode);
+        return Problem(title: error.Code, detail: error.Message, statusCode: statusCode);
     }
 }

@@ -1,3 +1,4 @@
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Engineering.Domain.Projects;
 using OpenLineOps.Engineering.Domain.Recipes;
@@ -170,14 +171,17 @@ internal static class EngineeringSnapshotMapper
     }
 
     private static TEnum ParseEnum<TEnum>(string value, string fieldName)
-        where TEnum : struct
+        where TEnum : struct, Enum
     {
-        if (Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed))
+        if (CanonicalEnumToken.TryParse<TEnum>(value, out var parsed))
         {
             return parsed;
         }
 
-        throw new InvalidOperationException($"Persisted {fieldName} value '{value}' is invalid.");
+        throw new InvalidOperationException(
+            $"Persisted {fieldName} value '{value}' is invalid. " +
+            $"Expected an exact, case-sensitive {typeof(TEnum).Name} token: " +
+            $"{CanonicalEnumToken.ExpectedTokens<TEnum>()}.");
     }
 }
 

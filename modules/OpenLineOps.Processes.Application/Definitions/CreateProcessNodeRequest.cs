@@ -6,6 +6,8 @@ public sealed record CreateProcessNodeRequest(
     string DisplayName,
     string? RequiredCapability,
     string? CommandName,
+    string? TargetKind,
+    string? TargetId,
     int? TimeoutSeconds,
     string? InputPayload,
     string? BlocklyWorkspaceJson,

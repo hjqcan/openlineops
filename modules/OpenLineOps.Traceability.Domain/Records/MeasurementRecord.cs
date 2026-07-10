@@ -10,8 +10,12 @@ public sealed record MeasurementRecord
         decimal? numericValue,
         string? textValue,
         string? unit,
-        DeviceId deviceId,
+        DeviceId? deviceId,
         RuntimeCommandId? runtimeCommandId,
+        string actionId,
+        TraceTargetKind targetKind,
+        string targetId,
+        TraceCommandStatus commandStatus,
         bool? passed,
         DateTimeOffset measuredAtUtc)
     {
@@ -27,6 +31,10 @@ public sealed record MeasurementRecord
         Unit = TraceabilityIdGuard.OptionalText(unit);
         DeviceId = deviceId;
         RuntimeCommandId = runtimeCommandId;
+        ActionId = TraceabilityIdGuard.NotBlank(actionId, nameof(actionId));
+        TargetKind = targetKind;
+        TargetId = TraceabilityIdGuard.NotBlank(targetId, nameof(targetId));
+        CommandStatus = commandStatus;
         Passed = passed;
         MeasuredAtUtc = measuredAtUtc;
     }
@@ -41,9 +49,17 @@ public sealed record MeasurementRecord
 
     public string? Unit { get; }
 
-    public DeviceId DeviceId { get; }
+    public DeviceId? DeviceId { get; }
 
     public RuntimeCommandId? RuntimeCommandId { get; }
+
+    public string ActionId { get; }
+
+    public TraceTargetKind TargetKind { get; }
+
+    public string TargetId { get; }
+
+    public TraceCommandStatus CommandStatus { get; }
 
     public bool? Passed { get; }
 

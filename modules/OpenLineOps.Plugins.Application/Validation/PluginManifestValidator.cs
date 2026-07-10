@@ -33,6 +33,36 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
             manifest.AbiVersion,
             "Plugin.AbiVersionRequired",
             "Plugin ABI version is required.");
+        AddCanonicalStringIssue(issues, manifest.Id, "Plugin.ManifestIdNonCanonical", "Plugin id");
+        AddCanonicalStringIssue(issues, manifest.Name, "Plugin.NameNonCanonical", "Plugin name");
+        AddCanonicalStringIssue(issues, manifest.Version, "Plugin.VersionNonCanonical", "Plugin version");
+        AddCanonicalStringIssue(
+            issues,
+            manifest.EntryAssembly,
+            "Plugin.EntryAssemblyNonCanonical",
+            "Plugin entry assembly");
+        AddCanonicalStringIssue(issues, manifest.EntryType, "Plugin.EntryTypeNonCanonical", "Plugin entry type");
+        AddCanonicalStringIssue(
+            issues,
+            manifest.ContractVersion,
+            "Plugin.ContractVersionNonCanonical",
+            "Plugin contract version");
+        AddCanonicalStringIssue(
+            issues,
+            manifest.MinimumPlatformVersion,
+            "Plugin.MinimumPlatformVersionNonCanonical",
+            "Plugin minimum platform version");
+        AddCanonicalStringIssue(
+            issues,
+            manifest.RuntimeIdentifier,
+            "Plugin.RuntimeIdentifierNonCanonical",
+            "Plugin runtime identifier");
+        AddCanonicalStringIssue(
+            issues,
+            manifest.AbiVersion,
+            "Plugin.AbiVersionNonCanonical",
+            "Plugin ABI version");
+        ValidateEntryAssemblyPath(issues, manifest.EntryAssembly);
 
         if (!Enum.IsDefined(manifest.Kind))
         {
@@ -121,7 +151,7 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
             return;
         }
 
-        var normalized = new HashSet<string>(StringComparer.Ordinal);
+        var canonicalCapabilities = new HashSet<string>(StringComparer.Ordinal);
         foreach (var capability in capabilities)
         {
             if (string.IsNullOrWhiteSpace(capability))
@@ -133,11 +163,19 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
                 continue;
             }
 
-            if (!normalized.Add(capability.Trim()))
+            if (!IsCanonicalString(capability))
+            {
+                issues.Add(new PluginValidationIssue(
+                    "Plugin.CapabilityNonCanonical",
+                    $"Plugin capability '{capability}' must not contain surrounding whitespace."));
+                continue;
+            }
+
+            if (!canonicalCapabilities.Add(capability))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.CapabilityDuplicate",
-                    $"Plugin capability '{capability.Trim()}' is declared more than once."));
+                    $"Plugin capability '{capability}' is declared more than once."));
             }
         }
     }
@@ -154,12 +192,11 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
 
         var declaredCapabilities = new HashSet<string>(
             capabilities?
-                .Where(capability => !string.IsNullOrWhiteSpace(capability))
-                .Select(capability => capability.Trim())
+                .Where(IsCanonicalString)
             ?? [],
             StringComparer.Ordinal);
         var commandIds = new HashSet<string>(StringComparer.Ordinal);
-        var commandNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var commandNames = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var command in deviceCommands)
         {
@@ -188,31 +225,44 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
                 "Plugin.DeviceCommandNameRequired",
                 "Plugin device command name is required.");
 
-            var trimmedId = command.Id.Trim();
-            if (!string.IsNullOrWhiteSpace(trimmedId) && !commandIds.Add(trimmedId))
+            var idIsCanonical = AddCommandStringIssue(
+                issues,
+                command.Id,
+                "Plugin.DeviceCommandIdNonCanonical",
+                "Plugin device command id");
+            var capabilityIsCanonical = AddCommandStringIssue(
+                issues,
+                command.Capability,
+                "Plugin.DeviceCommandCapabilityNonCanonical",
+                "Plugin device command capability");
+            var commandNameIsCanonical = AddCommandStringIssue(
+                issues,
+                command.CommandName,
+                "Plugin.DeviceCommandNameNonCanonical",
+                "Plugin device command name");
+
+            if (idIsCanonical && !commandIds.Add(command.Id))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.DeviceCommandDuplicate",
-                    $"Plugin device command '{trimmedId}' is declared more than once."));
+                    $"Plugin device command '{command.Id}' is declared more than once."));
             }
 
-            var trimmedCapability = command.Capability.Trim();
-            var trimmedCommandName = command.CommandName.Trim();
-            if (!string.IsNullOrWhiteSpace(trimmedCapability)
-                && !string.IsNullOrWhiteSpace(trimmedCommandName)
-                && !commandNames.Add($"{trimmedCapability}:{trimmedCommandName}"))
+            if (capabilityIsCanonical
+                && commandNameIsCanonical
+                && !commandNames.Add($"{command.Capability}:{command.CommandName}"))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.DeviceCommandNameDuplicate",
-                    $"Plugin device command '{trimmedCommandName}' for capability '{trimmedCapability}' is declared more than once."));
+                    $"Plugin device command '{command.CommandName}' for capability '{command.Capability}' is declared more than once."));
             }
 
-            if (!string.IsNullOrWhiteSpace(trimmedCapability)
-                && !declaredCapabilities.Contains(trimmedCapability))
+            if (capabilityIsCanonical
+                && !declaredCapabilities.Contains(command.Capability))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.DeviceCommandCapabilityMissing",
-                    $"Plugin device command '{trimmedId}' references capability '{trimmedCapability}', but that capability is not declared."));
+                    $"Plugin device command '{command.Id}' references capability '{command.Capability}', but that capability is not declared."));
             }
 
             if (command.TimeoutMilliseconds <= 0)
@@ -251,12 +301,11 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
 
         var declaredCapabilities = new HashSet<string>(
             capabilities?
-                .Where(capability => !string.IsNullOrWhiteSpace(capability))
-                .Select(capability => capability.Trim())
+                .Where(IsCanonicalString)
             ?? [],
             StringComparer.Ordinal);
         var commandIds = new HashSet<string>(StringComparer.Ordinal);
-        var commandNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var commandNames = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var command in processCommands)
         {
@@ -285,31 +334,44 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
                 "Plugin.ProcessCommandNameRequired",
                 "Plugin process command name is required.");
 
-            var trimmedId = command.Id.Trim();
-            if (!string.IsNullOrWhiteSpace(trimmedId) && !commandIds.Add(trimmedId))
+            var idIsCanonical = AddCommandStringIssue(
+                issues,
+                command.Id,
+                "Plugin.ProcessCommandIdNonCanonical",
+                "Plugin process command id");
+            var capabilityIsCanonical = AddCommandStringIssue(
+                issues,
+                command.Capability,
+                "Plugin.ProcessCommandCapabilityNonCanonical",
+                "Plugin process command capability");
+            var commandNameIsCanonical = AddCommandStringIssue(
+                issues,
+                command.CommandName,
+                "Plugin.ProcessCommandNameNonCanonical",
+                "Plugin process command name");
+
+            if (idIsCanonical && !commandIds.Add(command.Id))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.ProcessCommandDuplicate",
-                    $"Plugin process command '{trimmedId}' is declared more than once."));
+                    $"Plugin process command '{command.Id}' is declared more than once."));
             }
 
-            var trimmedCapability = command.Capability.Trim();
-            var trimmedCommandName = command.CommandName.Trim();
-            if (!string.IsNullOrWhiteSpace(trimmedCapability)
-                && !string.IsNullOrWhiteSpace(trimmedCommandName)
-                && !commandNames.Add($"{trimmedCapability}:{trimmedCommandName}"))
+            if (capabilityIsCanonical
+                && commandNameIsCanonical
+                && !commandNames.Add($"{command.Capability}:{command.CommandName}"))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.ProcessCommandNameDuplicate",
-                    $"Plugin process command '{trimmedCommandName}' for capability '{trimmedCapability}' is declared more than once."));
+                    $"Plugin process command '{command.CommandName}' for capability '{command.Capability}' is declared more than once."));
             }
 
-            if (!string.IsNullOrWhiteSpace(trimmedCapability)
-                && !declaredCapabilities.Contains(trimmedCapability))
+            if (capabilityIsCanonical
+                && !declaredCapabilities.Contains(command.Capability))
             {
                 issues.Add(new PluginValidationIssue(
                     "Plugin.ProcessCommandCapabilityMissing",
-                    $"Plugin process command '{trimmedId}' references capability '{trimmedCapability}', but that capability is not declared."));
+                    $"Plugin process command '{command.Id}' references capability '{command.Capability}', but that capability is not declared."));
             }
 
             if (command.TimeoutMilliseconds <= 0)
@@ -337,6 +399,69 @@ public sealed class PluginManifestValidator : IPluginManifestValidator
         if (string.IsNullOrWhiteSpace(value))
         {
             issues.Add(new PluginValidationIssue(code, message));
+        }
+    }
+
+    private static void AddCanonicalStringIssue(
+        List<PluginValidationIssue> issues,
+        string? value,
+        string code,
+        string fieldName)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && !IsCanonicalString(value))
+        {
+            issues.Add(new PluginValidationIssue(
+                code,
+                $"{fieldName} must not contain surrounding whitespace."));
+        }
+    }
+
+    private static bool AddCommandStringIssue(
+        List<PluginValidationIssue> issues,
+        string? value,
+        string code,
+        string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (IsCanonicalString(value))
+        {
+            return true;
+        }
+
+        issues.Add(new PluginValidationIssue(
+            code,
+            $"{fieldName} must not contain surrounding whitespace."));
+        return false;
+    }
+
+    private static bool IsCanonicalString(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && string.Equals(value, value.Trim(), StringComparison.Ordinal);
+    }
+
+    private static void ValidateEntryAssemblyPath(
+        List<PluginValidationIssue> issues,
+        string? entryAssembly)
+    {
+        if (!IsCanonicalString(entryAssembly))
+        {
+            return;
+        }
+
+        var canonicalEntryAssembly = entryAssembly!;
+        if (Path.IsPathRooted(canonicalEntryAssembly)
+            || canonicalEntryAssembly.Contains('\\', StringComparison.Ordinal)
+            || canonicalEntryAssembly.Any(char.IsControl)
+            || canonicalEntryAssembly.Split('/').Any(segment => segment is "" or "." or ".."))
+        {
+            issues.Add(new PluginValidationIssue(
+                "Plugin.EntryAssemblyPathNonCanonical",
+                "Plugin entry assembly must be a canonical forward-slash package-relative path."));
         }
     }
 

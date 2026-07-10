@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Domain.Instances;
 using OpenLineOps.Infrastructure.Data.Core.Identifiers;
+using OpenLineOps.Infrastructure.Data.Core.ValueConversion;
 
 namespace OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 
@@ -50,7 +51,7 @@ internal sealed class DeviceInstanceConfiguration : IEntityTypeConfiguration<Dev
             .IsRequired();
 
         builder.Property(instance => instance.Status)
-            .HasConversion<string>()
+            .HasConversion(new CanonicalEnumToStringConverter<DeviceConnectionStatus>())
             .HasMaxLength(32)
             .IsRequired();
 
@@ -63,4 +64,5 @@ internal sealed class DeviceInstanceConfiguration : IEntityTypeConfiguration<Dev
         builder.HasIndex(instance => instance.StationId);
         builder.HasIndex(instance => new { instance.DefinitionId, instance.Status });
     }
+
 }

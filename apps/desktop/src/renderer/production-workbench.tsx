@@ -7,6 +7,7 @@ import {
   Cpu,
   Factory,
   FlaskConical,
+  GitBranch,
   Plus,
   RefreshCw,
   Save,
@@ -16,21 +17,27 @@ import {
 import type {
   AutomationProjectWorkspaceResponse,
   AutomationTopologyResponse,
+  ConfigurationSnapshotResponse,
   ExternalTestProgramAdapterRequest,
   ProcessDefinitionSummary,
   ProductionLineResponse,
   ProductionLineSummaryResponse,
   ProductionStageRequest,
   ProductionWorkstationRequest,
-  SaveProductionLineRequest
+  SaveProductionLineRequest,
+  StationProfileResponse
 } from './contracts';
 import {
   createProductionLine,
   getAutomationTopology,
   getProductionLine,
+  listEngineeringProjects,
   listProcessDefinitions,
   listProductionLines,
+  listStationProfiles,
+  publishProjectSnapshot,
   replaceProductionLine,
+  saveAutomationProjectManifest,
   type ProjectApplicationApiScope
 } from './api';
 
@@ -38,6 +45,7 @@ interface ProductionWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
   isBackendHealthy: boolean;
+  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
 
@@ -55,12 +63,15 @@ export function ProductionWorkbench({
   activeWorkspace,
   activeApplicationId,
   isBackendHealthy,
+  onWorkspaceChanged,
   onMessage
 }: ProductionWorkbenchProps): React.ReactElement {
   const [lines, setLines] = useState<ProductionLineSummaryResponse[]>([]);
   const [topology, setTopology] = useState<AutomationTopologyResponse | null>(null);
   const [flows, setFlows] = useState<ProcessDefinitionSummary[]>([]);
-  const [draft, setDraft] = useState<ProductionLineDraft>(() => createEmptyDraft(null, []));
+  const [configurationSnapshots, setConfigurationSnapshots] = useState<ConfigurationSnapshotResponse[]>([]);
+  const [stationProfiles, setStationProfiles] = useState<StationProfileResponse[]>([]);
+  const [draft, setDraft] = useState<ProductionLineDraft>(() => createEmptyDraft(null, [], [], []));
   const [busy, setBusy] = useState(false);
 
   const activeApplication = activeWorkspace?.project.applications.find(
@@ -81,24 +92,45 @@ export function ProductionWorkbench({
   const stationSystems = useMemo(
     () => topology?.systems.filter(system => system.kind === 'Station') ?? [],
     [topology]);
+  const publishedSnapshot = useMemo(
+    () => activeWorkspace?.project.snapshots
+      .filter(snapshot => snapshot.applicationId === activeApplication?.applicationId
+        && snapshot.productionLineDefinitionId === draft.lineDefinitionId)
+      .slice()
+      .sort((left, right) => right.publishedAtUtc.localeCompare(left.publishedAtUtc))[0]
+      ?? null,
+    [activeApplication?.applicationId, activeWorkspace?.project.snapshots, draft.lineDefinitionId]);
 
   const refresh = useCallback(async () => {
     if (!scope || !isBackendHealthy) {
       setLines([]);
       setTopology(null);
       setFlows([]);
+      setConfigurationSnapshots([]);
+      setStationProfiles([]);
       return;
     }
 
-    const [nextLines, nextFlows, topologyResponse] = await Promise.all([
+    const [nextLines, nextFlows, engineeringProjects, nextStationProfiles, topologyResponse] = await Promise.all([
       listProductionLines(scope),
       listProcessDefinitions(scope),
+      listEngineeringProjects(scope),
+      listStationProfiles(scope),
       activeApplication?.topologyId
         ? getAutomationTopology(activeApplication.topologyId, scope)
         : Promise.resolve(null)
     ]);
     setLines(nextLines);
     setFlows(nextFlows);
+    const snapshots = engineeringProjects.flatMap(project => project.snapshots);
+    const snapshotCounts = new Map<string, number>();
+    for (const snapshot of snapshots) {
+      snapshotCounts.set(snapshot.snapshotId, (snapshotCounts.get(snapshot.snapshotId) ?? 0) + 1);
+    }
+    setConfigurationSnapshots(snapshots.filter(snapshot => (
+      snapshot.status === 'Published'
+      && snapshotCounts.get(snapshot.snapshotId) === 1)));
+    setStationProfiles(nextStationProfiles);
     setTopology(topologyResponse?.ok && topologyResponse.body ? topologyResponse.body : null);
   }, [activeApplication?.topologyId, isBackendHealthy, scope]);
 
@@ -107,7 +139,7 @@ export function ProductionWorkbench({
   }, [onMessage, refresh]);
 
   useEffect(() => {
-    setDraft(createEmptyDraft(null, []));
+    setDraft(createEmptyDraft(null, [], [], []));
   }, [scope?.applicationId]);
 
   useEffect(() => {
@@ -116,14 +148,14 @@ export function ProductionWorkbench({
     }
 
     setDraft(current => !current.persisted && !current.topologyId
-      ? createEmptyDraft(topology, publishedFlows)
+      ? createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles)
       : current);
-  }, [publishedFlows, topology]);
+  }, [configurationSnapshots, publishedFlows, stationProfiles, topology]);
 
   const createNew = useCallback(() => {
-    setDraft(createEmptyDraft(topology, publishedFlows));
+    setDraft(createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles));
     onMessage('New production line draft');
-  }, [onMessage, publishedFlows, topology]);
+  }, [configurationSnapshots, onMessage, publishedFlows, stationProfiles, topology]);
 
   const openLine = useCallback(async (line: ProductionLineSummaryResponse) => {
     if (!scope) {
@@ -172,6 +204,45 @@ export function ProductionWorkbench({
     }
   }, [draft, isBackendHealthy, onMessage, refresh, scope]);
 
+  const publishSnapshot = useCallback(async () => {
+    if (!scope || !activeWorkspace || !isBackendHealthy) {
+      onMessage('Open an Application with a healthy backend before publishing a snapshot');
+      return;
+    }
+
+    if (!draft.persisted) {
+      onMessage('Save the production line before publishing its immutable snapshot');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const snapshotId = `project-snapshot-${Date.now().toString(36)}`;
+      const publishResponse = await publishProjectSnapshot(activeWorkspace.project.projectId, {
+        snapshotId,
+        applicationId: scope.applicationId,
+        productionLineDefinitionId: draft.lineDefinitionId
+      });
+      if (!publishResponse.ok || !publishResponse.body) {
+        onMessage(`Project snapshot publish failed: ${publishResponse.status} ${publishResponse.text}`);
+        return;
+      }
+
+      const savedWorkspace = await saveAutomationProjectManifest(activeWorkspace.project.projectId);
+      if (!savedWorkspace.ok || !savedWorkspace.body) {
+        onMessage(`Project manifest save failed: ${savedWorkspace.status} ${savedWorkspace.text}`);
+        return;
+      }
+
+      onWorkspaceChanged(savedWorkspace.body);
+      onMessage(`Project snapshot published ${snapshotId} from line ${draft.lineDefinitionId}`);
+    } catch (error) {
+      onMessage(`Project snapshot publish failed: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [activeWorkspace, draft.lineDefinitionId, draft.persisted, isBackendHealthy, onMessage, onWorkspaceChanged, scope]);
+
   const addWorkstation = useCallback(() => {
     setDraft(current => {
       const index = current.workstations.length + 1;
@@ -190,19 +261,29 @@ export function ProductionWorkbench({
   const addStage = useCallback(() => {
     setDraft(current => {
       const sequence = current.stages.length + 1;
+      const workstationId = current.workstations[0]?.workstationId ?? '';
+      const flowDefinitionId = publishedFlows[0]?.processDefinitionId ?? '';
+      const configurationSnapshotId = findMatchingConfigurationSnapshots(
+        workstationId,
+        flowDefinitionId,
+        current.workstations,
+        publishedFlows,
+        configurationSnapshots,
+        stationProfiles)[0]?.snapshotId ?? '';
       return {
         ...current,
         stages: [...current.stages, {
           stageId: `stage-${sequence}`,
           sequence,
           displayName: `Stage ${sequence}`,
-          workstationId: current.workstations[0]?.workstationId ?? '',
-          flowDefinitionId: publishedFlows[0]?.processDefinitionId ?? '',
+          workstationId,
+          flowDefinitionId,
+          configurationSnapshotId,
           externalTestProgramAdapterId: null
         }]
       };
     });
-  }, [publishedFlows]);
+  }, [configurationSnapshots, publishedFlows, stationProfiles]);
 
   const addAdapter = useCallback(() => {
     setDraft(current => ({
@@ -246,8 +327,36 @@ export function ProductionWorkbench({
             <Save size={14} />
             Save Line
           </button>
+          <button
+            type="button"
+            className="button primary"
+            onClick={() => void publishSnapshot()}
+            disabled={busy || !isBackendHealthy || !draft.persisted}
+            title={draft.persisted ? 'Publish the saved production line' : 'Save the production line before publishing'}
+            data-testid="publish-production-line-snapshot"
+          >
+            <GitBranch size={14} />
+            Publish Snapshot
+          </button>
         </div>
       </header>
+
+      <section className="production-release-strip" data-testid="production-snapshot-result">
+        <div className="production-release-mark"><GitBranch size={17} /></div>
+        <div>
+          <small>IMMUTABLE APPLICATION SNAPSHOT</small>
+          <strong>{publishedSnapshot?.snapshotId ?? 'Saved line not published'}</strong>
+          <span>Source line {draft.lineDefinitionId || 'not selected'}</span>
+        </div>
+        <div className="production-release-evidence">
+          <span>{publishedSnapshot ? `${publishedSnapshot.layoutIds.length} layouts` : 'Line-only publication'}</span>
+          <small>
+            {publishedSnapshot
+              ? `Release ${publishedSnapshot.releaseContentSha256.slice(0, 12)}`
+              : 'Flows and configurations are resolved from ordered stages'}
+          </small>
+        </div>
+      </section>
 
       <div className="production-shell">
         <aside className="production-line-browser">
@@ -336,7 +445,7 @@ export function ProductionWorkbench({
             icon={Factory}
             eyebrow="PHYSICAL BINDING"
             title="Workstations"
-            detail="Each logical workstation binds to one Station node and one system module in this Application topology."
+            detail="Each logical workstation binds to one Station System in this Application topology."
             actionLabel="Add Workstation"
             onAction={addWorkstation}
           >
@@ -377,6 +486,8 @@ export function ProductionWorkbench({
                   count={draft.stages.length}
                   workstations={draft.workstations}
                   flows={publishedFlows}
+                  configurationSnapshots={configurationSnapshots}
+                  stationProfiles={stationProfiles}
                   adapters={draft.externalTestProgramAdapters}
                   onChange={next => setDraft(current => ({
                     ...current,
@@ -399,7 +510,7 @@ export function ProductionWorkbench({
             icon={FlaskConical}
             eyebrow="VENDOR TEST INTEGRATION"
             title="External Test Programs"
-            detail="Adapters declare launch, DUT inputs and normalized result mappings; execution still enters the standard command lifecycle."
+            detail="Adapters freeze launch, DUT inputs, exact judgement tokens and result evidence; failed and aborted vendor outcomes drive the standard command lifecycle."
             actionLabel="Add Adapter"
             onAction={addAdapter}
           >
@@ -558,6 +669,8 @@ function StageCard({
   count,
   workstations,
   flows,
+  configurationSnapshots,
+  stationProfiles,
   adapters,
   onChange,
   onMove,
@@ -568,11 +681,41 @@ function StageCard({
   count: number;
   workstations: ProductionWorkstationRequest[];
   flows: ProcessDefinitionSummary[];
+  configurationSnapshots: ConfigurationSnapshotResponse[];
+  stationProfiles: StationProfileResponse[];
   adapters: ExternalTestProgramAdapterRequest[];
   onChange(next: ProductionStageRequest): void;
   onMove(direction: -1 | 1): void;
   onRemove(): void;
 }): React.ReactElement {
+  const matchingConfigurations = findMatchingConfigurationSnapshots(
+    stage.workstationId,
+    stage.flowDefinitionId,
+    workstations,
+    flows,
+    configurationSnapshots,
+    stationProfiles);
+  const updateBinding = (
+    change: Pick<ProductionStageRequest, 'workstationId'>
+      | Pick<ProductionStageRequest, 'flowDefinitionId'>
+  ): void => {
+    const next = { ...stage, ...change };
+    const matches = findMatchingConfigurationSnapshots(
+      next.workstationId,
+      next.flowDefinitionId,
+      workstations,
+      flows,
+      configurationSnapshots,
+      stationProfiles);
+    onChange({
+      ...next,
+      configurationSnapshotId: matches.some(snapshot => (
+        snapshot.snapshotId === stage.configurationSnapshotId))
+        ? stage.configurationSnapshotId
+        : matches[0]?.snapshotId ?? ''
+    });
+  };
+
   return (
     <article className="production-stage-card" data-testid={`production-stage-${index}`}>
       <div className="production-stage-sequence">{String(index + 1).padStart(2, '0')}</div>
@@ -584,15 +727,29 @@ function StageCard({
           <input value={stage.displayName} onChange={event => onChange({ ...stage, displayName: event.target.value })} />
         </Field>
         <Field label="Workstation">
-          <select value={stage.workstationId} onChange={event => onChange({ ...stage, workstationId: event.target.value })}>
+          <select value={stage.workstationId} onChange={event => updateBinding({ workstationId: event.target.value })}>
             <option value="">Select Workstation</option>
             {workstations.map(workstation => <option key={workstation.workstationId} value={workstation.workstationId}>{workstation.displayName}</option>)}
           </select>
         </Field>
         <Field label="Published Flow">
-          <select value={stage.flowDefinitionId} onChange={event => onChange({ ...stage, flowDefinitionId: event.target.value })}>
+          <select value={stage.flowDefinitionId} onChange={event => updateBinding({ flowDefinitionId: event.target.value })}>
             <option value="">Select Flow</option>
             {flows.map(flow => <option key={flow.processDefinitionId} value={flow.processDefinitionId}>{flow.displayName} · {flow.versionId}</option>)}
+          </select>
+        </Field>
+        <Field label="Published Configuration">
+          <select
+            value={stage.configurationSnapshotId}
+            onChange={event => onChange({ ...stage, configurationSnapshotId: event.target.value })}
+            data-testid={`production-stage-configuration-${index}`}
+          >
+            <option value="">Create a matching published configuration</option>
+            {matchingConfigurations.map(snapshot => (
+              <option key={snapshot.snapshotId} value={snapshot.snapshotId}>
+                {snapshot.snapshotId} 路 {snapshot.recipeVersionId}
+              </option>
+            ))}
           </select>
         </Field>
         <Field label="External Test Adapter">
@@ -700,6 +857,42 @@ function AdapterCard({
             })}
           />
         </Field>
+        <Field label="Judgement Path">
+          <input
+            value={adapter.outcomeMapping.sourcePath}
+            onChange={event => onChange({
+              ...adapter,
+              outcomeMapping: { ...adapter.outcomeMapping, sourcePath: event.target.value }
+            })}
+          />
+        </Field>
+        <Field label="Passed Token">
+          <input
+            value={adapter.outcomeMapping.passedToken}
+            onChange={event => onChange({
+              ...adapter,
+              outcomeMapping: { ...adapter.outcomeMapping, passedToken: event.target.value }
+            })}
+          />
+        </Field>
+        <Field label="Failed Token">
+          <input
+            value={adapter.outcomeMapping.failedToken}
+            onChange={event => onChange({
+              ...adapter,
+              outcomeMapping: { ...adapter.outcomeMapping, failedToken: event.target.value }
+            })}
+          />
+        </Field>
+        <Field label="Aborted Token">
+          <input
+            value={adapter.outcomeMapping.abortedToken}
+            onChange={event => onChange({
+              ...adapter,
+              outcomeMapping: { ...adapter.outcomeMapping, abortedToken: event.target.value }
+            })}
+          />
+        </Field>
       </div>
       <MappingEditor
         title="Arguments"
@@ -782,7 +975,9 @@ function PairMappingEditor({
 
 function createEmptyDraft(
   topology: AutomationTopologyResponse | null,
-  publishedFlows: ProcessDefinitionSummary[]
+  publishedFlows: ProcessDefinitionSummary[],
+  configurationSnapshots: ConfigurationSnapshotResponse[],
+  stationProfiles: StationProfileResponse[]
 ): ProductionLineDraft {
   const seed = Date.now().toString(36);
   const station = topology?.systems.find(system => system.kind === 'Station');
@@ -791,6 +986,14 @@ function createEmptyDraft(
     displayName: station?.displayName ?? 'Workstation 1',
     stationSystemId: station?.systemId ?? ''
   };
+  const flowDefinitionId = publishedFlows[0]?.processDefinitionId ?? '';
+  const configurationSnapshotId = findMatchingConfigurationSnapshots(
+    workstation.workstationId,
+    flowDefinitionId,
+    [workstation],
+    publishedFlows,
+    configurationSnapshots,
+    stationProfiles)[0]?.snapshotId ?? '';
 
   return {
     persisted: false,
@@ -808,7 +1011,8 @@ function createEmptyDraft(
       sequence: 1,
       displayName: 'Stage 1',
       workstationId: workstation.workstationId,
-      flowDefinitionId: publishedFlows[0]?.processDefinitionId ?? '',
+      flowDefinitionId,
+      configurationSnapshotId,
       externalTestProgramAdapterId: null
     }],
     externalTestProgramAdapters: []
@@ -835,6 +1039,12 @@ function createExternalAdapter(
       { source: '$dut.model', target: 'modelCode' }
     ],
     resultMappings: [{ sourcePath: '$.judgement', targetKey: 'judgement' }],
+    outcomeMapping: {
+      sourcePath: '$.judgement',
+      passedToken: 'Passed',
+      failedToken: 'Failed',
+      abortedToken: 'Aborted'
+    },
     timeoutMilliseconds: (capability?.timeoutSeconds ?? 30) * 1000
   };
 }
@@ -853,6 +1063,7 @@ function fromResponse(response: ProductionLineResponse): ProductionLineDraft {
       displayName: stage.displayName,
       workstationId: stage.workstationId,
       flowDefinitionId: stage.flowDefinitionId,
+      configurationSnapshotId: stage.configurationSnapshotId,
       externalTestProgramAdapterId: stage.externalTestProgramAdapterId
     })),
     externalTestProgramAdapters: response.externalTestProgramAdapters.map(adapter => ({
@@ -860,12 +1071,13 @@ function fromResponse(response: ProductionLineResponse): ProductionLineDraft {
       displayName: adapter.displayName,
       capabilityId: adapter.capabilityId,
       commandName: adapter.commandName,
-      launchKind: adapter.launchKind === 'ApplicationExecutable' ? 'ApplicationExecutable' : 'Provider',
+      launchKind: parseAdapterLaunchKind(adapter.launchKind),
       executable: adapter.executable,
       providerKey: adapter.providerKey,
       argumentTemplates: [...adapter.argumentTemplates],
       inputMappings: adapter.inputMappings.map(mapping => ({ ...mapping })),
       resultMappings: adapter.resultMappings.map(mapping => ({ ...mapping })),
+      outcomeMapping: { ...adapter.outcomeMapping },
       timeoutMilliseconds: adapter.timeoutMilliseconds
     } as ExternalAdapterDraft))
   };
@@ -873,39 +1085,82 @@ function fromResponse(response: ProductionLineResponse): ProductionLineDraft {
 
 function toRequest(draft: ProductionLineDraft): SaveProductionLineRequest {
   return {
-    lineDefinitionId: draft.lineDefinitionId.trim(),
-    displayName: draft.displayName.trim(),
-    topologyId: draft.topologyId.trim(),
+    lineDefinitionId: draft.lineDefinitionId,
+    displayName: draft.displayName,
+    topologyId: draft.topologyId,
     dutModel: {
-      dutModelId: draft.dutModel.dutModelId.trim(),
-      modelCode: draft.dutModel.modelCode.trim(),
-      identityInputKey: draft.dutModel.identityInputKey.trim()
+      dutModelId: draft.dutModel.dutModelId,
+      modelCode: draft.dutModel.modelCode,
+      identityInputKey: draft.dutModel.identityInputKey
     },
     workstations: draft.workstations.map(workstation => ({
-      workstationId: workstation.workstationId.trim(),
-      displayName: workstation.displayName.trim(),
+      workstationId: workstation.workstationId,
+      displayName: workstation.displayName,
       stationSystemId: workstation.stationSystemId
     })),
     stages: resequence(draft.stages).map(stage => ({ ...stage })),
     externalTestProgramAdapters: (draft.externalTestProgramAdapters as ExternalAdapterDraft[]).map(adapter => ({
-      adapterId: adapter.adapterId.trim(),
-      displayName: adapter.displayName.trim(),
+      adapterId: adapter.adapterId,
+      displayName: adapter.displayName,
       capabilityId: adapter.capabilityId,
       commandName: adapter.commandName,
-      executable: adapter.launchKind === 'ApplicationExecutable' ? adapter.executable?.trim() || null : null,
-      providerKey: adapter.launchKind === 'Provider' ? adapter.providerKey?.trim() || null : null,
-      argumentTemplates: adapter.argumentTemplates.map(value => value.trim()).filter(Boolean),
+      executable: adapter.launchKind === 'ApplicationExecutable' && adapter.executable !== ''
+        ? adapter.executable
+        : null,
+      providerKey: adapter.launchKind === 'Provider' && adapter.providerKey !== ''
+        ? adapter.providerKey
+        : null,
+      argumentTemplates: [...adapter.argumentTemplates],
       inputMappings: adapter.inputMappings.map(mapping => ({
-        source: mapping.source.trim(),
-        target: mapping.target.trim()
+        source: mapping.source,
+        target: mapping.target
       })),
       resultMappings: adapter.resultMappings.map(mapping => ({
-        sourcePath: mapping.sourcePath.trim(),
-        targetKey: mapping.targetKey.trim()
+        sourcePath: mapping.sourcePath,
+        targetKey: mapping.targetKey
       })),
+      outcomeMapping: {
+        sourcePath: adapter.outcomeMapping.sourcePath,
+        passedToken: adapter.outcomeMapping.passedToken,
+        failedToken: adapter.outcomeMapping.failedToken,
+        abortedToken: adapter.outcomeMapping.abortedToken
+      },
       timeoutMilliseconds: adapter.timeoutMilliseconds
     }))
   };
+}
+
+function parseAdapterLaunchKind(value: string): AdapterLaunchKind {
+  if (value === 'Provider' || value === 'ApplicationExecutable') {
+    return value;
+  }
+
+  throw new Error(`Unsupported external test program launch kind: ${value}`);
+}
+
+function findMatchingConfigurationSnapshots(
+  workstationId: string,
+  flowDefinitionId: string,
+  workstations: ProductionWorkstationRequest[],
+  flows: ProcessDefinitionSummary[],
+  configurationSnapshots: ConfigurationSnapshotResponse[],
+  stationProfiles: StationProfileResponse[]
+): ConfigurationSnapshotResponse[] {
+  const workstation = workstations.find(candidate => candidate.workstationId === workstationId);
+  const flow = flows.find(candidate => candidate.processDefinitionId === flowDefinitionId);
+  if (!workstation || !flow) {
+    return [];
+  }
+
+  const stationProfileIds = new Set(stationProfiles
+    .filter(profile => profile.stationSystemId === workstation.stationSystemId)
+    .map(profile => profile.stationProfileId));
+  return configurationSnapshots
+    .filter(snapshot => (
+      snapshot.processDefinitionId === flow.processDefinitionId
+      && snapshot.processVersionId === flow.versionId
+      && stationProfileIds.has(snapshot.stationProfileId)))
+    .sort((left, right) => left.snapshotId.localeCompare(right.snapshotId));
 }
 
 function replaceAt<T>(items: T[], index: number, value: T): T[] {

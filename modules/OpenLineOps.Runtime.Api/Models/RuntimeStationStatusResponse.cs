@@ -1,13 +1,22 @@
 namespace OpenLineOps.Runtime.Api.Models;
 
 public sealed record RuntimeStationStatusResponse(
+    string ProjectId,
+    string ApplicationId,
+    string ProjectSnapshotId,
+    string TopologyId,
+    Guid ProductionRunId,
+    string ProductionLineDefinitionId,
+    string StageId,
+    int StageSequence,
+    string WorkstationId,
+    RuntimeDutIdentityResponse DutIdentity,
     string StationSystemId,
     Guid LatestSessionId,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     string RecipeSnapshotId,
-    string? SerialNumber,
     string? BatchId,
     string? FixtureId,
     string? DeviceId,

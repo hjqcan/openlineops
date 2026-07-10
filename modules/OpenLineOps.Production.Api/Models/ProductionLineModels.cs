@@ -28,6 +28,7 @@ public sealed record ProcessStageRequest(
     string? DisplayName,
     string? WorkstationId,
     string? FlowDefinitionId,
+    string? ConfigurationSnapshotId,
     string? ExternalTestProgramAdapterId);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -41,6 +42,7 @@ public sealed record ExternalTestProgramAdapterRequest(
     IReadOnlyCollection<string?>? ArgumentTemplates,
     IReadOnlyCollection<ExternalTestProgramInputMappingRequest?>? InputMappings,
     IReadOnlyCollection<ExternalTestProgramResultMappingRequest?>? ResultMappings,
+    ExternalTestProgramOutcomeMappingRequest? OutcomeMapping,
     long? TimeoutMilliseconds);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -48,6 +50,13 @@ public sealed record ExternalTestProgramInputMappingRequest(string? Source, stri
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalTestProgramResultMappingRequest(string? SourcePath, string? TargetKey);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record ExternalTestProgramOutcomeMappingRequest(
+    string? SourcePath,
+    string? PassedToken,
+    string? FailedToken,
+    string? AbortedToken);
 
 public sealed record ProductionLineResponse(
     string LineDefinitionId,
@@ -81,6 +90,7 @@ public sealed record ProcessStageResponse(
     string DisplayName,
     string WorkstationId,
     string FlowDefinitionId,
+    string ConfigurationSnapshotId,
     string? ExternalTestProgramAdapterId,
     string? NextStageId);
 
@@ -95,8 +105,15 @@ public sealed record ExternalTestProgramAdapterResponse(
     IReadOnlyCollection<string> ArgumentTemplates,
     IReadOnlyCollection<ExternalTestProgramInputMappingResponse> InputMappings,
     IReadOnlyCollection<ExternalTestProgramResultMappingResponse> ResultMappings,
+    ExternalTestProgramOutcomeMappingResponse OutcomeMapping,
     long TimeoutMilliseconds);
 
 public sealed record ExternalTestProgramInputMappingResponse(string Source, string Target);
 
 public sealed record ExternalTestProgramResultMappingResponse(string SourcePath, string TargetKey);
+
+public sealed record ExternalTestProgramOutcomeMappingResponse(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);

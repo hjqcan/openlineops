@@ -3,6 +3,7 @@ using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Devices.Tests;
 
@@ -64,6 +65,12 @@ public sealed class DeviceRuntimeCommandExecutorTests
     {
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
+            new ProductionRunId(Guid.Parse("00000000-0000-0000-0000-000000000010")),
+            "line-main",
+            "stage-scan",
+            1,
+            "workstation-scan",
+            new DutIdentity("model-main", "serialNumber", "ABC"),
             new StationId("station-a"),
             new ConfigurationSnapshotId("snapshot-001"),
             new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),

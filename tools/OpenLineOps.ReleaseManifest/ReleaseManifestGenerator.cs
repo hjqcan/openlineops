@@ -6,22 +6,6 @@ namespace OpenLineOps.ReleaseManifest;
 
 public static class ReleaseManifestGenerator
 {
-    private const string OtherArtifactKind = "other";
-
-    private static readonly (string Alias, string Kind)[] ArtifactKindAliases =
-    [
-        ("plugin-host", "plugin-host"),
-        ("pluginhost", "plugin-host"),
-        ("script-worker", "script-worker"),
-        ("scriptworker", "script-worker"),
-        ("sample-plugins", "sample-plugin"),
-        ("sample-plugin", "sample-plugin"),
-        ("desktop", "desktop"),
-        ("electron", "desktop"),
-        ("source", "source"),
-        ("api", "api")
-    ];
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -47,10 +31,10 @@ public static class ReleaseManifestGenerator
 
         var document = new ReleaseManifestDocument(
             SchemaVersion: 1,
-            Product: options.Product.Trim(),
-            Version: options.Version.Trim(),
+            Product: ReleaseManifestContract.Product,
+            Version: options.Version,
             GeneratedAtUtc: options.GeneratedAtUtc.ToUniversalTime().ToString("O"),
-            Commit: string.IsNullOrWhiteSpace(options.Commit) ? null : options.Commit.Trim(),
+            Commit: options.Commit,
             Artifacts: artifacts);
 
         WriteTextFile(
@@ -71,15 +55,8 @@ public static class ReleaseManifestGenerator
 
     private static void ValidateOptions(ReleaseManifestOptions options)
     {
-        if (string.IsNullOrWhiteSpace(options.Product))
-        {
-            throw new ArgumentException("Product is required.", nameof(options));
-        }
-
-        if (string.IsNullOrWhiteSpace(options.Version))
-        {
-            throw new ArgumentException("Version is required.", nameof(options));
-        }
+        ReleaseManifestContract.ValidateVersion(options.Version);
+        ReleaseManifestContract.ValidateCommit(options.Commit);
 
         if (!Directory.Exists(options.ArtifactsDirectory))
         {
@@ -114,7 +91,7 @@ public static class ReleaseManifestGenerator
         return new ReleaseArtifactEntry(
             RelativePath: relativePath,
             FileName: fileInfo.Name,
-            Kind: InferArtifactKind(relativePath),
+            Kind: ReleaseArtifactKinds.FromRelativePath(relativePath),
             SizeBytes: fileInfo.Length,
             Sha256: ComputeSha256(filePath));
     }
@@ -124,9 +101,8 @@ public static class ReleaseManifestGenerator
         IReadOnlyCollection<ReleaseArtifactEntry> artifacts)
     {
         var requiredKinds = options.RequiredArtifactKinds
-            .Select(NormalizeArtifactKind)
-            .Where(kind => kind.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(ReleaseArtifactKinds.Parse)
+            .Distinct(StringComparer.Ordinal)
             .ToArray();
         if (requiredKinds.Length == 0)
         {
@@ -135,7 +111,7 @@ public static class ReleaseManifestGenerator
 
         var availableKinds = artifacts
             .Select(artifact => artifact.Kind)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(StringComparer.Ordinal);
         var missingKinds = requiredKinds
             .Where(kind => !availableKinds.Contains(kind))
             .ToArray();
@@ -146,7 +122,7 @@ public static class ReleaseManifestGenerator
 
         var available = string.Join(
             ", ",
-            availableKinds.OrderBy(kind => kind, StringComparer.OrdinalIgnoreCase));
+            availableKinds.OrderBy(kind => kind, StringComparer.Ordinal));
         throw new InvalidOperationException(
             $"Required artifact kind(s) were missing: {string.Join(", ", missingKinds)}. "
             + $"Available artifact kind(s): {available}.");
@@ -216,42 +192,6 @@ public static class ReleaseManifestGenerator
             .ToString();
     }
 
-    private static string InferArtifactKind(string relativePath)
-    {
-        var normalizedPath = relativePath.Replace('\\', '/');
-        var separatorIndex = normalizedPath.IndexOf('/', StringComparison.Ordinal);
-        var topLevelToken = separatorIndex > 0
-            ? normalizedPath[..separatorIndex]
-            : Path.GetFileNameWithoutExtension(normalizedPath);
-
-        return MatchArtifactKindAlias(topLevelToken, allowPrefix: true);
-    }
-
-    private static string NormalizeArtifactKind(string value)
-    {
-        return MatchArtifactKindAlias(value, allowPrefix: false);
-    }
-
-    private static string MatchArtifactKindAlias(string value, bool allowPrefix)
-    {
-        var token = value.Trim().ToLowerInvariant();
-        if (token.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        foreach (var (alias, kind) in ArtifactKindAliases)
-        {
-            if (string.Equals(token, alias, StringComparison.OrdinalIgnoreCase)
-                || allowPrefix && token.StartsWith(alias + "-", StringComparison.OrdinalIgnoreCase))
-            {
-                return kind;
-            }
-        }
-
-        return allowPrefix ? OtherArtifactKind : token;
-    }
-
     private static void WriteTextFile(string path, string content)
     {
         var directory = Path.GetDirectoryName(path);
@@ -260,7 +200,7 @@ public static class ReleaseManifestGenerator
             Directory.CreateDirectory(directory);
         }
 
-        File.WriteAllText(path, content, Encoding.UTF8);
+        File.WriteAllText(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
     private static string ToRelativePath(string root, string path)

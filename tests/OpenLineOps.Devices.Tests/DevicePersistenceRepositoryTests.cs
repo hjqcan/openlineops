@@ -1,78 +1,16 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using OpenLineOps.Devices.Domain.Definitions;
-using OpenLineOps.Devices.Domain.Events;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Domain.Instances;
 using OpenLineOps.Devices.Infrastructure.Persistence;
 using OpenLineOps.Devices.Infrastructure.Persistence.Ef;
-using OpenLineOps.Domain.Abstractions.Events;
 
 namespace OpenLineOps.Devices.Tests;
 
 public sealed class DevicePersistenceRepositoryTests
 {
     private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
-
-    [Fact]
-    public async Task SqliteDeviceDefinitionRepositoryPersistsDefinitionGraphForNewRepositoryInstance()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var repository = new SqliteDeviceDefinitionRepository(database.ConnectionString);
-        var definition = CreateScannerDefinition();
-
-        await repository.SaveAsync(definition);
-
-        using var restartedRepository = new SqliteDeviceDefinitionRepository(database.ConnectionString);
-        var restored = await restartedRepository.GetByIdAsync(definition.Id);
-        var allDefinitions = await restartedRepository.ListAsync();
-
-        Assert.NotNull(restored);
-        Assert.Equal(definition.Id, restored.Id);
-        Assert.Equal("scanner-plugin", restored.PluginId);
-        Assert.Equal(BaseTimeUtc, restored.CreatedAtUtc);
-        Assert.Empty(restored.DomainEvents);
-        Assert.Single(allDefinitions);
-
-        var capability = Assert.Single(restored.Capabilities);
-        Assert.Equal("device.scanner", capability.Id.Value);
-        Assert.Equal("Scanner", capability.DisplayName);
-
-        var command = Assert.Single(restored.Commands);
-        Assert.Equal("device.scanner:scan", command.Id.Value);
-        Assert.Equal("Scan", command.CommandName);
-        Assert.Equal(TimeSpan.FromSeconds(15), command.Timeout);
-        Assert.Equal(2, command.MaxRetries);
-        Assert.Equal("{\"type\":\"object\"}", command.InputSchema);
-    }
-
-    [Fact]
-    public async Task SqliteDeviceInstanceRepositoryPersistsConnectionStateAndListsByStation()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var repository = new SqliteDeviceInstanceRepository(database.ConnectionString);
-        var instance = CreateScannerInstance("scanner-01", "station-eol");
-        Assert.True(instance.RequestConnection(BaseTimeUtc.AddSeconds(1)).Succeeded);
-        Assert.True(instance.ConfirmConnected(BaseTimeUtc.AddSeconds(2)).Succeeded);
-
-        await repository.SaveAsync(instance);
-
-        using var restartedRepository = new SqliteDeviceInstanceRepository(database.ConnectionString);
-        var restored = await restartedRepository.GetByIdAsync(instance.Id);
-        var stationInstances = await restartedRepository.ListByStationAsync("station-eol");
-        var missingStationInstances = await restartedRepository.ListByStationAsync("station-other");
-
-        Assert.NotNull(restored);
-        Assert.Equal(instance.Id, restored.Id);
-        Assert.Equal("scanner-definition", restored.DefinitionId.Value);
-        Assert.Equal("station-eol", restored.StationId);
-        Assert.Equal(DeviceConnectionStatus.Connected, restored.Status);
-        Assert.Equal(BaseTimeUtc.AddSeconds(2), restored.ConnectedAtUtc);
-        Assert.Null(restored.LastDisconnectedAtUtc);
-        Assert.Empty(restored.DomainEvents);
-        Assert.Single(stationInstances);
-        Assert.Empty(missingStationInstances);
-    }
 
     [Fact]
     public async Task InMemoryDeviceRepositoriesStoreDefinitionsAndInstances()
@@ -97,20 +35,19 @@ public sealed class DevicePersistenceRepositoryTests
     }
 
     [Fact]
-    public async Task EfSqliteDeviceRepositoriesPersistAggregatesAndDispatchDomainEvents()
+    public async Task EfSqliteDeviceRepositoriesPersistAggregatesWithoutUnusedDomainEvents()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
 
-        var dispatcher = new CapturingDomainEventDispatcher();
         var options = CreateEfOptions(connection);
         var definition = CreateScannerDefinition();
         var instance = CreateScannerInstance("scanner-01", "station-eol");
 
-        Assert.True(instance.RequestConnection(BaseTimeUtc.AddSeconds(1)).Succeeded);
+        Assert.True(instance.RequestConnection().Succeeded);
         Assert.True(instance.ConfirmConnected(BaseTimeUtc.AddSeconds(2)).Succeeded);
 
-        await using (var context = new DevicesDbContext(options, dispatcher))
+        await using (var context = new DevicesDbContext(options))
         {
             await context.Database.MigrateAsync();
             var definitionRepository = new EfDeviceDefinitionRepository(context);
@@ -152,7 +89,7 @@ public sealed class DevicePersistenceRepositoryTests
             Assert.Equal(restoredInstance.Id, Assert.Single(stationInstances).Id);
         }
 
-        await using (var context = new DevicesDbContext(options, dispatcher))
+        await using (var context = new DevicesDbContext(options))
         {
             var instanceRepository = new EfDeviceInstanceRepository(context);
 
@@ -175,16 +112,41 @@ public sealed class DevicePersistenceRepositoryTests
             Assert.Equal(BaseTimeUtc.AddMinutes(1), restoredInstance.LastDisconnectedAtUtc);
         }
 
-        Assert.Contains(
-            dispatcher.Dispatched,
-            domainEvent => domainEvent is DeviceConnectionStatusChangedDomainEvent changed
-                && changed.DeviceInstanceId == instance.Id
-                && changed.NewStatus == DeviceConnectionStatus.Connected);
-        Assert.Contains(
-            dispatcher.Dispatched,
-            domainEvent => domainEvent is DeviceConnectionStatusChangedDomainEvent changed
-            && changed.DeviceInstanceId == instance.Id
-            && changed.NewStatus == DeviceConnectionStatus.Disconnected);
+    }
+
+    [Fact]
+    public async Task EfDeviceStatusRequiresExactCanonicalToken()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = CreateEfOptions(connection);
+        var instance = CreateScannerInstance("scanner-canonical", "station-eol");
+        Assert.True(instance.RequestConnection().Succeeded);
+        Assert.True(instance.ConfirmConnected(BaseTimeUtc).Succeeded);
+
+        await using (var context = new DevicesDbContext(options))
+        {
+            await context.Database.MigrateAsync();
+            await new EfDeviceInstanceRepository(context).SaveAsync(instance);
+        }
+
+        await using (var select = connection.CreateCommand())
+        {
+            select.CommandText = "SELECT Status FROM device_instances_ef;";
+            Assert.Equal("Connected", await select.ExecuteScalarAsync());
+        }
+
+        await using (var update = connection.CreateCommand())
+        {
+            update.CommandText = "UPDATE device_instances_ef SET Status = 'connected';";
+            await update.ExecuteNonQueryAsync();
+        }
+
+        await using var readerContext = new DevicesDbContext(options);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            readerContext.DeviceInstances.AsNoTracking().SingleAsync());
+        Assert.Contains("case-sensitive", exception.ToString(), StringComparison.Ordinal);
+        Assert.Contains("connected", exception.ToString(), StringComparison.Ordinal);
     }
 
     private static DeviceDefinition CreateScannerDefinition()
@@ -230,47 +192,4 @@ public sealed class DevicePersistenceRepositoryTests
             .Options;
     }
 
-    private sealed class CapturingDomainEventDispatcher : IDomainEventDispatcher
-    {
-        public List<IDomainEvent> Dispatched { get; } = [];
-
-        public Task DispatchAsync(
-            IReadOnlyCollection<IDomainEvent> domainEvents,
-            CancellationToken cancellationToken = default)
-        {
-            Dispatched.AddRange(domainEvents);
-            return Task.CompletedTask;
-        }
-    }
-
-    private sealed class TemporarySqliteDatabase : IDisposable
-    {
-        private TemporarySqliteDatabase(string directory, string databasePath)
-        {
-            Directory = directory;
-            ConnectionString = $"Data Source={databasePath};Pooling=False";
-        }
-
-        private string Directory { get; }
-
-        public string ConnectionString { get; }
-
-        public static TemporarySqliteDatabase Create()
-        {
-            var directory = Path.Combine(Path.GetTempPath(), "OpenLineOps", Guid.NewGuid().ToString("N"));
-            var databasePath = Path.Combine(directory, "devices.sqlite");
-
-            System.IO.Directory.CreateDirectory(directory);
-
-            return new TemporarySqliteDatabase(directory, databasePath);
-        }
-
-        public void Dispose()
-        {
-            if (System.IO.Directory.Exists(Directory))
-            {
-                System.IO.Directory.Delete(Directory, recursive: true);
-            }
-        }
-    }
 }

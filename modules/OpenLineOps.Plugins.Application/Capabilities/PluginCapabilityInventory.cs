@@ -41,14 +41,13 @@ public sealed class PluginCapabilityInventory : IPluginCapabilityInventory
                     continue;
                 }
 
-                var normalizedCapability = capability.Trim();
                 capabilities.TryAdd(
-                    normalizedCapability,
+                    capability,
                     new PluginCapabilityDescriptor(
                         package.Manifest.Id,
                         package.Manifest.Name,
                         package.Manifest.Kind,
-                        normalizedCapability));
+                        capability));
             }
         }
 
@@ -71,7 +70,7 @@ public sealed class PluginCapabilityInventory : IPluginCapabilityInventory
 
         return capabilities.Any(candidate => string.Equals(
             candidate.Capability,
-            capability.Trim(),
+            capability,
             StringComparison.Ordinal));
     }
 }

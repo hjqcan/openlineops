@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Plugins.Api.Management;
 using OpenLineOps.Plugins.Api.Models;
+using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Plugins.Api.Controllers;
 
@@ -74,8 +76,41 @@ public sealed class PluginManagementController : ControllerBase
             }));
         }
 
+        if (Request.Query.TryGetValue(nameof(pluginId), out var rawPluginIds)
+            && (rawPluginIds.Count != 1
+                || string.IsNullOrWhiteSpace(rawPluginIds[0])
+                || !string.Equals(rawPluginIds[0], rawPluginIds[0]!.Trim(), StringComparison.Ordinal)))
+        {
+            return BadRequest(new ValidationProblemDetails(new Dictionary<string, string[]>
+            {
+                [nameof(pluginId)] =
+                [
+                    "PluginId must be one non-empty exact value without surrounding whitespace."
+                ]
+            }));
+        }
+
+        ExternalPluginProcessEventKind? parsedKind = null;
+        if (Request.Query.TryGetValue(nameof(kind), out var rawKinds))
+        {
+            if (rawKinds.Count != 1
+                || !CanonicalEnumToken.TryParse<ExternalPluginProcessEventKind>(rawKinds[0], out var value))
+            {
+                return BadRequest(new ValidationProblemDetails(new Dictionary<string, string[]>
+                {
+                    [nameof(kind)] =
+                    [
+                        $"Kind must be an exact, case-sensitive token: " +
+                        $"{CanonicalEnumToken.ExpectedTokens<ExternalPluginProcessEventKind>()}."
+                    ]
+                }));
+            }
+
+            parsedKind = value;
+        }
+
         return Ok(await _pluginManagementService
-            .ListEventsAsync(pluginId, kind, skip, take, cancellationToken)
+            .ListEventsAsync(pluginId, parsedKind, skip, take, cancellationToken)
             .ConfigureAwait(false));
     }
 }

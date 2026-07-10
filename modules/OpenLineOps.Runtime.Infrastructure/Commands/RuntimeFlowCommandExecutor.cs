@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Runtime.Application.Commands;
@@ -150,9 +149,19 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
                 return false;
             }
 
-            if (!TryGetDurationMilliseconds(document.RootElement, out var durationMilliseconds))
+            var properties = document.RootElement.EnumerateObject().ToArray();
+            if (properties.Length != 1
+                || !string.Equals(properties[0].Name, "durationMilliseconds", StringComparison.Ordinal))
             {
-                error = "Runtime flow wait payload must declare durationMilliseconds.";
+                error = "Runtime flow wait payload must contain only the canonical durationMilliseconds field.";
+                return false;
+            }
+
+            var durationValue = properties[0].Value;
+            if (durationValue.ValueKind != JsonValueKind.Number
+                || !durationValue.TryGetDouble(out var durationMilliseconds))
+            {
+                error = "Runtime flow wait durationMilliseconds must be a JSON number.";
                 return false;
             }
 
@@ -186,37 +195,4 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
         }
     }
 
-    private static bool TryGetDurationMilliseconds(
-        JsonElement payload,
-        out double durationMilliseconds)
-    {
-        foreach (var propertyName in new[] { "durationMilliseconds", "duration_ms", "DURATION_MS" })
-        {
-            if (!payload.TryGetProperty(propertyName, out var value))
-            {
-                continue;
-            }
-
-            if (value.ValueKind == JsonValueKind.Number
-                && value.TryGetDouble(out durationMilliseconds))
-            {
-                return true;
-            }
-
-            if (value.ValueKind == JsonValueKind.String
-                && double.TryParse(
-                    value.GetString(),
-                    NumberStyles.Float,
-                    CultureInfo.InvariantCulture,
-                    out durationMilliseconds))
-            {
-                return true;
-            }
-
-            break;
-        }
-
-        durationMilliseconds = default;
-        return false;
-    }
 }

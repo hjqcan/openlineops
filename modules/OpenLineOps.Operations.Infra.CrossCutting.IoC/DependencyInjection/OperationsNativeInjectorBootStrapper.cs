@@ -23,28 +23,23 @@ public static class OperationsNativeInjectorBootStrapper
         services.AddSingleton(persistenceOptions);
         AddSharedServices(services);
 
-        if (IsEfSqlite(persistenceOptions.Provider))
+        switch (OperationsPersistenceProviders.Parse(persistenceOptions.Provider))
         {
-            services.AddEfSqliteOperationsPersistence(persistenceOptions.ResolveSqliteConnectionString());
-        }
-        else if (IsPostgreSql(persistenceOptions.Provider))
-        {
-            services.AddEfPostgreSqlOperationsPersistence(persistenceOptions.ResolvePostgreSqlConnectionString());
-        }
-        else if (IsInMemory(persistenceOptions.Provider))
-        {
-            var databaseName = configuration?
-                .GetSection(OperationsPersistenceOptions.SectionName)["DatabaseName"];
-            services.AddDbContext<OperationsDbContext>(options =>
-                options.UseInMemoryDatabase(string.IsNullOrWhiteSpace(databaseName)
-                    ? "OpenLineOps.Operations"
-                    : databaseName));
-            services.AddScoped<IAlarmRepository, EfAlarmRepository>();
-        }
-        else
-        {
-            throw new InvalidOperationException(
-                $"Unsupported operations persistence provider '{persistenceOptions.Provider}'.");
+            case OperationsPersistenceProvider.Sqlite:
+                services.AddEfSqliteOperationsPersistence(persistenceOptions.ResolveSqliteConnectionString());
+                break;
+            case OperationsPersistenceProvider.PostgreSql:
+                services.AddEfPostgreSqlOperationsPersistence(persistenceOptions.ResolvePostgreSqlConnectionString());
+                break;
+            case OperationsPersistenceProvider.InMemory:
+                var databaseName = configuration?
+                    .GetSection(OperationsPersistenceOptions.SectionName)["DatabaseName"];
+                services.AddDbContext<OperationsDbContext>(options =>
+                    options.UseInMemoryDatabase(string.IsNullOrWhiteSpace(databaseName)
+                        ? "OpenLineOps.Operations"
+                        : databaseName));
+                services.AddScoped<IAlarmRepository, EfAlarmRepository>();
+                break;
         }
 
         return services;
@@ -77,28 +72,10 @@ public static class OperationsNativeInjectorBootStrapper
 
         return new OperationsPersistenceOptions
         {
-            Provider = section?["Provider"] ?? OperationsPersistenceProviders.EfSqlite,
+            Provider = section?["Provider"] ?? OperationsPersistenceProviders.Sqlite,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-operations.sqlite"
         };
     }
 
-    private static bool IsEfSqlite(string provider)
-    {
-        return string.Equals(provider, OperationsPersistenceProviders.EfSqlite, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "EntityFrameworkSqlite", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsInMemory(string provider)
-    {
-        return string.Equals(provider, OperationsPersistenceProviders.InMemory, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Memory", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsPostgreSql(string provider)
-    {
-        return string.Equals(provider, OperationsPersistenceProviders.PostgreSql, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "PostgreSQL", StringComparison.OrdinalIgnoreCase);
-    }
 }

@@ -10,14 +10,16 @@ public sealed class ExternalPluginProcessRegistry : IExternalPluginProcessRegist
 
     public void Register(string pluginId, IExternalPluginProcess process)
     {
-        if (string.IsNullOrWhiteSpace(pluginId))
+        if (!IsCanonicalPluginId(pluginId))
         {
-            throw new ArgumentException("Plugin id is required.", nameof(pluginId));
+            throw new ArgumentException(
+                "Plugin id is required and must not contain surrounding whitespace.",
+                nameof(pluginId));
         }
 
         ArgumentNullException.ThrowIfNull(process);
 
-        _processes[pluginId.Trim()] = process;
+        _processes[pluginId] = process;
     }
 
     public void Register(PluginPackageRuntimeIdentity identity, IExternalPluginProcess process)
@@ -35,14 +37,14 @@ public sealed class ExternalPluginProcessRegistry : IExternalPluginProcessRegist
 
     public bool TryGet(string pluginId, out IExternalPluginProcess process)
     {
-        if (string.IsNullOrWhiteSpace(pluginId))
+        if (!IsCanonicalPluginId(pluginId))
         {
             process = null!;
 
             return false;
         }
 
-        return _processes.TryGetValue(pluginId.Trim(), out process!);
+        return _processes.TryGetValue(pluginId, out process!);
     }
 
     public bool TryGet(PluginPackageRuntimeIdentity identity, out IExternalPluginProcess process)
@@ -59,14 +61,14 @@ public sealed class ExternalPluginProcessRegistry : IExternalPluginProcessRegist
 
     public void Unregister(string pluginId, IExternalPluginProcess process)
     {
-        if (string.IsNullOrWhiteSpace(pluginId))
+        if (!IsCanonicalPluginId(pluginId))
         {
             return;
         }
 
         ArgumentNullException.ThrowIfNull(process);
 
-        var entry = new KeyValuePair<string, IExternalPluginProcess>(pluginId.Trim(), process);
+        var entry = new KeyValuePair<string, IExternalPluginProcess>(pluginId, process);
         ((ICollection<KeyValuePair<string, IExternalPluginProcess>>)_processes).Remove(entry);
     }
 
@@ -78,5 +80,11 @@ public sealed class ExternalPluginProcessRegistry : IExternalPluginProcessRegist
         ((ICollection<KeyValuePair<PluginPackageRuntimeIdentity, IExternalPluginProcess>>)_exactProcesses)
             .Remove(exactEntry);
         Unregister(identity.PluginId, process);
+    }
+
+    private static bool IsCanonicalPluginId(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && string.Equals(value, value.Trim(), StringComparison.Ordinal);
     }
 }

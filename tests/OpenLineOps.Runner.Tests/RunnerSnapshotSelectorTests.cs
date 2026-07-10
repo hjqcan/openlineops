@@ -53,6 +53,20 @@ public sealed class RunnerSnapshotSelectorTests
         Assert.Equal("Runner.SnapshotNotFound", result.ErrorCode);
     }
 
+    [Theory]
+    [InlineData(" snapshot.active")]
+    [InlineData("snapshot.active ")]
+    [InlineData("")]
+    public void SelectRejectsNonCanonicalSnapshotSelection(string requestedSnapshot)
+    {
+        var result = RunnerSnapshotSelector.Select(
+            CreateProject("snapshot.active", [CreateSnapshot("snapshot.active")]),
+            requestedSnapshot);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("Runner.SnapshotSelectionInvalid", result.ErrorCode);
+    }
+
     internal static AutomationProjectDetails CreateProject(
         string? activeSnapshotId,
         IReadOnlyCollection<PublishedProjectSnapshotDetails> snapshots)
@@ -83,9 +97,7 @@ public sealed class RunnerSnapshotSelectorTests
             "application.main",
             "topology.main",
             ["layout.main"],
-            "process.main",
-            "process-version.1",
-            "configuration.1",
+            "line.main",
             new DateTimeOffset(2026, 7, 10, 1, 0, 0, TimeSpan.Zero),
             [],
             [],

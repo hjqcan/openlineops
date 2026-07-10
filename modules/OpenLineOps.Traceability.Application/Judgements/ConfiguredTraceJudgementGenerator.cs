@@ -1,4 +1,5 @@
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Traceability.Application.Records;
 using OpenLineOps.Traceability.Domain.Records;
 
@@ -17,12 +18,14 @@ public sealed class ConfiguredTraceJudgementGenerator : ITraceJudgementGenerator
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        if (!string.IsNullOrWhiteSpace(request.Judgement))
+        if (request.Judgement is not null)
         {
             return ParseJudgement(request.Judgement, "Traceability.InvalidJudgement");
         }
 
-        var measurements = request.Measurements ?? [];
+        var measurements = (request.Stages ?? [])
+            .SelectMany(stage => stage.Measurements ?? [])
+            .ToArray();
 
         if (_options.FailWhenAnyMeasurementFailed
             && measurements.Any(measurement => measurement.Passed == false))
@@ -37,7 +40,7 @@ public sealed class ConfiguredTraceJudgementGenerator : ITraceJudgementGenerator
         }
 
         if (_options.UnknownWhenNoMeasurements
-            && measurements.Count == 0)
+            && measurements.Length == 0)
         {
             return Result.Success(ResultJudgement.Unknown);
         }
@@ -47,13 +50,14 @@ public sealed class ConfiguredTraceJudgementGenerator : ITraceJudgementGenerator
 
     private static Result<ResultJudgement> ParseJudgement(string value, string errorCode)
     {
-        if (Enum.TryParse<ResultJudgement>(value, ignoreCase: true, out var parsed))
+        if (CanonicalEnumToken.TryParse<ResultJudgement>(value, out var parsed))
         {
             return Result.Success(parsed);
         }
 
         return Result.Failure<ResultJudgement>(ApplicationError.Validation(
             errorCode,
-            $"Result judgement '{value}' is not supported."));
+            $"Result judgement '{value}' is not supported. Expected an exact, case-sensitive token: " +
+            $"{CanonicalEnumToken.ExpectedTokens<ResultJudgement>()}."));
     }
 }

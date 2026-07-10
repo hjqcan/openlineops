@@ -95,13 +95,52 @@ public sealed class DevicesModuleDependencyInjectionTests
     }
 
     [Fact]
-    public void AddOpenLineOpsDevicesModuleCanSelectEfSqlitePersistence()
+    public void AddOpenLineOpsDevicesModuleUsesOnlyProcessIsolatedPythonExecutionByDefault()
+    {
+        var services = new ServiceCollection();
+
+        services.AddOpenLineOpsDevicesModule();
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var options = serviceProvider.GetRequiredService<PythonScriptRuntimeOptions>();
+        var executor = serviceProvider.GetRequiredService<IRuntimeScriptExecutor>();
+
+        Assert.Equal(PythonScriptRuntimeExecutionModes.ProcessIsolated, options.ExecutionMode);
+        Assert.IsType<ProcessIsolatedPythonScriptRuntimeScriptExecutor>(executor);
+        Assert.Single(
+            services,
+            descriptor => descriptor.ServiceType == typeof(IRuntimeScriptExecutor));
+    }
+
+    [Theory]
+    [InlineData("InProcessTrusted")]
+    [InlineData("Processisolated")]
+    [InlineData("Worker")]
+    [InlineData("")]
+    public void AddOpenLineOpsDevicesModuleRejectsNonCanonicalPythonExecutionMode(string executionMode)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Runtime:Scripting:Python:ExecutionMode"] = executionMode
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOpenLineOpsDevicesModule(configuration));
+
+        Assert.Contains("Expected exactly", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddOpenLineOpsDevicesModuleCanSelectSqlitePersistence()
     {
         using var database = TemporarySqliteDatabase.Create();
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OpenLineOps:Devices:Persistence:Provider"] = DevicePersistenceProviders.EfSqlite,
+                ["OpenLineOps:Devices:Persistence:Provider"] = DevicePersistenceProviders.Sqlite,
                 ["OpenLineOps:Devices:Persistence:ConnectionString"] = database.ConnectionString
             })
             .Build();
@@ -118,7 +157,7 @@ public sealed class DevicesModuleDependencyInjectionTests
     }
 
     [Fact]
-    public void AddOpenLineOpsDevicesModuleUsesEfSqlitePersistenceByDefault()
+    public void AddOpenLineOpsDevicesModuleUsesSqlitePersistenceByDefault()
     {
         var services = new ServiceCollection();
         services.AddOpenLineOpsDevicesModule();
@@ -150,6 +189,27 @@ public sealed class DevicesModuleDependencyInjectionTests
             serviceProvider.GetRequiredService<IDeviceDefinitionRepository>());
         Assert.IsType<InMemoryDeviceInstanceRepository>(
             serviceProvider.GetRequiredService<IDeviceInstanceRepository>());
+    }
+
+    [Theory]
+    [InlineData("EfSqlite")]
+    [InlineData("EntityFrameworkSqlite")]
+    [InlineData("sqlite")]
+    [InlineData("Memory")]
+    public void AddOpenLineOpsDevicesModuleRejectsNonCanonicalProviderTokens(string provider)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Devices:Persistence:Provider"] = provider
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOpenLineOpsDevicesModule(configuration));
+
+        Assert.Contains("Expected exactly 'Sqlite' or 'InMemory'", exception.Message, StringComparison.Ordinal);
     }
 
     private static DeviceCommandExecutionRequest CreateSimulatorRequest()

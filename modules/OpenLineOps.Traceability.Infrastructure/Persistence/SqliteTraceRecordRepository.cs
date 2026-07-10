@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Application.Abstractions.Paging;
@@ -13,147 +12,120 @@ namespace OpenLineOps.Traceability.Infrastructure.Persistence;
 public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     private readonly string _connectionString;
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
     private int _schemaCreated;
 
     public SqliteTraceRecordRepository(string connectionString)
     {
-        _connectionString = string.IsNullOrWhiteSpace(connectionString)
-            ? throw new ArgumentException("SQLite connection string is required.", nameof(connectionString))
-            : connectionString.Trim();
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new ArgumentException("SQLite connection string is required.", nameof(connectionString));
+        }
+
+        var builder = new SqliteConnectionStringBuilder(connectionString);
+        if (builder.Mode == SqliteOpenMode.Memory
+            || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase)
+            || (builder.DataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                && builder.DataSource.Contains("mode=memory", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ArgumentException(
+                "Traceability SQLite persistence requires a file-backed database; use the InMemory provider for transient execution.",
+                nameof(connectionString));
+        }
+
+        _connectionString = connectionString;
     }
 
-    public async ValueTask SaveAsync(
+    public async ValueTask<bool> TryAddAsync(
         TraceRecord traceRecord,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(traceRecord);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
 
-        await EnsureSchemaAsync(cancellationToken);
-
-        var snapshot = TraceRecordSnapshotMapper.ToSnapshot(traceRecord);
-        var documentJson = JsonSerializer.Serialize(snapshot, JsonOptions);
-
+        var documentJson = JsonSerializer.Serialize(
+            TraceRecordSnapshotMapper.ToSnapshot(traceRecord),
+            JsonOptions);
         await using var connection = CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection
+            .BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO trace_records (
-                trace_id,
-                document_json,
-                runtime_session_id,
-                project_id,
-                application_id,
-                project_snapshot_id,
-                topology_id,
-                serial_number,
-                batch_id,
-                station_id,
-                fixture_id,
-                process_definition_id,
-                process_version_id,
-                configuration_snapshot_id,
-                recipe_snapshot_id,
-                device_id,
-                judgement,
-                started_at_utc,
-                completed_at_utc,
-                recorded_by,
-                updated_at_utc)
+            INSERT OR IGNORE INTO trace_records (
+                trace_id, production_run_id, document_json,
+                project_id, application_id, project_snapshot_id, topology_id,
+                production_line_definition_id,
+                dut_model_id, dut_identity_input_key, dut_identity_value,
+                batch_id, fixture_id, device_id, actor_id,
+                run_status, judgement, created_at_utc, started_at_utc,
+                completed_at_utc, updated_at_utc)
             VALUES (
-                $trace_id,
-                $document_json,
-                $runtime_session_id,
-                $project_id,
-                $application_id,
-                $project_snapshot_id,
-                $topology_id,
-                $serial_number,
-                $batch_id,
-                $station_id,
-                $fixture_id,
-                $process_definition_id,
-                $process_version_id,
-                $configuration_snapshot_id,
-                $recipe_snapshot_id,
-                $device_id,
-                $judgement,
-                $started_at_utc,
-                $completed_at_utc,
-                $recorded_by,
-                $updated_at_utc)
-            ON CONFLICT(trace_id) DO UPDATE SET
-                document_json = excluded.document_json,
-                runtime_session_id = excluded.runtime_session_id,
-                project_id = excluded.project_id,
-                application_id = excluded.application_id,
-                project_snapshot_id = excluded.project_snapshot_id,
-                topology_id = excluded.topology_id,
-                serial_number = excluded.serial_number,
-                batch_id = excluded.batch_id,
-                station_id = excluded.station_id,
-                fixture_id = excluded.fixture_id,
-                process_definition_id = excluded.process_definition_id,
-                process_version_id = excluded.process_version_id,
-                configuration_snapshot_id = excluded.configuration_snapshot_id,
-                recipe_snapshot_id = excluded.recipe_snapshot_id,
-                device_id = excluded.device_id,
-                judgement = excluded.judgement,
-                started_at_utc = excluded.started_at_utc,
-                completed_at_utc = excluded.completed_at_utc,
-                recorded_by = excluded.recorded_by,
-                updated_at_utc = excluded.updated_at_utc;
+                $trace_id, $production_run_id, $document_json,
+                $project_id, $application_id, $project_snapshot_id, $topology_id,
+                $production_line_definition_id,
+                $dut_model_id, $dut_identity_input_key, $dut_identity_value,
+                $batch_id, $fixture_id, $device_id, $actor_id,
+                $run_status, $judgement, $created_at_utc, $started_at_utc,
+                $completed_at_utc, $updated_at_utc);
             """;
         command.Parameters.AddWithValue("$trace_id", traceRecord.Id.Value.ToString("D"));
+        command.Parameters.AddWithValue("$production_run_id", traceRecord.ProductionRunId.Value.ToString("D"));
         command.Parameters.AddWithValue("$document_json", documentJson);
-        command.Parameters.AddWithValue("$runtime_session_id", traceRecord.RuntimeSessionId.Value.ToString("D"));
-        AddOptionalParameter(command, "$project_id", traceRecord.ProjectId);
-        AddOptionalParameter(command, "$application_id", traceRecord.ApplicationId);
-        AddOptionalParameter(command, "$project_snapshot_id", traceRecord.ProjectSnapshotId);
-        AddOptionalParameter(command, "$topology_id", traceRecord.TopologyId);
-        command.Parameters.AddWithValue("$serial_number", traceRecord.SerialNumber);
+        command.Parameters.AddWithValue("$project_id", traceRecord.ProjectId);
+        command.Parameters.AddWithValue("$application_id", traceRecord.ApplicationId);
+        command.Parameters.AddWithValue("$project_snapshot_id", traceRecord.ProjectSnapshotId);
+        command.Parameters.AddWithValue("$topology_id", traceRecord.TopologyId);
+        command.Parameters.AddWithValue("$production_line_definition_id", traceRecord.ProductionLineDefinitionId);
+        command.Parameters.AddWithValue("$dut_model_id", traceRecord.DutModelId);
+        command.Parameters.AddWithValue("$dut_identity_input_key", traceRecord.DutIdentityInputKey);
+        command.Parameters.AddWithValue("$dut_identity_value", traceRecord.DutIdentityValue);
         AddOptionalParameter(command, "$batch_id", traceRecord.BatchId);
-        command.Parameters.AddWithValue("$station_id", traceRecord.StationId.Value);
         AddOptionalParameter(command, "$fixture_id", traceRecord.FixtureId);
-        command.Parameters.AddWithValue("$process_definition_id", traceRecord.ProcessDefinitionId.Value);
-        command.Parameters.AddWithValue("$process_version_id", traceRecord.ProcessVersionId.Value);
-        command.Parameters.AddWithValue("$configuration_snapshot_id", traceRecord.ConfigurationSnapshotId.Value);
-        command.Parameters.AddWithValue("$recipe_snapshot_id", traceRecord.RecipeSnapshotId.Value);
-        command.Parameters.AddWithValue("$device_id", traceRecord.DeviceId.Value);
+        AddOptionalParameter(command, "$device_id", traceRecord.DeviceId);
+        command.Parameters.AddWithValue("$actor_id", traceRecord.ActorId.Value);
+        command.Parameters.AddWithValue("$run_status", traceRecord.RunStatus.ToString());
         command.Parameters.AddWithValue("$judgement", traceRecord.Judgement.ToString());
-        command.Parameters.AddWithValue("$started_at_utc", FormatTimestamp(traceRecord.StartedAtUtc));
+        command.Parameters.AddWithValue("$created_at_utc", FormatTimestamp(traceRecord.CreatedAtUtc));
+        AddOptionalParameter(
+            command,
+            "$started_at_utc",
+            traceRecord.StartedAtUtc is null ? null : FormatTimestamp(traceRecord.StartedAtUtc.Value));
         command.Parameters.AddWithValue("$completed_at_utc", FormatTimestamp(traceRecord.CompletedAtUtc));
-        command.Parameters.AddWithValue("$recorded_by", traceRecord.RecordedBy.Value);
         command.Parameters.AddWithValue("$updated_at_utc", FormatTimestamp(DateTimeOffset.UtcNow));
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        var inserted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (inserted == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        foreach (var stage in traceRecord.Stages)
+        {
+            await InsertStageAsync(connection, transaction, traceRecord.Id, stage, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async ValueTask<TraceRecord?> GetByIdAsync(
         TraceRecordId traceRecordId,
         CancellationToken cancellationToken = default)
     {
-        await EnsureSchemaAsync(cancellationToken);
-
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT document_json
-            FROM trace_records
-            WHERE trace_id = $trace_id
-            LIMIT 1;
-            """;
+        command.CommandText = "SELECT document_json FROM trace_records WHERE trace_id = $trace_id LIMIT 1;";
         command.Parameters.AddWithValue("$trace_id", traceRecordId.Value.ToString("D"));
-
-        var documentJson = await command.ExecuteScalarAsync(cancellationToken);
-        return documentJson is null
-            ? null
-            : DeserializeTraceRecord((string)documentJson);
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return value is null ? null : Deserialize((string)value);
     }
 
     public async ValueTask<PagedResult<TraceRecord>> QueryAsync(
@@ -161,20 +133,40 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(query);
-
-        await EnsureSchemaAsync(cancellationToken);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
 
         var paging = query.Paging.Normalize(TraceRecordQuery.MaxPageSize);
         var filters = BuildFilters(query);
-        var whereClause = filters.Count == 0
+        var where = filters.Count == 0
             ? string.Empty
             : "WHERE " + string.Join(" AND ", filters.Select(filter => filter.Sql));
-
         await using var connection = CreateConnection();
-        await connection.OpenAsync(cancellationToken);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-        var totalCount = await CountAsync(connection, whereClause, filters, cancellationToken);
-        var records = await QueryPageAsync(connection, whereClause, filters, paging, cancellationToken);
+        await using var countCommand = connection.CreateCommand();
+        countCommand.CommandText = $"SELECT COUNT(*) FROM trace_records {where};";
+        AddQueryParameters(countCommand, filters);
+        var totalCount = Convert.ToInt64(
+            await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture);
+
+        await using var pageCommand = connection.CreateCommand();
+        pageCommand.CommandText = $"""
+            SELECT document_json
+            FROM trace_records
+            {where}
+            ORDER BY completed_at_utc, trace_id
+            LIMIT $take OFFSET $skip;
+            """;
+        AddQueryParameters(pageCommand, filters);
+        pageCommand.Parameters.AddWithValue("$take", paging.PageSize);
+        pageCommand.Parameters.AddWithValue("$skip", paging.Skip);
+        var records = new List<TraceRecord>();
+        await using var reader = await pageCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            records.Add(Deserialize(reader.GetString(0)));
+        }
 
         return new PagedResult<TraceRecord>(
             records,
@@ -183,48 +175,43 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             totalCount);
     }
 
-    private static async ValueTask<long> CountAsync(
+    private static async ValueTask InsertStageAsync(
         SqliteConnection connection,
-        string whereClause,
-        IReadOnlyCollection<QueryFilter> filters,
+        SqliteTransaction transaction,
+        TraceRecordId traceRecordId,
+        TraceStageExecution stage,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM trace_records {whereClause};";
-        AddQueryParameters(command, filters);
-
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return Convert.ToInt64(result, CultureInfo.InvariantCulture);
-    }
-
-    private static async ValueTask<IReadOnlyCollection<TraceRecord>> QueryPageAsync(
-        SqliteConnection connection,
-        string whereClause,
-        IReadOnlyCollection<QueryFilter> filters,
-        PagedRequest paging,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            SELECT document_json
-            FROM trace_records
-            {whereClause}
-            ORDER BY completed_at_utc, trace_id
-            LIMIT $take OFFSET $skip;
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO trace_stage_executions (
+                trace_id, stage_id, sequence, workstation_id, station_id,
+                process_definition_id, process_version_id,
+                configuration_snapshot_id, recipe_snapshot_id, runtime_session_id,
+                stage_status, completed_at_utc)
+            VALUES (
+                $trace_id, $stage_id, $sequence, $workstation_id, $station_id,
+                $process_definition_id, $process_version_id,
+                $configuration_snapshot_id, $recipe_snapshot_id, $runtime_session_id,
+                $stage_status, $completed_at_utc);
             """;
-        AddQueryParameters(command, filters);
-        command.Parameters.AddWithValue("$take", paging.PageSize);
-        command.Parameters.AddWithValue("$skip", paging.Skip);
-
-        var records = new List<TraceRecord>();
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            records.Add(DeserializeTraceRecord(reader.GetString(0)));
-        }
-
-        return records;
+        command.Parameters.AddWithValue("$trace_id", traceRecordId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$stage_id", stage.StageId);
+        command.Parameters.AddWithValue("$sequence", stage.Sequence);
+        command.Parameters.AddWithValue("$workstation_id", stage.WorkstationId);
+        command.Parameters.AddWithValue("$station_id", stage.StationId.Value);
+        command.Parameters.AddWithValue("$process_definition_id", stage.ProcessDefinitionId.Value);
+        command.Parameters.AddWithValue("$process_version_id", stage.ProcessVersionId.Value);
+        command.Parameters.AddWithValue("$configuration_snapshot_id", stage.ConfigurationSnapshotId.Value);
+        command.Parameters.AddWithValue("$recipe_snapshot_id", stage.RecipeSnapshotId.Value);
+        AddOptionalParameter(
+            command,
+            "$runtime_session_id",
+            stage.RuntimeSessionId?.Value.ToString("D"));
+        command.Parameters.AddWithValue("$stage_status", stage.Status.ToString());
+        command.Parameters.AddWithValue("$completed_at_utc", FormatTimestamp(stage.CompletedAtUtc));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken)
@@ -234,7 +221,7 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             return;
         }
 
-        await _schemaLock.WaitAsync(cancellationToken);
+        await _schemaLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (Volatile.Read(ref _schemaCreated) == 1)
@@ -243,74 +230,75 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             }
 
             EnsureDatabaseDirectory();
-
             await using var connection = CreateConnection();
-            await connection.OpenAsync(cancellationToken);
-
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
             command.CommandText = """
+                PRAGMA foreign_keys = ON;
+
                 CREATE TABLE IF NOT EXISTS trace_records (
                     trace_id TEXT NOT NULL PRIMARY KEY,
+                    production_run_id TEXT NOT NULL UNIQUE,
                     document_json TEXT NOT NULL,
-                    runtime_session_id TEXT NOT NULL,
-                    project_id TEXT NULL,
-                    application_id TEXT NULL,
-                    project_snapshot_id TEXT NULL,
-                    topology_id TEXT NULL,
-                    serial_number TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    application_id TEXT NOT NULL,
+                    project_snapshot_id TEXT NOT NULL,
+                    topology_id TEXT NOT NULL,
+                    production_line_definition_id TEXT NOT NULL,
+                    dut_model_id TEXT NOT NULL,
+                    dut_identity_input_key TEXT NOT NULL,
+                    dut_identity_value TEXT NOT NULL,
                     batch_id TEXT NULL,
-                    station_id TEXT NOT NULL,
                     fixture_id TEXT NULL,
+                    device_id TEXT NULL,
+                    actor_id TEXT NOT NULL,
+                    run_status TEXT NOT NULL,
+                    judgement TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    started_at_utc TEXT NULL,
+                    completed_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS trace_stage_executions (
+                    trace_id TEXT NOT NULL,
+                    stage_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    workstation_id TEXT NOT NULL,
+                    station_id TEXT NOT NULL,
                     process_definition_id TEXT NOT NULL,
                     process_version_id TEXT NOT NULL,
                     configuration_snapshot_id TEXT NOT NULL,
                     recipe_snapshot_id TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    judgement TEXT NOT NULL,
-                    started_at_utc TEXT NOT NULL,
+                    runtime_session_id TEXT NULL,
+                    stage_status TEXT NOT NULL,
                     completed_at_utc TEXT NOT NULL,
-                    recorded_by TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL
+                    PRIMARY KEY (trace_id, stage_id),
+                    UNIQUE (trace_id, sequence),
+                    FOREIGN KEY (trace_id) REFERENCES trace_records(trace_id) ON DELETE CASCADE
                 );
 
-                CREATE INDEX IF NOT EXISTS ix_trace_records_serial_completed
-                    ON trace_records(serial_number, completed_at_utc, trace_id);
-
+                CREATE INDEX IF NOT EXISTS ix_trace_records_dut_completed
+                    ON trace_records(dut_identity_value, completed_at_utc, trace_id);
                 CREATE INDEX IF NOT EXISTS ix_trace_records_batch_completed
                     ON trace_records(batch_id, completed_at_utc, trace_id);
-
-                CREATE INDEX IF NOT EXISTS ix_trace_records_station_completed
-                    ON trace_records(station_id, completed_at_utc, trace_id);
-
-                CREATE INDEX IF NOT EXISTS ix_trace_records_fixture_completed
-                    ON trace_records(fixture_id, completed_at_utc, trace_id);
-
-                CREATE INDEX IF NOT EXISTS ix_trace_records_runtime_session
-                    ON trace_records(runtime_session_id);
-
-                CREATE INDEX IF NOT EXISTS ix_trace_records_process_completed
-                    ON trace_records(process_version_id, completed_at_utc, trace_id);
-
-                CREATE INDEX IF NOT EXISTS ix_trace_records_device_completed
-                    ON trace_records(device_id, completed_at_utc, trace_id);
-
+                CREATE INDEX IF NOT EXISTS ix_trace_records_project_snapshot_completed
+                    ON trace_records(project_snapshot_id, completed_at_utc, trace_id);
+                CREATE INDEX IF NOT EXISTS ix_trace_records_line_completed
+                    ON trace_records(production_line_definition_id, completed_at_utc, trace_id);
                 CREATE INDEX IF NOT EXISTS ix_trace_records_judgement_completed
                     ON trace_records(judgement, completed_at_utc, trace_id);
+                CREATE INDEX IF NOT EXISTS ix_trace_stage_station
+                    ON trace_stage_executions(station_id, trace_id);
+                CREATE INDEX IF NOT EXISTS ix_trace_stage_process
+                    ON trace_stage_executions(process_version_id, trace_id);
+                CREATE INDEX IF NOT EXISTS ix_trace_stage_configuration
+                    ON trace_stage_executions(configuration_snapshot_id, trace_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_trace_stage_runtime_session
+                    ON trace_stage_executions(runtime_session_id)
+                    WHERE runtime_session_id IS NOT NULL;
                 """;
-
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            await EnsureColumnAsync(connection, "project_id", "TEXT NULL", cancellationToken);
-            await EnsureColumnAsync(connection, "application_id", "TEXT NULL", cancellationToken);
-            await EnsureColumnAsync(connection, "project_snapshot_id", "TEXT NULL", cancellationToken);
-            await EnsureColumnAsync(connection, "topology_id", "TEXT NULL", cancellationToken);
-            await EnsureIndexAsync(
-                connection,
-                "CREATE INDEX IF NOT EXISTS ix_trace_records_project_completed ON trace_records(project_id, completed_at_utc, trace_id);",
-                cancellationToken);
-            await EnsureIndexAsync(
-                connection,
-                "CREATE INDEX IF NOT EXISTS ix_trace_records_project_snapshot_completed ON trace_records(project_snapshot_id, completed_at_utc, trace_id);",
-                cancellationToken);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
         }
         finally
@@ -319,58 +307,9 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         }
     }
 
-    private SqliteConnection CreateConnection()
-    {
-        return new SqliteConnection(_connectionString);
-    }
-
-    private static async ValueTask EnsureColumnAsync(
-        SqliteConnection connection,
-        string columnName,
-        string definition,
-        CancellationToken cancellationToken)
-    {
-        var exists = false;
-        await using (var tableInfoCommand = connection.CreateCommand())
-        {
-            tableInfoCommand.CommandText = "PRAGMA table_info(trace_records);";
-
-            await using var reader = await tableInfoCommand.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
-                {
-                    exists = true;
-                    break;
-                }
-            }
-        }
-
-        if (exists)
-        {
-            return;
-        }
-
-        await using var alterCommand = connection.CreateCommand();
-        alterCommand.CommandText = $"ALTER TABLE trace_records ADD COLUMN {columnName} {definition};";
-        await alterCommand.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static async ValueTask EnsureIndexAsync(
-        SqliteConnection connection,
-        string createIndexSql,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = createIndexSql;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
     private void EnsureDatabaseDirectory()
     {
-        var builder = new SqliteConnectionStringBuilder(_connectionString);
-        var dataSource = builder.DataSource;
-
+        var dataSource = new SqliteConnectionStringBuilder(_connectionString).DataSource;
         if (string.IsNullOrWhiteSpace(dataSource)
             || string.Equals(dataSource, ":memory:", StringComparison.OrdinalIgnoreCase)
             || dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
@@ -379,7 +318,7 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         }
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(dataSource));
-        if (!string.IsNullOrWhiteSpace(directory))
+        if (directory is not null)
         {
             Directory.CreateDirectory(directory);
         }
@@ -388,141 +327,113 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
     private static List<QueryFilter> BuildFilters(TraceRecordQuery query)
     {
         var filters = new List<QueryFilter>();
+        Add(filters, query.ProductionRunId, "production_run_id = $production_run_id", "$production_run_id",
+            value => value.ToString("D"));
+        Add(filters, query.DutModelId, "dut_model_id = $dut_model_id", "$dut_model_id");
+        Add(filters, query.DutIdentityInputKey, "dut_identity_input_key = $dut_identity_input_key", "$dut_identity_input_key");
+        Add(filters, query.DutIdentityValue, "dut_identity_value = $dut_identity_value", "$dut_identity_value");
+        Add(filters, query.BatchId, "batch_id = $batch_id", "$batch_id");
+        Add(filters, query.FixtureId, "fixture_id = $fixture_id", "$fixture_id");
+        Add(filters, query.DeviceId, "device_id = $device_id", "$device_id");
+        Add(filters, query.ActorId, "actor_id = $actor_id", "$actor_id");
+        Add(filters, query.RunStatus, "run_status = $run_status", "$run_status");
+        Add(filters, query.Judgement, "judgement = $judgement", "$judgement");
+        Add(filters, query.ProjectId, "project_id = $project_id", "$project_id");
+        Add(filters, query.ApplicationId, "application_id = $application_id", "$application_id");
+        Add(filters, query.ProjectSnapshotId, "project_snapshot_id = $project_snapshot_id", "$project_snapshot_id");
+        Add(filters, query.TopologyId, "topology_id = $topology_id", "$topology_id");
+        Add(filters, query.ProductionLineDefinitionId,
+            "production_line_definition_id = $production_line_definition_id", "$production_line_definition_id");
+        Add(filters, query.CompletedFromUtc, "completed_at_utc >= $completed_from_utc", "$completed_from_utc", FormatTimestamp);
+        Add(filters, query.CompletedToUtc, "completed_at_utc <= $completed_to_utc", "$completed_to_utc", FormatTimestamp);
 
-        if (query.SerialNumber is not null)
-        {
-            filters.Add(new QueryFilter("serial_number = $serial_number", "$serial_number", query.SerialNumber));
-        }
-
-        if (query.BatchId is not null)
-        {
-            filters.Add(new QueryFilter("batch_id = $batch_id", "$batch_id", query.BatchId));
-        }
-
-        if (query.StationId is not null)
-        {
-            filters.Add(new QueryFilter("station_id = $station_id", "$station_id", query.StationId));
-        }
-
-        if (query.FixtureId is not null)
-        {
-            filters.Add(new QueryFilter("fixture_id = $fixture_id", "$fixture_id", query.FixtureId));
-        }
-
-        if (query.ProcessDefinitionId is not null)
-        {
-            filters.Add(new QueryFilter(
-                "process_definition_id = $process_definition_id",
-                "$process_definition_id",
-                query.ProcessDefinitionId));
-        }
-
-        if (query.ProcessVersionId is not null)
-        {
-            filters.Add(new QueryFilter(
-                "process_version_id = $process_version_id",
-                "$process_version_id",
-                query.ProcessVersionId));
-        }
-
-        if (query.ConfigurationSnapshotId is not null)
+        var stageConditions = new List<QueryFilter>();
+        Add(stageConditions, query.StageId, "stage.stage_id = $stage_id", "$stage_id");
+        Add(stageConditions, query.WorkstationId, "stage.workstation_id = $workstation_id", "$workstation_id");
+        Add(stageConditions, query.StationId, "stage.station_id = $station_id", "$station_id");
+        Add(stageConditions, query.ProcessDefinitionId,
+            "stage.process_definition_id = $process_definition_id", "$process_definition_id");
+        Add(stageConditions, query.ProcessVersionId,
+            "stage.process_version_id = $process_version_id", "$process_version_id");
+        Add(stageConditions, query.ConfigurationSnapshotId,
+            "stage.configuration_snapshot_id = $configuration_snapshot_id", "$configuration_snapshot_id");
+        Add(stageConditions, query.RecipeSnapshotId,
+            "stage.recipe_snapshot_id = $recipe_snapshot_id", "$recipe_snapshot_id");
+        if (stageConditions.Count > 0)
         {
             filters.Add(new QueryFilter(
-                "configuration_snapshot_id = $configuration_snapshot_id",
-                "$configuration_snapshot_id",
-                query.ConfigurationSnapshotId));
-        }
-
-        if (query.RecipeSnapshotId is not null)
-        {
-            filters.Add(new QueryFilter(
-                "recipe_snapshot_id = $recipe_snapshot_id",
-                "$recipe_snapshot_id",
-                query.RecipeSnapshotId));
-        }
-
-        if (query.DeviceId is not null)
-        {
-            filters.Add(new QueryFilter("device_id = $device_id", "$device_id", query.DeviceId));
-        }
-
-        if (query.Judgement is not null)
-        {
-            filters.Add(new QueryFilter("judgement = $judgement", "$judgement", query.Judgement));
-        }
-
-        if (query.ProjectId is not null)
-        {
-            filters.Add(new QueryFilter("project_id = $project_id", "$project_id", query.ProjectId));
-        }
-
-        if (query.ApplicationId is not null)
-        {
-            filters.Add(new QueryFilter("application_id = $application_id", "$application_id", query.ApplicationId));
-        }
-
-        if (query.ProjectSnapshotId is not null)
-        {
-            filters.Add(new QueryFilter(
-                "project_snapshot_id = $project_snapshot_id",
-                "$project_snapshot_id",
-                query.ProjectSnapshotId));
-        }
-
-        if (query.TopologyId is not null)
-        {
-            filters.Add(new QueryFilter("topology_id = $topology_id", "$topology_id", query.TopologyId));
-        }
-
-        if (query.CompletedFromUtc is not null)
-        {
-            filters.Add(new QueryFilter(
-                "completed_at_utc >= $completed_from_utc",
-                "$completed_from_utc",
-                FormatTimestamp(query.CompletedFromUtc.Value)));
-        }
-
-        if (query.CompletedToUtc is not null)
-        {
-            filters.Add(new QueryFilter(
-                "completed_at_utc <= $completed_to_utc",
-                "$completed_to_utc",
-                FormatTimestamp(query.CompletedToUtc.Value)));
+                "EXISTS (SELECT 1 FROM trace_stage_executions stage "
+                + "WHERE stage.trace_id = trace_records.trace_id AND "
+                + string.Join(" AND ", stageConditions.Select(condition => condition.Sql))
+                + ")",
+                stageConditions.SelectMany(condition => condition.Parameters).ToArray()));
         }
 
         return filters;
     }
 
-    private static void AddQueryParameters(SqliteCommand command, IEnumerable<QueryFilter> filters)
+    private static void Add<T>(
+        ICollection<QueryFilter> filters,
+        T? value,
+        string sql,
+        string parameterName,
+        Func<T, object>? map = null)
+        where T : struct
     {
-        foreach (var filter in filters)
+        if (value is not null)
         {
-            command.Parameters.AddWithValue(filter.ParameterName, filter.Value);
+            filters.Add(new QueryFilter(
+                sql,
+                [new QueryParameter(parameterName, map is null ? value.Value : map(value.Value))]));
         }
     }
 
-    private static void AddOptionalParameter(SqliteCommand command, string name, string? value)
+    private static void Add(
+        ICollection<QueryFilter> filters,
+        string? value,
+        string sql,
+        string parameterName)
     {
-        command.Parameters.AddWithValue(name, value is null ? DBNull.Value : value);
+        if (value is not null)
+        {
+            filters.Add(new QueryFilter(sql, [new QueryParameter(parameterName, value)]));
+        }
     }
 
-    private static TraceRecord DeserializeTraceRecord(string documentJson)
+    private static void AddQueryParameters(SqliteCommand command, IEnumerable<QueryFilter> filters)
     {
-        var snapshot = JsonSerializer.Deserialize<PersistedTraceRecord>(documentJson, JsonOptions)
-            ?? throw new InvalidOperationException("Persisted trace record document is empty.");
+        foreach (var parameter in filters.SelectMany(filter => filter.Parameters))
+        {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        }
+    }
 
+    private static void AddOptionalParameter(SqliteCommand command, string name, object? value)
+    {
+        command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+    }
+
+    private static TraceRecord Deserialize(string json)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedTraceRecord>(json, JsonOptions)
+            ?? throw new InvalidOperationException("Persisted trace record document is empty.");
         return TraceRecordSnapshotMapper.ToAggregate(snapshot);
     }
 
-    private static string FormatTimestamp(DateTimeOffset value)
+    private SqliteConnection CreateConnection()
     {
-        return value.ToString("O", CultureInfo.InvariantCulture);
+        var builder = new SqliteConnectionStringBuilder(_connectionString)
+        {
+            ForeignKeys = true
+        };
+        return new SqliteConnection(builder.ToString());
     }
 
-    public void Dispose()
-    {
-        _schemaLock.Dispose();
-    }
+    private static string FormatTimestamp(DateTimeOffset value) =>
+        value.ToString("O", CultureInfo.InvariantCulture);
 
-    private sealed record QueryFilter(string Sql, string ParameterName, object Value);
+    public void Dispose() => _schemaLock.Dispose();
+
+    private sealed record QueryParameter(string Name, object Value);
+    private sealed record QueryFilter(string Sql, IReadOnlyCollection<QueryParameter> Parameters);
 }

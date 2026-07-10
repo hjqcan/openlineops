@@ -86,7 +86,7 @@ public sealed class PluginLifecycleManagerTests
 
     private static PluginPackageDescriptor Package(PluginManifest manifest)
     {
-        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/openlineops-plugin.json");
+        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/manifest.json");
     }
 
     private static PluginManifest CreateManifest(string id, string capability)

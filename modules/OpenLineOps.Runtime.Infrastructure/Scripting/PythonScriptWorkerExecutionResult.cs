@@ -1,3 +1,4 @@
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Runtime.Application.Commands;
 
 namespace OpenLineOps.Runtime.Infrastructure.Scripting;
@@ -18,10 +19,12 @@ public sealed record PythonScriptWorkerExecutionResult(
 
     public RuntimeCommandExecutionResult ToRuntimeResult()
     {
-        if (!Enum.TryParse<RuntimeCommandExecutionOutcome>(Outcome, ignoreCase: true, out var parsed))
+        if (!CanonicalEnumToken.TryParse<RuntimeCommandExecutionOutcome>(Outcome, out var parsed))
         {
             return RuntimeCommandExecutionResult.Failed(
-                $"Python script worker returned unsupported outcome '{Outcome}'.");
+                $"Python script worker returned unsupported outcome '{Outcome}'. " +
+                $"Expected an exact, case-sensitive token: " +
+                $"{CanonicalEnumToken.ExpectedTokens<RuntimeCommandExecutionOutcome>()}.");
         }
 
         return parsed switch

@@ -10,6 +10,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Add-Type -AssemblyName System.Runtime.Serialization
+Add-Type -AssemblyName System.Xml.Linq
+
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $Failures = New-Object System.Collections.Generic.List[string]
 $ExpectedArtifactKinds = @("api", "desktop", "plugin-host", "sample-plugin", "script-worker", "source")
@@ -41,6 +44,120 @@ function Assert-UnderRepoRoot {
 function Add-Failure {
     param([Parameter(Mandatory = $true)][string] $Message)
     $Failures.Add($Message) | Out-Null
+}
+
+function Get-JsonXmlPropertyName {
+    param([Parameter(Mandatory = $true)][System.Xml.Linq.XElement] $Element)
+
+    $encodedName = $Element.Attribute([System.Xml.Linq.XName]::Get("item"))
+    if ($null -ne $encodedName) {
+        return $encodedName.Value
+    }
+
+    return $Element.Name.LocalName
+}
+
+function Assert-NoDuplicateJsonProperties {
+    param(
+        [Parameter(Mandatory = $true)][System.Xml.Linq.XElement] $Element,
+        [Parameter(Mandatory = $true)][string] $JsonPath
+    )
+
+    $typeAttribute = $Element.Attribute([System.Xml.Linq.XName]::Get("type"))
+    $elementType = if ($null -eq $typeAttribute) { $null } else { $typeAttribute.Value }
+    if ($elementType -ceq "object") {
+        $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($child in @($Element.Elements())) {
+            $propertyName = Get-JsonXmlPropertyName $child
+            if (-not $names.Add($propertyName)) {
+                throw "Duplicate JSON property '$propertyName' at $JsonPath."
+            }
+
+            Assert-NoDuplicateJsonProperties -Element $child -JsonPath "$JsonPath.$propertyName"
+        }
+
+        return
+    }
+
+    if ($elementType -ceq "array") {
+        $index = 0
+        foreach ($child in @($Element.Elements())) {
+            Assert-NoDuplicateJsonProperties -Element $child -JsonPath "$JsonPath[$index]"
+            $index++
+        }
+    }
+}
+
+function Test-JsonObjectProperties {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string] $Description,
+        [Parameter(Mandatory = $true)][string[]] $RequiredProperties,
+        [string[]] $OptionalProperties = @()
+    )
+
+    if ($null -eq $Value) {
+        Add-Failure "$Description must be a JSON object."
+        return $false
+    }
+
+    $names = @($Value.PSObject.Properties | Where-Object { $_.MemberType -eq "NoteProperty" } | ForEach-Object { $_.Name })
+    $allowed = @($RequiredProperties) + @($OptionalProperties)
+    $missing = @($RequiredProperties | Where-Object { $names -cnotcontains $_ })
+    $unexpected = @($names | Where-Object { $allowed -cnotcontains $_ })
+    if ($missing.Count -gt 0) {
+        Add-Failure "$Description is missing exact property name(s): $($missing -join ', ')."
+    }
+
+    if ($unexpected.Count -gt 0) {
+        Add-Failure "$Description has unexpected or non-canonical property name(s): $($unexpected -join ', ')."
+    }
+
+    return $missing.Count -eq 0 -and $unexpected.Count -eq 0
+}
+
+function Test-JsonArrayValue {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    if ($Value -isnot [System.Array]) {
+        Add-Failure "$Description must be a JSON array."
+        return $false
+    }
+
+    return $true
+}
+
+function Test-RequiredJsonString {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    if ($Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Value) -or
+        $Value -cne $Value.Trim()) {
+        Add-Failure "$Description must be a non-empty canonical string."
+        return $false
+    }
+
+    return $true
+}
+
+function Test-ExactStringSet {
+    param(
+        [Parameter(Mandatory = $true)][string[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    $actualValues = @($Actual | Sort-Object)
+    $expectedValues = @($Expected | Sort-Object)
+    if (($actualValues -join "|") -cne ($expectedValues -join "|")) {
+        Add-Failure "$Description were '$($actualValues -join ', ')', expected '$($expectedValues -join ', ')'."
+    }
 }
 
 function Write-Utf8NoBom {
@@ -87,7 +204,20 @@ function Read-JsonFile {
     }
 
     try {
-        return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $rawJson = [System.IO.File]::ReadAllText($Path)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($rawJson)
+        $reader = [System.Runtime.Serialization.Json.JsonReaderWriterFactory]::CreateJsonReader(
+            $bytes,
+            [System.Xml.XmlDictionaryReaderQuotas]::Max)
+        try {
+            $document = [System.Xml.Linq.XDocument]::Load($reader)
+        }
+        finally {
+            $reader.Dispose()
+        }
+
+        Assert-NoDuplicateJsonProperties -Element $document.Root -JsonPath '$'
+        return $rawJson | ConvertFrom-Json
     }
     catch {
         Add-Failure "Invalid JSON file '$Path': $($_.Exception.Message)"
@@ -103,7 +233,7 @@ function Test-ArtifactKinds {
 
     $actual = @($ActualKinds | Sort-Object)
     $expected = @($ExpectedArtifactKinds | Sort-Object)
-    if (($actual -join "|") -ne ($expected -join "|")) {
+    if (($actual -join "|") -cne ($expected -join "|")) {
         Add-Failure "$Description artifact kinds were '$($actual -join ", ")', expected '$($expected -join ", ")'."
     }
 }
@@ -115,13 +245,13 @@ function Test-GateStatus {
         [Parameter(Mandatory = $true)][string] $ExpectedStatus
     )
 
-    $gate = @($Evidence.gates | Where-Object { $_.name -eq $GateName }) | Select-Object -First 1
+    $gate = @($Evidence.gates | Where-Object { $_.name -ceq $GateName }) | Select-Object -First 1
     if ($null -eq $gate) {
         Add-Failure "Publication evidence is missing gate '$GateName'."
         return
     }
 
-    if ($gate.status -ne $ExpectedStatus) {
+    if ($gate.status -cne $ExpectedStatus) {
         Add-Failure "Publication evidence gate '$GateName' had status '$($gate.status)', expected '$ExpectedStatus'."
     }
 }
@@ -133,23 +263,246 @@ function Test-PreflightCase {
         [Parameter(Mandatory = $true)][string] $Expected
     )
 
-    $case = @($Preflight.cases | Where-Object { $_.name -eq $Name }) | Select-Object -First 1
+    $case = @($Preflight.cases | Where-Object { $_.name -ceq $Name }) | Select-Object -First 1
     if ($null -eq $case) {
         Add-Failure "Final publication preflight is missing case '$Name'."
         return
     }
 
-    if ($case.expected -ne $Expected) {
+    if ($case.expected -cne $Expected) {
         Add-Failure "Final publication preflight case '$Name' expected '$($case.expected)', expected metadata '$Expected'."
     }
 
-    if ($Expected -eq "pass" -and $case.exitCode -ne 0) {
+    if ($Expected -ceq "pass" -and $case.exitCode -ne 0) {
         Add-Failure "Final publication preflight case '$Name' should pass with exit code 0."
     }
 
-    if ($Expected -eq "fail" -and $case.exitCode -eq 0) {
+    if ($Expected -ceq "fail" -and $case.exitCode -eq 0) {
         Add-Failure "Final publication preflight case '$Name' should fail with a non-zero exit code."
     }
+}
+
+function Test-ManifestDocument {
+    param([Parameter(Mandatory = $true)]$Manifest)
+
+    if (-not (Test-JsonObjectProperties `
+        -Value $Manifest `
+        -Description "Release manifest" `
+        -RequiredProperties @("schemaVersion", "product", "version", "generatedAtUtc", "commit", "artifacts"))) {
+        return
+    }
+
+    Test-RequiredJsonString -Value $Manifest.version -Description "Release manifest version" | Out-Null
+    Test-RequiredJsonString -Value $Manifest.generatedAtUtc -Description "Release manifest generatedAtUtc" | Out-Null
+    if (-not (Test-JsonArrayValue -Value $Manifest.artifacts -Description "Release manifest artifacts")) {
+        return
+    }
+
+    $index = 0
+    foreach ($artifact in @($Manifest.artifacts)) {
+        $description = "Release manifest artifact[$index]"
+        if (Test-JsonObjectProperties `
+            -Value $artifact `
+            -Description $description `
+            -RequiredProperties @("relativePath", "fileName", "kind", "sizeBytes", "sha256")) {
+            Test-RequiredJsonString -Value $artifact.relativePath -Description "$description relativePath" | Out-Null
+            Test-RequiredJsonString -Value $artifact.fileName -Description "$description fileName" | Out-Null
+            Test-RequiredJsonString -Value $artifact.kind -Description "$description kind" | Out-Null
+            Test-RequiredJsonString -Value $artifact.sha256 -Description "$description sha256" | Out-Null
+            if ($ExpectedArtifactKinds -cnotcontains $artifact.kind) {
+                Add-Failure "$description kind '$($artifact.kind)' is not a canonical artifact kind."
+            }
+        }
+
+        $index++
+    }
+}
+
+function Test-DependencyInventoryDocument {
+    param([Parameter(Mandatory = $true)]$Inventory)
+
+    if (-not (Test-JsonObjectProperties `
+        -Value $Inventory `
+        -Description "Dependency inventory" `
+        -RequiredProperties @(
+            "schemaVersion", "product", "version", "generatedAtUtc", "packageCounts", "reviewPolicy", "packages"))) {
+        return
+    }
+
+    Test-RequiredJsonString -Value $Inventory.version -Description "Dependency inventory version" | Out-Null
+    Test-RequiredJsonString -Value $Inventory.generatedAtUtc -Description "Dependency inventory generatedAtUtc" | Out-Null
+    Test-JsonObjectProperties `
+        -Value $Inventory.packageCounts `
+        -Description "Dependency inventory packageCounts" `
+        -RequiredProperties @("total", "nuget", "npm", "uniqueLicenseValues") | Out-Null
+    Test-JsonObjectProperties `
+        -Value $Inventory.reviewPolicy `
+        -Description "Dependency inventory reviewPolicy" `
+        -RequiredProperties @("blockedLicensePatterns") | Out-Null
+    Test-JsonArrayValue `
+        -Value $Inventory.reviewPolicy.blockedLicensePatterns `
+        -Description "Dependency inventory blockedLicensePatterns" | Out-Null
+    if (-not (Test-JsonArrayValue -Value $Inventory.packages -Description "Dependency inventory packages")) {
+        return
+    }
+
+    $identities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $index = 0
+    foreach ($package in @($Inventory.packages)) {
+        $description = "Dependency inventory package[$index]"
+        if (Test-JsonObjectProperties `
+            -Value $package `
+            -Description $description `
+            -RequiredProperties @("ecosystem", "name", "version", "license", "licenseSource")) {
+            foreach ($field in @("ecosystem", "name", "version", "license", "licenseSource")) {
+                Test-RequiredJsonString -Value $package.$field -Description "$description $field" | Out-Null
+            }
+
+            if (@("nuget", "npm") -cnotcontains $package.ecosystem) {
+                Add-Failure "$description ecosystem '$($package.ecosystem)' must be exactly 'nuget' or 'npm'."
+            }
+
+            $identity = "$($package.ecosystem)`0$($package.name)`0$($package.version)"
+            if (-not $identities.Add($identity)) {
+                Add-Failure "$description duplicates package identity '$($package.ecosystem)/$($package.name)/$($package.version)'."
+            }
+        }
+
+        $index++
+    }
+}
+
+function Test-PublicationEvidenceDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    if (-not (Test-JsonObjectProperties `
+        -Value $Evidence `
+        -Description $Description `
+        -RequiredProperties @(
+            "schemaVersion", "generatedAtUtc", "product", "publishable", "repoRoot", "artifactsRoot", "outputRoot",
+            "license", "githubActions", "release", "pendingExternal", "internalFailures", "gates"))) {
+        return
+    }
+
+    Test-RequiredJsonString -Value $Evidence.generatedAtUtc -Description "$Description generatedAtUtc" | Out-Null
+    Test-RequiredJsonString -Value $Evidence.repoRoot -Description "$Description repoRoot" | Out-Null
+    Test-RequiredJsonString -Value $Evidence.artifactsRoot -Description "$Description artifactsRoot" | Out-Null
+    Test-RequiredJsonString -Value $Evidence.outputRoot -Description "$Description outputRoot" | Out-Null
+    Test-JsonObjectProperties `
+        -Value $Evidence.license `
+        -Description "$Description license" `
+        -RequiredProperties @("fileLicense", "confirmedForPublication") | Out-Null
+    Test-JsonObjectProperties `
+        -Value $Evidence.githubActions `
+        -Description "$Description githubActions" `
+        -RequiredProperties @("runUrl", "proofSupplied") | Out-Null
+    Test-JsonObjectProperties `
+        -Value $Evidence.release `
+        -Description "$Description release" `
+        -RequiredProperties @(
+            "product", "version", "manifestPath", "provenancePath", "provenanceGeneratedAtUtc", "artifactCount", "artifactKinds") | Out-Null
+    Test-JsonArrayValue -Value $Evidence.release.artifactKinds -Description "$Description release artifactKinds" | Out-Null
+    Test-JsonArrayValue -Value $Evidence.pendingExternal -Description "$Description pendingExternal" | Out-Null
+    Test-JsonArrayValue -Value $Evidence.internalFailures -Description "$Description internalFailures" | Out-Null
+    if (-not (Test-JsonArrayValue -Value $Evidence.gates -Description "$Description gates")) {
+        return
+    }
+
+    if ($Evidence.product -cne "OpenLineOps") {
+        Add-Failure "$Description product must be exactly 'OpenLineOps'."
+    }
+
+    if ($Evidence.license.fileLicense -cne "MIT") {
+        Add-Failure "$Description license fileLicense must be exactly 'MIT'."
+    }
+
+    $expectedGateNames = @(
+        "open-source metadata",
+        "third-party license metadata",
+        "release candidate inspection",
+        "release candidate inspection behavior",
+        "desktop signing readiness",
+        "publication metadata finalization behavior",
+        "publication readiness with pending external allowed",
+        "strict publication readiness",
+        "signed release candidate inspection")
+    $gateNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $index = 0
+    foreach ($gate in @($Evidence.gates)) {
+        $gateDescription = "$Description gate[$index]"
+        if (Test-JsonObjectProperties `
+            -Value $gate `
+            -Description $gateDescription `
+            -RequiredProperties @("name", "status", "exitCode", "pendingAllowed", "command", "output")) {
+            Test-RequiredJsonString -Value $gate.name -Description "$gateDescription name" | Out-Null
+            Test-RequiredJsonString -Value $gate.status -Description "$gateDescription status" | Out-Null
+            if (@("pass", "fail", "pending external") -cnotcontains $gate.status) {
+                Add-Failure "$gateDescription status '$($gate.status)' is not canonical."
+            }
+
+            if (-not $gateNames.Add([string]$gate.name)) {
+                Add-Failure "$Description contains duplicate gate name '$($gate.name)'."
+            }
+        }
+
+        $index++
+    }
+
+    Test-ExactStringSet `
+        -Actual @($Evidence.gates | ForEach-Object { $_.name }) `
+        -Expected $expectedGateNames `
+        -Description "$Description gate names"
+}
+
+function Test-PreflightDocument {
+    param([Parameter(Mandatory = $true)]$Preflight)
+
+    if (-not (Test-JsonObjectProperties `
+        -Value $Preflight `
+        -Description "Final publication preflight" `
+        -RequiredProperties @("schemaVersion", "generatedAtUtc", "product", "workRoot", "cases"))) {
+        return
+    }
+
+    Test-RequiredJsonString -Value $Preflight.generatedAtUtc -Description "Final publication preflight generatedAtUtc" | Out-Null
+    Test-RequiredJsonString -Value $Preflight.workRoot -Description "Final publication preflight workRoot" | Out-Null
+    if (-not (Test-JsonArrayValue -Value $Preflight.cases -Description "Final publication preflight cases")) {
+        return
+    }
+
+    if ($Preflight.product -cne "OpenLineOps") {
+        Add-Failure "Final publication preflight product must be exactly 'OpenLineOps'."
+    }
+
+    $caseNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $index = 0
+    foreach ($case in @($Preflight.cases)) {
+        $description = "Final publication preflight case[$index]"
+        if (Test-JsonObjectProperties `
+            -Value $case `
+            -Description $description `
+            -RequiredProperties @("name", "exitCode", "expected", "output")) {
+            Test-RequiredJsonString -Value $case.name -Description "$description name" | Out-Null
+            Test-RequiredJsonString -Value $case.expected -Description "$description expected" | Out-Null
+            if (@("pass", "fail") -cnotcontains $case.expected) {
+                Add-Failure "$description expected '$($case.expected)' is not canonical."
+            }
+
+            if (-not $caseNames.Add([string]$case.name)) {
+                Add-Failure "Final publication preflight contains duplicate case name '$($case.name)'."
+            }
+        }
+
+        $index++
+    }
+
+    Test-ExactStringSet `
+        -Actual @($Preflight.cases | ForEach-Object { $_.name }) `
+        -Expected @("missing-license-confirmation", "invalid-github-actions-url", "missing-signing-selector", "valid-plan") `
+        -Description "Final publication preflight case names"
 }
 
 function Invoke-ReleaseCandidateInspection {
@@ -172,10 +525,17 @@ function Invoke-ReleaseCandidateInspection {
         $arguments += "-RequireSignedDesktop"
     }
 
-    $output = & powershell @arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    if ($null -eq $exitCode) {
-        $exitCode = 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & powershell @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($null -eq $exitCode) {
+            $exitCode = 0
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 
     if ($exitCode -ne 0) {
@@ -350,27 +710,31 @@ $evidence = Read-JsonFile $evidencePath
 $preflight = Read-JsonFile $preflightPath
 
 if ($null -ne $manifest) {
+    Test-ManifestDocument $manifest
+
     if ($manifest.schemaVersion -ne 1) {
         Add-Failure "Release manifest schemaVersion must be 1."
     }
 
-    if ($manifest.product -ne "OpenLineOps") {
-        Add-Failure "Release manifest product must be OpenLineOps."
+    if ($manifest.product -cne "OpenLineOps") {
+        Add-Failure "Release manifest product must be exactly 'OpenLineOps'."
     }
 
     Test-ArtifactKinds -ActualKinds @($manifest.artifacts | ForEach-Object { $_.kind }) -Description "Release manifest"
 }
 
 if ($null -ne $dependencyInventory) {
+    Test-DependencyInventoryDocument $dependencyInventory
+
     if ($dependencyInventory.schemaVersion -ne 1) {
         Add-Failure "Dependency inventory schemaVersion must be 1."
     }
 
-    if ($dependencyInventory.product -ne "OpenLineOps") {
-        Add-Failure "Dependency inventory product must be OpenLineOps."
+    if ($dependencyInventory.product -cne "OpenLineOps") {
+        Add-Failure "Dependency inventory product must be exactly 'OpenLineOps'."
     }
 
-    if ($null -ne $manifest -and $dependencyInventory.version -ne $manifest.version) {
+    if ($null -ne $manifest -and $dependencyInventory.version -cne $manifest.version) {
         Add-Failure "Dependency inventory version '$($dependencyInventory.version)' does not match manifest version '$($manifest.version)'."
     }
 
@@ -382,12 +746,14 @@ if ($null -ne $dependencyInventory) {
 Invoke-ReleaseCandidateInspection -ArtifactsRoot $artifactsRoot
 
 if ($null -ne $evidence) {
+    Test-PublicationEvidenceDocument -Evidence $evidence -Description "Publication evidence"
+
     if ($evidence.schemaVersion -ne 1) {
         Add-Failure "Publication evidence schemaVersion must be 1."
     }
 
-    if ($evidence.product -ne "OpenLineOps") {
-        Add-Failure "Publication evidence product must be OpenLineOps."
+    if ($evidence.product -cne "OpenLineOps") {
+        Add-Failure "Publication evidence product must be exactly 'OpenLineOps'."
     }
 
     if (@($evidence.internalFailures).Count -ne 0) {
@@ -395,7 +761,7 @@ if ($null -ne $evidence) {
     }
 
     if ($null -ne $manifest) {
-        if ($evidence.release.version -ne $manifest.version) {
+        if ($evidence.release.version -cne $manifest.version) {
             Add-Failure "Publication evidence release version '$($evidence.release.version)' does not match manifest version '$($manifest.version)'."
         }
 
@@ -436,12 +802,20 @@ foreach ($caseName in @("default", "confirmed-proof", "invalid-github-actions-ur
 }
 
 $defaultVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "default/publication-evidence.json")
-if ($null -ne $defaultVerification -and @($defaultVerification.internalFailures).Count -ne 0) {
-    Add-Failure "Default publication evidence verification contains internal failures."
+if ($null -ne $defaultVerification) {
+    Test-PublicationEvidenceDocument `
+        -Evidence $defaultVerification `
+        -Description "Default publication evidence verification"
+    if (@($defaultVerification.internalFailures).Count -ne 0) {
+        Add-Failure "Default publication evidence verification contains internal failures."
+    }
 }
 
 $confirmedVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "confirmed-proof/publication-evidence.json")
 if ($null -ne $confirmedVerification) {
+    Test-PublicationEvidenceDocument `
+        -Evidence $confirmedVerification `
+        -Description "Confirmed publication evidence verification"
     if ($confirmedVerification.license.confirmedForPublication -ne $true) {
         Add-Failure "Confirmed publication evidence verification must record final MIT confirmation."
     }
@@ -452,17 +826,31 @@ if ($null -ne $confirmedVerification) {
 }
 
 $invalidUrlVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "invalid-github-actions-url/publication-evidence.json")
-if ($null -ne $invalidUrlVerification -and -not (@($invalidUrlVerification.internalFailures) | Where-Object { $_ -match "GitHubActionsRunUrl must point" })) {
-    Add-Failure "Invalid GitHub Actions URL verification must record the expected internal failure."
+if ($null -ne $invalidUrlVerification) {
+    Test-PublicationEvidenceDocument `
+        -Evidence $invalidUrlVerification `
+        -Description "Invalid URL publication evidence verification"
+    if (-not (@($invalidUrlVerification.internalFailures) | Where-Object { $_ -cmatch "GitHubActionsRunUrl must point" })) {
+        Add-Failure "Invalid GitHub Actions URL verification must record the expected internal failure."
+    }
+}
+
+$requirePublishableVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "require-publishable/publication-evidence.json")
+if ($null -ne $requirePublishableVerification) {
+    Test-PublicationEvidenceDocument `
+        -Evidence $requirePublishableVerification `
+        -Description "Require-publishable publication evidence verification"
 }
 
 if ($null -ne $preflight) {
+    Test-PreflightDocument $preflight
+
     if ($preflight.schemaVersion -ne 1) {
         Add-Failure "Final publication preflight schemaVersion must be 1."
     }
 
-    if ($preflight.product -ne "OpenLineOps") {
-        Add-Failure "Final publication preflight product must be OpenLineOps."
+    if ($preflight.product -cne "OpenLineOps") {
+        Add-Failure "Final publication preflight product must be exactly 'OpenLineOps'."
     }
 
     Test-PreflightCase -Preflight $preflight -Name "missing-license-confirmation" -Expected "fail"

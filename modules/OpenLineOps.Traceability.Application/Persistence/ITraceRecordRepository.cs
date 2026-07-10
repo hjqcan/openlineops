@@ -7,7 +7,7 @@ namespace OpenLineOps.Traceability.Application.Persistence;
 
 public interface ITraceRecordRepository
 {
-    ValueTask SaveAsync(TraceRecord traceRecord, CancellationToken cancellationToken = default);
+    ValueTask<bool> TryAddAsync(TraceRecord traceRecord, CancellationToken cancellationToken = default);
 
     ValueTask<TraceRecord?> GetByIdAsync(TraceRecordId traceRecordId, CancellationToken cancellationToken = default);
 

@@ -49,4 +49,30 @@ public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<WebApplicationF
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    [Fact]
+    public async Task ProjectSnapshotRuntimeSessionStartRouteDoesNotExist()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/automation-projects/obsolete/snapshots/obsolete/runtime-sessions",
+            new { });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProductionRunStartRejectsRemovedSerialNumberField()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/automation-projects/obsolete/snapshots/obsolete/production-runs",
+            new
+            {
+                productionRunId = Guid.NewGuid(),
+                dutIdentityValue = "DUT-001",
+                actorId = "operator-a",
+                serialNumber = "SN-001"
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
 }

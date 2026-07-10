@@ -62,16 +62,21 @@ Return terminal outcomes only:
 - `TimedOut`
 - `Canceled`
 
-## Isolation Modes
+## Runtime configuration
 
-The current infrastructure supports these plugin execution directions:
+Configuration tokens are case-sensitive and accept only these canonical values:
 
-- In-process assembly load context for trusted first-party development.
-- External plugin host process for stronger lifecycle control.
-- Container launch argument generation for Docker or Podman based isolation.
-- Least-privilege identity launcher templates for OS-native account isolation.
+- `OpenLineOps:Plugins:Activator`: `ManifestOnly`, `AssemblyLoadContext`, or `ExternalProcess`.
+- `OpenLineOps:Plugins:EventLog:Provider`: `Sqlite`.
+- `OpenLineOps:Plugins:ExternalHost:Sandbox:IsolationMode`: `ExternalProcess`, `LeastPrivilegeIdentity`, or `Container`.
 
-Production deployments should prefer external process, container, or least-privilege isolation for third-party plugins.
+Use `ContainerRuntimeExecutable` to select `docker`, `podman`, or another compatible
+runtime; executable names are not isolation-mode aliases. Invalid or empty configured
+tokens fail during service registration. External-process lifecycle events always use
+the configured persistent event log; there is no event-discarding sink.
+
+Production deployments should prefer external process, container, or least-privilege
+isolation for third-party plugins.
 
 ## Packaging Layout
 
@@ -87,9 +92,8 @@ package-root/
 ```
 
 The manifest should match the assembly and entry type exposed by the plugin class.
-The file-system package catalog accepts `manifest.json`, `openlineops-plugin.json`,
-`plugin.manifest.json`, and `plugin.json`; `manifest.json` is the recommended name
-for simple plugin packages.
+Every plugin package must use the canonical `manifest.json` file name. Files with
+other names are not plugin manifests and are not discovered.
 
 ## Sample
 

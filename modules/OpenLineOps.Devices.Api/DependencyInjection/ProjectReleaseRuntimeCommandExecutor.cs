@@ -53,6 +53,14 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
         var route = await _routeResolver.ResolveAsync(
                 new DeviceCommandRouteRequest(
                     context.SessionId.ToString(),
+                    context.ProductionRunId.ToString(),
+                    context.ProductionLineDefinitionId,
+                    context.ProductionStageId,
+                    context.StageSequence,
+                    context.WorkstationId,
+                    context.DutIdentity.ModelId,
+                    context.DutIdentity.InputKey,
+                    context.DutIdentity.Value,
                     context.StepId.ToString(),
                     context.CommandId.ToString(),
                     context.NodeId.Value,
@@ -65,12 +73,21 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                     context.ApplicationId,
                     context.ProjectSnapshotId,
                     context.TargetKind,
-                    context.TargetId),
+                    context.TargetId,
+                    context.InputPayload,
+                    context.Timeout),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return route switch
         {
+            ProjectReleaseExternalTestProgramCommandRoute externalTestRoute =>
+                await ProjectReleaseExternalTestProgramCommandExecutor.ExecuteAsync(
+                        context,
+                        externalTestRoute,
+                        ExecuteExternalTestProviderAsync,
+                        cancellationToken)
+                    .ConfigureAwait(false),
             ProjectReleaseProcessCommandRoute =>
                 await _processPluginExecutor.ExecuteAsync(context, cancellationToken).ConfigureAwait(false),
             ProjectReleaseDeviceCommandRoute deviceRoute =>
@@ -79,6 +96,22 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                 $"Immutable release does not contain exactly one executable provider binding for capability '{context.TargetCapability.Value}' and target '{context.TargetKind}/{context.TargetId}'."),
             _ => RuntimeCommandExecutionResult.Rejected(
                 $"Immutable release provider kind '{route.ProviderKind}' is not executable.")
+        };
+    }
+
+    private async ValueTask<RuntimeCommandExecutionResult> ExecuteExternalTestProviderAsync(
+        RuntimeCommandExecutionContext context,
+        ProjectReleaseRuntimeCommandRoute route,
+        CancellationToken cancellationToken)
+    {
+        return route switch
+        {
+            ProjectReleaseProcessCommandRoute =>
+                await _processPluginExecutor.ExecuteAsync(context, cancellationToken).ConfigureAwait(false),
+            ProjectReleaseDeviceCommandRoute deviceRoute =>
+                await _deviceExecutor.ExecuteAsync(context, deviceRoute, cancellationToken).ConfigureAwait(false),
+            _ => RuntimeCommandExecutionResult.Rejected(
+                $"Frozen external test provider kind '{route.ProviderKind}' is not executable.")
         };
     }
 }

@@ -46,18 +46,44 @@ public sealed class PluginProcessCommandInventoryTests
                 [Command("process.vision:inspect", "process.vision", "Inspect")]))),
             new PluginManifestValidator());
 
-        var command = await inventory.FindProcessCommandAsync("process.vision", "inspect");
+        var command = await inventory.FindProcessCommandAsync("process.vision", "Inspect");
 
         Assert.NotNull(command);
         Assert.Equal("process.vision:inspect", command.CommandDefinitionId);
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect "));
         Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "Classify"));
         Assert.Null(await inventory.FindProcessCommandAsync("process.robot", "Inspect"));
         Assert.Null(await inventory.FindProcessCommandAsync(" ", "Inspect"));
     }
 
+    [Fact]
+    public async Task InterfaceDefaultLookupRequiresExactCanonicalCommandIdentity()
+    {
+        IPluginProcessCommandInventory inventory = new StaticProcessCommandInventory(
+            new PluginProcessCommandDescriptor(
+                "plugin.vision",
+                "Vision",
+                PluginKind.ProcessNode,
+                "process.vision:inspect",
+                "process.vision",
+                "Inspect",
+                null,
+                null,
+                30000,
+                0));
+
+        Assert.NotNull(await inventory.FindProcessCommandAsync("process.vision", "Inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync("Process.Vision", "Inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect "));
+    }
+
     private static PluginPackageDescriptor Package(PluginManifest manifest)
     {
-        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/openlineops-plugin.json");
+        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/manifest.json");
     }
 
     private static PluginManifest CreateManifest(
@@ -94,6 +120,16 @@ public sealed class PluginProcessCommandInventoryTests
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
+        }
+    }
+
+    private sealed class StaticProcessCommandInventory(
+        params PluginProcessCommandDescriptor[] commands) : IPluginProcessCommandInventory
+    {
+        public ValueTask<IReadOnlyCollection<PluginProcessCommandDescriptor>> ListProcessCommandsAsync(
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromResult<IReadOnlyCollection<PluginProcessCommandDescriptor>>(commands);
         }
     }
 }

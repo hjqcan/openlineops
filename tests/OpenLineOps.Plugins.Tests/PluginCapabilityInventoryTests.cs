@@ -45,13 +45,30 @@ public sealed class PluginCapabilityInventoryTests
             new PluginManifestValidator());
 
         Assert.True(await inventory.HasCapabilityAsync("device.scanner"));
+        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner"));
+        Assert.False(await inventory.HasCapabilityAsync(" device.scanner "));
         Assert.False(await inventory.HasCapabilityAsync("device.multimeter"));
         Assert.False(await inventory.HasCapabilityAsync(" "));
     }
 
+    [Fact]
+    public async Task InterfaceDefaultLookupRequiresExactCanonicalCapability()
+    {
+        IPluginCapabilityInventory inventory = new StaticCapabilityInventory(
+            new PluginCapabilityDescriptor(
+                "plugin.scanner",
+                "Scanner",
+                PluginKind.DeviceDriver,
+                "device.scanner"));
+
+        Assert.True(await inventory.HasCapabilityAsync("device.scanner"));
+        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner"));
+        Assert.False(await inventory.HasCapabilityAsync(" device.scanner "));
+    }
+
     private static PluginPackageDescriptor Package(PluginManifest manifest)
     {
-        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/openlineops-plugin.json");
+        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/manifest.json");
     }
 
     private static PluginManifest CreateManifest(
@@ -78,6 +95,16 @@ public sealed class PluginCapabilityInventoryTests
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
+        }
+    }
+
+    private sealed class StaticCapabilityInventory(
+        params PluginCapabilityDescriptor[] capabilities) : IPluginCapabilityInventory
+    {
+        public ValueTask<IReadOnlyCollection<PluginCapabilityDescriptor>> ListCapabilitiesAsync(
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromResult<IReadOnlyCollection<PluginCapabilityDescriptor>>(capabilities);
         }
     }
 }

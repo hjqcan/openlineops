@@ -65,6 +65,44 @@ public sealed class PluginManagementApiTests : IClassFixture<WebApplicationFacto
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ProcessEventsRequireExactCanonicalKindToken()
+    {
+        using var canonical = await _client.GetAsync("/api/plugins/process-events?kind=Started");
+        using var caseChanged = await _client.GetAsync("/api/plugins/process-events?kind=started");
+        var caseChangedBody = await caseChanged.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, canonical.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, caseChanged.StatusCode);
+        Assert.Contains("case-sensitive", caseChangedBody, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("%20")]
+    [InlineData("Started&kind=Stopped")]
+    public async Task ProcessEventsRejectExplicitNonCanonicalKind(string queryValue)
+    {
+        using var response = await _client.GetAsync($"/api/plugins/process-events?kind={queryValue}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("%20")]
+    [InlineData("%20plugin-alpha")]
+    [InlineData("plugin-alpha%20")]
+    [InlineData("plugin-alpha&pluginId=plugin-beta")]
+    public async Task ProcessEventsRejectExplicitNonCanonicalPluginId(string queryValue)
+    {
+        using var response = await _client.GetAsync($"/api/plugins/process-events?pluginId={queryValue}");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("PluginId", body, StringComparison.Ordinal);
+    }
+
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)
     {
         var stream = await response.Content.ReadAsStreamAsync();

@@ -1,4 +1,3 @@
-using OpenLineOps.Devices.Domain.Events;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Domain.Operations;
 using OpenLineOps.Domain.Abstractions.Entities;
@@ -86,7 +85,7 @@ public sealed class DeviceInstance : AggregateRoot<DeviceInstanceId>
         return instance;
     }
 
-    public DeviceOperationResult RequestConnection(DateTimeOffset requestedAtUtc)
+    public DeviceOperationResult RequestConnection()
     {
         if (Status == DeviceConnectionStatus.Connected || Status == DeviceConnectionStatus.Connecting)
         {
@@ -100,7 +99,7 @@ public sealed class DeviceInstance : AggregateRoot<DeviceInstanceId>
                 $"Device {Id} is faulted and must be reset before reconnecting.");
         }
 
-        ChangeStatus(DeviceConnectionStatus.Connecting, requestedAtUtc, "Connection requested.");
+        ChangeStatus(DeviceConnectionStatus.Connecting);
 
         return DeviceOperationResult.Accepted("Connection requested.");
     }
@@ -121,7 +120,7 @@ public sealed class DeviceInstance : AggregateRoot<DeviceInstanceId>
 
         ConnectedAtUtc = connectedAtUtc;
         FaultReason = null;
-        ChangeStatus(DeviceConnectionStatus.Connected, connectedAtUtc, "Device connected.");
+        ChangeStatus(DeviceConnectionStatus.Connected);
 
         return DeviceOperationResult.Accepted("Device connected.");
     }
@@ -136,23 +135,23 @@ public sealed class DeviceInstance : AggregateRoot<DeviceInstanceId>
         LastDisconnectedAtUtc = disconnectedAtUtc;
         ConnectedAtUtc = null;
         FaultReason = null;
-        ChangeStatus(DeviceConnectionStatus.Disconnected, disconnectedAtUtc, reason);
+        ChangeStatus(DeviceConnectionStatus.Disconnected);
 
         return DeviceOperationResult.Accepted("Device disconnected.");
     }
 
-    public DeviceOperationResult MarkFaulted(DateTimeOffset faultedAtUtc, string reason)
+    public DeviceOperationResult MarkFaulted(string reason)
     {
         var normalizedReason = DeviceIdGuard.NotBlank(reason, nameof(reason));
 
         ConnectedAtUtc = null;
         FaultReason = normalizedReason;
-        ChangeStatus(DeviceConnectionStatus.Faulted, faultedAtUtc, normalizedReason);
+        ChangeStatus(DeviceConnectionStatus.Faulted);
 
         return DeviceOperationResult.Accepted("Device faulted.");
     }
 
-    public DeviceOperationResult ResetFault(DateTimeOffset resetAtUtc)
+    public DeviceOperationResult ResetFault()
     {
         if (Status != DeviceConnectionStatus.Faulted)
         {
@@ -160,26 +159,18 @@ public sealed class DeviceInstance : AggregateRoot<DeviceInstanceId>
         }
 
         FaultReason = null;
-        ChangeStatus(DeviceConnectionStatus.Disconnected, resetAtUtc, "Fault reset.");
+        ChangeStatus(DeviceConnectionStatus.Disconnected);
 
         return DeviceOperationResult.Accepted("Fault reset.");
     }
 
-    private void ChangeStatus(
-        DeviceConnectionStatus newStatus,
-        DateTimeOffset changedAtUtc,
-        string? reason)
+    private void ChangeStatus(DeviceConnectionStatus newStatus)
     {
         if (Status == newStatus)
         {
             return;
         }
 
-        var previousStatus = Status;
         Status = newStatus;
-        RaiseDomainEvent(new DeviceConnectionStatusChangedDomainEvent(Id, previousStatus, newStatus, reason)
-        {
-            OccurredAtUtc = changedAtUtc
-        });
     }
 }

@@ -199,7 +199,7 @@ public sealed class DeviceConfigurationService : IDeviceConfigurationService
             deviceInstanceId,
             instance =>
             {
-                var requested = instance.RequestConnection(_clock.UtcNow);
+                var requested = instance.RequestConnection();
                 if (!requested.Succeeded)
                 {
                     return requested;
@@ -232,7 +232,7 @@ public sealed class DeviceConfigurationService : IDeviceConfigurationService
 
         return await ChangeInstanceAsync(
             deviceInstanceId,
-            instance => instance.MarkFaulted(_clock.UtcNow, request.Reason ?? "Faulted from device management."),
+            instance => instance.MarkFaulted(request.Reason ?? "Faulted from device management."),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -242,7 +242,7 @@ public sealed class DeviceConfigurationService : IDeviceConfigurationService
     {
         return await ChangeInstanceAsync(
             deviceInstanceId,
-            instance => instance.ResetFault(_clock.UtcNow),
+            instance => instance.ResetFault(),
             cancellationToken).ConfigureAwait(false);
     }
 

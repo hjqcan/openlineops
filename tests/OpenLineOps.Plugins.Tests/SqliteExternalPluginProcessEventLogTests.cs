@@ -90,6 +90,55 @@ public sealed class SqliteExternalPluginProcessEventLogTests
         Assert.Equal("started", processEvent.Message);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData(" plugin-alpha")]
+    [InlineData("plugin-alpha ")]
+    public async Task ListAsyncRejectsNonCanonicalPluginIdQueries(string pluginId)
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: pluginId)));
+    }
+
+    [Fact]
+    public async Task ListAsyncMatchesPluginIdWithExactCasing()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
+        log.Record(new ExternalPluginProcessEvent(
+            ExternalPluginProcessEventKind.Started,
+            "plugin-alpha",
+            "started",
+            DateTimeOffset.Parse("2026-06-29T09:00:00Z", CultureInfo.InvariantCulture)));
+
+        var exact = await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: "plugin-alpha"));
+        var caseAlias = await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: "Plugin-Alpha"));
+
+        Assert.Single(exact);
+        Assert.Empty(caseAlias);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData(" plugin-alpha ")]
+    public void RecordRejectsNonCanonicalPluginId(string pluginId)
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
+        var processEvent = new ExternalPluginProcessEvent(
+            ExternalPluginProcessEventKind.Started,
+            pluginId,
+            "started",
+            DateTimeOffset.Parse("2026-06-29T09:00:00Z", CultureInfo.InvariantCulture));
+
+        Assert.Throws<ArgumentException>(() => log.Record(processEvent));
+    }
+
     private sealed class TemporarySqliteDatabase : IDisposable
     {
         private TemporarySqliteDatabase(string directory, string databasePath)

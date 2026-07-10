@@ -440,6 +440,12 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         AutomationProjectSnapshotFile snapshot,
         string projectFilePath)
     {
+        if (string.IsNullOrWhiteSpace(snapshot.ProductionLineDefinitionId))
+        {
+            throw new InvalidDataException(
+                $"Project file '{projectFilePath}' snapshot '{snapshot.SnapshotId}' is missing productionLineDefinitionId.");
+        }
+
         if (string.IsNullOrWhiteSpace(snapshot.ReleaseManifestPath))
         {
             throw new InvalidDataException(
@@ -493,9 +499,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             snapshot.ApplicationId,
             snapshot.TopologyId,
             NormalizeStrings(snapshot.LayoutIds),
-            snapshot.ProcessDefinitionId,
-            snapshot.ProcessVersionId,
-            snapshot.ConfigurationSnapshotId,
+            snapshot.ProductionLineDefinitionId,
             snapshot.PublishedAtUtc,
             snapshot.CapabilityBindings,
             snapshot.TargetReferences,
@@ -514,9 +518,7 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             snapshot.ApplicationId,
             snapshot.TopologyId,
             NormalizeStrings(snapshot.LayoutIds),
-            snapshot.ProcessDefinitionId,
-            snapshot.ProcessVersionId,
-            snapshot.ConfigurationSnapshotId,
+            snapshot.ProductionLineDefinitionId,
             snapshot.PublishedAtUtc,
             snapshot.CapabilityBindings,
             snapshot.TargetReferences,

@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using OpenLineOps.Domain.Abstractions.EventBus;
-using OpenLineOps.Domain.Abstractions.Events;
+using OpenLineOps.Infrastructure.Data.Core.EventBus;
 using OpenLineOps.Operations.Domain.Aggregates;
 using OpenLineOps.Operations.Domain.Events;
 using OpenLineOps.Operations.Domain.Events.Converters;
@@ -13,13 +13,15 @@ namespace OpenLineOps.Operations.Tests;
 
 public sealed class AlarmPersistenceTests
 {
+    private static readonly IntegrationEventPublicationPolicy PostCommitPolicy =
+        new(IntegrationEventPublicationMode.PostCommit);
+
     [Fact]
-    public async Task EfDataCoreRepositoryPersistsAlarmLifecycleAndDispatchesDomainEvents()
+    public async Task EfDataCoreRepositoryPersistsAlarmLifecycleAndPublishesIntegrationEvent()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
 
-        var dispatcher = new CapturingDomainEventDispatcher();
         var publisher = new CapturingIntegrationEventPublisher();
         var options = new DbContextOptionsBuilder<OperationsDbContext>()
             .UseSqlite(connection)
@@ -34,7 +36,10 @@ public sealed class AlarmPersistenceTests
             "The runtime command failed.",
             new DateTimeOffset(2026, 6, 30, 8, 0, 0, TimeSpan.Zero));
 
-        await using (var context = new OperationsDbContext(options, dispatcher, publisher))
+        await using (var context = new OperationsDbContext(
+                         options,
+                         PostCommitPolicy,
+                         integrationEventPublisher: publisher))
         {
             await context.Database.MigrateAsync();
 
@@ -64,8 +69,7 @@ public sealed class AlarmPersistenceTests
         }
 
         var raisedEvent = Assert.IsType<AlarmRaisedDomainEvent>(
-            Assert.Single(dispatcher.Dispatched));
-        Assert.Same(raisedEvent, Assert.Single(publisher.Published));
+            Assert.Single(publisher.Published));
 
         var integrationDto = raisedEvent.ToIntegrationDto();
 
@@ -84,7 +88,10 @@ public sealed class AlarmPersistenceTests
             .UseSqlite(connection)
             .Options;
 
-        await using var context = new OperationsDbContext(options);
+        await using var context = new OperationsDbContext(
+            options,
+            PostCommitPolicy,
+            integrationEventPublisher: new CapturingIntegrationEventPublisher());
         await context.Database.MigrateAsync();
 
         var open = Alarm.Raise(
@@ -145,7 +152,10 @@ public sealed class AlarmPersistenceTests
             .Options;
         var alarmId = new AlarmId($"operations.alarm.auto-migrate.{Guid.NewGuid():N}");
 
-        await using (var context = new OperationsDbContext(options))
+        await using (var context = new OperationsDbContext(
+                         options,
+                         PostCommitPolicy,
+                         integrationEventPublisher: new CapturingIntegrationEventPublisher()))
         {
             var repository = new EfAlarmRepository(context);
             repository.Add(Alarm.Raise(
@@ -170,19 +180,6 @@ public sealed class AlarmPersistenceTests
 
             Assert.NotNull(restored);
             Assert.Equal("station-auto-migrate", restored.StationId);
-        }
-    }
-
-    private sealed class CapturingDomainEventDispatcher : IDomainEventDispatcher
-    {
-        public List<IDomainEvent> Dispatched { get; } = [];
-
-        public Task DispatchAsync(
-            IReadOnlyCollection<IDomainEvent> domainEvents,
-            CancellationToken cancellationToken = default)
-        {
-            Dispatched.AddRange(domainEvents);
-            return Task.CompletedTask;
         }
     }
 

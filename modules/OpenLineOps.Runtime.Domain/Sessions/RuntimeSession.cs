@@ -177,17 +177,17 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             return RuntimeOperationResult.Accepted("Session is already paused.");
         }
 
-        return TransitionTo(RuntimeSessionStatus.Pausing, requestedAtUtc, NormalizeReason(reason, "Pause requested."));
+        return TransitionTo(RuntimeSessionStatus.Pausing, requestedAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult ConfirmPaused(DateTimeOffset pausedAtUtc, string reason)
     {
-        return TransitionTo(RuntimeSessionStatus.Paused, pausedAtUtc, NormalizeReason(reason, "Session paused."));
+        return TransitionTo(RuntimeSessionStatus.Paused, pausedAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult Resume(DateTimeOffset resumedAtUtc, string reason)
     {
-        return TransitionTo(RuntimeSessionStatus.Running, resumedAtUtc, NormalizeReason(reason, "Session resumed."));
+        return TransitionTo(RuntimeSessionStatus.Running, resumedAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult RequestStop(DateTimeOffset requestedAtUtc, string reason)
@@ -197,12 +197,12 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             return RuntimeOperationResult.Accepted("Session is already stopped.");
         }
 
-        return TransitionTo(RuntimeSessionStatus.Stopping, requestedAtUtc, NormalizeReason(reason, "Stop requested."));
+        return TransitionTo(RuntimeSessionStatus.Stopping, requestedAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult MarkStopped(DateTimeOffset stoppedAtUtc, string reason)
     {
-        return TransitionTo(RuntimeSessionStatus.Stopped, stoppedAtUtc, NormalizeReason(reason, "Session stopped."));
+        return TransitionTo(RuntimeSessionStatus.Stopped, stoppedAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult Complete(DateTimeOffset completedAtUtc)
@@ -217,7 +217,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             return RuntimeOperationResult.Accepted("Session is already canceled.");
         }
 
-        return TransitionTo(RuntimeSessionStatus.Canceled, canceledAtUtc, NormalizeReason(reason, "Session canceled."));
+        return TransitionTo(RuntimeSessionStatus.Canceled, canceledAtUtc, RequiredReason(reason));
     }
 
     public RuntimeOperationResult Fail(DateTimeOffset failedAtUtc, string code, string message)
@@ -319,17 +319,26 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
     public RuntimeOperationResult CompleteCommand(
         RuntimeCommandId commandId,
         string? resultPayload,
-        DateTimeOffset completedAtUtc)
+        DateTimeOffset completedAtUtc,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
         return ChangeCommandStatus(
             commandId,
-            command => command.Complete(resultPayload, completedAtUtc),
+            command => command.Complete(resultPayload, completedAtUtc, semanticOutcome),
             "Command completed.");
     }
 
-    public RuntimeOperationResult FailCommand(RuntimeCommandId commandId, string reason, DateTimeOffset failedAtUtc)
+    public RuntimeOperationResult FailCommand(
+        RuntimeCommandId commandId,
+        string reason,
+        DateTimeOffset failedAtUtc,
+        string? resultPayload = null,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
-        return ChangeCommandStatus(commandId, command => command.Fail(reason, failedAtUtc), NormalizeReason(reason, "Command failed."));
+        return ChangeCommandStatus(
+            commandId,
+            command => command.Fail(reason, failedAtUtc, resultPayload, semanticOutcome),
+            RequiredReason(reason));
     }
 
     public RuntimeOperationResult TimeoutCommand(RuntimeCommandId commandId, DateTimeOffset timedOutAtUtc)
@@ -337,14 +346,25 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         return ChangeCommandStatus(commandId, command => command.TimeoutAt(timedOutAtUtc), "Command timed out.");
     }
 
-    public RuntimeOperationResult CancelCommand(RuntimeCommandId commandId, DateTimeOffset canceledAtUtc)
+    public RuntimeOperationResult CancelCommand(
+        RuntimeCommandId commandId,
+        DateTimeOffset canceledAtUtc,
+        string reason = "Command canceled.",
+        string? resultPayload = null,
+        RuntimeCommandSemanticOutcome? semanticOutcome = null)
     {
-        return ChangeCommandStatus(commandId, command => command.Cancel(canceledAtUtc), "Command canceled.");
+        return ChangeCommandStatus(
+            commandId,
+            command => command.Cancel(canceledAtUtc, reason, resultPayload, semanticOutcome),
+            RequiredReason(reason));
     }
 
     public RuntimeOperationResult RejectCommand(RuntimeCommandId commandId, string reason, DateTimeOffset rejectedAtUtc)
     {
-        return ChangeCommandStatus(commandId, command => command.Reject(reason, rejectedAtUtc), NormalizeReason(reason, "Command rejected."));
+        return ChangeCommandStatus(
+            commandId,
+            command => command.Reject(reason, rejectedAtUtc),
+            RequiredReason(reason));
     }
 
     public RuntimeIncident RecordIncident(
@@ -513,10 +533,14 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             or RuntimeSessionStatus.Canceled;
     }
 
-    private static string NormalizeReason(string reason, string fallback)
+    private static string RequiredReason(string reason)
     {
         return string.IsNullOrWhiteSpace(reason)
-            ? fallback
-            : reason.Trim();
+            || char.IsWhiteSpace(reason[0])
+            || char.IsWhiteSpace(reason[^1])
+            ? throw new ArgumentException(
+                "Runtime transition reason must be non-empty canonical text.",
+                nameof(reason))
+            : reason;
     }
 }

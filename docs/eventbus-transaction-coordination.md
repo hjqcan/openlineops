@@ -1,12 +1,36 @@
-# EventBus Transaction Coordination
+# EventBus Publication Policy
 
-OpenLineOps publishes integration events through the shared CAP-backed EventBus.
-The default local profile keeps CAP in memory and does not coordinate CAP with EF Core transactions.
+OpenLineOps requires one explicit integration-event publication mode. The configured value is part of the unit-of-work contract; the runtime never infers behavior from whichever services happen to be registered.
 
-For deployment profiles that require an aggregate write and its integration-event outbox row to commit atomically,
-OpenLineOps provides an optional EF Core transaction coordinator.
+## PostCommit
 
-## Configuration
+Use `PostCommit` when the bounded-context database and CAP storage cannot share one relational transaction, including the desktop SQLite profile.
+
+```json
+{
+  "OpenLineOps": {
+    "EventBus": {
+      "PublicationMode": "PostCommit",
+      "UseInMemory": true
+    }
+  }
+}
+```
+
+The commit sequence is:
+
+1. Verify that the publication policy and `IIntegrationEventPublisher` exist.
+2. Save aggregate changes.
+3. Publish each integration event through the ordinary publisher.
+4. Remove each event from its aggregate only after that event publishes successfully.
+
+Missing dependencies fail before the database save. Persistence or publication failures are logged and rethrown. If publication fails after the database commit, the failed and not-yet-attempted events remain attached to the tracked aggregate; retrying `CommitAsync` on the same unit of work publishes those events even though EF has no additional changed rows. Events that already published successfully were removed individually and are not repeated by that retry.
+
+`PostCommit` does not provide crash-safe recovery after the DbContext is discarded. Use `Transactional` whenever a durable CAP outbox is required. Consumers must still be idempotent because distributed delivery is at least once.
+
+## Transactional
+
+Use `Transactional` only when the bounded-context EF Core store and CAP PostgreSQL storage intentionally share the same PostgreSQL database transaction.
 
 ```json
 {
@@ -15,10 +39,10 @@ OpenLineOps provides an optional EF Core transaction coordinator.
   },
   "OpenLineOps": {
     "EventBus": {
+      "PublicationMode": "Transactional",
       "UseInMemory": false,
       "ConnectionStringName": "OpenLineOpsEventBus",
       "PostgreSqlSchema": "cap",
-      "EnableEfCoreTransactionCoordinator": true,
       "RabbitMq": {
         "Enabled": true,
         "HostName": "localhost",
@@ -29,40 +53,22 @@ OpenLineOps provides an optional EF Core transaction coordinator.
 }
 ```
 
-Only enable `EnableEfCoreTransactionCoordinator` when the EF-backed bounded context and CAP storage participate in the same relational database transaction. The intended production profile is PostgreSQL EF Core bounded contexts plus CAP PostgreSQL storage in the same database. Leave it disabled for local in-memory CAP, mixed database providers, or SQLite-only desktop profiles.
+The commit sequence is:
 
-When `UseInMemory` is `false`, CAP stores outbox records in PostgreSQL. If `RabbitMq.Enabled` is `false`, OpenLineOps uses CAP's in-memory message queue for local or integration-test profiles; enable RabbitMQ for cross-process deployment messaging.
+1. At host startup, verify `ITransactionalIntegrationEventPublisher` and `IIntegrationEventTransactionCoordinator` are resolvable.
+2. Before each eventful commit, repeat the policy and dependency preflight.
+3. Begin the CAP-aware EF Core transaction.
+4. Save with EF change acceptance deferred.
+5. Write integration events to the CAP outbox.
+6. Commit the database and outbox transaction together.
+7. Accept EF changes and remove domain events only after the transaction succeeds.
 
-For the full Operations server profile, including environment-variable examples and verification commands, see `docs/operations-postgresql-deployment.md`.
+Any save, publish, or transaction failure is logged and rethrown. The transaction rolls back, EF entity states remain retryable, and domain events remain attached to their aggregates.
 
-## Runtime Behavior
+`Transactional` is rejected with in-memory CAP storage. PostgreSQL CAP storage may still use the in-memory message queue when `RabbitMq.Enabled` is `false`; the outbox remains durable, but cross-process transport requires RabbitMQ.
 
-When a `BaseDbContext` has integration events and both of these services are available:
+## Domain-event boundary
 
-- `IIntegrationEventTransactionCoordinator`
-- `ITransactionalIntegrationEventPublisher`
+`BaseDbContext` has no implicit local dispatcher. A non-integration domain event therefore fails preflight before persistence. An event must either have a real product consumer and be modeled as an integration event with its boundary DTO converter, or it must not be raised.
 
-the commit flow is:
-
-1. Open a CAP-aware EF Core transaction.
-2. Save aggregate changes through `SaveChangesAsync`.
-3. Publish integration events with strict failure handling.
-4. Commit the EF transaction and CAP transaction together.
-5. Dispatch local domain-event subscribers after the transactional commit succeeds.
-
-If strict integration publishing fails, the coordinator rolls back the transaction and `CommitAsync` throws. This is intentional: in the coordinated profile, missing an outbox row is treated as a failed unit of work.
-
-When the coordinator is not registered, OpenLineOps keeps the compatibility behavior:
-
-- Save aggregate changes first.
-- Dispatch local domain events.
-- Publish integration events through the normal publisher path.
-- Log publish failures without failing the already-committed business operation.
-
-## Design Rules
-
-- Domain projects do not reference CAP or EF transaction APIs.
-- `BaseDbContext` depends on the small Data.Core `IIntegrationEventTransactionCoordinator` port.
-- CAP-specific transaction code lives in `shared/OpenLineOps.EventBus`.
-- Generated bounded contexts include the optional coordinator constructor parameter by default.
-- Do not enable same-transaction coordination until the bounded context storage and CAP storage are intentionally deployed on the same relational database.
+CAP and transaction implementations remain in `shared/OpenLineOps.EventBus`; domain projects depend only on the event abstractions, and Data.Core depends on the explicit publication policy and coordinator port.

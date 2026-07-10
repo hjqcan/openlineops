@@ -1,29 +1,17 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace OpenLineOps.ReleaseManifest;
 
 public static class ReleaseManifestVerifier
 {
-    private const string OtherArtifactKind = "other";
-
-    private static readonly (string Alias, string Kind)[] ArtifactKindAliases =
-    [
-        ("plugin-host", "plugin-host"),
-        ("pluginhost", "plugin-host"),
-        ("script-worker", "script-worker"),
-        ("scriptworker", "script-worker"),
-        ("sample-plugins", "sample-plugin"),
-        ("sample-plugin", "sample-plugin"),
-        ("desktop", "desktop"),
-        ("electron", "desktop"),
-        ("source", "source"),
-        ("api", "api")
-    ];
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNameCaseInsensitive = true
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        AllowDuplicateProperties = false
     };
 
     public static ReleaseManifestVerificationResult Verify(ReleaseManifestVerificationOptions options)
@@ -38,7 +26,8 @@ public static class ReleaseManifestVerifier
                 $"Unsupported release manifest schemaVersion {document.SchemaVersion}. Expected 1.");
         }
 
-        if (document.Artifacts.Count == 0)
+        VerifyManifestMetadata(document);
+        if (document.Artifacts is null || document.Artifacts.Count == 0)
         {
             throw new InvalidOperationException("Release manifest does not contain any artifacts.");
         }
@@ -51,6 +40,19 @@ public static class ReleaseManifestVerifier
         }
 
         return new ReleaseManifestVerificationResult(document.Artifacts.Count);
+    }
+
+    private static void VerifyManifestMetadata(ReleaseManifestDocument document)
+    {
+        if (!string.Equals(document.Product, ReleaseManifestContract.Product, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Release product must be exactly '{ReleaseManifestContract.Product}'.");
+        }
+
+        ReleaseManifestContract.ValidateVersion(document.Version);
+        ReleaseManifestContract.ValidateGeneratedAtUtc(document.GeneratedAtUtc);
+        ReleaseManifestContract.ValidateCommit(document.Commit);
     }
 
     private static void ValidateOptions(ReleaseManifestVerificationOptions options)
@@ -89,9 +91,8 @@ public static class ReleaseManifestVerifier
         IReadOnlyCollection<ReleaseArtifactEntry> artifacts)
     {
         var requiredKinds = options.RequiredArtifactKinds
-            .Select(NormalizeArtifactKind)
-            .Where(kind => kind.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(ReleaseArtifactKinds.Parse)
+            .Distinct(StringComparer.Ordinal)
             .ToArray();
         if (requiredKinds.Length == 0)
         {
@@ -100,7 +101,7 @@ public static class ReleaseManifestVerifier
 
         var availableKinds = artifacts
             .Select(artifact => artifact.Kind)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(StringComparer.Ordinal);
         var missingKinds = requiredKinds
             .Where(kind => !availableKinds.Contains(kind))
             .ToArray();
@@ -111,7 +112,7 @@ public static class ReleaseManifestVerifier
 
         var available = string.Join(
             ", ",
-            availableKinds.OrderBy(kind => kind, StringComparer.OrdinalIgnoreCase));
+            availableKinds.OrderBy(kind => kind, StringComparer.Ordinal));
         throw new InvalidOperationException(
             $"Required artifact kind(s) were missing: {string.Join(", ", missingKinds)}. "
             + $"Available artifact kind(s): {available}.");
@@ -124,6 +125,11 @@ public static class ReleaseManifestVerifier
         var relativePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var artifact in artifacts)
         {
+            if (artifact is null)
+            {
+                throw new InvalidOperationException("Release manifest contains a null artifact entry.");
+            }
+
             VerifyArtifactMetadata(artifact);
             if (!relativePaths.Add(artifact.RelativePath))
             {
@@ -148,18 +154,18 @@ public static class ReleaseManifestVerifier
             }
 
             var sha256 = ComputeSha256(artifactPath);
-            if (!string.Equals(sha256, artifact.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(sha256, artifact.Sha256, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"Release artifact '{artifact.RelativePath}' SHA-256 mismatch.");
             }
 
-            var inferredKind = InferArtifactKind(artifact.RelativePath);
-            if (!string.Equals(inferredKind, artifact.Kind, StringComparison.OrdinalIgnoreCase))
+            var pathKind = ReleaseArtifactKinds.FromRelativePath(artifact.RelativePath);
+            if (!string.Equals(pathKind, artifact.Kind, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"Release artifact '{artifact.RelativePath}' kind mismatch. "
-                    + $"Expected '{inferredKind}', found '{artifact.Kind}'.");
+                    + $"Expected '{pathKind}', found '{artifact.Kind}'.");
             }
         }
     }
@@ -175,6 +181,14 @@ public static class ReleaseManifestVerifier
         {
             throw new InvalidOperationException(
                 $"Release artifact '{artifact.RelativePath}' must use forward slashes in the manifest.");
+        }
+
+        var pathSegments = artifact.RelativePath.Split('/');
+        if (Path.IsPathRooted(artifact.RelativePath)
+            || pathSegments.Any(segment => !IsCanonicalPathSegment(segment)))
+        {
+            throw new InvalidOperationException(
+                $"Release artifact '{artifact.RelativePath}' is not a canonical relative path.");
         }
 
         if (string.IsNullOrWhiteSpace(artifact.FileName))
@@ -198,18 +212,18 @@ public static class ReleaseManifestVerifier
                 $"Release artifact '{artifact.RelativePath}' has an empty artifact kind.");
         }
 
+        ReleaseArtifactKinds.Parse(artifact.Kind);
+
         if (artifact.SizeBytes < 0)
         {
             throw new InvalidOperationException(
                 $"Release artifact '{artifact.RelativePath}' has a negative size.");
         }
 
-        if (string.IsNullOrWhiteSpace(artifact.Sha256)
-            || artifact.Sha256.Length != 64
-            || !artifact.Sha256.All(Uri.IsHexDigit))
+        if (!IsCanonicalSha256(artifact.Sha256))
         {
             throw new InvalidOperationException(
-                $"Release artifact '{artifact.RelativePath}' has an invalid SHA-256 value.");
+                $"Release artifact '{artifact.RelativePath}' must use a lowercase 64-character SHA-256 value.");
         }
     }
 
@@ -220,33 +234,36 @@ public static class ReleaseManifestVerifier
         var expected = artifacts.ToDictionary(
             artifact => artifact.RelativePath,
             artifact => artifact.Sha256,
-            StringComparer.OrdinalIgnoreCase);
-        var actual = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            StringComparer.Ordinal);
+        var actual = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var rawLine in File.ReadAllLines(checksumsPath))
         {
-            var line = rawLine.Trim();
-            if (line.Length == 0)
+            if (rawLine.Length == 0)
             {
-                continue;
+                throw new InvalidOperationException(
+                    $"Invalid empty checksum line in '{checksumsPath}'.");
             }
 
-            var separatorIndex = line.IndexOfAny([' ', '\t']);
-            if (separatorIndex <= 0)
+            if (rawLine.Length <= 66
+                || rawLine[64] != ' '
+                || rawLine[65] != ' ')
             {
                 throw new InvalidOperationException(
                     $"Invalid checksum line in '{checksumsPath}': {rawLine}");
             }
 
-            var hash = line[..separatorIndex].Trim();
-            var relativePath = line[separatorIndex..].Trim();
-            if (relativePath.Length == 0)
+            var hash = rawLine[..64];
+            var relativePath = rawLine[66..];
+            if (!IsCanonicalSha256(hash)
+                || relativePath.Length == 0
+                || !string.Equals(relativePath, relativePath.Trim(), StringComparison.Ordinal)
+                || relativePath.Contains('\\', StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"Invalid checksum line in '{checksumsPath}': {rawLine}");
             }
 
-            relativePath = relativePath.Replace('\\', '/');
             if (!actual.TryAdd(relativePath, hash))
             {
                 throw new InvalidOperationException(
@@ -262,7 +279,7 @@ public static class ReleaseManifestVerifier
                     $"Checksums file is missing artifact '{relativePath}'.");
             }
 
-            if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(expectedHash, actualHash, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     $"Checksums file SHA-256 mismatch for artifact '{relativePath}'.");
@@ -271,7 +288,7 @@ public static class ReleaseManifestVerifier
 
         var extraPaths = actual.Keys
             .Where(path => !expected.ContainsKey(path))
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.Ordinal)
             .ToArray();
         if (extraPaths.Length > 0)
         {
@@ -287,17 +304,50 @@ public static class ReleaseManifestVerifier
             .GetFullPath(artifactsDirectory)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var rootPrefix = fullRoot + Path.DirectorySeparatorChar;
-        var artifactPath = Path.GetFullPath(Path.Combine(
+        var requestedPath = Path.GetFullPath(Path.Combine(
             fullRoot,
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
 
-        if (!artifactPath.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        if (!requestedPath.StartsWith(rootPrefix, pathComparison))
         {
             throw new InvalidOperationException(
                 $"Release artifact '{relativePath}' resolves outside the artifacts directory.");
         }
 
-        return artifactPath;
+        var currentPath = fullRoot;
+        var segments = relativePath.Split('/');
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var segment = segments[index];
+            var exactMatches = Directory
+                .EnumerateFileSystemEntries(currentPath)
+                .Where(entry => string.Equals(Path.GetFileName(entry), segment, StringComparison.Ordinal))
+                .ToArray();
+            if (exactMatches.Length != 1)
+            {
+                throw new FileNotFoundException(
+                    $"Release artifact '{relativePath}' does not exist with its exact canonical path.",
+                    requestedPath);
+            }
+
+            currentPath = exactMatches[0];
+            if ((File.GetAttributes(currentPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Release artifact '{relativePath}' must not traverse a symbolic link or junction.");
+            }
+
+            if (index < segments.Length - 1 && !Directory.Exists(currentPath))
+            {
+                throw new InvalidOperationException(
+                    $"Release artifact '{relativePath}' contains a non-directory path segment '{segment}'.");
+            }
+        }
+
+        return currentPath;
     }
 
     private static string ComputeSha256(string filePath)
@@ -307,39 +357,19 @@ public static class ReleaseManifestVerifier
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private static string InferArtifactKind(string relativePath)
+    private static bool IsCanonicalSha256(string? value)
     {
-        var normalizedPath = relativePath.Replace('\\', '/');
-        var separatorIndex = normalizedPath.IndexOf('/', StringComparison.Ordinal);
-        var topLevelToken = separatorIndex > 0
-            ? normalizedPath[..separatorIndex]
-            : Path.GetFileNameWithoutExtension(normalizedPath);
-
-        return MatchArtifactKindAlias(topLevelToken, allowPrefix: true);
+        return value is { Length: 64 }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 
-    private static string NormalizeArtifactKind(string value)
+    private static bool IsCanonicalPathSegment(string segment)
     {
-        return MatchArtifactKindAlias(value, allowPrefix: false);
+        return segment.Length > 0
+            && segment is not "." and not ".."
+            && string.Equals(segment, segment.Trim(), StringComparison.Ordinal)
+            && segment.All(character => char.IsAsciiLetterOrDigit(character)
+                || character is '.' or '_' or '-');
     }
 
-    private static string MatchArtifactKindAlias(string value, bool allowPrefix)
-    {
-        var token = value.Trim().ToLowerInvariant();
-        if (token.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        foreach (var (alias, kind) in ArtifactKindAliases)
-        {
-            if (string.Equals(token, alias, StringComparison.OrdinalIgnoreCase)
-                || allowPrefix && token.StartsWith(alias + "-", StringComparison.OrdinalIgnoreCase))
-            {
-                return kind;
-            }
-        }
-
-        return allowPrefix ? OtherArtifactKind : token;
-    }
 }

@@ -142,4 +142,27 @@ public sealed class PythonScriptWorkerStartInfoBuilderTests
         Assert.NotNull(error);
         Assert.Contains("container image", error, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("Docker")]
+    [InlineData("Podman")]
+    [InlineData("container")]
+    [InlineData("")]
+    public void BuildRejectsNonCanonicalIsolationMode(string isolationMode)
+    {
+        var options = new PythonScriptRuntimeOptions
+        {
+            WorkerFileName = "dotnet",
+            Sandbox = new PythonScriptWorkerSandboxOptions
+            {
+                IsolationMode = isolationMode,
+                ContainerImage = "openlineops/script-worker:1.0.0"
+            }
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            PythonScriptWorkerStartInfoBuilder.Build(options));
+
+        Assert.Contains("Expected exactly", exception.Message, StringComparison.Ordinal);
+    }
 }

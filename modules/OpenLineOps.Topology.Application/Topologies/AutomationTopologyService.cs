@@ -1,6 +1,7 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
-using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Topology.Application.Layouts;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Domain.Capabilities;
@@ -939,8 +940,7 @@ internal sealed class ApplicationAutomationTopologyEditor
     private static bool TryParseDefinedEnum<TEnum>(string value, out TEnum parsed)
         where TEnum : struct, Enum
     {
-        return Enum.TryParse(value, ignoreCase: false, out parsed)
-            && Enum.IsDefined(parsed);
+        return CanonicalEnumToken.TryParse(value, out parsed);
     }
 
     private static ApplicationError Required(string code, string fieldName)

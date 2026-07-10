@@ -1,12 +1,16 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Application.FlowIr;
+using OpenLineOps.Processes.Application.ProjectWorkspaces;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Transitions;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 using OpenLineOps.Production.Application.LineDefinitions;
+using OpenLineOps.Production.Domain.Identifiers;
 using OpenLineOps.Production.Infrastructure.Persistence;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
@@ -37,6 +41,9 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
 
         Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
         Assert.Equal(["stage.load", "stage.test"], result.Value.Stages.Select(stage => stage.StageId));
+        Assert.Equal(
+            ["configuration.load", "configuration.test"],
+            result.Value.Stages.Select(stage => stage.ConfigurationSnapshotId));
         Assert.Equal("stage.test", result.Value.Stages.First().NextStageId);
         Assert.Null(result.Value.Stages.Last().NextStageId);
         Assert.Equal("Provider", Assert.Single(result.Value.ExternalTestProgramAdapters).LaunchKind);
@@ -46,6 +53,64 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "lines",
             "line.main",
             "line.json")));
+    }
+
+    [Fact]
+    public async Task RepositoryRejectsLegacyStageResourceWithoutConfigurationSnapshotId()
+    {
+        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var createResult = await fixture.Service.CreateAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            Request());
+        Assert.True(createResult.IsSuccess, createResult.IsFailure ? createResult.Error.Message : string.Empty);
+
+        var path = Path.Combine(
+            fixture.Scope.ApplicationRootPath,
+            "production",
+            "lines",
+            "line.main",
+            "line.json");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        Assert.True(document["stages"]![0]!.AsObject().Remove("configurationSnapshotId"));
+        await File.WriteAllTextAsync(
+            path,
+            document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+        var repository = new FileSystemProjectProductionLineDefinitionRepository();
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(
+                fixture.Scope,
+                new ProductionLineDefinitionId("line.main")));
+        Assert.Contains("required semantic collections", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(" configuration.load")]
+    [InlineData("configuration.load ")]
+    public async Task ServiceRejectsMissingOrNonCanonicalStageConfigurationSnapshotId(
+        string? configurationSnapshotId)
+    {
+        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var request = Request() with
+        {
+            Stages = Request().Stages
+                .Select(stage => stage.Sequence == 1
+                    ? stage with { ConfigurationSnapshotId = configurationSnapshotId! }
+                    : stage)
+                .ToArray()
+        };
+
+        var result = await fixture.Service.CreateAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            request);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Production.InvalidLineDefinition", result.Error.Code);
     }
 
     [Fact]
@@ -148,6 +213,10 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             new FileSystemProjectProductionLineDefinitionRepository(),
             topologyRepository,
             processRepository,
+            new ProjectProcessBlocklyBlockCatalog(
+                new FixedScopeResolver(scope),
+                new FileSystemProjectProcessBlocklyBlockDefinitionRepository(),
+                new FixedClock(Now)),
             new ProcessFlowIrCompiler(),
             new FixedClock(Now));
         return new ServiceFixture(scope, service);
@@ -162,13 +231,21 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             new DutModelRequest("dut.model-a", "MODEL-A", "serialNumber"),
             [new WorkstationRequest("workstation.eol", "EOL", "station.eol")],
             [
-                new ProcessStageRequest("stage.load", 1, "Load", "workstation.eol", "flow.load", null),
+                new ProcessStageRequest(
+                    "stage.load",
+                    1,
+                    "Load",
+                    "workstation.eol",
+                    "flow.load",
+                    "configuration.load",
+                    null),
                 new ProcessStageRequest(
                     "stage.test",
                     2,
                     "External Test",
                     "workstation.eol",
                     "flow.test",
+                    "configuration.test",
                     "adapter.test")
             ],
             [new ExternalTestProgramAdapterRequest(
@@ -184,6 +261,11 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     new ExternalTestProgramInputMappingRequest("$dut.model", "model")
                 ],
                 [new ExternalTestProgramResultMappingRequest("$.outcome", "test.outcome")],
+                new ExternalTestProgramOutcomeMappingRequest(
+                    "$.outcome",
+                    "Passed",
+                    "Failed",
+                    "Aborted"),
                 30_000)]);
     }
 
@@ -234,6 +316,8 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                 new ProcessNodeId("action"),
                 "Action",
                 new ProcessCapabilityId(capabilityId),
+                ProcessActionTargetKind.Capability,
+                capabilityId,
                 commandName,
                 TimeSpan.FromSeconds(30),
                 adapterId is null

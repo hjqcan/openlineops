@@ -5,8 +5,6 @@ using OpenLineOps.Domain.Abstractions.EventBus;
 using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Domain.Abstractions.Repositories;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
-using NetDevPackDomainEvent = NetDevPack.Messaging.DomainEvent;
-using NetDevPackDomainEventDispatcher = NetDevPack.Messaging.IDomainEventDispatcher;
 using NetDevPackEvent = NetDevPack.Messaging.Event;
 
 namespace OpenLineOps.Infrastructure.Data.Core.Context;
@@ -17,68 +15,38 @@ public abstract class BaseDbContext : DbContext, IUnitOfWork
         LoggerMessage.Define(
             LogLevel.Debug,
             new EventId(1, nameof(LogCommitCompletedWithNoRows)),
-            "Commit completed with no persisted rows; domain events were not dispatched.");
+            "Commit completed with no persisted rows or pending domain events.");
 
     private static readonly Action<ILogger, Exception?> LogCommitFailed =
         LoggerMessage.Define(
             LogLevel.Error,
             new EventId(2, nameof(LogCommitFailed)),
-            "Commit failed while saving changes.");
-
-    private static readonly Action<ILogger, int, Exception?> LogNoOpenLineOpsDispatcher =
-        LoggerMessage.Define<int>(
-            LogLevel.Debug,
-            new EventId(3, nameof(LogNoOpenLineOpsDispatcher)),
-            "No OpenLineOps domain event dispatcher was configured; skipped {Count} events.");
-
-    private static readonly Action<ILogger, string, Exception?> LogOpenLineOpsDispatchFailed =
-        LoggerMessage.Define<string>(
-            LogLevel.Error,
-            new EventId(4, nameof(LogOpenLineOpsDispatchFailed)),
-            "OpenLineOps domain event dispatch failed. CorrelationId: {CorrelationId}");
-
-    private static readonly Action<ILogger, int, Exception?> LogNoNetDevPackDispatcher =
-        LoggerMessage.Define<int>(
-            LogLevel.Debug,
-            new EventId(5, nameof(LogNoNetDevPackDispatcher)),
-            "No NetDevPack domain event dispatcher was configured; skipped {Count} events.");
-
-    private static readonly Action<ILogger, string, Exception?> LogNetDevPackDispatchFailed =
-        LoggerMessage.Define<string>(
-            LogLevel.Error,
-            new EventId(6, nameof(LogNetDevPackDispatchFailed)),
-            "NetDevPack domain event dispatch failed. CorrelationId: {CorrelationId}");
-
-    private static readonly Action<ILogger, Exception?> LogNoIntegrationPublisher =
-        LoggerMessage.Define(
-            LogLevel.Debug,
-            new EventId(7, nameof(LogNoIntegrationPublisher)),
-            "No integration event publisher was configured.");
+            "Commit failed while saving changes or publishing transactional integration events.");
 
     private static readonly Action<ILogger, string, Exception?> LogIntegrationPublishFailed =
         LoggerMessage.Define<string>(
             LogLevel.Error,
-            new EventId(8, nameof(LogIntegrationPublishFailed)),
+            new EventId(3, nameof(LogIntegrationPublishFailed)),
             "Integration event publishing failed. CorrelationId: {CorrelationId}");
 
-    private readonly IDomainEventDispatcher? _domainEventDispatcher;
-    private readonly NetDevPackDomainEventDispatcher? _netDevPackDomainEventDispatcher;
+    private readonly IntegrationEventPublicationPolicy? _integrationEventPublicationPolicy;
     private readonly IIntegrationEventPublisher? _integrationEventPublisher;
+    private readonly ITransactionalIntegrationEventPublisher? _transactionalIntegrationEventPublisher;
     private readonly IIntegrationEventTransactionCoordinator? _integrationEventTransactionCoordinator;
     private readonly ILogger<BaseDbContext>? _logger;
 
     protected BaseDbContext(
         DbContextOptions options,
-        IDomainEventDispatcher? domainEventDispatcher = null,
-        NetDevPackDomainEventDispatcher? netDevPackDomainEventDispatcher = null,
+        IntegrationEventPublicationPolicy? integrationEventPublicationPolicy = null,
         IIntegrationEventPublisher? integrationEventPublisher = null,
+        ITransactionalIntegrationEventPublisher? transactionalIntegrationEventPublisher = null,
         IIntegrationEventTransactionCoordinator? integrationEventTransactionCoordinator = null,
         ILogger<BaseDbContext>? logger = null)
         : base(options)
     {
-        _domainEventDispatcher = domainEventDispatcher;
-        _netDevPackDomainEventDispatcher = netDevPackDomainEventDispatcher;
+        _integrationEventPublicationPolicy = integrationEventPublicationPolicy;
         _integrationEventPublisher = integrationEventPublisher;
+        _transactionalIntegrationEventPublisher = transactionalIntegrationEventPublisher;
         _integrationEventTransactionCoordinator = integrationEventTransactionCoordinator;
         _logger = logger;
     }
@@ -99,93 +67,50 @@ public abstract class BaseDbContext : DbContext, IUnitOfWork
 
     public async Task<bool> CommitAsync(CancellationToken cancellationToken = default)
     {
-        var openLineOpsEntities = ChangeTracker
-            .Entries()
-            .Select(entry => entry.Entity)
-            .OfType<IHasDomainEvents>()
-            .Where(entity => entity.DomainEvents.Count > 0)
-            .ToList();
-
-        var openLineOpsDomainEvents = openLineOpsEntities
-            .SelectMany(entity => entity.DomainEvents)
+        var pendingEvents = CapturePendingEvents();
+        var integrationEvents = pendingEvents
+            .Where(pendingEvent => IntegrationEventDescriptorFactory.IsIntegrationEvent(pendingEvent.Payload))
             .ToArray();
 
-        foreach (var entity in openLineOpsEntities)
+        PreflightLocalDomainEvents(pendingEvents, integrationEvents);
+        PreflightIntegrationEventPublication(integrationEvents);
+
+        if (integrationEvents.Length > 0
+            && _integrationEventPublicationPolicy!.Mode == IntegrationEventPublicationMode.Transactional)
         {
-            entity.ClearDomainEvents();
-        }
-
-        var netDevPackEntities = ChangeTracker
-            .Entries<NetDevPack.Domain.Entity>()
-            .Where(entry => entry.Entity.DomainEvents is { Count: > 0 })
-            .Select(entry => entry.Entity)
-            .ToList();
-
-        var netDevPackEvents = netDevPackEntities
-            .SelectMany(entity => entity.DomainEvents ?? Array.Empty<NetDevPackEvent>())
-            .ToArray();
-
-        foreach (var entity in netDevPackEntities)
-        {
-            entity.ClearDomainEvents();
-        }
-
-        var integrationEvents = GetIntegrationEvents(
-            openLineOpsDomainEvents.Cast<object>().Concat(netDevPackEvents));
-        var integrationEventsPublishedInTransaction = false;
-
-        var affectedRows = await SaveChangesAndPublishTransactionalIntegrationEventsAsync(
-            integrationEvents,
-            cancellationToken).ConfigureAwait(false);
-        integrationEventsPublishedInTransaction = affectedRows.PublishedIntegrationEventsInTransaction;
-        if (affectedRows.AffectedRows <= 0)
-        {
-            if (_logger is not null)
-            {
-                LogCommitCompletedWithNoRows(_logger, null);
-            }
-
-            return false;
-        }
-
-        await DispatchOpenLineOpsDomainEventsAsync(openLineOpsDomainEvents, cancellationToken)
-            .ConfigureAwait(false);
-        await DispatchNetDevPackDomainEventsAsync(netDevPackEvents, cancellationToken)
-            .ConfigureAwait(false);
-        if (!integrationEventsPublishedInTransaction)
-        {
-            await PublishIntegrationEventsAsync(integrationEvents, cancellationToken)
+            return await CommitTransactionallyAsync(
+                    pendingEvents,
+                    integrationEvents,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        return true;
+        return await CommitPostCommitAsync(
+                pendingEvents,
+                integrationEvents,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    private async Task<CommitPersistenceResult> SaveChangesAndPublishTransactionalIntegrationEventsAsync(
-        object[] integrationEvents,
+    private async Task<bool> CommitTransactionallyAsync(
+        IReadOnlyCollection<PendingDomainEvent> pendingEvents,
+        IReadOnlyCollection<PendingDomainEvent> integrationEvents,
         CancellationToken cancellationToken)
     {
         try
         {
-            if (CanPublishIntegrationEventsInTransaction(integrationEvents))
-            {
-                var affectedRows = await _integrationEventTransactionCoordinator!
-                    .SaveChangesAndPublishAsync(
-                        this,
-                        SaveChangesAsync,
-                        token => ((ITransactionalIntegrationEventPublisher)_integrationEventPublisher!)
-                            .PublishTransactionalAsync(integrationEvents, token),
-                        cancellationToken)
-                    .ConfigureAwait(false);
+            var affectedRows = await _integrationEventTransactionCoordinator!
+                .SaveChangesAndPublishAsync(
+                    this,
+                    token => SaveChangesAsync(acceptAllChangesOnSuccess: false, token),
+                    token => PublishTransactionalIntegrationEventsAsync(integrationEvents, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
 
-                return new CommitPersistenceResult(
-                    affectedRows,
-                    PublishedIntegrationEventsInTransaction: affectedRows > 0);
-            }
+            ChangeTracker.AcceptAllChanges();
+            RemoveEvents(pendingEvents);
 
-            return new CommitPersistenceResult(
-                await SaveChangesAsync(cancellationToken).ConfigureAwait(false),
-                PublishedIntegrationEventsInTransaction: false);
+            return affectedRows > 0 || pendingEvents.Count > 0;
         }
         catch (Exception ex)
         {
@@ -198,103 +123,74 @@ public abstract class BaseDbContext : DbContext, IUnitOfWork
         }
     }
 
-    private bool CanPublishIntegrationEventsInTransaction(object[] integrationEvents)
-    {
-        return integrationEvents.Length > 0
-            && _integrationEventTransactionCoordinator is not null
-            && _integrationEventPublisher is ITransactionalIntegrationEventPublisher;
-    }
-
-    private async Task DispatchOpenLineOpsDomainEventsAsync(
-        IDomainEvent[] domainEvents,
+    private async Task<bool> CommitPostCommitAsync(
+        IReadOnlyCollection<PendingDomainEvent> pendingEvents,
+        IReadOnlyCollection<PendingDomainEvent> integrationEvents,
         CancellationToken cancellationToken)
     {
-        if (domainEvents.Length == 0)
-        {
-            return;
-        }
+        var affectedRows = await SaveChangesWithLoggingAsync(cancellationToken).ConfigureAwait(false);
 
-        if (_domainEventDispatcher is null)
+        var integrationEventSet = integrationEvents.ToHashSet();
+        RemoveEvents(pendingEvents.Where(pendingEvent => !integrationEventSet.Contains(pendingEvent)));
+
+        foreach (var pendingEvent in integrationEvents)
         {
-            if (_logger is not null)
+            try
             {
-                LogNoOpenLineOpsDispatcher(_logger, domainEvents.Length, null);
+                await _integrationEventPublisher!
+                    .PublishAsync([pendingEvent.Payload], cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                if (_logger is not null)
+                {
+                    LogIntegrationPublishFailed(_logger, CurrentCorrelationId(), ex);
+                }
+
+                throw;
             }
 
-            return;
+            pendingEvent.Remove();
         }
 
+        var committed = affectedRows > 0 || pendingEvents.Count > 0;
+        if (!committed && _logger is not null)
+        {
+            LogCommitCompletedWithNoRows(_logger, null);
+        }
+
+        return committed;
+    }
+
+    private async Task<int> SaveChangesWithLoggingAsync(CancellationToken cancellationToken)
+    {
         try
         {
-            await _domainEventDispatcher.DispatchAsync(domainEvents, cancellationToken).ConfigureAwait(false);
+            return await SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             if (_logger is not null)
             {
-                LogOpenLineOpsDispatchFailed(_logger, CurrentCorrelationId(), ex);
+                LogCommitFailed(_logger, ex);
             }
+
+            throw;
         }
     }
 
-    private async Task DispatchNetDevPackDomainEventsAsync(
-        NetDevPackEvent[] domainEvents,
+    private async Task PublishTransactionalIntegrationEventsAsync(
+        IReadOnlyCollection<PendingDomainEvent> integrationEvents,
         CancellationToken cancellationToken)
     {
-        if (domainEvents.Length == 0)
-        {
-            return;
-        }
-
-        var localDomainEvents = domainEvents.OfType<NetDevPackDomainEvent>().ToArray();
-        if (localDomainEvents.Length > 0)
-        {
-            if (_netDevPackDomainEventDispatcher is null)
-            {
-                if (_logger is not null)
-                {
-                    LogNoNetDevPackDispatcher(_logger, localDomainEvents.Length, null);
-                }
-            }
-            else
-            {
-                try
-                {
-                    await _netDevPackDomainEventDispatcher.DispatchAsync(localDomainEvents).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    if (_logger is not null)
-                    {
-                        LogNetDevPackDispatchFailed(_logger, CurrentCorrelationId(), ex);
-                    }
-                }
-            }
-        }
-    }
-
-    private async Task PublishIntegrationEventsAsync(
-        object[] eventsToPublish,
-        CancellationToken cancellationToken)
-    {
-        if (eventsToPublish.Length == 0)
-        {
-            return;
-        }
-
-        if (_integrationEventPublisher is null)
-        {
-            if (_logger is not null)
-            {
-                LogNoIntegrationPublisher(_logger, null);
-            }
-
-            return;
-        }
-
         try
         {
-            await _integrationEventPublisher.PublishAsync(eventsToPublish, cancellationToken).ConfigureAwait(false);
+            await _transactionalIntegrationEventPublisher!
+                .PublishTransactionalAsync(
+                    integrationEvents.Select(pendingEvent => pendingEvent.Payload),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -302,6 +198,98 @@ public abstract class BaseDbContext : DbContext, IUnitOfWork
             {
                 LogIntegrationPublishFailed(_logger, CurrentCorrelationId(), ex);
             }
+
+            throw;
+        }
+    }
+
+    private void PreflightIntegrationEventPublication(
+        IReadOnlyCollection<PendingDomainEvent> integrationEvents)
+    {
+        if (integrationEvents.Count == 0)
+        {
+            return;
+        }
+
+        if (_integrationEventPublicationPolicy is null)
+        {
+            throw new InvalidOperationException(
+                "An explicit integration event publication policy is required before committing integration events.");
+        }
+
+        switch (_integrationEventPublicationPolicy.Mode)
+        {
+            case IntegrationEventPublicationMode.PostCommit when _integrationEventPublisher is null:
+                throw new InvalidOperationException(
+                    "PostCommit integration event publication requires IIntegrationEventPublisher before saving changes.");
+            case IntegrationEventPublicationMode.Transactional when _transactionalIntegrationEventPublisher is null:
+                throw new InvalidOperationException(
+                    "Transactional integration event publication requires ITransactionalIntegrationEventPublisher before saving changes.");
+            case IntegrationEventPublicationMode.Transactional when _integrationEventTransactionCoordinator is null:
+                throw new InvalidOperationException(
+                    "Transactional integration event publication requires IIntegrationEventTransactionCoordinator before saving changes.");
+            case IntegrationEventPublicationMode.PostCommit:
+            case IntegrationEventPublicationMode.Transactional:
+                return;
+            default:
+                throw new InvalidOperationException(
+                    $"Unsupported integration event publication mode '{_integrationEventPublicationPolicy.Mode}'.");
+        }
+    }
+
+    private static void PreflightLocalDomainEvents(
+        IReadOnlyCollection<PendingDomainEvent> pendingEvents,
+        IReadOnlyCollection<PendingDomainEvent> integrationEvents)
+    {
+        if (pendingEvents.Count == integrationEvents.Count)
+        {
+            return;
+        }
+
+        var unsupportedEvent = pendingEvents
+            .First(pendingEvent => !IntegrationEventDescriptorFactory.IsIntegrationEvent(pendingEvent.Payload));
+        throw new InvalidOperationException(
+            $"Local domain event '{unsupportedEvent.Payload.GetType().FullName}' has no dispatch pipeline. "
+            + "Remove the unused event or model it as an explicit integration event before saving changes.");
+    }
+
+    private List<PendingDomainEvent> CapturePendingEvents()
+    {
+        var pendingEvents = new List<PendingDomainEvent>();
+
+        foreach (var entity in ChangeTracker
+                     .Entries()
+                     .Select(entry => entry.Entity)
+                     .OfType<IHasDomainEvents>())
+        {
+            foreach (var domainEvent in entity.DomainEvents.ToArray())
+            {
+                pendingEvents.Add(new PendingDomainEvent(
+                    domainEvent,
+                    () => entity.RemoveDomainEvent(domainEvent)));
+            }
+        }
+
+        foreach (var entity in ChangeTracker
+                     .Entries<NetDevPack.Domain.Entity>()
+                     .Select(entry => entry.Entity))
+        {
+            foreach (var domainEvent in entity.DomainEvents?.ToArray() ?? [])
+            {
+                pendingEvents.Add(new PendingDomainEvent(
+                    domainEvent,
+                    () => entity.RemoveDomainEvent(domainEvent)));
+            }
+        }
+
+        return pendingEvents;
+    }
+
+    private static void RemoveEvents(IEnumerable<PendingDomainEvent> pendingEvents)
+    {
+        foreach (var pendingEvent in pendingEvents)
+        {
+            pendingEvent.Remove();
         }
     }
 
@@ -310,14 +298,5 @@ public abstract class BaseDbContext : DbContext, IUnitOfWork
         return Activity.Current?.Id ?? Guid.NewGuid().ToString("N");
     }
 
-    private static object[] GetIntegrationEvents(IEnumerable<object> domainEvents)
-    {
-        return domainEvents
-            .Where(IntegrationEventDescriptorFactory.IsIntegrationEvent)
-            .ToArray();
-    }
-
-    private readonly record struct CommitPersistenceResult(
-        int AffectedRows,
-        bool PublishedIntegrationEventsInTransaction);
+    private sealed record PendingDomainEvent(object Payload, Action Remove);
 }

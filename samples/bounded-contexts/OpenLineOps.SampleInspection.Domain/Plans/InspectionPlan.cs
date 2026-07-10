@@ -1,5 +1,4 @@
 using OpenLineOps.Domain.Abstractions.Entities;
-using OpenLineOps.SampleInspection.Domain.Events;
 using OpenLineOps.SampleInspection.Domain.Identifiers;
 using OpenLineOps.SampleInspection.Domain.Operations;
 
@@ -45,10 +44,7 @@ public sealed class InspectionPlan : AggregateRoot<InspectionPlanId>
         string targetDeviceId,
         DateTimeOffset createdAtUtc)
     {
-        var plan = new InspectionPlan(id, displayName, targetDeviceId, createdAtUtc);
-        plan.RaiseDomainEvent(new InspectionPlanCreatedDomainEvent(id, plan.TargetDeviceId, createdAtUtc));
-
-        return plan;
+        return new InspectionPlan(id, displayName, targetDeviceId, createdAtUtc);
     }
 
     public InspectionOperationResult Rename(string displayName)
@@ -81,8 +77,6 @@ public sealed class InspectionPlan : AggregateRoot<InspectionPlanId>
 
         Status = InspectionPlanStatus.Active;
         ActivatedAtUtc = activatedAtUtc;
-        RaiseDomainEvent(new InspectionPlanActivatedDomainEvent(Id, activatedAtUtc));
-
         return InspectionOperationResult.Accepted("Inspection plan activated.");
     }
 

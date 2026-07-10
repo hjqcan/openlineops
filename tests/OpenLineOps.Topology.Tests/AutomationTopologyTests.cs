@@ -79,6 +79,55 @@ public sealed class AutomationTopologyTests
     }
 
     [Fact]
+    public void StationMustBeRootAndNestedGeneralSystemMustBelongDirectlyToStation()
+    {
+        var topology = AutomationTopology.Create(
+            new AutomationTopologyId("topology.hierarchy"),
+            "Hierarchy",
+            DateTimeOffset.UtcNow);
+        var rootSystem = AutomationSystem.Create(
+            new AutomationSystemId("system.root"),
+            null,
+            SystemKind.System,
+            "line.root",
+            "Line Root");
+        var station = AutomationSystem.Create(
+            new AutomationSystemId("station.root"),
+            null,
+            SystemKind.Station,
+            "station",
+            "Station");
+
+        Assert.True(topology.AddSystem(rootSystem).Succeeded);
+        Assert.True(topology.AddSystem(station).Succeeded);
+
+        var nestedStation = topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("station.nested"),
+            station.Id,
+            SystemKind.Station,
+            "station",
+            "Nested Station"));
+        var generalUnderGeneral = topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("system.nested"),
+            rootSystem.Id,
+            SystemKind.System,
+            "component",
+            "Nested General System"));
+        var generalUnderStation = topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("system.station-child"),
+            station.Id,
+            SystemKind.System,
+            "component",
+            "Station Component"));
+
+        Assert.False(nestedStation.Succeeded);
+        Assert.Equal("Topology.StationMustBeRoot", nestedStation.Code);
+        Assert.False(generalUnderGeneral.Succeeded);
+        Assert.Equal("Topology.ChildSystemRequiresStation", generalUnderGeneral.Code);
+        Assert.True(generalUnderStation.Succeeded);
+    }
+
+    [Fact]
     public void SlotGroupRejectsNonStationParentAndSlotRejectsMismatchedSystem()
     {
         var topology = CreateTopology();

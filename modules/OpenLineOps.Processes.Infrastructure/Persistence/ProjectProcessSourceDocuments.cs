@@ -25,6 +25,8 @@ internal sealed record ProjectProcessNodeDocument(
     string DisplayName,
     string? RequiredCapabilityId,
     string? CommandName,
+    string? TargetKind,
+    string? TargetId,
     long? CommandTimeoutTicks,
     string? InputPayload,
     string? ScriptLanguage,

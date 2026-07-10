@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using OpenLineOps.Processes.Application.Scripting;
 using ApiCreateProcessDefinitionRequest = OpenLineOps.Processes.Api.Models.CreateProcessDefinitionRequest;
@@ -31,6 +32,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         const string applicationA = "application.a";
         const string applicationB = "application.b";
         const string topologyId = "topology.main";
+        const string productionLineDefinitionId = "line.main";
         const string layoutId = "layout.main";
         const string processDefinitionId = "process.main";
         const string customBlockType = "user_shared_fixture_action";
@@ -44,7 +46,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         PublishedProjectRelease? publishedReleaseA = null;
         PublishedProjectRelease? publishedReleaseB = null;
 
-        using (var firstFactory = new WebApplicationFactory<Program>())
+        using (var firstFactory = new ScriptWorkerWebApplicationFactory())
         using (var client = firstFactory.CreateClient())
         {
             using var createWorkspace = await client.PostAsJsonAsync(
@@ -132,8 +134,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 projectId,
                 applicationA,
                 customBlockType,
-                "Application A Fixture Action V2",
-                "application A fixture action v2",
+                "Application A Fixture Action Revised",
+                "application A fixture action revised",
                 expectedVersion: 2);
             await RegisterApplicationBlockAsync(
                 client,
@@ -179,6 +181,15 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
             foreach (var applicationId in new[] { applicationA, applicationB })
             {
+                await CreateApplicationProductionLineAsync(
+                    client,
+                    projectId,
+                    applicationId,
+                    productionLineDefinitionId,
+                    topologyId,
+                    processDefinitionId,
+                    configurationSnapshotId);
+
                 using var linkTopology = await client.PutAsJsonAsync(
                     $"/api/automation-projects/{projectId}/applications/{applicationId}/topology",
                     new { topologyId });
@@ -195,16 +206,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 projectId,
                 projectSnapshotA,
                 applicationA,
-                processDefinitionId,
-                configurationSnapshotId,
+                productionLineDefinitionId,
                 _projectDirectory);
             publishedReleaseB = await PublishApplicationProjectSnapshotAsync(
                 client,
                 projectId,
                 projectSnapshotB,
                 applicationB,
-                processDefinitionId,
-                configurationSnapshotId,
+                productionLineDefinitionId,
                 _projectDirectory);
 
             using var mutateLiveLayout = await client.PutAsJsonAsync(
@@ -254,7 +263,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Directory.GetFiles(_projectDirectory, "source.*.py", SearchOption.AllDirectories).Length >= 2);
         Directory.Move(_projectDirectory, MovedProjectDirectory);
 
-        using (var secondFactory = new WebApplicationFactory<Program>())
+        using (var secondFactory = new ScriptWorkerWebApplicationFactory())
         using (var client = secondFactory.CreateClient())
         {
             using var openWorkspace = await client.PostAsJsonAsync(
@@ -274,6 +283,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             using var layoutB = await GetJsonAsync(
                 client,
                 ProjectLayoutPath(projectId, applicationB, layoutId));
+            using var releasedTopologyA = await GetJsonAsync(
+                client,
+                $"{ProjectTopologyPath(projectId, applicationA, topologyId)}?snapshotId={projectSnapshotA}");
+            using var releasedLayoutA = await GetJsonAsync(
+                client,
+                $"{ProjectLayoutPath(projectId, applicationA, layoutId)}?snapshotId={projectSnapshotA}");
+            using var crossApplicationReleaseRead = await client.GetAsync(
+                $"{ProjectLayoutPath(projectId, applicationB, layoutId)}?snapshotId={projectSnapshotA}");
             using var processA = await GetJsonAsync(
                 client,
                 ProjectProcessPath(projectId, applicationA, processDefinitionId));
@@ -287,6 +304,13 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Assert.Equal("Application B Site", topologyB.RootElement.GetProperty("systems")[0].GetProperty("displayName").GetString());
             Assert.Equal(125, layoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.Equal(425, layoutB.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
+            Assert.Equal(
+                "Application A Topology",
+                releasedTopologyA.RootElement.GetProperty("displayName").GetString());
+            Assert.Equal(
+                25,
+                releasedLayoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
+            Assert.Equal(HttpStatusCode.NotFound, crossApplicationReleaseRead.StatusCode);
             Assert.True(File.Exists(Path.Combine(
                 MovedProjectDirectory,
                 publishedReleaseA.RelativeManifestPath.Replace('/', Path.DirectorySeparatorChar))));
@@ -339,9 +363,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 block => block.GetProperty("blockType").GetString() == customBlockType);
             Assert.False(customBlockA.GetProperty("isBuiltIn").GetBoolean());
             Assert.Equal(2, customBlockA.GetProperty("version").GetInt32());
-            Assert.Equal("Application A Fixture Action V2", customBlockA.GetProperty("displayName").GetString());
+            Assert.Equal("Application A Fixture Action Revised", customBlockA.GetProperty("displayName").GetString());
             Assert.Equal(
-                "application A fixture action v2 %1 ms",
+                "application A fixture action revised %1 ms",
                 customBlockA.GetProperty("blocklyJson").GetProperty("message0").GetString());
             AssertFixtureActionContract(customBlockA);
 
@@ -363,7 +387,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 block =>
                 {
                     Assert.Equal(2, block.GetProperty("version").GetInt32());
-                    Assert.Equal("Application A Fixture Action V2", block.GetProperty("displayName").GetString());
+                    Assert.Equal("Application A Fixture Action Revised", block.GetProperty("displayName").GetString());
                 },
                 block =>
                 {
@@ -436,7 +460,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 capabilityId: "device.camera",
                 deviceKey: "camera-b");
 
-            await AssertProjectSnapshotStartsWithScopedConfigurationAsync(
+            await AssertProjectSnapshotRunsWithScopedConfigurationAsync(
                 client,
                 projectId,
                 projectSnapshotA,
@@ -446,7 +470,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 $"{processDefinitionId}@1.0.0",
                 configurationSnapshotId,
                 $"{recipeId}@1.0.0");
-            await AssertProjectSnapshotStartsWithScopedConfigurationAsync(
+            await AssertProjectSnapshotRunsWithScopedConfigurationAsync(
                 client,
                 projectId,
                 projectSnapshotB,
@@ -749,13 +773,65 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(snapshotId, snapshotBody.RootElement.GetProperty("activeSnapshotId").GetString());
     }
 
+    private static async Task CreateApplicationProductionLineAsync(
+        HttpClient client,
+        string projectId,
+        string applicationId,
+        string productionLineDefinitionId,
+        string topologyId,
+        string processDefinitionId,
+        string configurationSnapshotId)
+    {
+        using var response = await client.PostAsJsonAsync(
+            $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines",
+            new
+            {
+                lineDefinitionId = productionLineDefinitionId,
+                displayName = $"{applicationId} Production Line",
+                topologyId,
+                dutModel = new
+                {
+                    dutModelId = "dut.main",
+                    modelCode = "MODEL-MAIN",
+                    identityInputKey = "serialNumber"
+                },
+                workstations = new[]
+                {
+                    new
+                    {
+                        workstationId = "workstation.main",
+                        displayName = "Main Workstation",
+                        stationSystemId = "station.main"
+                    }
+                },
+                stages = new[]
+                {
+                    new
+                    {
+                        stageId = "stage.main",
+                        sequence = 1,
+                        displayName = "Main Stage",
+                        workstationId = "workstation.main",
+                        flowDefinitionId = processDefinitionId,
+                        configurationSnapshotId,
+                        externalTestProgramAdapterId = (string?)null
+                    }
+                },
+                externalTestProgramAdapters = Array.Empty<object>()
+            });
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.True(
+            response.StatusCode == HttpStatusCode.Created,
+            $"Production line creation returned {(int)response.StatusCode} {response.StatusCode}: {body}");
+    }
+
     private static async Task<PublishedProjectRelease> PublishApplicationProjectSnapshotAsync(
         HttpClient client,
         string projectId,
         string projectSnapshotId,
         string applicationId,
-        string processDefinitionId,
-        string configurationSnapshotId,
+        string productionLineDefinitionId,
         string projectDirectory)
     {
         using var response = await client.PostAsJsonAsync(
@@ -764,8 +840,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             {
                 snapshotId = projectSnapshotId,
                 applicationId,
-                processDefinitionId,
-                configurationSnapshotId
+                productionLineDefinitionId
             });
 
         var responseText = await response.Content.ReadAsStringAsync();
@@ -802,7 +877,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         return new PublishedProjectRelease(relativeManifestPath, contentSha256, absoluteManifestPath);
     }
 
-    private static async Task AssertProjectSnapshotStartsWithScopedConfigurationAsync(
+    private static async Task AssertProjectSnapshotRunsWithScopedConfigurationAsync(
         HttpClient client,
         string projectId,
         string projectSnapshotId,
@@ -813,11 +888,13 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string configurationSnapshotId,
         string recipeVersionId)
     {
+        var productionRunId = Guid.NewGuid();
         using var startResponse = await client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/snapshots/{projectSnapshotId}/runtime-sessions",
+            $"/api/automation-projects/{projectId}/snapshots/{projectSnapshotId}/production-runs",
             new
             {
-                serialNumber = $"SN-{applicationId}",
+                productionRunId,
+                dutIdentityValue = $"DUT-{applicationId}",
                 actorId = "scoped-engineering-test"
             });
         using var startBody = await ReadJsonAsync(startResponse);
@@ -827,10 +904,25 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(projectId, startBody.RootElement.GetProperty("projectId").GetString());
         Assert.Equal(applicationId, startBody.RootElement.GetProperty("applicationId").GetString());
         Assert.Equal(topologyId, startBody.RootElement.GetProperty("topologyId").GetString());
-        Assert.Equal(configurationSnapshotId, startBody.RootElement.GetProperty("configurationSnapshotId").GetString());
-        Assert.Equal("Completed", startBody.RootElement.GetProperty("status").GetString());
+        Assert.Equal(productionRunId, startBody.RootElement.GetProperty("productionRunId").GetGuid());
+        Assert.Equal("scoped-engineering-test", startBody.RootElement.GetProperty("actorId").GetString());
+        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("batchId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("fixtureId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("deviceId").ValueKind);
+        Assert.True(
+            string.Equals(
+                "Completed",
+                startBody.RootElement.GetProperty("status").GetString(),
+                StringComparison.Ordinal),
+            $"Production Run did not complete: {startBody.RootElement.GetRawText()}");
 
-        var sessionId = startBody.RootElement.GetProperty("sessionId").GetGuid();
+        var stage = Assert.Single(startBody.RootElement.GetProperty("stages").EnumerateArray());
+        Assert.Equal("Completed", stage.GetProperty("status").GetString());
+        Assert.Equal(processDefinitionId, stage.GetProperty("processDefinitionId").GetString());
+        Assert.Equal(processVersionId, stage.GetProperty("processVersionId").GetString());
+        Assert.Equal(configurationSnapshotId, stage.GetProperty("configurationSnapshotId").GetString());
+        Assert.Equal(recipeVersionId, stage.GetProperty("recipeSnapshotId").GetString());
+        var sessionId = stage.GetProperty("runtimeSessionId").GetGuid();
         using var sessionResponse = await client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var session = await ReadJsonAsync(sessionResponse);
 
@@ -963,6 +1055,44 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string ContentSha256,
         string AbsoluteManifestPath);
 
+    private sealed class ScriptWorkerWebApplicationFactory : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            var repositoryRoot = FindRepositoryRoot();
+            var workerProjectPath = Path.Combine(
+                repositoryRoot,
+                "src",
+                "OpenLineOps.ScriptWorker",
+                "OpenLineOps.ScriptWorker.csproj");
+            builder.UseSetting(
+                "OpenLineOps:Runtime:Scripting:Python:WorkerFileName",
+                "dotnet");
+            builder.UseSetting(
+                "OpenLineOps:Runtime:Scripting:Python:WorkerArguments",
+                $"run --project \"{workerProjectPath}\" --no-launch-profile --no-build");
+            builder.UseSetting(
+                "OpenLineOps:Runtime:Scripting:Python:WorkerWorkingDirectory",
+                repositoryRoot);
+        }
+
+        private static string FindRepositoryRoot()
+        {
+            var directory = new DirectoryInfo(AppContext.BaseDirectory);
+            while (directory is not null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "OpenLineOps.sln")))
+                {
+                    return directory.FullName;
+                }
+
+                directory = directory.Parent;
+            }
+
+            throw new InvalidOperationException("Could not locate the OpenLineOps repository root.");
+        }
+    }
+
     private static ApiCreateProcessDefinitionRequest CreateApplicationProcessRequest(
         string processDefinitionId,
         string displayName,
@@ -981,6 +1111,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     "Start",
                     RequiredCapability: null,
                     CommandName: null,
+                    TargetKind: null,
+                    TargetId: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
                     BlocklyWorkspaceJson: null,
@@ -992,6 +1124,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     "Blockly Flow",
                     RequiredCapability: null,
                     CommandName: null,
+                    TargetKind: null,
+                    TargetId: null,
                     TimeoutSeconds: 10,
                     InputPayload: null,
                     BlocklyWorkspaceJson: blocklyWorkspaceJson,
@@ -1003,6 +1137,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     "Python Script",
                     RequiredCapability: null,
                     CommandName: null,
+                    TargetKind: null,
+                    TargetId: null,
                     TimeoutSeconds: 10,
                     InputPayload: null,
                     BlocklyWorkspaceJson: null,
@@ -1014,6 +1150,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     "End",
                     RequiredCapability: null,
                     CommandName: null,
+                    TargetKind: null,
+                    TargetId: null,
                     TimeoutSeconds: null,
                     InputPayload: null,
                     BlocklyWorkspaceJson: null,

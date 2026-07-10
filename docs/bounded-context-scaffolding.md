@@ -36,9 +36,10 @@ Generated infrastructure uses:
 - `BaseDbContext`
 - `BaseRepository<TContext, TAggregate, TId>`
 - `HasStronglyTypedIdConversion<TId, string>()`
-- `IIntegrationEventPublisher` constructor injection
+- explicit `IntegrationEventPublicationPolicy` constructor injection
+- ordinary and transactional integration-event publisher ports plus the transaction-coordinator port
 - EF relational entity configuration
-- SQLite-backed integration-style test coverage
+- SQLite-backed `PostCommit` integration-style test coverage
 
 Generated module composition also registers:
 

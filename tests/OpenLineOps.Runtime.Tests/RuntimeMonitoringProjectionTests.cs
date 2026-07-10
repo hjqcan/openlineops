@@ -8,6 +8,7 @@ using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Events;
@@ -18,6 +19,14 @@ namespace OpenLineOps.Runtime.Tests;
 public sealed class RuntimeMonitoringProjectionTests
 {
     private static readonly DateTimeOffset StartedAtUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
+    private static readonly ProductionRunId MonitoringProductionRunId = new(
+        Guid.Parse("10000000-0000-0000-0000-000000000001"));
+    private static readonly RuntimeMonitoringScope MonitoringScope = new(
+        "project-monitoring",
+        "application-monitoring",
+        "snapshot-monitoring",
+        "topology-monitoring",
+        MonitoringProductionRunId);
 
     [Fact]
     public async Task ProjectionUpdatesStationTimelineAndAlarmAcknowledgementFromRuntimeEvents()
@@ -37,18 +46,47 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.True(result.IsSuccess);
         Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
 
-        var stationStatus = Assert.Single(await projection.GetStationStatusesAsync("station-monitoring"));
+        var stationStatus = Assert.Single(await projection.GetStationStatusesAsync(
+            MonitoringScope,
+            "station-monitoring"));
         Assert.Equal(result.Value.SessionId, stationStatus.LatestSessionId);
         Assert.Equal(RuntimeSessionStatus.Failed, stationStatus.SessionStatus);
+        Assert.Equal(MonitoringProductionRunId, stationStatus.ProductionRunId);
+        Assert.Equal("line.main", stationStatus.ProductionLineDefinitionId);
+        Assert.Equal("stage.main", stationStatus.StageId);
+        Assert.Equal(1, stationStatus.StageSequence);
+        Assert.Equal("workstation.main", stationStatus.WorkstationId);
+        Assert.Equal("dut.default", stationStatus.DutIdentity.ModelId);
+        Assert.Equal("serialNumber", stationStatus.DutIdentity.InputKey);
+        Assert.Equal("DUT-DEFAULT", stationStatus.DutIdentity.Value);
         Assert.Equal(1, stationStatus.IncidentCount);
         Assert.True(stationStatus.IsTerminal);
 
-        var timeline = await projection.GetSessionTimelineAsync(result.Value.SessionId);
+        var timeline = await projection.GetSessionTimelineAsync(
+            result.Value.SessionId,
+            MonitoringScope);
         Assert.Contains(timeline, entry => entry.EventName == "RuntimeSession.Created");
         Assert.Contains(timeline, entry => entry.EventName == "RuntimeIncident.Recorded");
         Assert.Contains(timeline, entry =>
             entry.EventName == "RuntimeSession.StatusChanged"
             && entry.ToStatus == RuntimeSessionStatus.Failed.ToString());
+        Assert.All(timeline, entry =>
+        {
+            Assert.Equal(MonitoringProductionRunId, entry.ProductionRunId);
+            Assert.Equal("line.main", entry.ProductionLineDefinitionId);
+            Assert.Equal("stage.main", entry.StageId);
+            Assert.Equal(1, entry.StageSequence);
+            Assert.Equal("workstation.main", entry.WorkstationId);
+            Assert.Equal("DUT-DEFAULT", entry.DutIdentity.Value);
+        });
+        Assert.Empty(await projection.GetSessionTimelineAsync(
+            result.Value.SessionId,
+            new RuntimeMonitoringScope(
+                MonitoringScope.ProjectId,
+                MonitoringScope.ApplicationId,
+                MonitoringScope.ProjectSnapshotId,
+                MonitoringScope.TopologyId,
+                ProductionRunId.New())));
 
         var alarm = Assert.Single(await projection.GetAlarmsAsync("station-monitoring"));
         Assert.Equal("Runtime.CommandFailed", alarm.Code);
@@ -141,7 +179,7 @@ public sealed class RuntimeMonitoringProjectionTests
             status => AssertInProgressTarget(status, RuntimeTargetKinds.Slot, "Slot.A"),
             status => AssertInProgressTarget(status, RuntimeTargetKinds.Slot, "slot.a"));
 
-        var firstStatuses = await projection.GetTargetStatusesAsync("Station.System");
+        var firstStatuses = await projection.GetTargetStatusesAsync(MonitoringScope, "Station.System");
         Assert.Equal(4, firstStatuses.Count);
         AssertTargetStatus(firstStatuses, RuntimeTargetKinds.System, "System.Main", RuntimeCommandStatus.Completed, null);
         AssertTargetStatus(firstStatuses, RuntimeTargetKinds.SlotGroup, "Group.A", RuntimeCommandStatus.Completed, null);
@@ -166,8 +204,10 @@ public sealed class RuntimeMonitoringProjectionTests
                 new RuntimeTargetReference(RuntimeTargetKinds.System, "System.Main"))));
 
         Assert.True(secondRun.IsSuccess);
+        var secondStatuses = await projection.GetTargetStatusesAsync(MonitoringScope, "Station.System");
+        Assert.Single(secondStatuses);
         var latestSystem = Assert.Single(
-            await projection.GetTargetStatusesAsync("Station.System"),
+            secondStatuses,
             status => status.TargetKind == RuntimeTargetKinds.System);
         Assert.Equal(secondRun.Value.SessionId, latestSystem.SessionId);
         Assert.Equal("action-system-newest", latestSystem.ActionId);
@@ -188,12 +228,130 @@ public sealed class RuntimeMonitoringProjectionTests
                 new RuntimeTargetReference(RuntimeTargetKinds.System, "System.Main"))));
 
         Assert.True(lowerCaseStationRun.IsSuccess);
-        Assert.Single(await projection.GetStationStatusesAsync("Station.System"));
-        Assert.Single(await projection.GetStationStatusesAsync("station.system"));
-        Assert.Empty(await projection.GetStationStatusesAsync("STATION.SYSTEM"));
-        Assert.Single(await projection.GetTargetStatusesAsync("station.system"));
-        Assert.Empty(await projection.GetTargetStatusesAsync("STATION.SYSTEM"));
-        Assert.Equal(2, (await projection.GetStationStatusesAsync()).Count);
+        Assert.Single(await projection.GetStationStatusesAsync(MonitoringScope, "Station.System"));
+        Assert.Single(await projection.GetStationStatusesAsync(MonitoringScope, "station.system"));
+        Assert.Empty(await projection.GetStationStatusesAsync(MonitoringScope, "STATION.SYSTEM"));
+        Assert.Single(await projection.GetTargetStatusesAsync(MonitoringScope, "station.system"));
+        Assert.Empty(await projection.GetTargetStatusesAsync(MonitoringScope, "STATION.SYSTEM"));
+        Assert.Equal(2, (await projection.GetStationStatusesAsync(MonitoringScope)).Count);
+    }
+
+    [Fact]
+    public async Task IdenticalLocalStationAndTargetIdsRemainIsolatedByApplicationSnapshotScope()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var projection = new RuntimeMonitoringProjection(repository);
+        var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
+        var runner = new RuntimeSessionRunner(
+            repository,
+            eventPublisher,
+            new ScriptedRuntimeCommandExecutor(
+                RuntimeCommandExecutionResult.Completed(),
+                RuntimeCommandExecutionResult.Failed("application-b failed")),
+            new DeterministicRuntimeIdProvider(),
+            new FixedClock(StartedAtUtc));
+        var scopeA = new RuntimeMonitoringScope(
+            "project-shared",
+            "application-a",
+            "snapshot-a",
+            "topology-shared");
+        var scopeB = new RuntimeMonitoringScope(
+            "project-shared",
+            "application-b",
+            "snapshot-b",
+            "topology-shared");
+
+        var runA = await runner.RunAsync(CreateScopedStartRequest(
+            scopeA,
+            "station.shared",
+            TargetNode("node-a", "action-a", RuntimeTargetKinds.Slot, "slot.shared")));
+        var runB = await runner.RunAsync(CreateScopedStartRequest(
+            scopeB,
+            "station.shared",
+            TargetNode("node-b", "action-b", RuntimeTargetKinds.Slot, "slot.shared")));
+
+        Assert.True(runA.IsSuccess);
+        Assert.True(runB.IsSuccess);
+        var stationA = Assert.Single(await projection.GetStationStatusesAsync(scopeA, "station.shared"));
+        var stationB = Assert.Single(await projection.GetStationStatusesAsync(scopeB, "station.shared"));
+        Assert.Equal(runA.Value.SessionId, stationA.LatestSessionId);
+        Assert.Equal(runB.Value.SessionId, stationB.LatestSessionId);
+        Assert.Equal("application-a", stationA.ApplicationId);
+        Assert.Equal("application-b", stationB.ApplicationId);
+        var targetA = Assert.Single(await projection.GetTargetStatusesAsync(scopeA, "station.shared"));
+        var targetB = Assert.Single(await projection.GetTargetStatusesAsync(scopeB, "station.shared"));
+        Assert.Equal(RuntimeCommandStatus.Completed, targetA.CommandStatus);
+        Assert.Equal(RuntimeCommandStatus.Failed, targetB.CommandStatus);
+        Assert.Equal("application-b failed", targetB.FailureReason);
+        Assert.Empty(await projection.GetStationStatusesAsync(new RuntimeMonitoringScope(
+            "project-shared",
+            "application-a",
+            "snapshot-b",
+            "topology-shared")));
+    }
+
+    [Fact]
+    public async Task IdenticalReleaseAndStationIdentitiesRemainIsolatedByProductionRun()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var projection = new RuntimeMonitoringProjection(repository);
+        var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
+        var runner = new RuntimeSessionRunner(
+            repository,
+            eventPublisher,
+            new ScriptedRuntimeCommandExecutor(
+                RuntimeCommandExecutionResult.Completed(),
+                RuntimeCommandExecutionResult.Failed("second production run failed")),
+            new DeterministicRuntimeIdProvider(),
+            new FixedClock(StartedAtUtc));
+        var firstProductionRunId = new ProductionRunId(
+            Guid.Parse("20000000-0000-0000-0000-000000000001"));
+        var secondProductionRunId = new ProductionRunId(
+            Guid.Parse("20000000-0000-0000-0000-000000000002"));
+        var unfilteredScope = new RuntimeMonitoringScope(
+            "project-run-scope",
+            "application-run-scope",
+            "snapshot-run-scope",
+            "topology-run-scope");
+        var firstScope = new RuntimeMonitoringScope(
+            unfilteredScope.ProjectId,
+            unfilteredScope.ApplicationId,
+            unfilteredScope.ProjectSnapshotId,
+            unfilteredScope.TopologyId,
+            firstProductionRunId);
+        var secondScope = new RuntimeMonitoringScope(
+            unfilteredScope.ProjectId,
+            unfilteredScope.ApplicationId,
+            unfilteredScope.ProjectSnapshotId,
+            unfilteredScope.TopologyId,
+            secondProductionRunId);
+
+        var firstRun = await runner.RunAsync(CreateProductionRunScopedStartRequest(
+            firstScope,
+            "station.shared",
+            TargetNode("node.shared", "action.shared", RuntimeTargetKinds.Slot, "slot.shared")));
+        var secondRun = await runner.RunAsync(CreateProductionRunScopedStartRequest(
+            secondScope,
+            "station.shared",
+            TargetNode("node.shared", "action.shared", RuntimeTargetKinds.Slot, "slot.shared")));
+
+        Assert.True(firstRun.IsSuccess);
+        Assert.True(secondRun.IsSuccess);
+        var firstStation = Assert.Single(await projection.GetStationStatusesAsync(firstScope));
+        var secondStation = Assert.Single(await projection.GetStationStatusesAsync(secondScope));
+        Assert.Equal(firstRun.Value.SessionId, firstStation.LatestSessionId);
+        Assert.Equal(secondRun.Value.SessionId, secondStation.LatestSessionId);
+        Assert.Equal(firstProductionRunId, firstStation.ProductionRunId);
+        Assert.Equal(secondProductionRunId, secondStation.ProductionRunId);
+        Assert.Equal(2, (await projection.GetStationStatusesAsync(unfilteredScope)).Count);
+
+        var firstTarget = Assert.Single(await projection.GetTargetStatusesAsync(firstScope));
+        var secondTarget = Assert.Single(await projection.GetTargetStatusesAsync(secondScope));
+        Assert.Equal(RuntimeCommandStatus.Completed, firstTarget.CommandStatus);
+        Assert.Equal(RuntimeCommandStatus.Failed, secondTarget.CommandStatus);
+        Assert.Equal(2, (await projection.GetTargetStatusesAsync(unfilteredScope)).Count);
+        Assert.Empty(await projection.GetSessionTimelineAsync(firstRun.Value.SessionId, secondScope));
+        Assert.NotEmpty(await projection.GetSessionTimelineAsync(firstRun.Value.SessionId, firstScope));
     }
 
     private static StartRuntimeSessionRequest CreateStartRequest(
@@ -216,6 +374,7 @@ public sealed class RuntimeMonitoringProjectionTests
             ];
 
         return new StartRuntimeSessionRequest(
+            RuntimeSessionId.New(),
             new StationId(stationSystemId),
             new ConfigurationSnapshotId("snapshot-monitoring"),
             new RecipeSnapshotId("recipe-monitoring"),
@@ -223,16 +382,84 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessDefinitionId("process-monitoring"),
                 new ProcessVersionId("process-monitoring@1.0.0"),
                 executableNodes),
+            RuntimeTestReleaseIdentity.TraceMetadata(
+                actorId: "runtime-monitoring-tests",
+                projectId: "project-monitoring",
+                applicationId: "application-monitoring",
+                projectSnapshotId: "snapshot-monitoring",
+                topologyId: "topology-monitoring"));
+    }
+
+    private static StartRuntimeSessionRequest CreateScopedStartRequest(
+        RuntimeMonitoringScope scope,
+        string stationSystemId,
+        params ExecutableRuntimeNode[] nodes)
+    {
+        return new StartRuntimeSessionRequest(
+            RuntimeSessionId.New(),
+            new StationId(stationSystemId),
+            new ConfigurationSnapshotId($"configuration-{scope.ApplicationId}"),
+            new RecipeSnapshotId($"recipe-{scope.ApplicationId}"),
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId($"process-{scope.ApplicationId}"),
+                new ProcessVersionId($"process-{scope.ApplicationId}@1.0.0"),
+                nodes),
+            RuntimeTestReleaseIdentity.TraceMetadata(
+                actorId: "runtime-monitoring-tests",
+                projectId: scope.ProjectId,
+                applicationId: scope.ApplicationId,
+                projectSnapshotId: scope.ProjectSnapshotId,
+                topologyId: scope.TopologyId));
+    }
+
+    private static StartRuntimeSessionRequest CreateProductionRunScopedStartRequest(
+        RuntimeMonitoringScope scope,
+        string stationSystemId,
+        params ExecutableRuntimeNode[] nodes)
+    {
+        var productionRunId = scope.ProductionRunId
+            ?? throw new ArgumentException("Production Run scope is required.", nameof(scope));
+        return new StartRuntimeSessionRequest(
+            RuntimeSessionId.New(),
+            new StationId(stationSystemId),
+            new ConfigurationSnapshotId("configuration-run-scope"),
+            new RecipeSnapshotId("recipe-run-scope"),
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process-run-scope"),
+                new ProcessVersionId("process-run-scope@1.0.0"),
+                nodes),
             new RuntimeSessionTraceMetadata(
-                null,
+                productionRunId,
+                "line-run-scope",
+                "stage-run-scope",
+                1,
+                "workstation-run-scope",
+                new DutIdentity("dut-run-scope", "serialNumber", productionRunId.Value.ToString("D")),
                 null,
                 null,
                 null,
                 "runtime-monitoring-tests",
-                "project-monitoring",
-                "application-monitoring",
-                "snapshot-monitoring",
-                "topology-monitoring"));
+                scope.ProjectId,
+                scope.ApplicationId,
+                scope.ProjectSnapshotId,
+                scope.TopologyId));
+    }
+
+    private static ExecutableRuntimeNode TargetNode(
+        string nodeId,
+        string actionId,
+        string targetKind,
+        string targetId)
+    {
+        return new ExecutableRuntimeNode(
+            new RuntimeNodeId(nodeId),
+            nodeId,
+            new RuntimeCapabilityId("system.run"),
+            "Run",
+            TimeSpan.FromSeconds(30),
+            null,
+            new RuntimeActionId(actionId),
+            new RuntimeTargetReference(targetKind, targetId));
     }
 
     private static void AssertInProgressTarget(
@@ -242,6 +469,12 @@ public sealed class RuntimeMonitoringProjectionTests
     {
         Assert.Equal(targetKind, status.TargetKind);
         Assert.Equal(targetId, status.TargetId);
+        Assert.Equal(MonitoringProductionRunId, status.ProductionRunId);
+        Assert.Equal("line.main", status.ProductionLineDefinitionId);
+        Assert.Equal("stage.main", status.StageId);
+        Assert.Equal(1, status.StageSequence);
+        Assert.Equal("workstation.main", status.WorkstationId);
+        Assert.Equal("DUT-DEFAULT", status.DutIdentity.Value);
         Assert.Equal(RuntimeCommandStatus.InProgress, status.CommandStatus);
         Assert.False(status.IsTerminal);
         Assert.Null(status.FailureReason);
@@ -258,6 +491,12 @@ public sealed class RuntimeMonitoringProjectionTests
             statuses,
             candidate => candidate.TargetKind == targetKind && candidate.TargetId == targetId);
         Assert.Equal(expectedStatus, status.CommandStatus);
+        Assert.Equal(MonitoringProductionRunId, status.ProductionRunId);
+        Assert.Equal("line.main", status.ProductionLineDefinitionId);
+        Assert.Equal("stage.main", status.StageId);
+        Assert.Equal(1, status.StageSequence);
+        Assert.Equal("workstation.main", status.WorkstationId);
+        Assert.Equal("DUT-DEFAULT", status.DutIdentity.Value);
         Assert.Equal(expectedFailureReason, status.FailureReason);
         Assert.True(status.IsTerminal);
         Assert.Equal(StartedAtUtc, status.LastTransitionAtUtc);
@@ -335,7 +574,10 @@ public sealed class RuntimeMonitoringProjectionTests
             CancellationToken cancellationToken = default)
         {
             var current = Assert.Single(
-                await _projection.GetTargetStatusesAsync(context.StationId.Value, cancellationToken),
+                await _projection.GetTargetStatusesAsync(
+                    MonitoringScope,
+                    context.StationId.Value,
+                    cancellationToken),
                 status => status.TargetKind == context.TargetKind
                     && status.TargetId == context.TargetId);
             ObservedInProgressStatuses.Add(current);

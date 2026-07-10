@@ -64,6 +64,8 @@ public static class ProcessDefinitionMapper
             node.DisplayName,
             node.RequiredCapability?.Value,
             node.CommandName,
+            node.TargetKind?.ToString(),
+            node.TargetId,
             node.CommandTimeout is null
                 ? node.ScriptTimeout is null
                     ? null

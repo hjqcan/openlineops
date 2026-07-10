@@ -118,11 +118,6 @@ public sealed class Alarm : AggregateRoot<AlarmId>
         AcknowledgedAtUtc = acknowledgedAtUtc;
         Status = AlarmStatus.Acknowledged;
 
-        RaiseDomainEvent(new AlarmAcknowledgedDomainEvent(
-            Id,
-            AcknowledgedBy,
-            acknowledgedAtUtc));
-
         return OperationsOperationResult.Accepted("Alarm acknowledged.");
     }
 
@@ -140,12 +135,6 @@ public sealed class Alarm : AggregateRoot<AlarmId>
         ResolutionNote = RequiredText(resolutionNote, nameof(resolutionNote));
         ResolvedAtUtc = resolvedAtUtc;
         Status = AlarmStatus.Resolved;
-
-        RaiseDomainEvent(new AlarmResolvedDomainEvent(
-            Id,
-            ResolvedBy,
-            resolvedAtUtc,
-            ResolutionNote));
 
         return OperationsOperationResult.Accepted("Alarm resolved.");
     }

@@ -747,38 +747,38 @@ internal static class BlocklyWorkspaceActionCompiler
             case RuntimeActionContextValue:
                 return ExpressionFailure("Runtime context expressions are not allowed for this static action value.");
             case RuntimeActionObjectValue objectValue:
-            {
-                var result = new JsonObject();
-                foreach (var (name, childExpression) in objectValue.Properties
-                             .OrderBy(pair => pair.Key, StringComparer.Ordinal))
                 {
-                    var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
-                    if (child.IsFailure)
+                    var result = new JsonObject();
+                    foreach (var (name, childExpression) in objectValue.Properties
+                                 .OrderBy(pair => pair.Key, StringComparer.Ordinal))
                     {
-                        return Result.Failure<JsonElement>(child.Error);
+                        var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
+                        if (child.IsFailure)
+                        {
+                            return Result.Failure<JsonElement>(child.Error);
+                        }
+
+                        result[name] = JsonNode.Parse(child.Value.GetRawText());
                     }
 
-                    result[name] = JsonNode.Parse(child.Value.GetRawText());
+                    return Result.Success(JsonSerializer.SerializeToElement(result));
                 }
-
-                return Result.Success(JsonSerializer.SerializeToElement(result));
-            }
             case RuntimeActionArrayValue arrayValue:
-            {
-                var result = new JsonArray();
-                foreach (var childExpression in arrayValue.Items)
                 {
-                    var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
-                    if (child.IsFailure)
+                    var result = new JsonArray();
+                    foreach (var childExpression in arrayValue.Items)
                     {
-                        return Result.Failure<JsonElement>(child.Error);
+                        var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
+                        if (child.IsFailure)
+                        {
+                            return Result.Failure<JsonElement>(child.Error);
+                        }
+
+                        result.Add(JsonNode.Parse(child.Value.GetRawText()));
                     }
 
-                    result.Add(JsonNode.Parse(child.Value.GetRawText()));
+                    return Result.Success(JsonSerializer.SerializeToElement(result));
                 }
-
-                return Result.Success(JsonSerializer.SerializeToElement(result));
-            }
             default:
                 return ExpressionFailure($"Expression type {expression.GetType().Name} is not supported.");
         }

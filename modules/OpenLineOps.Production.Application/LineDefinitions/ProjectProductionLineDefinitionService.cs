@@ -4,6 +4,7 @@ using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
+using OpenLineOps.Processes.Application.ProjectWorkspaces;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Production.Application.Persistence;
 using OpenLineOps.Production.Domain.Aggregates;
@@ -22,6 +23,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
     private readonly IProjectProductionLineDefinitionRepository _repository;
     private readonly IProjectAutomationTopologyRepository _topologyRepository;
     private readonly IProjectProcessDefinitionRepository _processRepository;
+    private readonly IProjectProcessBlocklyBlockCatalog _blockCatalog;
     private readonly IProcessFlowIrCompiler _flowIrCompiler;
     private readonly IClock _clock;
 
@@ -30,6 +32,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         IProjectProductionLineDefinitionRepository repository,
         IProjectAutomationTopologyRepository topologyRepository,
         IProjectProcessDefinitionRepository processRepository,
+        IProjectProcessBlocklyBlockCatalog blockCatalog,
         IProcessFlowIrCompiler flowIrCompiler,
         IClock clock)
     {
@@ -37,6 +40,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         _repository = repository;
         _topologyRepository = topologyRepository;
         _processRepository = processRepository;
+        _blockCatalog = blockCatalog;
         _flowIrCompiler = flowIrCompiler;
         _clock = clock;
     }
@@ -241,6 +245,11 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
                     new ExternalTestProgramInputMapping(mapping.Source, mapping.Target)),
                 adapter.ResultMappings.Select(mapping =>
                     new ExternalTestProgramResultMapping(mapping.SourcePath, mapping.TargetKey)),
+                new ExternalTestProgramOutcomeMapping(
+                    adapter.OutcomeMapping.SourcePath,
+                    adapter.OutcomeMapping.PassedToken,
+                    adapter.OutcomeMapping.FailedToken,
+                    adapter.OutcomeMapping.AbortedToken),
                 MillisecondsToTimeout(adapter.TimeoutMilliseconds)));
         var stages = request.Stages.Select(stage => ProcessStage.Create(
             new ProcessStageId(stage.StageId),
@@ -248,7 +257,8 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             stage.DisplayName,
             new WorkstationId(stage.WorkstationId),
             stage.FlowDefinitionId,
-            string.IsNullOrWhiteSpace(stage.ExternalTestProgramAdapterId)
+            stage.ConfigurationSnapshotId,
+            stage.ExternalTestProgramAdapterId is null
                 ? null
                 : new ExternalTestProgramAdapterId(stage.ExternalTestProgramAdapterId)));
 
@@ -280,6 +290,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             ArgumentNullException.ThrowIfNull(adapter.ArgumentTemplates);
             ArgumentNullException.ThrowIfNull(adapter.InputMappings);
             ArgumentNullException.ThrowIfNull(adapter.ResultMappings);
+            ArgumentNullException.ThrowIfNull(adapter.OutcomeMapping);
             if (adapter.InputMappings.Any(static mapping => mapping is null)
                 || adapter.ResultMappings.Any(static mapping => mapping is null))
             {
@@ -362,6 +373,16 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             }
         }
 
+        var blockCatalogResult = await _blockCatalog
+            .ListAsync(scope.ProjectId, scope.ApplicationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (blockCatalogResult.IsFailure)
+        {
+            return Validation(
+                "StageFlowBlockCatalogUnavailable",
+                $"Application Blockly block catalog cannot be loaded: {blockCatalogResult.Error.Message}");
+        }
+
         var compiledFlows = new Dictionary<string, FlowIrDocument>(StringComparer.Ordinal);
         foreach (var stage in definition.Stages)
         {
@@ -377,7 +398,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
 
             if (!compiledFlows.TryGetValue(stage.FlowDefinitionId, out var flowIr))
             {
-                var compilation = _flowIrCompiler.Compile(flow);
+                var compilation = _flowIrCompiler.Compile(flow, blockCatalogResult.Value);
                 if (compilation.IsFailure)
                 {
                     return Validation(

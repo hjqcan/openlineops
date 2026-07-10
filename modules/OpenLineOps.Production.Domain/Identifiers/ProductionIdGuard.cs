@@ -4,19 +4,22 @@ internal static class ProductionIdGuard
 {
     public static string NotBlank(string value, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        if (string.IsNullOrWhiteSpace(value)
+            || char.IsWhiteSpace(value[0])
+            || char.IsWhiteSpace(value[^1]))
         {
-            throw new ArgumentException("Identifier values cannot be blank.", parameterName);
+            throw new ArgumentException(
+                "Values must be non-empty canonical text without leading or trailing whitespace.",
+                parameterName);
         }
 
-        return value.Trim();
+        return value;
     }
 
     public static string PortablePathSegment(string value, string parameterName)
     {
         var normalized = NotBlank(value, parameterName);
-        if (!string.Equals(value, normalized, StringComparison.Ordinal)
-            || normalized is "." or ".."
+        if (normalized is "." or ".."
             || normalized.Length > 128
             || normalized.EndsWith('.')
             || IsReservedWindowsName(normalized)

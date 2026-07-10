@@ -50,6 +50,7 @@ import type {
   SiteLayoutResponse,
   RuntimeAlarm,
   RuntimeAlarmsResponse,
+  RuntimeMonitoringScope,
   RuntimeStationStatus,
   RuntimeStationStatusesResponse,
   RuntimeTargetStatus,
@@ -58,8 +59,8 @@ import type {
   RuntimeTimelineResponse,
   SaveProductionLineRequest,
   RegisterProcessBlocklyBlockDefinitionRequest,
-  StartedProjectSnapshotRuntimeSessionResponse,
-  StartProjectSnapshotRuntimeSessionRequest,
+  StartedProjectSnapshotProductionRunResponse,
+  StartProjectSnapshotProductionRunRequest,
   StationProfileResponse,
   TraceRecordExportPackageResponse,
   TraceRecordQueryResponse,
@@ -179,13 +180,13 @@ export async function publishProjectSnapshot(
     });
 }
 
-export async function startProjectSnapshotRuntimeSession(
+export async function startProjectSnapshotProductionRun(
   projectId: string,
   snapshotId: string,
-  request: StartProjectSnapshotRuntimeSessionRequest
-): Promise<ApiResponse<StartedProjectSnapshotRuntimeSessionResponse>> {
-  return desktop.apiRequest<StartedProjectSnapshotRuntimeSessionResponse>(
-    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/runtime-sessions`,
+  request: StartProjectSnapshotProductionRunRequest
+): Promise<ApiResponse<StartedProjectSnapshotProductionRunResponse>> {
+  return desktop.apiRequest<StartedProjectSnapshotProductionRunResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/production-runs`,
     {
       method: 'POST',
       body: request
@@ -207,10 +208,11 @@ export async function listAutomationTopologies(
 
 export async function getAutomationTopology(
   topologyId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  snapshotId?: string
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}`);
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}${toQueryString({ snapshotId })}`);
 }
 
 export async function createAutomationTopology(
@@ -364,10 +366,11 @@ export async function deleteSlotDefinition(
 
 export async function getSiteLayout(
   layoutId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  snapshotId?: string
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
-    `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}`);
+    `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}${toQueryString({ snapshotId })}`);
 }
 
 export async function createSiteLayout(
@@ -425,25 +428,46 @@ function engineeringPath(scope: ProjectApplicationApiScope): string {
   return `${projectApplicationPath(scope)}/engineering`;
 }
 
-export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
+export async function getStationStatuses(
+  scope: RuntimeMonitoringScope
+): Promise<RuntimeStationStatus[]> {
   const response = await desktop.apiRequest<RuntimeStationStatusesResponse>(
-    '/api/runtime/monitoring/stations');
+    `/api/runtime/monitoring/stations?${runtimeMonitoringQuery(scope)}`);
   return response.body?.items ?? [];
 }
 
 export async function getTargetStatuses(
+  scope: RuntimeMonitoringScope,
   stationSystemIds?: readonly string[]
 ): Promise<RuntimeTargetStatus[]> {
   const uniqueStationSystemIds = [...new Set(
     (stationSystemIds ?? []).filter(stationSystemId => stationSystemId.length > 0))];
   const paths = uniqueStationSystemIds.length === 0
-    ? ['/api/runtime/monitoring/targets']
+    ? [`/api/runtime/monitoring/targets?${runtimeMonitoringQuery(scope)}`]
     : uniqueStationSystemIds.map(stationSystemId =>
-      `/api/runtime/monitoring/targets?stationSystemId=${encodeURIComponent(stationSystemId)}`);
+      `/api/runtime/monitoring/targets?${runtimeMonitoringQuery(scope, stationSystemId)}`);
   const responses = await Promise.all(paths.map(path =>
     desktop.apiRequest<RuntimeTargetStatusesResponse>(path)));
 
   return responses.flatMap(response => response.body?.items ?? []);
+}
+
+function runtimeMonitoringQuery(
+  scope: RuntimeMonitoringScope,
+  stationSystemId?: string
+): string {
+  const query = new URLSearchParams({
+    projectId: scope.projectId,
+    applicationId: scope.applicationId,
+    projectSnapshotId: scope.projectSnapshotId,
+    topologyId: scope.topologyId,
+    productionRunId: scope.productionRunId
+  });
+  if (stationSystemId !== undefined) {
+    query.set('stationSystemId', stationSystemId);
+  }
+
+  return query.toString();
 }
 
 export async function getAlarms(includeAcknowledged = false): Promise<RuntimeAlarm[]> {
@@ -452,14 +476,19 @@ export async function getAlarms(includeAcknowledged = false): Promise<RuntimeAla
   return response.body?.items ?? [];
 }
 
-export async function getTimeline(sessionId: string): Promise<RuntimeTimelineEntry[]> {
+export async function getTimeline(
+  sessionId: string,
+  scope: RuntimeMonitoringScope
+): Promise<RuntimeTimelineEntry[]> {
   const response = await desktop.apiRequest<RuntimeTimelineResponse>(
-    `/api/runtime/monitoring/sessions/${sessionId}/timeline`);
+    `/api/runtime/monitoring/sessions/${sessionId}/timeline?${runtimeMonitoringQuery(scope)}`);
   return response.body?.items ?? [];
 }
 
-export async function getTraceRecords(serialNumber?: string): Promise<TraceRecordQueryResponse | null> {
-  const query = serialNumber ? `?serialNumber=${encodeURIComponent(serialNumber)}` : '';
+export async function getTraceRecords(dutIdentityValue?: string): Promise<TraceRecordQueryResponse | null> {
+  const query = dutIdentityValue
+    ? `?dutIdentityValue=${encodeURIComponent(dutIdentityValue)}`
+    : '';
   const response = await desktop.apiRequest<TraceRecordQueryResponse>(
     `/api/traceability/records${query}`);
   return response.body;

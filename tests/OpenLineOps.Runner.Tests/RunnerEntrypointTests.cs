@@ -13,11 +13,13 @@ public sealed class RunnerEntrypointTests
         var writer = new StringWriter();
 
         var exitCode = await RunnerEntrypoint.RunAsync(
-            ["run", missingProject],
+            ["run", missingProject, "--dut", "DUT-001", "--actor", "runner-test"],
             currentDirectory,
             writer);
 
-        Assert.Equal(RunnerExitCodes.ProjectOpenFailed, exitCode);
+        Assert.True(
+            exitCode == RunnerExitCodes.ProjectOpenFailed,
+            $"Runner returned {exitCode}: {writer}");
         using var document = JsonDocument.Parse(writer.ToString());
         Assert.Equal(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.False(document.RootElement.GetProperty("success").GetBoolean());

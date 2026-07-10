@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace OpenLineOps.Projects.Api.Models;
 
 public sealed record CreateAutomationProjectRequest(
@@ -26,18 +28,20 @@ public sealed record LinkProjectTopologyRequest(
 public sealed record LinkProjectProcessDefinitionRequest(
     string? ProcessDefinitionId);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record PublishProjectSnapshotRequest(
     string? SnapshotId,
     string? ApplicationId,
-    string? ProcessDefinitionId,
-    string? ConfigurationSnapshotId);
+    string? ProductionLineDefinitionId);
 
-public sealed record StartProjectSnapshotRuntimeSessionRequest(
-    string? SerialNumber = null,
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record StartProjectSnapshotProductionRunRequest(
+    Guid? ProductionRunId,
+    string? DutIdentityValue,
+    string? ActorId,
     string? BatchId = null,
     string? FixtureId = null,
-    string? DeviceId = null,
-    string? ActorId = null);
+    string? DeviceId = null);
 
 public sealed record SnapshotCapabilityBindingRequest(
     string? CapabilityId,
@@ -101,9 +105,7 @@ public sealed record PublishedProjectSnapshotResponse(
     string ApplicationId,
     string TopologyId,
     IReadOnlyCollection<string> LayoutIds,
-    string ProcessDefinitionId,
-    string ProcessVersionId,
-    string ConfigurationSnapshotId,
+    string ProductionLineDefinitionId,
     DateTimeOffset PublishedAtUtc,
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
@@ -117,9 +119,7 @@ public sealed record PublishedProjectSnapshotManifestResponse(
     string ApplicationId,
     string TopologyId,
     IReadOnlyCollection<string> LayoutIds,
-    string ProcessDefinitionId,
-    string ProcessVersionId,
-    string ConfigurationSnapshotId,
+    string ProductionLineDefinitionId,
     DateTimeOffset PublishedAtUtc,
     IReadOnlyCollection<SnapshotCapabilityBindingResponse> CapabilityBindings,
     IReadOnlyCollection<ProjectTargetReferenceResponse> TargetReferences,
@@ -137,14 +137,49 @@ public sealed record ProjectTargetReferenceResponse(
     string Kind,
     string TargetId);
 
-public sealed record StartedProjectSnapshotRuntimeSessionResponse(
+public sealed record StartedProjectSnapshotProductionRunResponse(
     string SnapshotId,
     string ProjectId,
     string ApplicationId,
     string TopologyId,
-    Guid SessionId,
-    string ConfigurationSnapshotId,
+    string ProductionLineDefinitionId,
+    Guid ProductionRunId,
+    string DutModelId,
+    string DutIdentityInputKey,
+    string DutIdentityValue,
+    string ActorId,
+    string? BatchId,
+    string? FixtureId,
+    string? DeviceId,
     string Status,
-    int CompletedSteps,
+    bool IsTerminal,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset LastTransitionAtUtc,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    string? FailureCode,
+    string? FailureReason,
+    int CompletedStageCount,
+    int CompletedStepCount,
+    int CommandCount,
+    int IncidentCount,
+    IReadOnlyCollection<ProductionStageRunResponse> Stages);
+
+public sealed record ProductionStageRunResponse(
+    string StageId,
+    int Sequence,
+    string WorkstationId,
+    string StationSystemId,
+    string ProcessDefinitionId,
+    string ProcessVersionId,
+    string ConfigurationSnapshotId,
+    string RecipeSnapshotId,
+    string Status,
+    Guid? RuntimeSessionId,
+    DateTimeOffset? StartedAtUtc,
+    DateTimeOffset? CompletedAtUtc,
+    string? FailureCode,
+    string? FailureReason,
+    int CompletedStepCount,
     int CommandCount,
     int IncidentCount);

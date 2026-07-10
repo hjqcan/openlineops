@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using OpenLineOps.EventBus.DependencyInjection;
 using OpenLineOps.Operations.Application.Contract.Alarms;
 using OpenLineOps.Operations.Application.Contract.Services;
 using OpenLineOps.Operations.Domain.Repositories;
@@ -12,7 +13,7 @@ namespace OpenLineOps.Api.Tests;
 public sealed class OperationsModuleDependencyInjectionTests
 {
     [Fact]
-    public void AddOpenLineOpsOperationsModuleUsesEfSqlitePersistenceByDefault()
+    public void AddOpenLineOpsOperationsModuleUsesSqlitePersistenceByDefault()
     {
         using var database = TemporarySqliteDatabase.Create();
         var configuration = new ConfigurationBuilder()
@@ -58,7 +59,7 @@ public sealed class OperationsModuleDependencyInjectionTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OpenLineOps:Operations:Persistence:Provider"] = "Postgres",
+                ["OpenLineOps:Operations:Persistence:Provider"] = OperationsPersistenceProviders.PostgreSql,
                 ["OpenLineOps:Operations:Persistence:ConnectionString"] =
                     "Host=localhost;Database=openlineops;Username=openlineops;Password=openlineops"
             })
@@ -90,18 +91,47 @@ public sealed class OperationsModuleDependencyInjectionTests
         Assert.Contains("ConnectionString", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("EfSqlite")]
+    [InlineData("EntityFrameworkSqlite")]
+    [InlineData("Postgres")]
+    [InlineData("PostgreSQL")]
+    [InlineData("postgresql")]
+    [InlineData("Memory")]
+    public void AddOpenLineOpsOperationsModuleRejectsNonCanonicalProviderTokens(string provider)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Operations:Persistence:Provider"] = provider
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOpenLineOpsOperationsModule(configuration));
+
+        Assert.Contains(
+            "Expected exactly 'Sqlite', 'InMemory', or 'PostgreSql'",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
-    public async Task AddOpenLineOpsOperationsModuleCanRaiseAlarmWithDefaultEfSqlitePersistence()
+    public async Task AddOpenLineOpsOperationsModuleCanRaiseAlarmWithDefaultSqlitePersistence()
     {
         using var database = TemporarySqliteDatabase.Create();
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OpenLineOps:Operations:Persistence:ConnectionString"] = database.ConnectionString
+                ["OpenLineOps:Operations:Persistence:ConnectionString"] = database.ConnectionString,
+                ["OpenLineOps:EventBus:PublicationMode"] = "PostCommit"
             })
             .Build();
         var services = new ServiceCollection();
+        services.AddLogging();
         services.AddOpenLineOpsOperationsModule(configuration);
+        services.AddOpenLineOpsEventBus(configuration);
 
         using var serviceProvider = services.BuildServiceProvider();
         using var scope = serviceProvider.CreateScope();

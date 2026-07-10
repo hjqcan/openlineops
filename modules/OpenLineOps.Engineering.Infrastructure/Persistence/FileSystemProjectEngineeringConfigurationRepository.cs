@@ -516,14 +516,14 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
             throw InvalidResource(path, "recipe parameters collection is empty");
         }
 
-        if (string.Equals(snapshot.Status, "Published", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(snapshot.Status, "Published", StringComparison.Ordinal))
         {
             if (snapshot.PublishedAtUtc is null)
             {
                 throw InvalidResource(path, "published recipe has no publication timestamp");
             }
         }
-        else if (!string.Equals(snapshot.Status, "Draft", StringComparison.OrdinalIgnoreCase))
+        else if (!string.Equals(snapshot.Status, "Draft", StringComparison.Ordinal))
         {
             throw InvalidResource(path, $"recipe status '{snapshot.Status}' is not supported");
         }

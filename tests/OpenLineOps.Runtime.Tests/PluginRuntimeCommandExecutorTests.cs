@@ -2,6 +2,7 @@ using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -110,6 +111,12 @@ public sealed class PluginRuntimeCommandExecutorTests
     {
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
+            new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
+            "line.main",
+            "stage.main",
+            1,
+            "workstation.main",
+            new DutIdentity("dut.main", "serialNumber", "SN-001"),
             new StationId("station-a"),
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),

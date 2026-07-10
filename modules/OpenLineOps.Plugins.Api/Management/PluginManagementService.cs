@@ -85,14 +85,14 @@ public sealed class PluginManagementService : IPluginManagementService
 
     public async Task<IReadOnlyCollection<ExternalPluginProcessEventResponse>> ListEventsAsync(
         string? pluginId,
-        string? kind,
+        ExternalPluginProcessEventKind? kind,
         int skip,
         int take,
         CancellationToken cancellationToken = default)
     {
         var query = new ExternalPluginProcessEventQuery(
-            string.IsNullOrWhiteSpace(pluginId) ? null : pluginId.Trim(),
-            TryParseKind(kind),
+            RequireCanonicalOptionalPluginId(pluginId),
+            kind,
             Skip: skip,
             Take: take);
         var events = await _eventLog
@@ -100,6 +100,24 @@ public sealed class PluginManagementService : IPluginManagementService
             .ConfigureAwait(false);
 
         return events.Select(ToResponse).ToArray();
+    }
+
+    private static string? RequireCanonicalOptionalPluginId(string? pluginId)
+    {
+        if (pluginId is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(pluginId)
+            || !string.Equals(pluginId, pluginId.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Plugin id must be non-empty and must not contain surrounding whitespace.",
+                nameof(pluginId));
+        }
+
+        return pluginId;
     }
 
     private PluginPackageResponse ToResponse(PluginPackageDescriptor package)
@@ -218,10 +236,4 @@ public sealed class PluginManagementService : IPluginManagementService
             processEvent.Detail);
     }
 
-    private static ExternalPluginProcessEventKind? TryParseKind(string? kind)
-    {
-        return Enum.TryParse<ExternalPluginProcessEventKind>(kind, ignoreCase: true, out var parsed)
-            ? parsed
-            : null;
-    }
 }

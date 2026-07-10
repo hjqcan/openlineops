@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using OpenLineOps.Processes.Domain.Definitions;
-using OpenLineOps.Processes.Domain.Events;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Operations;
@@ -26,11 +25,6 @@ public sealed class ProcessDefinitionTests
         Assert.Equal(ProcessDefinitionStatus.Published, definition.Status);
         Assert.True(definition.IsPublished);
         Assert.Equal(PublishedAtUtc, definition.PublishedAtUtc);
-
-        var domainEvent = Assert.IsType<ProcessDefinitionPublishedDomainEvent>(Assert.Single(definition.DomainEvents));
-        Assert.Equal(definition.Id, domainEvent.ProcessDefinitionId);
-        Assert.Equal(definition.VersionId, domainEvent.VersionId);
-        Assert.Equal(PublishedAtUtc, domainEvent.PublishedAtUtc);
     }
 
     [Fact]
@@ -58,7 +52,12 @@ public sealed class ProcessDefinitionTests
     public void PublishInvalidGraphDoesNotPublish()
     {
         var definition = CreateDefinition();
-        AddNode(definition, ProcessNode.Command(NodeId("inspect"), "Inspect", CapabilityId("vision-camera")));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera"));
 
         var result = definition.Publish(PublishedAtUtc);
 
@@ -66,14 +65,18 @@ public sealed class ProcessDefinitionTests
         Assert.Equal("Processes.PublishValidationFailed", result.Code);
         Assert.Equal(ProcessDefinitionStatus.Draft, definition.Status);
         Assert.Null(definition.PublishedAtUtc);
-        Assert.Empty(definition.DomainEvents);
     }
 
     [Fact]
     public void ValidatorRejectsGraphWithoutStartNode()
     {
         var definition = CreateDefinition();
-        AddNode(definition, ProcessNode.Command(NodeId("inspect"), "Inspect", CapabilityId("vision-camera")));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera"));
 
         var report = ProcessGraphValidator.Validate(definition);
 
@@ -85,7 +88,12 @@ public sealed class ProcessDefinitionTests
     public void ValidatorRejectsUnreachableNode()
     {
         var definition = CreateValidDefinition();
-        AddNode(definition, ProcessNode.Command(NodeId("orphan"), "Orphan", CapabilityId("unused-capability")));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("orphan"),
+            "Orphan",
+            CapabilityId("unused-capability"),
+            ProcessActionTargetKind.Capability,
+            "unused-capability"));
 
         var report = ProcessGraphValidator.Validate(definition);
 
@@ -113,7 +121,12 @@ public sealed class ProcessDefinitionTests
     {
         var definition = CreateDefinition();
         AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
-        AddNode(definition, ProcessNode.Command(NodeId("inspect"), "Inspect", CapabilityId("vision-camera")));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera"));
         AddTransition(definition, ProcessTransition.Create(TransitionId("start-to-inspect"), NodeId("start"), NodeId("inspect")));
         AddTransition(definition, ProcessTransition.Create(TransitionId("inspect-to-start"), NodeId("inspect"), NodeId("start")));
 
@@ -148,6 +161,8 @@ public sealed class ProcessDefinitionTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30)));
         AddNode(definition, ProcessNode.Decision(NodeId("route"), "Route Result"));
@@ -177,6 +192,8 @@ public sealed class ProcessDefinitionTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30)));
         AddTransition(definition, ProcessTransition.Create(TransitionId("start-to-inspect"), NodeId("start"), NodeId("inspect")));
@@ -233,6 +250,8 @@ public sealed class ProcessDefinitionTests
             NodeId("inspect"),
             "Inspect",
             requiredCapability: null,
+            targetKind: ProcessActionTargetKind.Capability,
+            targetId: "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
@@ -250,7 +269,12 @@ public sealed class ProcessDefinitionTests
     {
         var definition = CreateDefinition();
         AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
-        AddNode(definition, ProcessNode.Command(NodeId("inspect"), "Inspect", CapabilityId("vision-camera")));
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera"));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));
         AddTransition(definition, ProcessTransition.Create(TransitionId("start-to-inspect"), NodeId("start"), NodeId("inspect")));
         AddTransition(definition, ProcessTransition.Create(TransitionId("inspect-to-end"), NodeId("inspect"), NodeId("end")));
@@ -338,6 +362,8 @@ public sealed class ProcessDefinitionTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30),
             inputPayload: "scan-ok"));
@@ -357,6 +383,8 @@ public sealed class ProcessDefinitionTests
             NodeId("inspect"),
             "Inspect",
             CapabilityId("vision-camera"),
+            ProcessActionTargetKind.Capability,
+            "vision-camera",
             commandName: "Inspect",
             commandTimeout: TimeSpan.FromSeconds(30),
             inputPayload: "scan-ok"));

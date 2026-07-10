@@ -11,33 +11,20 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
     private readonly ExternalProcessPluginHostOptions _options;
     private readonly IExternalPluginProcessEventSink _eventSink;
 
-    public ExternalProcessPluginInstanceActivator()
-        : this(new SystemDiagnosticsExternalPluginProcessRunner(), new ExternalPluginProcessRegistry())
-    {
-    }
-
-    public ExternalProcessPluginInstanceActivator(IExternalPluginProcessRunner processRunner)
-        : this(processRunner, new ExternalPluginProcessRegistry())
-    {
-    }
-
-    public ExternalProcessPluginInstanceActivator(
-        IExternalPluginProcessRunner processRunner,
-        IExternalPluginProcessRegistry processRegistry)
-        : this(processRunner, processRegistry, new ExternalProcessPluginHostOptions())
-    {
-    }
-
     public ExternalProcessPluginInstanceActivator(
         IExternalPluginProcessRunner processRunner,
         IExternalPluginProcessRegistry processRegistry,
-        ExternalProcessPluginHostOptions? options,
-        IExternalPluginProcessEventSink? eventSink = null)
+        ExternalProcessPluginHostOptions options,
+        IExternalPluginProcessEventSink eventSink)
     {
+        ArgumentNullException.ThrowIfNull(processRunner);
+        ArgumentNullException.ThrowIfNull(processRegistry);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(eventSink);
         _processRunner = processRunner;
         _processRegistry = processRegistry;
-        _options = options ?? new ExternalProcessPluginHostOptions();
-        _eventSink = eventSink ?? NullExternalPluginProcessEventSink.Instance;
+        _options = options;
+        _eventSink = eventSink;
     }
 
     public ValueTask<PluginActivationResult> ActivateAsync(
@@ -104,6 +91,8 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
     private string? ValidateSandboxPolicy(string pluginId)
     {
+        _ = ExternalPluginIsolationModes.Parse(_options.Sandbox.IsolationMode);
+
         if (ExternalPluginIsolationModes.IsLeastPrivilegeIdentity(_options.Sandbox.IsolationMode)
             && string.IsNullOrWhiteSpace(_options.Sandbox.LeastPrivilegeIdentity))
         {
@@ -142,9 +131,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
             ["OPENLINEOPS_PLUGIN_MANIFEST_PATH"] = Path.GetFullPath(package.ManifestPath),
             ["OPENLINEOPS_PLUGIN_ENTRY_ASSEMBLY"] = entryAssemblyPath,
             ["OPENLINEOPS_PLUGIN_ENTRY_TYPE"] = package.Manifest.EntryType,
-            ["OPENLINEOPS_PLUGIN_SANDBOX_ISOLATION_MODE"] = NormalizeOptional(
-                sandboxOptions.IsolationMode,
-                ExternalPluginIsolationModes.ExternalProcess),
+            ["OPENLINEOPS_PLUGIN_SANDBOX_ISOLATION_MODE"] = sandboxOptions.IsolationMode,
             ["OPENLINEOPS_PLUGIN_SANDBOX_MAX_COMMAND_TIMEOUT_MS"] = ToTimeoutMilliseconds(
                 sandboxOptions.MaxCommandTimeout).ToString(System.Globalization.CultureInfo.InvariantCulture)
         };
@@ -197,13 +184,6 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
         {
             environmentVariables[name] = value.Trim();
         }
-    }
-
-    private static string NormalizeOptional(string? value, string fallback)
-    {
-        return string.IsNullOrWhiteSpace(value)
-            ? fallback
-            : value.Trim();
     }
 
     private static int ToTimeoutMilliseconds(TimeSpan timeout)

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Plugins.Infrastructure.Lifecycle;
@@ -8,6 +9,10 @@ namespace OpenLineOps.Plugins.Tests;
 public sealed class ExternalPluginHostProtocolLoopTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     [Fact]
     public async Task RunAsyncExecutesDeviceCommandAndWritesProtocolResponse()
@@ -156,6 +161,48 @@ public sealed class ExternalPluginHostProtocolLoopTests
         Assert.Contains("outside package directory", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("property-case")]
+    [InlineData("unknown-property")]
+    public async Task LoaderRejectsNonCanonicalManifestJson(string scenario)
+    {
+        using var package = HostPluginTestPackage.Create<HostLoopDeviceCommandPlugin>(
+            HostLoopDeviceCommandPlugin.ManifestId);
+        package.RewriteManifest(json => scenario switch
+        {
+            "property-case" => json.Replace("\"id\":", "\"Id\":", StringComparison.Ordinal),
+            "unknown-property" => json.Replace(
+                "\"capabilities\":[\"device.scanner\"]",
+                "\"capabilities\":[\"device.scanner\"],\"legacy\":true",
+                StringComparison.Ordinal),
+            _ => throw new InvalidOperationException($"Unknown scenario {scenario}.")
+        });
+
+        await Assert.ThrowsAsync<JsonException>(async () =>
+        {
+            _ = await new ExternalPluginHostPluginLoader()
+                .LoadAsync(new ExternalPluginHostLoadRequest(package.ManifestPath));
+        });
+    }
+
+    [Fact]
+    public async Task LoaderRejectsBackslashEntryAssemblyAlias()
+    {
+        using var package = HostPluginTestPackage.Create<HostLoopDeviceCommandPlugin>(
+            HostLoopDeviceCommandPlugin.ManifestId);
+        var entryAssembly = Path.GetFileName(package.EntryAssemblyPath);
+        package.RewriteManifest(json => json.Replace(
+            $"\"entryAssembly\":\"{entryAssembly}\"",
+            $"\"entryAssembly\":\"bin\\\\{entryAssembly}\"",
+            StringComparison.Ordinal));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+        {
+            _ = await new ExternalPluginHostPluginLoader()
+                .LoadAsync(new ExternalPluginHostLoadRequest(package.ManifestPath));
+        });
+    }
+
     private static ProtocolRequest CreateProtocolRequest()
     {
         return new ProtocolRequest(
@@ -261,6 +308,11 @@ public sealed class ExternalPluginHostProtocolLoopTests
 
         public string EntryAssemblyPath { get; }
 
+        public void RewriteManifest(Func<string, string> rewrite)
+        {
+            File.WriteAllText(ManifestPath, rewrite(File.ReadAllText(ManifestPath)));
+        }
+
         public static HostPluginTestPackage Create<TPlugin>(string manifestId)
             where TPlugin : IOpenLineOpsPlugin
         {
@@ -273,7 +325,7 @@ public sealed class ExternalPluginHostProtocolLoopTests
             var entryAssemblyPath = Path.Combine(packagePath, Path.GetFileName(TestAssemblyPath));
             File.Copy(TestAssemblyPath, entryAssemblyPath);
 
-            var manifestPath = Path.Combine(packagePath, "openlineops-plugin.json");
+            var manifestPath = Path.Combine(packagePath, "manifest.json");
             var manifest = new PluginManifest(
                 manifestId,
                 "Host Loop Test Plugin",
@@ -289,7 +341,7 @@ public sealed class ExternalPluginHostProtocolLoopTests
                         "device.scanner",
                         "Scan")
                 ]);
-            File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, JsonOptions));
+            File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, ManifestJsonOptions));
 
             return new HostPluginTestPackage(
                 Path.GetFullPath(packagePath),

@@ -13,14 +13,14 @@ internal static class ExternalPluginProcessStartInfoBuilder
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(request);
 
-        if (ExternalPluginIsolationModes.IsContainer(options.Sandbox.IsolationMode))
+        return ExternalPluginIsolationModes.Parse(options.Sandbox.IsolationMode) switch
         {
-            return BuildContainerStartInfo(options, request);
-        }
-
-        return ExternalPluginIsolationModes.IsLeastPrivilegeIdentity(options.Sandbox.IsolationMode)
-            ? BuildLeastPrivilegeStartInfo(options, request)
-            : BuildExternalProcessStartInfo(options, request);
+            ExternalPluginIsolationMode.ExternalProcess => BuildExternalProcessStartInfo(options, request),
+            ExternalPluginIsolationMode.LeastPrivilegeIdentity => BuildLeastPrivilegeStartInfo(options, request),
+            ExternalPluginIsolationMode.Container => BuildContainerStartInfo(options, request),
+            _ => throw new InvalidOperationException(
+                $"Unsupported external plugin isolation mode '{options.Sandbox.IsolationMode}'.")
+        };
     }
 
     private static ProcessStartInfo BuildExternalProcessStartInfo(
@@ -283,9 +283,7 @@ internal static class ExternalPluginProcessStartInfoBuilder
             return sandbox.ContainerRuntimeExecutable.Trim();
         }
 
-        return string.Equals(sandbox.IsolationMode, "Podman", StringComparison.OrdinalIgnoreCase)
-            ? "podman"
-            : "docker";
+        return "docker";
     }
 
     private static string ResolveLeastPrivilegeLauncherExecutable(ExternalPluginSandboxOptions sandbox)

@@ -7,12 +7,19 @@ namespace OpenLineOps.Runtime.Application.Sessions;
 public sealed record StartRuntimeSessionRequest
 {
     public StartRuntimeSessionRequest(
+        RuntimeSessionId sessionId,
         StationId stationId,
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
         ExecutableRuntimeProcess process,
         RuntimeSessionTraceMetadata traceMetadata)
     {
+        if (sessionId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("Runtime session id cannot be empty.", nameof(sessionId));
+        }
+
+        SessionId = sessionId;
         StationId = stationId ?? throw new ArgumentNullException(nameof(stationId));
         ConfigurationSnapshotId = configurationSnapshotId
             ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
@@ -20,6 +27,8 @@ public sealed record StartRuntimeSessionRequest
         Process = process ?? throw new ArgumentNullException(nameof(process));
         TraceMetadata = traceMetadata ?? throw new ArgumentNullException(nameof(traceMetadata));
     }
+
+    public RuntimeSessionId SessionId { get; }
 
     public StationId StationId { get; }
 

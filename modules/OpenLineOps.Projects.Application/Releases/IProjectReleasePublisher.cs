@@ -14,5 +14,4 @@ public interface IProjectReleasePublisher
 public sealed record PublishProjectReleaseRequest(
     string SnapshotId,
     string ApplicationId,
-    string ProcessDefinitionId,
-    string ConfigurationSnapshotId);
+    string ProductionLineDefinitionId);

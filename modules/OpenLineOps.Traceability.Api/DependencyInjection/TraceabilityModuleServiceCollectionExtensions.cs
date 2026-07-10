@@ -30,44 +30,36 @@ public static class TraceabilityModuleServiceCollectionExtensions
         var judgementOptions = LoadJudgementOptions(configuration);
         services.AddSingleton(judgementOptions);
 
-        if (IsSqlite(persistenceOptions.Provider))
+        switch (TraceRecordPersistenceProviders.Parse(persistenceOptions.Provider))
         {
-            services.AddSingleton<ITraceRecordRepository>(_ =>
-                new SqliteTraceRecordRepository(persistenceOptions.ResolveSqliteConnectionString()));
-        }
-        else if (IsPostgreSql(persistenceOptions.Provider))
-        {
-            services.AddSingleton<ITraceRecordRepository>(_ =>
-                new PostgresTraceRecordRepository(persistenceOptions.ResolvePostgreSqlConnectionString()));
-        }
-        else if (IsInMemory(persistenceOptions.Provider))
-        {
-            services.AddSingleton<InMemoryTraceRecordRepository>();
-            services.AddSingleton<ITraceRecordRepository>(serviceProvider =>
-                serviceProvider.GetRequiredService<InMemoryTraceRecordRepository>());
-        }
-        else
-        {
-            throw new InvalidOperationException(
-                $"Unsupported traceability persistence provider '{persistenceOptions.Provider}'.");
+            case TraceRecordPersistenceProvider.Sqlite:
+                services.AddSingleton<ITraceRecordRepository>(_ =>
+                    new SqliteTraceRecordRepository(persistenceOptions.ResolveSqliteConnectionString()));
+                break;
+            case TraceRecordPersistenceProvider.InMemory:
+                services.AddSingleton<InMemoryTraceRecordRepository>();
+                services.AddSingleton<ITraceRecordRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryTraceRecordRepository>());
+                break;
         }
 
-        if (IsLocalFileArtifactStorage(artifactStorageOptions.Provider))
+        switch (TraceArtifactStorageProviders.Parse(artifactStorageOptions.Provider))
         {
-            services.AddSingleton<ITraceArtifactStorage>(_ =>
-                new LocalFileTraceArtifactStorage(artifactStorageOptions.ResolveRootPath()));
-        }
-        else
-        {
-            throw new InvalidOperationException(
-                $"Unsupported traceability artifact storage provider '{artifactStorageOptions.Provider}'.");
+            case TraceArtifactStorageProvider.FileSystem:
+                services.AddSingleton<ITraceArtifactStorage>(_ =>
+                    new FileSystemTraceArtifactStorage(artifactStorageOptions.ResolveRootPath()));
+                break;
         }
 
         services.AddSingleton<ITraceRecordService, TraceRecordService>();
         services.AddSingleton<ITraceJudgementGenerator, ConfiguredTraceJudgementGenerator>();
         services.AddSingleton<ITraceReadModelService, TraceReadModelService>();
-        services.TryAddEnumerable(
-            ServiceDescriptor.Singleton<IRuntimeDomainEventSubscriber, TraceRecordRuntimeDomainEventSubscriber>());
+        services.AddSingleton<ProductionRunTraceDomainEventSubscriber>();
+        services.AddSingleton<IRuntimeDomainEventSubscriber>(serviceProvider =>
+            serviceProvider.GetRequiredService<ProductionRunTraceDomainEventSubscriber>());
+        services.AddSingleton<IProductionRunTerminalOutboxHandler>(serviceProvider =>
+            serviceProvider.GetRequiredService<ProductionRunTraceDomainEventSubscriber>());
+        services.AddHostedService<ProductionRunTerminalOutboxHostedService>();
 
         return services;
     }
@@ -78,7 +70,7 @@ public static class TraceabilityModuleServiceCollectionExtensions
 
         return new TraceRecordPersistenceOptions
         {
-            Provider = section?["Provider"] ?? TraceRecordPersistenceProviders.InMemory,
+            Provider = section?["Provider"] ?? TraceRecordPersistenceProviders.Sqlite,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-traceability.sqlite"
         };
@@ -103,35 +95,9 @@ public static class TraceabilityModuleServiceCollectionExtensions
 
         return new TraceArtifactStorageOptions
         {
-            Provider = section?["Provider"] ?? TraceArtifactStorageProviders.LocalFile,
+            Provider = section?["Provider"] ?? TraceArtifactStorageProviders.FileSystem,
             RootPath = section?["RootPath"] ?? "data/openlineops-traceability-artifacts"
         };
-    }
-
-    private static bool IsSqlite(string provider)
-    {
-        return string.Equals(provider, TraceRecordPersistenceProviders.Sqlite, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "SQLite", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsInMemory(string provider)
-    {
-        return string.Equals(provider, TraceRecordPersistenceProviders.InMemory, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Memory", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsPostgreSql(string provider)
-    {
-        return string.Equals(provider, TraceRecordPersistenceProviders.PostgreSql, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "PostgreSQL", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsLocalFileArtifactStorage(string provider)
-    {
-        return string.Equals(provider, TraceArtifactStorageProviders.LocalFile, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "FileSystem", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "File", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ParseBoolean(string? value, bool defaultValue)

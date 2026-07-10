@@ -1,11 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Transitions;
-using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 
 namespace OpenLineOps.Processes.Tests;
@@ -115,6 +115,97 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
 
         await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await repository.GetByIdAsync(scope, definitionId));
+    }
+
+    [Fact]
+    public void ProcessStatusRequiresExactCanonicalToken()
+    {
+        var definitionId = new ProcessDefinitionId("process.canonical-status");
+        var snapshot = ProcessDefinitionSnapshotMapper.ToSnapshot(CreateDefinition(
+            definitionId,
+            "Canonical Status",
+            "result = {'canonical': True}\n",
+            "result = {'manual': True}\n"));
+
+        Assert.Equal("Draft", snapshot.Status);
+        Assert.Equal(ProcessDefinitionStatus.Draft, ProcessDefinitionSnapshotMapper.ToAggregate(snapshot).Status);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProcessDefinitionSnapshotMapper.ToAggregate(snapshot with { Status = "draft" }));
+        Assert.Contains("case-sensitive", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("draft", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void PersistedLoopPolicyRequiresExplicitCanonicalToken(string? loopPolicy)
+    {
+        var snapshot = ProcessDefinitionSnapshotMapper.ToSnapshot(CreateDefinition(
+            new ProcessDefinitionId("process.canonical-loop-policy"),
+            "Canonical Loop Policy",
+            "result = {'canonical': True}\n",
+            "result = {'manual': True}\n"));
+        var transitions = snapshot.Transitions.ToArray();
+        var transition = transitions[0];
+        transitions[0] = transition with { LoopPolicy = loopPolicy };
+        var tampered = snapshot with
+        {
+            Transitions = transitions
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProcessDefinitionSnapshotMapper.ToAggregate(tampered));
+
+        Assert.Contains("case-sensitive", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlowSourceRevisionRejectsUppercaseDigestAlias()
+    {
+        var scope = Scope("application.uppercase-revision");
+        var definitionId = new ProcessDefinitionId("process.uppercase-revision");
+        var repository = new FileSystemProjectProcessDefinitionRepository();
+        await repository.SaveAsync(
+            scope,
+            CreateDefinition(
+                definitionId,
+                "Uppercase Revision",
+                "result = {'canonical': True}\n",
+                "result = {'manual': True}\n"));
+        var path = Assert.Single(Directory.GetFiles(
+            scope.ApplicationRootPath,
+            "flow.json",
+            SearchOption.AllDirectories));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        var canonicalRevision = document["sourceRevision"]!.GetValue<string>();
+        Assert.Equal(canonicalRevision.ToLowerInvariant(), canonicalRevision);
+
+        document["sourceRevision"] = canonicalRevision.ToUpperInvariant();
+        await File.WriteAllTextAsync(path, document.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            repository.GetByIdAsync(scope, definitionId).AsTask());
+        Assert.Contains("canonical lowercase SHA-256", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArtifactReferenceRejectsUppercaseDigestAlias()
+    {
+        Directory.CreateDirectory(_projectDirectory);
+        var path = Path.Combine(_projectDirectory, "artifact.py");
+        await File.WriteAllTextAsync(path, "result = 1\n");
+        var canonicalDigest = ProjectProcessResourceFileStore.ComputeSha256(
+            await File.ReadAllBytesAsync(path));
+        Assert.Equal(canonicalDigest.ToLowerInvariant(), canonicalDigest);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            ProjectProcessResourceFileStore.LoadVerifiedArtifactAsync(
+                path,
+                canonicalDigest.ToUpperInvariant(),
+                CancellationToken.None).AsTask());
+        Assert.Contains("non-canonical SHA-256", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -389,4 +480,5 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
             File.ReadAllBytes(Path.Combine(expectedRoot, relativePath)),
             File.ReadAllBytes(Path.Combine(actualRoot, relativePath))));
     }
+
 }

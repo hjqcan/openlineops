@@ -77,6 +77,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     displayName = "Load",
                     workstationId = "workstation.eol",
                     flowDefinitionId = "flow.load",
+                    configurationSnapshotId = "configuration.load",
                     externalTestProgramAdapterId = (string?)null
                 },
                 new
@@ -86,6 +87,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     displayName = "External Test",
                     workstationId = "workstation.eol",
                     flowDefinitionId = "flow.test",
+                    configurationSnapshotId = "configuration.test",
                     externalTestProgramAdapterId = "adapter.test"
                 }
             },
@@ -109,6 +111,13 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     {
                         new { sourcePath = "$.outcome", targetKey = "test.outcome" }
                     },
+                    outcomeMapping = new
+                    {
+                        sourcePath = "$.outcome",
+                        passedToken = "Passed",
+                        failedToken = "Failed",
+                        abortedToken = "Aborted"
+                    },
                     timeoutMilliseconds = 30_000L
                 }
             }
@@ -119,10 +128,18 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
         using var created = JsonDocument.Parse(createBody);
         Assert.Equal("line.main", created.RootElement.GetProperty("lineDefinitionId").GetString());
+        Assert.Equal(
+            "configuration.load",
+            created.RootElement.GetProperty("stages")[0].GetProperty("configurationSnapshotId").GetString());
         Assert.Equal("stage.test", created.RootElement.GetProperty("stages")[0].GetProperty("nextStageId").GetString());
         Assert.Equal("Provider", created.RootElement
             .GetProperty("externalTestProgramAdapters")[0]
             .GetProperty("launchKind")
+            .GetString());
+        Assert.Equal("Passed", created.RootElement
+            .GetProperty("externalTestProgramAdapters")[0]
+            .GetProperty("outcomeMapping")
+            .GetProperty("passedToken")
             .GetString());
 
         using var getResponse = await _client.GetAsync($"{route}/line.main");
@@ -130,6 +147,63 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         using var restored = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
         Assert.Equal("MODEL-A", restored.RootElement.GetProperty("dutModel").GetProperty("modelCode").GetString());
         Assert.Equal(2, restored.RootElement.GetProperty("stages").GetArrayLength());
+        Assert.Equal(
+            "configuration.test",
+            restored.RootElement.GetProperty("stages")[1].GetProperty("configurationSnapshotId").GetString());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(" configuration.load")]
+    [InlineData("configuration.load ")]
+    public async Task ApiRejectsMissingOrNonCanonicalStageConfigurationSnapshotId(
+        string? configurationSnapshotId)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project.production.invalid-configuration.{suffix}";
+        var applicationId = $"application.production.invalid-configuration.{suffix}";
+        await SeedApplicationAsync(projectId, applicationId);
+        var route = $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines";
+
+        using var response = await _client.PostAsJsonAsync(route, new
+        {
+            lineDefinitionId = "line.invalid-configuration",
+            displayName = "Invalid Configuration Production Line",
+            topologyId = "topology.main",
+            dutModel = new
+            {
+                dutModelId = "dut.model-a",
+                modelCode = "MODEL-A",
+                identityInputKey = "serialNumber"
+            },
+            workstations = new[]
+            {
+                new
+                {
+                    workstationId = "workstation.eol",
+                    displayName = "EOL",
+                    stationSystemId = "station.eol"
+                }
+            },
+            stages = new[]
+            {
+                new
+                {
+                    stageId = "stage.load",
+                    sequence = 1,
+                    displayName = "Load",
+                    workstationId = "workstation.eol",
+                    flowDefinitionId = "flow.load",
+                    configurationSnapshotId,
+                    externalTestProgramAdapterId = (string?)null
+                }
+            },
+            externalTestProgramAdapters = Array.Empty<object>()
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     public void Dispose()
@@ -221,6 +295,8 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                 new ProcessNodeId("action"),
                 "Action",
                 new ProcessCapabilityId(capability),
+                ProcessActionTargetKind.Capability,
+                capability,
                 command,
                 TimeSpan.FromSeconds(30),
                 "{}")

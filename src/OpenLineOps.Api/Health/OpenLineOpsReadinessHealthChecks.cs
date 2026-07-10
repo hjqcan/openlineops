@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
 using OpenLineOps.EventBus.Configuration;
+using OpenLineOps.Operations.Infra.Data.Persistence;
 using RabbitMQ.Client;
 
 namespace OpenLineOps.Api.Health;
@@ -31,7 +32,9 @@ public static class OpenLineOpsReadinessHealthChecks
         IConfiguration configuration)
     {
         var section = configuration.GetSection(OperationsPersistenceSection);
-        if (!IsPostgreSqlProvider(section["Provider"]))
+        var provider = OperationsPersistenceProviders.Parse(
+            section["Provider"] ?? OperationsPersistenceProviders.Sqlite);
+        if (provider != OperationsPersistenceProvider.PostgreSql)
         {
             return;
         }
@@ -104,13 +107,6 @@ public static class OpenLineOpsReadinessHealthChecks
             new RabbitMqConnectionHealthCheck(options.RabbitMq),
             failureStatus: HealthStatus.Unhealthy,
             tags: ["ready", "rabbitmq", "eventbus", "cap"]);
-    }
-
-    private static bool IsPostgreSqlProvider(string? provider)
-    {
-        return string.Equals(provider, "PostgreSql", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(provider, "PostgreSQL", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class PostgreSqlConnectionHealthCheck(

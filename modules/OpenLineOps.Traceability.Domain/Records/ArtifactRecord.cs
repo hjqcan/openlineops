@@ -12,7 +12,7 @@ public sealed record ArtifactRecord
         string? mediaType,
         long sizeBytes,
         string? sha256,
-        DeviceId deviceId,
+        DeviceId? deviceId,
         DateTimeOffset capturedAtUtc)
     {
         if (sizeBytes < 0)
@@ -26,7 +26,7 @@ public sealed record ArtifactRecord
         StorageKey = TraceabilityIdGuard.NotBlank(storageKey, nameof(storageKey));
         MediaType = TraceabilityIdGuard.OptionalText(mediaType);
         SizeBytes = sizeBytes;
-        Sha256 = TraceabilityIdGuard.OptionalText(sha256);
+        Sha256 = TraceabilityIdGuard.OptionalSha256(sha256, nameof(sha256));
         DeviceId = deviceId;
         CapturedAtUtc = capturedAtUtc;
     }
@@ -45,7 +45,7 @@ public sealed record ArtifactRecord
 
     public string? Sha256 { get; }
 
-    public DeviceId DeviceId { get; }
+    public DeviceId? DeviceId { get; }
 
     public DateTimeOffset CapturedAtUtc { get; }
 }

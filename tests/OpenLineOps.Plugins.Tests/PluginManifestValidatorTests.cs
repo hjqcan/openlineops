@@ -72,6 +72,119 @@ public sealed class PluginManifestValidatorTests
     }
 
     [Fact]
+    public void ValidateRejectsSurroundingWhitespaceInsteadOfNormalizingManifestValues()
+    {
+        var validator = new PluginManifestValidator();
+        var manifest = CreateManifest(
+            kind: PluginKind.ProcessNode,
+            capabilities: [" process.vision "],
+            deviceCommands:
+            [
+                new PluginDeviceCommandDefinition(
+                    " device.scan ",
+                    " process.vision ",
+                    " Scan ")
+            ],
+            processCommands:
+            [
+                new PluginProcessCommandDefinition(
+                    " process.inspect ",
+                    " process.vision ",
+                    " Inspect ")
+            ]) with
+        {
+            Id = " openlineops.fake-scanner ",
+            Name = " Fake Scanner ",
+            Version = " 1.0.0 ",
+            EntryAssembly = " OpenLineOps.FakeScanner.dll ",
+            EntryType = " OpenLineOps.FakeScanner.FakeScannerPlugin ",
+            ContractVersion = " 1.0.0 ",
+            MinimumPlatformVersion = " 1.0.0 ",
+            RuntimeIdentifier = " any ",
+            AbiVersion = " openlineops.plugin-abi/1 "
+        };
+
+        var report = validator.Validate(manifest);
+        var codes = report.Issues.Select(issue => issue.Code).ToHashSet(StringComparer.Ordinal);
+
+        Assert.False(report.IsValid);
+        Assert.Contains("Plugin.ManifestIdNonCanonical", codes);
+        Assert.Contains("Plugin.NameNonCanonical", codes);
+        Assert.Contains("Plugin.VersionNonCanonical", codes);
+        Assert.Contains("Plugin.EntryAssemblyNonCanonical", codes);
+        Assert.Contains("Plugin.EntryTypeNonCanonical", codes);
+        Assert.Contains("Plugin.ContractVersionNonCanonical", codes);
+        Assert.Contains("Plugin.MinimumPlatformVersionNonCanonical", codes);
+        Assert.Contains("Plugin.RuntimeIdentifierNonCanonical", codes);
+        Assert.Contains("Plugin.AbiVersionNonCanonical", codes);
+        Assert.Contains("Plugin.CapabilityNonCanonical", codes);
+        Assert.Contains("Plugin.DeviceCommandIdNonCanonical", codes);
+        Assert.Contains("Plugin.DeviceCommandCapabilityNonCanonical", codes);
+        Assert.Contains("Plugin.DeviceCommandNameNonCanonical", codes);
+        Assert.Contains("Plugin.ProcessCommandIdNonCanonical", codes);
+        Assert.Contains("Plugin.ProcessCommandCapabilityNonCanonical", codes);
+        Assert.Contains("Plugin.ProcessCommandNameNonCanonical", codes);
+    }
+
+    [Theory]
+    [InlineData("bin\\Plugin.dll")]
+    [InlineData("/Plugin.dll")]
+    [InlineData("./Plugin.dll")]
+    [InlineData("bin//Plugin.dll")]
+    public void ValidateRejectsNonCanonicalEntryAssemblyPath(string entryAssembly)
+    {
+        var validator = new PluginManifestValidator();
+        var manifest = CreateManifest() with { EntryAssembly = entryAssembly };
+
+        var report = validator.Validate(manifest);
+
+        Assert.False(report.IsValid);
+        Assert.Contains(report.Issues, issue => issue.Code == "Plugin.EntryAssemblyPathNonCanonical");
+    }
+
+    [Fact]
+    public void ValidateTreatsCapabilityAndCommandNameCasingAsExact()
+    {
+        var validator = new PluginManifestValidator();
+        var manifest = CreateManifest(
+            kind: PluginKind.ProcessNode,
+            capabilities: ["device.scanner", "process.vision"],
+            deviceCommands:
+            [
+                new PluginDeviceCommandDefinition("device.scanner:scan", "device.scanner", "Scan"),
+                new PluginDeviceCommandDefinition("device.scanner:scan-lower", "device.scanner", "scan")
+            ],
+            processCommands:
+            [
+                new PluginProcessCommandDefinition("process.vision:inspect", "process.vision", "Inspect"),
+                new PluginProcessCommandDefinition("process.vision:inspect-lower", "process.vision", "inspect")
+            ]);
+
+        var report = validator.Validate(manifest);
+
+        Assert.True(report.IsValid);
+        Assert.Empty(report.Issues);
+    }
+
+    [Fact]
+    public void ValidateDoesNotCaseFoldCommandCapabilityReferences()
+    {
+        var validator = new PluginManifestValidator();
+        var manifest = CreateManifest(deviceCommands:
+        [
+            new PluginDeviceCommandDefinition(
+                "device.scanner:scan",
+                "Device.Scanner",
+                "Scan")
+        ]);
+
+        var report = validator.Validate(manifest);
+
+        Assert.False(report.IsValid);
+        Assert.Contains(report.Issues, issue => issue.Code == "Plugin.DeviceCommandCapabilityMissing");
+    }
+
+    [Fact]
     public void ValidateAcceptsManifestWithDeviceCommandDefinitions()
     {
         var validator = new PluginManifestValidator();
@@ -145,7 +258,7 @@ public sealed class PluginManifestValidatorTests
             new PluginDeviceCommandDefinition(
                 "device.scanner:scan",
                 "device.scanner",
-                "scan")
+                "Scan")
         ]);
 
         var report = validator.Validate(manifest);
@@ -173,7 +286,7 @@ public sealed class PluginManifestValidatorTests
             new PluginProcessCommandDefinition(
                 "process.vision:inspect",
                 "process.vision",
-                "inspect")
+                "Inspect")
         ]);
 
         var report = validator.Validate(manifest);

@@ -11,6 +11,7 @@ public sealed class ProcessStage : Entity<ProcessStageId>
         string displayName,
         WorkstationId workstationId,
         string flowDefinitionId,
+        string configurationSnapshotId,
         ExternalTestProgramAdapterId? externalTestProgramAdapterId)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
     {
@@ -23,6 +24,9 @@ public sealed class ProcessStage : Entity<ProcessStageId>
         DisplayName = ProductionIdGuard.NotBlank(displayName, nameof(displayName));
         WorkstationId = workstationId ?? throw new ArgumentNullException(nameof(workstationId));
         FlowDefinitionId = ProductionIdGuard.NotBlank(flowDefinitionId, nameof(flowDefinitionId));
+        ConfigurationSnapshotId = ProductionIdGuard.NotBlank(
+            configurationSnapshotId,
+            nameof(configurationSnapshotId));
         ExternalTestProgramAdapterId = externalTestProgramAdapterId;
     }
 
@@ -34,6 +38,8 @@ public sealed class ProcessStage : Entity<ProcessStageId>
 
     public string FlowDefinitionId { get; }
 
+    public string ConfigurationSnapshotId { get; }
+
     public ExternalTestProgramAdapterId? ExternalTestProgramAdapterId { get; }
 
     public static ProcessStage Create(
@@ -42,6 +48,7 @@ public sealed class ProcessStage : Entity<ProcessStageId>
         string displayName,
         WorkstationId workstationId,
         string flowDefinitionId,
+        string configurationSnapshotId,
         ExternalTestProgramAdapterId? externalTestProgramAdapterId = null)
     {
         return new ProcessStage(
@@ -50,6 +57,7 @@ public sealed class ProcessStage : Entity<ProcessStageId>
             displayName,
             workstationId,
             flowDefinitionId,
+            configurationSnapshotId,
             externalTestProgramAdapterId);
     }
 }

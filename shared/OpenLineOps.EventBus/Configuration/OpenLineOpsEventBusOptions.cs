@@ -4,6 +4,8 @@ public sealed class OpenLineOpsEventBusOptions
 {
     public const string SectionName = "OpenLineOps:EventBus";
 
+    public string? PublicationMode { get; set; }
+
     public bool UseInMemory { get; set; } = true;
 
     public string ConnectionStringName { get; set; } = "OpenLineOpsEventBus";
@@ -11,8 +13,6 @@ public sealed class OpenLineOpsEventBusOptions
     public string PostgreSqlSchema { get; set; } = "cap";
 
     public bool UseDashboard { get; set; }
-
-    public bool EnableEfCoreTransactionCoordinator { get; set; }
 
     public int FailedRetryCount { get; set; } = 3;
 

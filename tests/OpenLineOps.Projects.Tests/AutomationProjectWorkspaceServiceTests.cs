@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
@@ -45,9 +46,7 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
                 "application.main",
                 "topology.main",
                 ["layout.main"],
-                "process.main",
-                "process.main@1.0.0",
-                "configuration.main.v1",
+                "line.main",
                 [
                     new SnapshotCapabilityBindingRequest(
                         "motion.axis.move",
@@ -74,6 +73,15 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
         Assert.True(published.IsSuccess);
         Assert.True(saved.IsSuccess);
         Assert.True(File.Exists(saved.Value.ManifestPath));
+        using (var projectFile = JsonDocument.Parse(await File.ReadAllTextAsync(saved.Value.ManifestPath)))
+        {
+            var frozenSnapshot = Assert.Single(
+                projectFile.RootElement.GetProperty("snapshots").EnumerateArray());
+            Assert.Equal("line.main", frozenSnapshot.GetProperty("productionLineDefinitionId").GetString());
+            Assert.False(frozenSnapshot.TryGetProperty("processDefinitionId", out _));
+            Assert.False(frozenSnapshot.TryGetProperty("processVersionId", out _));
+            Assert.False(frozenSnapshot.TryGetProperty("configurationSnapshotId", out _));
+        }
         Assert.True(opened.IsSuccess);
         Assert.Equal(Path.GetFullPath(_projectDirectory), opened.Value.Project.ProjectPath);
         Assert.Equal("snapshot.main.v1", opened.Value.Project.ActiveSnapshotId);

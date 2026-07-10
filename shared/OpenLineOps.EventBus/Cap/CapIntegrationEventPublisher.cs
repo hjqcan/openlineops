@@ -37,25 +37,18 @@ public sealed class CapIntegrationEventPublisher : ITransactionalIntegrationEven
         IEnumerable<object> domainEvents,
         CancellationToken cancellationToken = default)
     {
-        await PublishCoreAsync(
-            domainEvents,
-            throwOnFailure: false,
-            cancellationToken).ConfigureAwait(false);
+        await PublishCoreAsync(domainEvents, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task PublishTransactionalAsync(
         IEnumerable<object> domainEvents,
         CancellationToken cancellationToken = default)
     {
-        await PublishCoreAsync(
-            domainEvents,
-            throwOnFailure: true,
-            cancellationToken).ConfigureAwait(false);
+        await PublishCoreAsync(domainEvents, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task PublishCoreAsync(
         IEnumerable<object> domainEvents,
-        bool throwOnFailure,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(domainEvents);
@@ -95,10 +88,7 @@ public sealed class CapIntegrationEventPublisher : ITransactionalIntegrationEven
                     descriptor.Version,
                     ex);
 
-                if (throwOnFailure)
-                {
-                    throw;
-                }
+                throw;
             }
         }
     }

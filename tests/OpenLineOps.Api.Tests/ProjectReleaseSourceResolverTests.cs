@@ -1,6 +1,6 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
-using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Plugins.Infrastructure.Discovery;
+using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.Topologies;
@@ -11,6 +11,26 @@ namespace OpenLineOps.Api.Tests;
 
 public sealed class ProjectReleaseSourceResolverTests
 {
+    [Theory]
+    [InlineData("PluginCommand", true, true)]
+    [InlineData("ProcessCommandProvider", true, false)]
+    [InlineData("plugincommand", false, false)]
+    [InlineData("processcommandprovider", false, false)]
+    [InlineData("PLUGINCOMMAND", false, false)]
+    [InlineData("PROCESSCOMMANDPROVIDER", false, false)]
+    public void PluginProviderKindsRequireCanonicalCase(
+        string providerKind,
+        bool isPluginProvider,
+        bool isDevicePluginProvider)
+    {
+        Assert.Equal(
+            isPluginProvider,
+            ProjectReleaseSourceResolver.IsPluginProvider(providerKind));
+        Assert.Equal(
+            isDevicePluginProvider,
+            ProjectReleaseSourceResolver.IsDevicePluginProvider(providerKind));
+    }
+
     [Fact]
     public void ResolveActionCapabilityTargetUsesRequiredCapabilityForSystemTarget()
     {
@@ -143,6 +163,7 @@ public sealed class ProjectReleaseSourceResolverTests
                 processRepository: null!,
                 engineeringRepository: null!,
                 blockRepository: null!,
+                productionRepository: null!,
                 flowIrCompiler: null!,
                 flowIrSerializer: null!,
                 clock: null!,
@@ -180,6 +201,7 @@ public sealed class ProjectReleaseSourceResolverTests
             processRepository: null!,
             engineeringRepository: null!,
             blockRepository: null!,
+            productionRepository: null!,
             flowIrCompiler: new ProcessFlowIrCompiler(),
             flowIrSerializer: new FlowIrCanonicalSerializer(),
             clock: null!);
@@ -191,8 +213,7 @@ public sealed class ProjectReleaseSourceResolverTests
                 Path.Combine(Path.GetTempPath(), "openlineops-release-source-error"),
                 "applications/application.main/application.main.oloapp"),
             "topology.main",
-            "process.main",
-            "configuration.main");
+            "line.main");
 
         Assert.True(result.IsFailure);
         Assert.Equal("Validation.Projects.ReleaseSourceInvalid", result.Error.Code);

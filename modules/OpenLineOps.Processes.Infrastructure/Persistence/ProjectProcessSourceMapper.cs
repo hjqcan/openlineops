@@ -58,7 +58,8 @@ internal static class ProjectProcessSourceMapper
                 {
                     var sourceBytes = StrictUtf8.GetBytes(node.ScriptSourceCode);
                     var sourceSha256 = ProjectProcessResourceFileStore.ComputeSha256(sourceBytes);
-                    if (!string.Equals(sourceSha256, node.ScriptSourceHash, StringComparison.OrdinalIgnoreCase))
+                    if (!ProjectProcessResourceFileStore.IsCanonicalSha256(node.ScriptSourceHash)
+                        || !string.Equals(sourceSha256, node.ScriptSourceHash, StringComparison.Ordinal))
                     {
                         throw new InvalidDataException(
                             $"Python source hash for node {node.NodeId} does not match its content.");
@@ -83,6 +84,8 @@ internal static class ProjectProcessSourceMapper
                 node.DisplayName,
                 node.RequiredCapabilityId,
                 node.CommandName,
+                node.TargetKind,
+                node.TargetId,
                 node.CommandTimeout?.Ticks,
                 node.InputPayload,
                 node.ScriptLanguage,
@@ -160,6 +163,8 @@ internal static class ProjectProcessSourceMapper
                 node.DisplayName,
                 node.RequiredCapabilityId,
                 node.CommandName,
+                node.TargetKind,
+                node.TargetId,
                 node.CommandTimeoutTicks is null ? null : TimeSpan.FromTicks(node.CommandTimeoutTicks.Value),
                 node.InputPayload,
                 node.ScriptLanguage,
@@ -190,7 +195,7 @@ internal static class ProjectProcessSourceMapper
         foreach (var node in definition.Nodes.Where(node => node.ScriptSourceCode is not null))
         {
             var expectedHash = nodes.Single(candidate => candidate.NodeId == node.Id.Value).ScriptSourceHash;
-            if (!string.Equals(node.ScriptSourceHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(node.ScriptSourceHash, expectedHash, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     $"Python source hash for node {node.Id} changed while restoring the process definition.");
@@ -223,7 +228,14 @@ internal static class ProjectProcessSourceMapper
         }
 
         var expectedRevision = ComputeSourceRevision(document with { SourceRevision = string.Empty });
-        if (!string.Equals(document.SourceRevision, expectedRevision, StringComparison.OrdinalIgnoreCase))
+        if (!ProjectProcessResourceFileStore.IsCanonicalSha256(document.SourceRevision))
+        {
+            throw new InvalidDataException(
+                $"Project process {document.ProcessDefinitionId} source revision " +
+                $"'{document.SourceRevision}' is not a canonical lowercase SHA-256 token.");
+        }
+
+        if (!string.Equals(document.SourceRevision, expectedRevision, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 $"Project process {document.ProcessDefinitionId} source revision does not match its flow document.");

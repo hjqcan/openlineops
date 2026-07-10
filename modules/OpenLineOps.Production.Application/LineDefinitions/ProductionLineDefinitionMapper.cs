@@ -29,6 +29,7 @@ public static class ProductionLineDefinitionMapper
                     stage.DisplayName,
                     stage.WorkstationId.Value,
                     stage.FlowDefinitionId,
+                    stage.ConfigurationSnapshotId,
                     stage.ExternalTestProgramAdapterId?.Value,
                     index + 1 < orderedStages.Length ? orderedStages[index + 1].Id.Value : null))
                 .ToArray(),
@@ -47,6 +48,11 @@ public static class ProductionLineDefinitionMapper
                         new ExternalTestProgramInputMappingDetails(mapping.Source, mapping.Target)).ToArray(),
                     adapter.ResultMappings.Select(mapping =>
                         new ExternalTestProgramResultMappingDetails(mapping.SourcePath, mapping.TargetKey)).ToArray(),
+                    new ExternalTestProgramOutcomeMappingDetails(
+                        adapter.OutcomeMapping.SourcePath,
+                        adapter.OutcomeMapping.PassedToken,
+                        adapter.OutcomeMapping.FailedToken,
+                        adapter.OutcomeMapping.AbortedToken),
                     checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond)))
                 .ToArray(),
             definition.CreatedAtUtc,

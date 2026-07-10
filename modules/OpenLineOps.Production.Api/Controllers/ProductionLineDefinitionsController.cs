@@ -136,7 +136,8 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 || stage.Sequence is null
                 || string.IsNullOrWhiteSpace(stage.DisplayName)
                 || string.IsNullOrWhiteSpace(stage.WorkstationId)
-                || string.IsNullOrWhiteSpace(stage.FlowDefinitionId))
+                || string.IsNullOrWhiteSpace(stage.FlowDefinitionId)
+                || string.IsNullOrWhiteSpace(stage.ConfigurationSnapshotId))
             || request.ExternalTestProgramAdapters.Any(AdapterIsIncomplete))
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
@@ -164,6 +165,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     stage.DisplayName!,
                     stage.WorkstationId!,
                     stage.FlowDefinitionId!,
+                    stage.ConfigurationSnapshotId!,
                     stage.ExternalTestProgramAdapterId)).ToArray(),
             request.ExternalTestProgramAdapters.Select(adapter => new AppAdapterRequest(
                 adapter!.AdapterId!,
@@ -181,6 +183,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     new OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramResultMappingRequest(
                         mapping!.SourcePath!,
                         mapping.TargetKey!)).ToArray(),
+                new OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramOutcomeMappingRequest(
+                    adapter.OutcomeMapping!.SourcePath!,
+                    adapter.OutcomeMapping.PassedToken!,
+                    adapter.OutcomeMapping.FailedToken!,
+                    adapter.OutcomeMapping.AbortedToken!),
                 adapter.TimeoutMilliseconds!.Value)).ToArray()));
     }
 
@@ -195,6 +202,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             || adapter.ArgumentTemplates is null
             || adapter.InputMappings is null
             || adapter.ResultMappings is null
+            || adapter.OutcomeMapping is null
+            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.SourcePath)
+            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.PassedToken)
+            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.FailedToken)
+            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.AbortedToken)
             || adapter.TimeoutMilliseconds is null
             || adapter.TimeoutMilliseconds <= 0
             || adapter.TimeoutMilliseconds > maximumTimeoutMilliseconds
@@ -229,6 +241,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 stage.DisplayName,
                 stage.WorkstationId,
                 stage.FlowDefinitionId,
+                stage.ConfigurationSnapshotId,
                 stage.ExternalTestProgramAdapterId,
                 stage.NextStageId)).ToArray(),
             details.ExternalTestProgramAdapters.Select(adapter => new ExternalTestProgramAdapterResponse(
@@ -244,6 +257,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     new ExternalTestProgramInputMappingResponse(mapping.Source, mapping.Target)).ToArray(),
                 adapter.ResultMappings.Select(mapping =>
                     new ExternalTestProgramResultMappingResponse(mapping.SourcePath, mapping.TargetKey)).ToArray(),
+                new ExternalTestProgramOutcomeMappingResponse(
+                    adapter.OutcomeMapping.SourcePath,
+                    adapter.OutcomeMapping.PassedToken,
+                    adapter.OutcomeMapping.FailedToken,
+                    adapter.OutcomeMapping.AbortedToken),
                 adapter.TimeoutMilliseconds)).ToArray(),
             details.CreatedAtUtc,
             details.UpdatedAtUtc);

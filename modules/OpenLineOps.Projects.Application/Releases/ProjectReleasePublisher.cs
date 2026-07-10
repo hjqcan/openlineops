@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
@@ -81,17 +82,8 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 $"Application {application.ApplicationId} does not have a linked topology."));
         }
 
-        if (!application.ProcessDefinitionIds.Contains(
-                request.ProcessDefinitionId,
-                StringComparer.Ordinal))
-        {
-            return Result.Failure<AutomationProjectDetails>(ApplicationError.Conflict(
-                "Projects.ProcessNotLinked",
-                $"Process definition {request.ProcessDefinitionId} is not linked to application {application.ApplicationId}."));
-        }
-
         // Synchronize the Application project file before freezing its source
-        // tree so the release contains the same topology/process entry links
+        // tree so the release contains the same topology entry link
         // that were validated from the aggregate.
         var sourceManifestResult = await _workspaceService
             .SaveManifestAsync(projectId, cancellationToken)
@@ -115,8 +107,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             .ResolveAsync(
                 scope,
                 application.TopologyId,
-                request.ProcessDefinitionId,
-                request.ConfigurationSnapshotId,
+                request.ProductionLineDefinitionId,
                 cancellationToken)
             .ConfigureAwait(false);
         if (sourceResult.IsFailure)
@@ -175,8 +166,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             .ResolveAsync(
                 releaseScope,
                 metadata.TopologyId,
-                metadata.ProcessDefinitionId,
-                metadata.ConfigurationSnapshotId,
+                metadata.ProductionLine.LineDefinitionId,
                 cancellationToken)
             .ConfigureAwait(false);
         if (copiedSourceResult.IsFailure)
@@ -207,9 +197,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                     application.ApplicationId,
                     metadata.TopologyId,
                     metadata.LayoutIds,
-                    metadata.ProcessDefinitionId,
-                    metadata.ProcessVersionId,
-                    metadata.ConfigurationSnapshotId,
+                    metadata.ProductionLine.LineDefinitionId,
                     metadata.CapabilityBindings.Select(binding => new SnapshotCapabilityBindingRequest(
                         binding.CapabilityId,
                         binding.BindingId,
@@ -270,14 +258,12 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             return Required("Projects.ApplicationIdRequired", "ApplicationId");
         }
 
-        if (string.IsNullOrWhiteSpace(request.ProcessDefinitionId))
+        if (string.IsNullOrWhiteSpace(request.ProductionLineDefinitionId))
         {
-            return Required("Projects.ProcessDefinitionIdRequired", "ProcessDefinitionId");
+            return Required("Projects.ProductionLineDefinitionIdRequired", "ProductionLineDefinitionId");
         }
 
-        return string.IsNullOrWhiteSpace(request.ConfigurationSnapshotId)
-            ? Required("Projects.ConfigurationSnapshotIdRequired", "ConfigurationSnapshotId")
-            : null;
+        return null;
     }
 
     private static ApplicationError? ValidateResolvedSource(
@@ -286,8 +272,15 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         ProjectReleaseSourceMetadata metadata)
     {
         if (!string.Equals(metadata.TopologyId, topologyId, StringComparison.Ordinal)
-            || !string.Equals(metadata.ProcessDefinitionId, request.ProcessDefinitionId, StringComparison.Ordinal)
-            || !string.Equals(metadata.ConfigurationSnapshotId, request.ConfigurationSnapshotId, StringComparison.Ordinal))
+            || metadata.ProductionLine is null
+            || !string.Equals(
+                metadata.ProductionLine.LineDefinitionId,
+                request.ProductionLineDefinitionId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                metadata.ProductionLine.TopologyId,
+                topologyId,
+                StringComparison.Ordinal))
         {
             return ApplicationError.Conflict(
                 "Projects.ReleaseSourceIdentityMismatch",
@@ -299,6 +292,18 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             return ApplicationError.Conflict(
                 "Projects.ReleaseLayoutsMissing",
                 "Resolved release source does not contain a site layout.");
+        }
+
+        if (metadata.ProductionLine.Workstations is null
+            || metadata.ProductionLine.Workstations.Count == 0
+            || metadata.ProductionLine.Stages is null
+            || metadata.ProductionLine.Stages.Count == 0
+            || metadata.ProductionLine.ExternalTestProgramAdapters is null
+            || metadata.ProductionLine.DutModel is null)
+        {
+            return ApplicationError.Conflict(
+                "Projects.ReleaseProductionLineInvalid",
+                "Resolved release source does not contain complete frozen Production line semantics.");
         }
 
         if (metadata.CapabilityBindings is null || metadata.CapabilityBindings.Count == 0)
@@ -315,13 +320,18 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 "Resolved release source does not contain a runtime target.");
         }
 
-        if (string.IsNullOrWhiteSpace(metadata.FlowIrSchemaVersion)
-            || string.IsNullOrWhiteSpace(metadata.FlowIrCanonicalJson)
-            || !IsSha256(metadata.FlowIrSha256))
+        if (metadata.ProductionLine.Stages.Any(stage =>
+                string.IsNullOrWhiteSpace(stage.FlowDefinitionId)
+                || string.IsNullOrWhiteSpace(stage.FlowVersionId)
+                || string.IsNullOrWhiteSpace(stage.ConfigurationSnapshotId)
+                || string.IsNullOrWhiteSpace(stage.FlowIrSchemaVersion)
+                || string.IsNullOrWhiteSpace(stage.FlowIrCanonicalJson)
+                || !IsSha256(stage.FlowIrSha256)
+                || stage.BlockVersionIds is null))
         {
             return ApplicationError.Conflict(
-                "Projects.ReleaseFlowIrMissing",
-                "Resolved release source does not contain a valid frozen Flow IR schema, canonical JSON, and SHA-256.");
+                "Projects.ReleaseProductionStageInvalid",
+                "Every resolved Production stage must contain its configuration, Flow identity, canonical Flow IR, SHA-256, and block locks.");
         }
 
         if (metadata.BlockVersionIds is null)
@@ -380,15 +390,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         ProjectReleaseSourceMetadata right)
     {
         if (!string.Equals(left.TopologyId, right.TopologyId, StringComparison.Ordinal)
-            || !string.Equals(left.ProcessDefinitionId, right.ProcessDefinitionId, StringComparison.Ordinal)
-            || !string.Equals(left.ProcessVersionId, right.ProcessVersionId, StringComparison.Ordinal)
-            || !string.Equals(left.FlowIrSchemaVersion, right.FlowIrSchemaVersion, StringComparison.Ordinal)
-            || !string.Equals(left.FlowIrSha256, right.FlowIrSha256, StringComparison.Ordinal)
-            || !string.Equals(left.FlowIrCanonicalJson, right.FlowIrCanonicalJson, StringComparison.Ordinal)
-            || !string.Equals(
-                left.ConfigurationSnapshotId,
-                right.ConfigurationSnapshotId,
-                StringComparison.Ordinal))
+            || !ProductionLineEquals(left.ProductionLine, right.ProductionLine))
         {
             return false;
         }
@@ -423,6 +425,14 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             .ThenBy(target => target.TargetId, StringComparer.Ordinal);
 
         return leftTargets.SequenceEqual(rightTargets);
+    }
+
+    private static bool ProductionLineEquals(
+        ProjectReleaseProductionLine left,
+        ProjectReleaseProductionLine right)
+    {
+        return JsonSerializer.SerializeToUtf8Bytes(left).AsSpan().SequenceEqual(
+            JsonSerializer.SerializeToUtf8Bytes(right));
     }
 
     private static bool PackageDependenciesEqual(

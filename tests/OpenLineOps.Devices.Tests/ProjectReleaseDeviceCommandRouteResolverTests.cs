@@ -16,13 +16,6 @@ using OpenLineOps.Projects.Domain.Projects;
 using OpenLineOps.Projects.Domain.Snapshots;
 using OpenLineOps.Projects.Infrastructure.Persistence;
 using OpenLineOps.Projects.Infrastructure.Releases;
-using ProjectApplicationId = OpenLineOps.Projects.Domain.Identifiers.ProjectApplicationId;
-using ProjectConfigurationSnapshotId = OpenLineOps.Projects.Domain.Identifiers.ConfigurationSnapshotId;
-using ProjectDefinitionId = OpenLineOps.Projects.Domain.Identifiers.ProcessDefinitionId;
-using ProjectId = OpenLineOps.Projects.Domain.Identifiers.AutomationProjectId;
-using ProjectProcessVersionId = OpenLineOps.Projects.Domain.Identifiers.ProcessVersionId;
-using ProjectSnapshotId = OpenLineOps.Projects.Domain.Identifiers.PublishedProjectSnapshotId;
-using ProjectTopologyId = OpenLineOps.Projects.Domain.Identifiers.AutomationTopologyId;
 using EngineeringConfigurationSnapshotId = OpenLineOps.Engineering.Domain.Identifiers.ConfigurationSnapshotId;
 using EngineeringDeviceBindingId = OpenLineOps.Engineering.Domain.Identifiers.DeviceBindingId;
 using EngineeringDeviceCapabilityId = OpenLineOps.Engineering.Domain.Identifiers.DeviceCapabilityId;
@@ -32,6 +25,12 @@ using EngineeringRecipeId = OpenLineOps.Engineering.Domain.Identifiers.RecipeId;
 using EngineeringRecipeVersionId = OpenLineOps.Engineering.Domain.Identifiers.RecipeVersionId;
 using EngineeringStationProfileId = OpenLineOps.Engineering.Domain.Identifiers.StationProfileId;
 using EngineeringWorkspaceId = OpenLineOps.Engineering.Domain.Identifiers.WorkspaceId;
+using ProjectApplicationId = OpenLineOps.Projects.Domain.Identifiers.ProjectApplicationId;
+using ProjectDefinitionId = OpenLineOps.Projects.Domain.Identifiers.ProcessDefinitionId;
+using ProjectId = OpenLineOps.Projects.Domain.Identifiers.AutomationProjectId;
+using ProjectProductionLineDefinitionId = OpenLineOps.Projects.Domain.Identifiers.ProductionLineDefinitionId;
+using ProjectSnapshotId = OpenLineOps.Projects.Domain.Identifiers.PublishedProjectSnapshotId;
+using ProjectTopologyId = OpenLineOps.Projects.Domain.Identifiers.AutomationTopologyId;
 
 namespace OpenLineOps.Devices.Tests;
 
@@ -84,14 +83,29 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             CreatedAtUtc.AddMinutes(1),
             new ProjectReleaseSourceMetadata(
                 "topology.release.route",
-                "station.eol",
                 ["layout.release.route"],
-                processDefinitionId,
-                processVersionId,
-                "openlineops.flow-ir/v1",
-                "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-                "{}",
-                configurationSnapshotId,
+                new ProjectReleaseProductionLine(
+                    "line.release.route",
+                    "Release Route Line",
+                    "topology.release.route",
+                    new ProjectReleaseDutModel("dut.release", "MAINBOARD-A", "serialNumber"),
+                    [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+                    [
+                        new ProjectReleaseProductionStage(
+                            "stage.eol",
+                            1,
+                            "EOL",
+                            "workstation.eol",
+                            processDefinitionId,
+                            configurationSnapshotId,
+                            processVersionId,
+                            "openlineops.flow-ir/v1",
+                            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                            "{}",
+                            ["openlineops_device_command@1"],
+                            ExternalTestProgramAdapterId: null)
+                    ],
+                    ExternalTestProgramAdapters: []),
                 [new ProjectReleaseCapabilityBinding(
                     capabilityId,
                     "binding.scanner",
@@ -120,9 +134,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             projectApplicationId,
             topologyId,
             ["layout.release.route"],
-            projectProcessId,
-            new ProjectProcessVersionId(processVersionId),
-            new ProjectConfigurationSnapshotId(configurationSnapshotId),
+            new ProjectProductionLineDefinitionId("line.release.route"),
             [new SnapshotCapabilityBinding(
                 capabilityId,
                 "binding.scanner",
@@ -145,6 +157,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             engineeringRepository);
         var request = new DeviceCommandRouteRequest(
             "session-release",
+            "00000000-0000-0000-0000-000000000010",
+            "line.release.route",
+            "stage.eol",
+            1,
+            "workstation.eol",
+            "dut.release",
+            "serialNumber",
+            "SERIAL-001",
             "step-release",
             "command-release",
             "node-scan",
@@ -156,17 +176,43 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             applicationId,
             snapshotId,
             "System",
-            "station.eol");
+            "station.eol",
+            inputPayload: null,
+            timeout: TimeSpan.FromSeconds(30));
         var route = await resolver.ResolveAsync(request);
 
         var deviceRoute = Assert.IsType<ProjectReleaseDeviceCommandRoute>(route);
         Assert.Equal("scanner-01", deviceRoute.DeviceInstanceId.Value);
         Assert.Equal(capabilityId, deviceRoute.CapabilityId.Value);
-        Assert.Equal("device.scanner:scan.v2", deviceRoute.CommandDefinitionId.Value);
+        Assert.Equal("device.scanner:scan.updated", deviceRoute.CommandDefinitionId.Value);
         Assert.NotNull(deviceRoute.PluginPackage);
         Assert.Equal("plugin.scanner", deviceRoute.PluginPackage.PluginId);
         Assert.Equal("2.0.0", deviceRoute.PluginPackage.Version);
         Assert.Equal(packageDependency.PackageContentSha256, deviceRoute.PluginPackage.PackageContentSha256);
+        Assert.Null(await resolver.ResolveAsync(new DeviceCommandRouteRequest(
+            request.RuntimeSessionId,
+            request.ProductionRunId,
+            request.ProductionLineDefinitionId,
+            request.ProductionStageId,
+            request.StageSequence,
+            request.WorkstationId,
+            request.DutModelId,
+            request.DutIdentityInputKey,
+            request.DutIdentityValue,
+            request.RuntimeStepId,
+            request.RuntimeCommandId,
+            request.RuntimeNodeId,
+            request.StationId,
+            request.ConfigurationSnapshotId,
+            request.CapabilityId,
+            "scan",
+            request.ProjectId,
+            request.ApplicationId,
+            request.ProjectSnapshotId,
+            request.TargetKind,
+            request.TargetId,
+            request.InputPayload,
+            request.Timeout)));
 
         await File.WriteAllTextAsync(
             Path.Combine(
@@ -178,22 +224,279 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         Assert.Null(await resolver.ResolveAsync(request));
     }
 
-    private static void WriteReleaseTopologyResources(ProjectApplicationWorkspaceScope scope)
+    [Fact]
+    public async Task ExternalTestProgramRouteUsesExactProductionStageAndFrozenExecutable()
+    {
+        const string projectId = "project.external.route";
+        const string applicationId = "application.external.route";
+        const string snapshotId = "snapshot.external.route";
+        const string configurationSnapshotId = "configuration.external.route";
+        const string processDefinitionId = "process.external.route";
+        const string processVersionId = "process.external.route@1.0.0";
+        const string capabilityId = "test.external";
+        const string adapterId = "adapter.external";
+        const string applicationProjectPath =
+            "applications/application.external.route/application.external.route.oloapp";
+
+        var scope = new ProjectApplicationWorkspaceScope(
+            projectId,
+            applicationId,
+            _projectPath,
+            applicationProjectPath);
+        var engineeringRepository = new FileSystemProjectEngineeringConfigurationRepository();
+        await engineeringRepository.SaveAsync(scope, CreateEngineeringProject(
+            configurationSnapshotId,
+            processDefinitionId,
+            processVersionId,
+            capabilityId));
+        await engineeringRepository.SaveAsync(scope, CreateStationProfile(capabilityId));
+        WriteReleaseTopologyResources(
+            scope,
+            topologyId: "topology.external.route",
+            layoutId: "layout.external.route",
+            lineDefinitionId: "line.external.route");
+        var executableSourcePath = Path.Combine(
+            scope.ApplicationRootPath,
+            "programs",
+            "external",
+            "test.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(executableSourcePath)!);
+        await File.WriteAllTextAsync(executableSourcePath, "frozen-external-test-program");
+
+        var releaseStore = new FileSystemProjectReleaseArtifactStore();
+        var release = await releaseStore.PublishAsync(
+            scope,
+            snapshotId,
+            CreatedAtUtc.AddMinutes(1),
+            new ProjectReleaseSourceMetadata(
+                "topology.external.route",
+                ["layout.external.route"],
+                new ProjectReleaseProductionLine(
+                    "line.external.route",
+                    "External Test Line",
+                    "topology.external.route",
+                    new ProjectReleaseDutModel("dut.external", "MODEL-EXTERNAL", "serialNumber"),
+                    [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+                    [
+                        new ProjectReleaseProductionStage(
+                            "stage.external",
+                            1,
+                            "External Test",
+                            "workstation.eol",
+                            processDefinitionId,
+                            configurationSnapshotId,
+                            processVersionId,
+                            "openlineops.flow-ir/v1",
+                            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                            "{}",
+                            ["openlineops_device_command@1"],
+                            adapterId)
+                    ],
+                    [
+                        new ProjectReleaseExternalTestProgramAdapter(
+                            adapterId,
+                            "External EOL",
+                            capabilityId,
+                            "ExecuteTestProgram",
+                            "ApplicationExecutable",
+                            "programs/external/test.exe",
+                            ProviderKey: null,
+                            ["--serial", "{{dut.identity}}", "--stage", "{{stage.id}}"],
+                            [
+                                new ProjectReleaseExternalTestProgramInputMapping(
+                                    "$dut.identity",
+                                    "serial"),
+                                new ProjectReleaseExternalTestProgramInputMapping(
+                                    "$dut.model",
+                                    "model"),
+                                new ProjectReleaseExternalTestProgramInputMapping(
+                                    "$run.id",
+                                    "runId"),
+                                new ProjectReleaseExternalTestProgramInputMapping(
+                                    "$stage.id",
+                                    "stageId")
+                            ],
+                            [
+                                new ProjectReleaseExternalTestProgramResultMapping(
+                                    "$.outcome",
+                                    "test.outcome")
+                            ],
+                            new ProjectReleaseExternalTestProgramOutcomeMapping(
+                                "$.outcome",
+                                "Passed",
+                                "Failed",
+                                "Aborted"),
+                            30_000)
+                    ]),
+                [new ProjectReleaseCapabilityBinding(
+                    capabilityId,
+                    "binding.external",
+                    "ExternalSystem",
+                    adapterId)],
+                [new ProjectReleaseTargetReference("System", "station.eol")],
+                ["openlineops_device_command@1"],
+                PackageDependencies: []));
+
+        var project = AutomationProject.Create(
+            new ProjectId(projectId),
+            "External Route Project",
+            _projectPath,
+            CreatedAtUtc);
+        var projectApplicationId = new ProjectApplicationId(applicationId);
+        var topologyId = new ProjectTopologyId("topology.external.route");
+        Assert.True(project.AddApplication(ProjectApplication.Create(
+            projectApplicationId,
+            "External Route Application",
+            applicationProjectPath)).Succeeded);
+        Assert.True(project.LinkTopology(projectApplicationId, topologyId).Succeeded);
+        Assert.True(project.LinkProcessDefinition(
+            projectApplicationId,
+            new ProjectDefinitionId(processDefinitionId)).Succeeded);
+        Assert.True(project.PublishSnapshot(
+            new ProjectSnapshotId(snapshotId),
+            projectApplicationId,
+            topologyId,
+            ["layout.external.route"],
+            new ProjectProductionLineDefinitionId("line.external.route"),
+            [new SnapshotCapabilityBinding(
+                capabilityId,
+                "binding.external",
+                "ExternalSystem",
+                adapterId)],
+            [new ProjectTargetReference("System", "station.eol")],
+            ["openlineops_device_command@1"],
+            Path.GetRelativePath(_projectPath, release.ManifestPath).Replace('\\', '/'),
+            release.ContentSha256,
+            CreatedAtUtc.AddMinutes(1)).Succeeded);
+
+        var projectRepository = new InMemoryAutomationProjectRepository();
+        await projectRepository.SaveAsync(project);
+        Directory.Delete(Path.Combine(_projectPath, "applications"), recursive: true);
+        var resolver = new ProjectReleaseDeviceCommandRouteResolver(
+            projectRepository,
+            releaseStore,
+            engineeringRepository);
+        var request = new DeviceCommandRouteRequest(
+            "session-external",
+            "00000000-0000-0000-0000-000000000020",
+            "line.external.route",
+            "stage.external",
+            1,
+            "workstation.eol",
+            "dut.external",
+            "serialNumber",
+            "SERIAL-EXT-001",
+            "step-external",
+            "command-external",
+            "node-external",
+            "station.eol",
+            configurationSnapshotId,
+            new OpenLineOps.Devices.Domain.Identifiers.DeviceCapabilityId(capabilityId),
+            "ExecuteTestProgram",
+            projectId,
+            applicationId,
+            snapshotId,
+            "System",
+            "station.eol",
+            $$"""{"externalTestProgramAdapterId":"{{adapterId}}"}""",
+            TimeSpan.FromSeconds(30));
+
+        var route = Assert.IsType<ProjectReleaseExternalTestProgramCommandRoute>(
+            await resolver.ResolveAsync(request));
+        Assert.Equal(adapterId, route.AdapterId);
+        var frozenExecutable = Assert.IsType<string>(route.Executable);
+        Assert.Equal("programs/external/test.exe", frozenExecutable);
+        Assert.Null(route.ProviderRoute);
+        Assert.Equal("ApplicationExecutable", route.LaunchKind);
+        Assert.StartsWith(
+            Path.GetFullPath(release.SourceRootPath),
+            Path.GetFullPath(route.ReleaseApplicationRootPath),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(Path.Combine(
+            route.ReleaseApplicationRootPath,
+            frozenExecutable.Replace('/', Path.DirectorySeparatorChar))));
+
+        Assert.Null(await resolver.ResolveAsync(CopyRequest(
+            request,
+            productionStageId: "stage.other")));
+        Assert.Null(await resolver.ResolveAsync(CopyRequest(
+            request,
+            productionLineDefinitionId: "line.other")));
+        Assert.Null(await resolver.ResolveAsync(CopyRequest(
+            request,
+            dutModelId: "dut.other")));
+
+        await File.WriteAllTextAsync(
+            Path.Combine(
+                route.ReleaseApplicationRootPath,
+                frozenExecutable.Replace('/', Path.DirectorySeparatorChar)),
+            "tampered-external-test-program");
+        Assert.Null(await resolver.ResolveAsync(request));
+    }
+
+    private static void WriteReleaseTopologyResources(
+        ProjectApplicationWorkspaceScope scope,
+        string topologyId = "topology.release.route",
+        string layoutId = "layout.release.route",
+        string lineDefinitionId = "line.release.route")
     {
         var topologyDirectory = Path.Combine(scope.ApplicationRootPath, "topology");
         var layoutDirectory = Path.Combine(scope.ApplicationRootPath, "layouts");
+        var productionDirectory = Path.Combine(
+            scope.ApplicationRootPath,
+            "production",
+            "lines",
+            lineDefinitionId);
         Directory.CreateDirectory(topologyDirectory);
         Directory.CreateDirectory(layoutDirectory);
+        Directory.CreateDirectory(productionDirectory);
         File.WriteAllText(
             Path.Combine(topologyDirectory, "topology.json"),
             $$"""
-            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"topology.release.route"}
+            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
             """);
         File.WriteAllText(
             Path.Combine(layoutDirectory, "layout.json"),
             $$"""
-            {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"layout.release.route"}
+            {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
             """);
+        File.WriteAllText(
+            Path.Combine(productionDirectory, "line.json"),
+            $$"""
+            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"{{lineDefinitionId}}"}
+            """);
+    }
+
+    private static DeviceCommandRouteRequest CopyRequest(
+        DeviceCommandRouteRequest request,
+        string? productionLineDefinitionId = null,
+        string? productionStageId = null,
+        string? dutModelId = null)
+    {
+        return new DeviceCommandRouteRequest(
+            request.RuntimeSessionId,
+            request.ProductionRunId,
+            productionLineDefinitionId ?? request.ProductionLineDefinitionId,
+            productionStageId ?? request.ProductionStageId,
+            request.StageSequence,
+            request.WorkstationId,
+            dutModelId ?? request.DutModelId,
+            request.DutIdentityInputKey,
+            request.DutIdentityValue,
+            request.RuntimeStepId,
+            request.RuntimeCommandId,
+            request.RuntimeNodeId,
+            request.StationId,
+            request.ConfigurationSnapshotId,
+            request.CapabilityId,
+            request.CommandName,
+            request.ProjectId,
+            request.ApplicationId,
+            request.ProjectSnapshotId,
+            request.TargetKind,
+            request.TargetId,
+            request.InputPayload,
+            request.Timeout);
     }
 
     public void Dispose()
@@ -295,7 +598,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "scanner.dll",
             [new ProjectReleasePackageCommandLock(
                 "Device",
-                "device.scanner:scan.v2",
+                "device.scanner:scan.updated",
                 capabilityId,
                 "Scan")],
             files,

@@ -32,7 +32,7 @@ public sealed class ProjectReleaseDeviceCommandExecutor : IDeviceCommandExecutor
                     $"DeviceInstance release provider '{request.ProviderKey}' has no installed execution adapter.")),
             ProjectReleaseRuntimeProviderKinds.ExternalSystem =>
                 Task.FromResult(DeviceCommandExecutionResult.Rejected(
-                    $"ExternalSystem release provider '{request.ProviderKey}' must be invoked by a published external-test adapter.")),
+                    $"ExternalSystem release provider '{request.ProviderKey}' has no installed execution adapter.")),
             _ => Task.FromResult(DeviceCommandExecutionResult.Rejected(
                 $"Release provider kind '{request.ProviderKind}' is not executable."))
         };

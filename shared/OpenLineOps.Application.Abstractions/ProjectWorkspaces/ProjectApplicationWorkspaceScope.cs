@@ -12,24 +12,27 @@ public sealed record ProjectApplicationWorkspaceScope
         string projectPath,
         string applicationProjectRelativePath)
     {
-        if (string.IsNullOrWhiteSpace(projectId))
+        if (string.IsNullOrWhiteSpace(projectId)
+            || !string.Equals(projectId, projectId.Trim(), StringComparison.Ordinal))
         {
-            throw new ArgumentException("Project id cannot be empty.", nameof(projectId));
+            throw new ArgumentException("Project id must be canonical non-empty text.", nameof(projectId));
         }
 
-        if (string.IsNullOrWhiteSpace(applicationId))
+        if (string.IsNullOrWhiteSpace(applicationId)
+            || !string.Equals(applicationId, applicationId.Trim(), StringComparison.Ordinal))
         {
-            throw new ArgumentException("Application id cannot be empty.", nameof(applicationId));
+            throw new ArgumentException("Application id must be canonical non-empty text.", nameof(applicationId));
         }
 
-        if (string.IsNullOrWhiteSpace(projectPath))
+        if (string.IsNullOrWhiteSpace(projectPath)
+            || !string.Equals(projectPath, projectPath.Trim(), StringComparison.Ordinal))
         {
-            throw new ArgumentException("Project path cannot be empty.", nameof(projectPath));
+            throw new ArgumentException("Project path must be canonical non-empty text.", nameof(projectPath));
         }
 
-        ProjectId = projectId.Trim();
-        ApplicationId = applicationId.Trim();
-        ProjectPath = Path.GetFullPath(projectPath.Trim());
+        ProjectId = projectId;
+        ApplicationId = applicationId;
+        ProjectPath = Path.GetFullPath(projectPath);
         ApplicationProjectRelativePath = NormalizeApplicationProjectRelativePath(
             applicationProjectRelativePath);
         ApplicationProjectFilePath = ResolveInsideProject(

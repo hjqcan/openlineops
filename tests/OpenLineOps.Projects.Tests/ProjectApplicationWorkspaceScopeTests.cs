@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Projects.Tests;
@@ -52,6 +53,30 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
             relativePath));
     }
 
+    [Theory]
+    [InlineData(" project.main", "application.main")]
+    [InlineData("project.main ", "application.main")]
+    [InlineData("project.main", " application.main")]
+    [InlineData("project.main", "application.main ")]
+    public void ScopeRejectsNonCanonicalIdentities(string projectId, string applicationId)
+    {
+        Assert.Throws<ArgumentException>(() => new ProjectApplicationWorkspaceScope(
+            projectId,
+            applicationId,
+            Path.Combine(_testRoot, "project"),
+            "applications/Main/Main.oloapp"));
+    }
+
+    [Fact]
+    public void ScopeRejectsProjectPathWithOuterWhitespace()
+    {
+        Assert.Throws<ArgumentException>(() => new ProjectApplicationWorkspaceScope(
+            "project.main",
+            "application.main",
+            $" {Path.Combine(_testRoot, "project")}",
+            "applications/Main/Main.oloapp"));
+    }
+
     [Fact]
     public void ScopeRejectsProjectPathThatIsAnExistingFile()
     {
@@ -98,29 +123,61 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
     }
 
     [Fact]
-    public void ScopeRejectsExistingReparsePointInApplicationDirectoryChainWhenSupported()
+    public void ScopeRejectsExistingReparsePointInApplicationDirectoryChain()
     {
         var projectPath = Path.Combine(_testRoot, "project");
         var targetPath = Path.Combine(_testRoot, "target");
         Directory.CreateDirectory(projectPath);
         Directory.CreateDirectory(targetPath);
         var applicationsPath = Path.Combine(projectPath, "applications");
+        CreateDirectoryReparsePoint(applicationsPath, targetPath);
+
         try
         {
-            Directory.CreateSymbolicLink(applicationsPath, targetPath);
+            Assert.Throws<InvalidDataException>(() => new ProjectApplicationWorkspaceScope(
+                "project.main",
+                "application.main",
+                projectPath,
+                "applications/Main/Main.oloapp"));
         }
-        catch (Exception exception) when (exception is UnauthorizedAccessException
-                                           or IOException
-                                           or PlatformNotSupportedException)
+        finally
         {
+            Directory.Delete(applicationsPath);
+        }
+    }
+
+    private static void CreateDirectoryReparsePoint(string path, string targetPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(path, targetPath);
             return;
         }
 
-        Assert.Throws<InvalidDataException>(() => new ProjectApplicationWorkspaceScope(
-            "project.main",
-            "application.main",
-            projectPath,
-            "applications/Main/Main.oloapp"));
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            ArgumentList =
+            {
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                path,
+                targetPath
+            }
+        }) ?? throw new InvalidOperationException("Failed to start the Windows junction command.");
+
+        process.WaitForExit();
+        var standardOutput = process.StandardOutput.ReadToEnd();
+        var standardError = process.StandardError.ReadToEnd();
+        Assert.True(
+            process.ExitCode == 0,
+            $"Failed to create test junction. stdout: {standardOutput} stderr: {standardError}");
     }
 
     public void Dispose()

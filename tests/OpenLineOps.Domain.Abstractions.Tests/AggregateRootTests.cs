@@ -58,7 +58,7 @@ public sealed class AggregateRootTests
 
         Assert.True(IntegrationEventDescriptorFactory.IsIntegrationEvent(domainEvent));
         Assert.Equal("Tests.InterfaceMarked", descriptor.EventName);
-        Assert.Equal("v2", descriptor.Version);
+        Assert.Equal("2.0.0", descriptor.Version);
         Assert.Same(domainEvent, descriptor.Payload);
         Assert.Equal(domainEvent.AggregateId.ToString(), descriptor.BuildHeaders()["aggregate-id"]);
     }
@@ -178,7 +178,7 @@ public sealed class AggregateRootTests
     {
         public string EventName => "Tests.InterfaceMarked";
 
-        public string Version => "v2";
+        public string Version => "2.0.0";
     }
 
     [IntegrationEvent("Tests.AttributeMarked", "v3")]

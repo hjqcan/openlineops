@@ -1,6 +1,8 @@
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
@@ -9,9 +11,14 @@ namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
 internal static class RuntimeSessionSnapshotMapper
 {
+    internal const int CurrentSchemaVersion = 1;
+    internal const string CurrentResourceKind = "OpenLineOps.RuntimeSession";
+
     public static PersistedRuntimeSession ToSnapshot(RuntimeSession session)
     {
         return new PersistedRuntimeSession(
+            CurrentSchemaVersion,
+            CurrentResourceKind,
             session.Id.Value,
             session.StationId.Value,
             session.ProcessDefinitionId.Value,
@@ -33,6 +40,7 @@ internal static class RuntimeSessionSnapshotMapper
     public static RuntimeSession ToAggregate(PersistedRuntimeSession snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        RequireCurrentSchema(snapshot);
 
         var steps = snapshot.Steps.Select(ToAggregate).ToArray();
 
@@ -58,7 +66,14 @@ internal static class RuntimeSessionSnapshotMapper
     private static PersistedRuntimeTraceMetadata ToSnapshot(RuntimeSessionTraceMetadata traceMetadata)
     {
         return new PersistedRuntimeTraceMetadata(
-            traceMetadata.SerialNumber,
+            traceMetadata.ProductionRunId.Value,
+            traceMetadata.ProductionLineDefinitionId,
+            traceMetadata.ProductionStageId,
+            traceMetadata.StageSequence,
+            traceMetadata.WorkstationId,
+            traceMetadata.DutIdentity.ModelId,
+            traceMetadata.DutIdentity.InputKey,
+            traceMetadata.DutIdentity.Value,
             traceMetadata.BatchId,
             traceMetadata.FixtureId,
             traceMetadata.DeviceId,
@@ -99,6 +114,7 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
+            command.SemanticOutcome?.ToString(),
             command.ActionId.Value,
             command.TargetKind,
             command.TargetId);
@@ -143,6 +159,9 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
+            ParseOptionalEnum<RuntimeCommandSemanticOutcome>(
+                command.SemanticOutcome,
+                nameof(command.SemanticOutcome)),
             RequiredActionId(command.ActionId, $"runtime command {command.CommandId:D}"),
             RequiredTarget(command.TargetKind, command.TargetId, $"runtime command {command.CommandId:D}"));
     }
@@ -189,15 +208,52 @@ internal static class RuntimeSessionSnapshotMapper
         }
 
         return new RuntimeSessionTraceMetadata(
-            traceMetadata.SerialNumber,
+            RequiredProductionRunId(traceMetadata.ProductionRunId),
+            RequiredTraceIdentity(
+                traceMetadata.ProductionLineDefinitionId,
+                "production line definition id"),
+            RequiredTraceIdentity(traceMetadata.ProductionStageId, "production stage id"),
+            RequiredPositiveSequence(traceMetadata.StageSequence),
+            RequiredTraceIdentity(traceMetadata.WorkstationId, "workstation id"),
+            new DutIdentity(
+                RequiredTraceIdentity(traceMetadata.DutModelId, "DUT model id"),
+                RequiredTraceIdentity(traceMetadata.DutIdentityInputKey, "DUT identity input key"),
+                RequiredTraceIdentity(traceMetadata.DutIdentityValue, "DUT identity value")),
             traceMetadata.BatchId,
             traceMetadata.FixtureId,
             traceMetadata.DeviceId,
-            traceMetadata.ActorId,
+            RequiredTraceIdentity(traceMetadata.ActorId, "actor id"),
             RequiredTraceIdentity(traceMetadata.ProjectId, "project id"),
             RequiredTraceIdentity(traceMetadata.ApplicationId, "application id"),
             RequiredTraceIdentity(traceMetadata.ProjectSnapshotId, "project snapshot id"),
             RequiredTraceIdentity(traceMetadata.TopologyId, "topology id"));
+    }
+
+    private static void RequireCurrentSchema(PersistedRuntimeSession snapshot)
+    {
+        if (snapshot.SchemaVersion != CurrentSchemaVersion
+            || !string.Equals(snapshot.ResourceKind, CurrentResourceKind, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Persisted runtime session schema is not current. Expected resource kind "
+                + $"'{CurrentResourceKind}' and schema version {CurrentSchemaVersion}.");
+        }
+    }
+
+    private static ProductionRunId RequiredProductionRunId(Guid value)
+    {
+        return value == Guid.Empty
+            ? throw new InvalidDataException(
+                "Persisted runtime session trace metadata does not declare production run id.")
+            : new ProductionRunId(value);
+    }
+
+    private static int RequiredPositiveSequence(int value)
+    {
+        return value <= 0
+            ? throw new InvalidDataException(
+                "Persisted runtime session trace metadata does not declare a positive stage sequence.")
+            : value;
     }
 
     private static string RequiredTraceIdentity(string? value, string fieldName)
@@ -209,18 +265,29 @@ internal static class RuntimeSessionSnapshotMapper
     }
 
     private static TEnum ParseEnum<TEnum>(string value, string fieldName)
-        where TEnum : struct
+        where TEnum : struct, Enum
     {
-        if (Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed))
+        if (CanonicalEnumToken.TryParse<TEnum>(value, out var parsed))
         {
             return parsed;
         }
 
-        throw new InvalidOperationException($"Persisted {fieldName} value '{value}' is invalid.");
+        throw new InvalidOperationException(
+            $"Persisted {fieldName} value '{value}' is invalid. " +
+            $"Expected an exact, case-sensitive {typeof(TEnum).Name} token: " +
+            $"{CanonicalEnumToken.ExpectedTokens<TEnum>()}.");
+    }
+
+    private static TEnum? ParseOptionalEnum<TEnum>(string? value, string fieldName)
+        where TEnum : struct, Enum
+    {
+        return value is null ? null : ParseEnum<TEnum>(value, fieldName);
     }
 }
 
 internal sealed record PersistedRuntimeSession(
+    int SchemaVersion,
+    string ResourceKind,
     Guid SessionId,
     string StationId,
     string ProcessDefinitionId,
@@ -239,7 +306,14 @@ internal sealed record PersistedRuntimeSession(
     PersistedRuntimeIncident[] Incidents);
 
 internal sealed record PersistedRuntimeTraceMetadata(
-    string? SerialNumber,
+    Guid ProductionRunId,
+    string? ProductionLineDefinitionId,
+    string? ProductionStageId,
+    int StageSequence,
+    string? WorkstationId,
+    string? DutModelId,
+    string? DutIdentityInputKey,
+    string? DutIdentityValue,
     string? BatchId,
     string? FixtureId,
     string? DeviceId,
@@ -274,6 +348,7 @@ internal sealed record PersistedRuntimeCommand(
     DateTimeOffset? CompletedAtUtc,
     string? ResultPayload,
     string? FailureReason,
+    string? SemanticOutcome,
     string ActionId,
     string TargetKind,
     string TargetId);

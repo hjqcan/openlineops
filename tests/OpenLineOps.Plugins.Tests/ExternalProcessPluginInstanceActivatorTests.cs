@@ -21,7 +21,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         var manifest = CreateManifest();
         var runner = new CapturingExternalPluginProcessRunner();
         var registry = new ExternalPluginProcessRegistry();
-        var activator = new ExternalProcessPluginInstanceActivator(runner, registry);
+        var activator = CreateActivator(runner, registry);
 
         var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
 
@@ -60,7 +60,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         using var packageDirectory = TestPluginPackageDirectory.Create();
         var manifest = CreateManifest(entryAssembly: Path.Combine("..", "Plugin.dll"));
         var runner = new CapturingExternalPluginProcessRunner();
-        var activator = new ExternalProcessPluginInstanceActivator(runner);
+        var activator = CreateActivator(runner);
 
         var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
 
@@ -75,7 +75,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         using var packageDirectory = TestPluginPackageDirectory.Create();
         var manifest = CreateManifest(entryAssembly: "Missing.Plugin.dll");
         var runner = new CapturingExternalPluginProcessRunner();
-        var activator = new ExternalProcessPluginInstanceActivator(runner);
+        var activator = CreateActivator(runner);
 
         var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
 
@@ -115,6 +115,30 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
     }
 
     [Fact]
+    public async Task ActivateAsyncRejectsUppercaseTrustedPackageHashAlias()
+    {
+        using var packageDirectory = TestPluginPackageDirectory.Create();
+        var manifest = CreateManifest();
+        var runner = new CapturingExternalPluginProcessRunner();
+        var options = new ExternalProcessPluginHostOptions
+        {
+            Sandbox = new ExternalPluginSandboxOptions
+            {
+                RequireTrustedPackage = true
+            }
+        };
+        options.Sandbox.TrustedEntryAssemblySha256[manifest.Id] =
+            ComputeSha256(packageDirectory.EntryAssemblyPath).ToUpperInvariant();
+        var activator = CreateActivator(runner, options: options);
+
+        var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("64 lowercase hexadecimal", result.FailureReason, StringComparison.Ordinal);
+        Assert.Equal(0, runner.StartCount);
+    }
+
+    [Fact]
     public async Task ActivateAsyncAllowsTrustedPackageAndPassesSandboxEnvironment()
     {
         using var packageDirectory = TestPluginPackageDirectory.Create();
@@ -134,10 +158,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         };
         var expectedHash = ComputeSha256(packageDirectory.EntryAssemblyPath);
         options.Sandbox.TrustedEntryAssemblySha256[manifest.Id] = expectedHash;
-        var activator = new ExternalProcessPluginInstanceActivator(
-            runner,
-            registry,
-            options);
+        var activator = CreateActivator(runner, registry, options);
 
         var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
 
@@ -190,6 +211,82 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
             && processEvent.PluginId == manifest.Id);
     }
 
+    [Theory]
+    [InlineData("property-case")]
+    [InlineData("unknown-property")]
+    public async Task ActivateAsyncRejectsNonCanonicalSignatureJson(string scenario)
+    {
+        using var packageDirectory = TestPluginPackageDirectory.Create();
+        using var rsa = RSA.Create(2048);
+        var manifest = CreateManifest();
+        var package = packageDirectory.Package(manifest);
+        WritePackageSignature(packageDirectory, package, rsa);
+        var signatureJson = await File.ReadAllTextAsync(packageDirectory.SignaturePath);
+        signatureJson = scenario switch
+        {
+            "property-case" => signatureJson.Replace(
+                "\"algorithm\":",
+                "\"Algorithm\":",
+                StringComparison.Ordinal),
+            "unknown-property" => signatureJson.Insert(
+                signatureJson.LastIndexOf('}'),
+                ",\"legacy\":true"),
+            _ => throw new InvalidOperationException($"Unknown scenario {scenario}.")
+        };
+        await File.WriteAllTextAsync(packageDirectory.SignaturePath, signatureJson);
+        var runner = new CapturingExternalPluginProcessRunner();
+        var options = new ExternalProcessPluginHostOptions
+        {
+            Sandbox = new ExternalPluginSandboxOptions
+            {
+                RequireSignedPackage = true
+            }
+        };
+        options.Sandbox.TrustedPackageSigningPublicKeys[manifest.Id] = rsa.ExportSubjectPublicKeyInfoPem();
+        var activator = CreateActivator(runner, options: options);
+
+        var result = await activator.ActivateAsync(package);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("signature file is invalid JSON", result.FailureReason, StringComparison.Ordinal);
+        Assert.Equal(0, runner.StartCount);
+    }
+
+    [Theory]
+    [InlineData("rsa-sha256")]
+    [InlineData(" RSA-SHA256 ")]
+    public async Task ActivateAsyncRejectsNonCanonicalSignatureAlgorithm(string algorithm)
+    {
+        using var packageDirectory = TestPluginPackageDirectory.Create();
+        using var rsa = RSA.Create(2048);
+        var manifest = CreateManifest();
+        var package = packageDirectory.Package(manifest);
+        WritePackageSignature(packageDirectory, package, rsa);
+        var signatureJson = await File.ReadAllTextAsync(packageDirectory.SignaturePath);
+        signatureJson = signatureJson.Replace(
+            ExternalPluginPackageSignatureAlgorithms.RsaSha256,
+            algorithm,
+            StringComparison.Ordinal);
+        await File.WriteAllTextAsync(packageDirectory.SignaturePath, signatureJson);
+        var runner = new CapturingExternalPluginProcessRunner();
+        var options = new ExternalProcessPluginHostOptions
+        {
+            Sandbox = new ExternalPluginSandboxOptions
+            {
+                RequireSignedPackage = true
+            }
+        };
+        options.Sandbox.TrustedPackageSigningPublicKeys[manifest.Id] = rsa.ExportSubjectPublicKeyInfoPem();
+        var activator = CreateActivator(runner, options: options);
+
+        var result = await activator.ActivateAsync(package);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("signature algorithm", result.FailureReason, StringComparison.Ordinal);
+        Assert.Contains("is not supported", result.FailureReason, StringComparison.Ordinal);
+        Assert.Equal(0, runner.StartCount);
+    }
+
     [Fact]
     public async Task ActivateAsyncAllowsSignedPackageWithoutConfiguredHash()
     {
@@ -209,10 +306,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
             }
         };
         options.Sandbox.TrustedPackageSigningPublicKeys[manifest.Id] = rsa.ExportSubjectPublicKeyInfoPem();
-        var activator = new ExternalProcessPluginInstanceActivator(
-            runner,
-            registry,
-            options);
+        var activator = CreateActivator(runner, registry, options);
 
         var result = await activator.ActivateAsync(package);
 
@@ -247,10 +341,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
             }
         };
         options.Sandbox.TrustedPackageSigningPublicKeys["*"] = rsa.ExportSubjectPublicKeyInfoPem();
-        var activator = new ExternalProcessPluginInstanceActivator(
-            runner,
-            new ExternalPluginProcessRegistry(),
-            options);
+        var activator = CreateActivator(runner, options: options);
 
         var result = await activator.ActivateAsync(package);
 
@@ -357,7 +448,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         var manifest = CreateManifest();
         var runner = new CapturingExternalPluginProcessRunner(
             new FakeExternalPluginProcess(hasExited: true));
-        var activator = new ExternalProcessPluginInstanceActivator(runner);
+        var activator = CreateActivator(runner);
 
         var result = await activator.ActivateAsync(packageDirectory.Package(manifest));
         var status = await result.Plugin!.InitializeAsync(new EmptyServiceProvider());
@@ -379,7 +470,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         var manager = new PluginLifecycleManager(
             new InMemoryPluginPackageCatalog(packageDirectory.Package(manifest)),
             new PluginManifestValidator(),
-            new ExternalProcessPluginInstanceActivator(runner, registry));
+            CreateActivator(runner, registry));
 
         var startRecords = await manager.StartAsync(new EmptyServiceProvider());
         var stopRecords = await manager.StopAsync();
@@ -492,6 +583,18 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
             ["device.external-process"]);
     }
 
+    private static ExternalProcessPluginInstanceActivator CreateActivator(
+        IExternalPluginProcessRunner processRunner,
+        IExternalPluginProcessRegistry? processRegistry = null,
+        ExternalProcessPluginHostOptions? options = null)
+    {
+        return new ExternalProcessPluginInstanceActivator(
+            processRunner,
+            processRegistry ?? new ExternalPluginProcessRegistry(),
+            options ?? new ExternalProcessPluginHostOptions(),
+            new CapturingExternalPluginProcessEventSink());
+    }
+
     private static PluginDeviceCommandInvocationRequest CreateInvocationRequest()
     {
         return new PluginDeviceCommandInvocationRequest(
@@ -525,7 +628,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
     {
         using var stream = File.OpenRead(path);
 
-        return Convert.ToHexString(SHA256.HashData(stream));
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private static void WritePackageSignature(
@@ -660,7 +763,7 @@ public sealed class ExternalProcessPluginInstanceActivatorTests
         private TestPluginPackageDirectory(string packagePath)
         {
             PackagePath = packagePath;
-            ManifestPath = Path.Combine(packagePath, "openlineops-plugin.json");
+            ManifestPath = Path.Combine(packagePath, "manifest.json");
             EntryAssemblyPath = Path.Combine(packagePath, "Plugin.dll");
             SignaturePath = Path.Combine(packagePath, "openlineops-plugin.signature.json");
         }

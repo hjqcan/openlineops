@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using OpenLineOps.Traceability.Infrastructure.Artifacts;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -27,7 +28,8 @@ public sealed class TraceArtifactsApiTests : IClassFixture<WebApplicationFactory
                 {
                     configurationBuilder.AddInMemoryCollection(new Dictionary<string, string?>
                     {
-                        ["OpenLineOps:Traceability:ArtifactStorage:Provider"] = "LocalFile",
+                        ["OpenLineOps:Traceability:ArtifactStorage:Provider"] =
+                            TraceArtifactStorageProviders.FileSystem,
                         ["OpenLineOps:Traceability:ArtifactStorage:RootPath"] = _storageRoot
                     });
                 });
@@ -55,7 +57,9 @@ public sealed class TraceArtifactsApiTests : IClassFixture<WebApplicationFactory
         Assert.EndsWith(".log", storageKey, StringComparison.Ordinal);
         Assert.Equal("vision.log", body.RootElement.GetProperty("fileName").GetString());
         Assert.Equal(payload.Length, body.RootElement.GetProperty("sizeBytes").GetInt64());
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(payload)), body.RootElement.GetProperty("sha256").GetString());
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant(),
+            body.RootElement.GetProperty("sha256").GetString());
 
         using var downloadResponse = await _client.GetAsync($"/api/traceability/artifacts/{storageKey}");
         var downloadedPayload = await downloadResponse.Content.ReadAsByteArrayAsync();

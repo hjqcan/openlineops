@@ -1,3 +1,4 @@
+using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
@@ -76,8 +77,6 @@ internal static class ProcessDefinitionSnapshotMapper
                 $"Persisted process definition {snapshot.DefinitionId} has unsupported status {snapshot.Status}.");
         }
 
-        definition.ClearDomainEvents();
-
         return definition;
     }
 
@@ -89,6 +88,8 @@ internal static class ProcessDefinitionSnapshotMapper
             node.DisplayName,
             node.RequiredCapability?.Value,
             node.CommandName,
+            node.TargetKind?.ToString(),
+            node.TargetId,
             node.CommandTimeout,
             node.InputPayload,
             node.ScriptLanguage,
@@ -124,6 +125,8 @@ internal static class ProcessDefinitionSnapshotMapper
                 string.IsNullOrWhiteSpace(node.RequiredCapabilityId)
                     ? null
                     : new ProcessCapabilityId(node.RequiredCapabilityId),
+                ParseNullableCommandTargetKind(node),
+                node.TargetId,
                 node.CommandName,
                 node.CommandTimeout,
                 node.InputPayload),
@@ -158,22 +161,30 @@ internal static class ProcessDefinitionSnapshotMapper
             transition.MaxTraversals);
     }
 
-    private static ProcessTransitionLoopPolicy ParseLoopPolicy(PersistedProcessTransition transition)
+    private static ProcessActionTargetKind? ParseNullableCommandTargetKind(PersistedProcessNode node)
     {
-        return string.IsNullOrWhiteSpace(transition.LoopPolicy)
-            ? ProcessTransitionLoopPolicy.None
-            : ParseEnum<ProcessTransitionLoopPolicy>(transition.LoopPolicy, nameof(transition.LoopPolicy));
+        return string.IsNullOrWhiteSpace(node.TargetKind)
+            ? null
+            : ParseEnum<ProcessActionTargetKind>(node.TargetKind, nameof(node.TargetKind));
     }
 
-    private static TEnum ParseEnum<TEnum>(string value, string fieldName)
-        where TEnum : struct
+    private static ProcessTransitionLoopPolicy ParseLoopPolicy(PersistedProcessTransition transition)
     {
-        if (Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed))
+        return ParseEnum<ProcessTransitionLoopPolicy>(transition.LoopPolicy, nameof(transition.LoopPolicy));
+    }
+
+    private static TEnum ParseEnum<TEnum>(string? value, string fieldName)
+        where TEnum : struct, Enum
+    {
+        if (CanonicalEnumToken.TryParse<TEnum>(value, out var parsed))
         {
             return parsed;
         }
 
-        throw new InvalidOperationException($"Persisted {fieldName} value '{value}' is invalid.");
+        throw new InvalidOperationException(
+            $"Persisted {fieldName} value '{value}' is invalid. " +
+            $"Expected an exact, case-sensitive {typeof(TEnum).Name} token: " +
+            $"{CanonicalEnumToken.ExpectedTokens<TEnum>()}.");
     }
 }
 
@@ -193,6 +204,8 @@ internal sealed record PersistedProcessNode(
     string DisplayName,
     string? RequiredCapabilityId,
     string? CommandName,
+    string? TargetKind,
+    string? TargetId,
     TimeSpan? CommandTimeout,
     string? InputPayload,
     string? ScriptLanguage,

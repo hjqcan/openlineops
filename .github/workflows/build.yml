@@ -23,6 +23,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-ci-workflow-actions.ps1
 
+      - name: Reject version-suffixed implementations
+        shell: powershell
+        run: ./eng/verify-no-version-suffix-implementations.ps1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:

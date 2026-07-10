@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
@@ -31,10 +31,14 @@ import type {
   PlatformResponse,
   PublishedProjectSnapshotResponse,
   RuntimeAlarm,
+  RuntimeCommandStatus,
+  RuntimeMonitoringScope,
+  RuntimeSessionStatus,
   RuntimeStationStatus,
   RuntimeTargetStatus,
   RuntimeTimelineEntry,
-  StartedProjectSnapshotRuntimeSessionResponse,
+  StartProjectSnapshotProductionRunRequest,
+  StartedProjectSnapshotProductionRunResponse,
   TraceRecordSummary
 } from './contracts';
 import { desktop } from './desktop-bridge';
@@ -48,7 +52,7 @@ import {
   getTargetStatuses,
   getTimeline,
   getTraceRecords,
-  startProjectSnapshotRuntimeSession
+  startProjectSnapshotProductionRun
 } from './api';
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
@@ -88,6 +92,22 @@ const navItems = [
 type NavId = (typeof navItems)[number]['id'];
 type HubState = 'Disconnected' | 'Connecting' | 'Connected' | 'Reconnecting';
 
+interface ProductionRunFormState {
+  dutIdentityValue: string;
+  actorId: string;
+  batchId: string;
+  fixtureId: string;
+  deviceId: string;
+}
+
+const emptyProductionRunForm: ProductionRunFormState = {
+  dutIdentityValue: '',
+  actorId: '',
+  batchId: '',
+  fixtureId: '',
+  deviceId: ''
+};
+
 declare global {
   interface Window {
     __openlineopsSmokeEvents?: Record<string, number>;
@@ -108,7 +128,11 @@ function App(): React.ReactElement {
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
   const [lastProjectRun, setLastProjectRun] =
-    useState<StartedProjectSnapshotRuntimeSessionResponse | null>(null);
+    useState<StartedProjectSnapshotProductionRunResponse | null>(null);
+  const [activeProductionRunId, setActiveProductionRunId] = useState<string | null>(null);
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [productionRunForm, setProductionRunForm] =
+    useState<ProductionRunFormState>(emptyProductionRunForm);
   const [activeWorkspace, setActiveWorkspace] = useState<AutomationProjectWorkspaceResponse | null>(null);
   const [activeApplicationId, setActiveApplicationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -123,6 +147,29 @@ function App(): React.ReactElement {
   const activeApplicationSnapshot = useMemo(
     () => selectApplicationSnapshot(activeWorkspace, activeApplication?.applicationId ?? null),
     [activeApplication?.applicationId, activeWorkspace]);
+  const activeMonitoringScope = useMemo<RuntimeMonitoringScope | null>(
+    () => workspaceMode === 'run'
+      && activeProductionRunId
+      && activeWorkspace
+      && activeApplicationSnapshot
+      ? {
+        projectId: activeWorkspace.project.projectId,
+        applicationId: activeApplicationSnapshot.applicationId,
+        projectSnapshotId: activeApplicationSnapshot.snapshotId,
+        topologyId: activeApplicationSnapshot.topologyId,
+        productionRunId: activeProductionRunId
+      }
+      : null,
+    [activeApplicationSnapshot, activeProductionRunId, activeWorkspace, workspaceMode]);
+  const runtimeHubConnectionRef =
+    useRef<ReturnType<typeof createRuntimeHubConnection> | null>(null);
+  const runDialogRef = useRef<HTMLDialogElement>(null);
+  const monitoringScopeRef = useRef<RuntimeMonitoringScope | null>(activeMonitoringScope);
+  const joinedMonitoringScopeRef = useRef<RuntimeMonitoringScope | null>(null);
+  monitoringScopeRef.current = activeMonitoringScope;
+  const lastProjectRunSessionId = useMemo(
+    () => latestProductionRunSessionId(lastProjectRun),
+    [lastProjectRun]);
 
   const latestStation = stations[0] ?? null;
   const activeNavLabel = navItems.find(item => item.id === activeNav)?.label ?? 'Explorer';
@@ -157,26 +204,69 @@ function App(): React.ReactElement {
 
     if (status.health === 'Healthy') {
       const [stationRows, alarmRows, traceResponse] = await Promise.all([
-        getStationStatuses(),
+        activeMonitoringScope
+          ? getStationStatuses(activeMonitoringScope)
+          : Promise.resolve([]),
         getAlarms(),
         getTraceRecords()
       ]);
-      setStations(stationRows);
+      const scopedStationRows = stationRows.filter(statusRow =>
+        runtimeStatusMatchesScope(statusRow, activeMonitoringScope)
+        && isRuntimeSessionStatus(statusRow.sessionStatus));
+      setStations(scopedStationRows);
       setAlarms(alarmRows);
       setTraceRows(traceResponse?.items ?? []);
-      setTargetStatuses(await getTargetStatuses(
-        stationRows.map(station => station.stationSystemId)));
+      const scopedTargetRows = activeMonitoringScope
+        ? (await getTargetStatuses(
+          activeMonitoringScope,
+          scopedStationRows.map(station => station.stationSystemId)))
+          .filter(statusRow => runtimeStatusMatchesScope(statusRow, activeMonitoringScope)
+            && isRuntimeCommandStatus(statusRow.commandStatus))
+        : [];
+      setTargetStatuses(scopedTargetRows);
 
-      const selectedSessionId = lastProjectRun?.sessionId ?? stationRows[0]?.latestSessionId;
-      if (selectedSessionId) {
-        setTimeline(await getTimeline(selectedSessionId));
+      const selectedSessionId = activeMonitoringScope
+        ? lastProjectRunSessionId ?? scopedStationRows[0]?.latestSessionId
+        : null;
+      if (selectedSessionId && activeMonitoringScope) {
+        setTimeline(await getTimeline(selectedSessionId, activeMonitoringScope));
+      } else {
+        setTimeline([]);
       }
+    } else {
+      setStations([]);
+      setTargetStatuses([]);
+      setTimeline([]);
     }
-  }, [lastProjectRun?.sessionId]);
+  }, [activeMonitoringScope, lastProjectRunSessionId]);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     refresh().catch(error => setMessage(`Refresh failed: ${String(error)}`));
   }, [refresh]);
+
+  useEffect(() => {
+    if (!backendStatus?.isRunning || backendStatus.health === 'Healthy') {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      refresh().catch(error => setMessage(`Refresh failed: ${String(error)}`));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [backendStatus?.health, backendStatus?.isRunning, refresh]);
+
+  useEffect(() => {
+    if (backendStatus?.health !== 'Healthy') {
+      return;
+    }
+
+    setMessage(current => current === 'Backend start requested' || current === 'Starting OpenLineOps.Api'
+      ? 'Runtime ready'
+      : current);
+  }, [backendStatus?.health]);
 
   useEffect(() => {
     setActiveApplicationId(current => {
@@ -186,6 +276,38 @@ function App(): React.ReactElement {
         : applications[0]?.applicationId ?? null;
     });
   }, [activeWorkspace]);
+
+  useEffect(() => {
+    if (!lastProjectRun || !activeWorkspace || !activeApplicationSnapshot) {
+      return;
+    }
+
+    if (lastProjectRun.projectId === activeWorkspace.project.projectId
+        && lastProjectRun.applicationId === activeApplicationSnapshot.applicationId
+        && lastProjectRun.snapshotId === activeApplicationSnapshot.snapshotId
+        && lastProjectRun.topologyId === activeApplicationSnapshot.topologyId) {
+      return;
+    }
+
+    setLastProjectRun(null);
+    setActiveProductionRunId(null);
+    setStations([]);
+    setTargetStatuses([]);
+    setTimeline([]);
+  }, [activeApplicationSnapshot, activeWorkspace, lastProjectRun]);
+
+  useEffect(() => {
+    const dialog = runDialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    if (runDialogOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!runDialogOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [runDialogOpen]);
 
   useEffect(() => {
     if (!config?.apiBaseUrl) {
@@ -198,6 +320,7 @@ function App(): React.ReactElement {
     }
 
     const connection = createRuntimeHubConnection(config.apiBaseUrl);
+    runtimeHubConnectionRef.current = connection;
     let disposed = false;
     let retryTimer: number | undefined;
 
@@ -210,6 +333,11 @@ function App(): React.ReactElement {
       try {
         await connection.start();
         if (!disposed) {
+          const scope = monitoringScopeRef.current;
+          if (scope) {
+            await joinRuntimeProductionRunGroup(connection, scope);
+            joinedMonitoringScopeRef.current = scope;
+          }
           setHubState('Connected');
         }
       } catch {
@@ -224,14 +352,32 @@ function App(): React.ReactElement {
 
     connection.on('StationStatusChanged', (status: RuntimeStationStatus) => {
       recordSmokeEvent('StationStatusChanged');
-      setStations(current => upsertBy(current, status, item => item.stationSystemId));
+      if (!runtimeStatusMatchesScope(status, monitoringScopeRef.current)
+          || !isRuntimeSessionStatus(status.sessionStatus)) {
+        return;
+      }
+
+      setStations(current => upsertBy(current, status, runtimeStationStatusKey));
+      setTargetStatuses(current => current.filter(candidate =>
+        !sameRuntimeStationScope(candidate, status)
+        || candidate.sessionId === status.latestSessionId));
     });
     connection.on('TargetStatusChanged', (status: RuntimeTargetStatus) => {
       recordSmokeEvent('TargetStatusChanged');
+      if (!runtimeStatusMatchesScope(status, monitoringScopeRef.current)
+          || !isRuntimeCommandStatus(status.commandStatus)) {
+        return;
+      }
+
       setTargetStatuses(current => upsertRuntimeTargetStatus(current, status));
     });
     connection.on('RuntimeEvent', (entry: RuntimeTimelineEntry) => {
       recordSmokeEvent('RuntimeEvent');
+      if (!runtimeTimelineMatchesScope(entry, monitoringScopeRef.current)
+          || !isRuntimeSessionStatus(entry.sessionStatus)) {
+        return;
+      }
+
       setTimeline(current => [...current.filter(item => item.eventId !== entry.eventId), entry]
         .sort((left, right) => left.sequence - right.sequence)
         .slice(-80));
@@ -245,9 +391,16 @@ function App(): React.ReactElement {
       setAlarms(current => upsertBy(current, alarm, item => item.alarmId));
     });
     connection.onreconnecting(() => setHubState('Reconnecting'));
-    connection.onreconnected(() => {
+    connection.onreconnected(async () => {
+      const scope = monitoringScopeRef.current;
+      if (scope) {
+        await joinRuntimeProductionRunGroup(connection, scope);
+        joinedMonitoringScopeRef.current = scope;
+      } else {
+        joinedMonitoringScopeRef.current = null;
+      }
       setHubState('Connected');
-      refresh().catch(error => setMessage(`Resync failed: ${String(error)}`));
+      refreshRef.current().catch(error => setMessage(`Resync failed: ${String(error)}`));
     });
     connection.onclose(() => setHubState('Disconnected'));
 
@@ -258,9 +411,34 @@ function App(): React.ReactElement {
       if (retryTimer !== undefined) {
         window.clearTimeout(retryTimer);
       }
+      if (runtimeHubConnectionRef.current === connection) {
+        runtimeHubConnectionRef.current = null;
+      }
+      joinedMonitoringScopeRef.current = null;
       void connection.stop();
     };
-  }, [backendStatus?.health, config?.apiBaseUrl, refresh]);
+  }, [backendStatus?.health, config?.apiBaseUrl]);
+
+  useEffect(() => {
+    const connection = runtimeHubConnectionRef.current;
+    if (!connection || hubState !== 'Connected') {
+      return;
+    }
+
+    const previousScope = joinedMonitoringScopeRef.current;
+    if (runtimeMonitoringScopesEqual(previousScope, activeMonitoringScope)) {
+      return;
+    }
+
+    void synchronizeRuntimeProductionRunGroup(
+      connection,
+      previousScope,
+      activeMonitoringScope)
+      .then(() => {
+        joinedMonitoringScopeRef.current = activeMonitoringScope;
+      })
+      .catch(error => setMessage(`Runtime monitor subscription failed: ${String(error)}`));
+  }, [activeMonitoringScope, hubState]);
 
   const startBackend = useCallback(async () => {
     setBusy(true);
@@ -301,6 +479,10 @@ function App(): React.ReactElement {
     setWorkspaceMode('edit');
     setActiveNav('projects');
     setLastProjectRun(null);
+    setActiveProductionRunId(null);
+    setStations([]);
+    setTargetStatuses([]);
+    setTimeline([]);
   }, []);
 
   const closeWorkspace = useCallback(() => {
@@ -309,6 +491,10 @@ function App(): React.ReactElement {
     setWorkspaceMode('edit');
     setActiveNav('projects');
     setLastProjectRun(null);
+    setActiveProductionRunId(null);
+    setStations([]);
+    setTargetStatuses([]);
+    setTimeline([]);
     setMessage('Project closed. Select a project to continue.');
   }, []);
 
@@ -319,11 +505,17 @@ function App(): React.ReactElement {
       return;
     }
 
+    if (mode === 'run' && !activeApplicationSnapshot) {
+      setMessage('Publish an immutable production-line snapshot for the selected Application before entering Run mode.');
+      setActiveNav('production');
+      return;
+    }
+
     setWorkspaceMode(mode);
     setActiveNav(mode === 'run' ? 'topology' : activeNav === 'dashboard' ? 'projects' : activeNav);
-  }, [activeNav, activeWorkspace]);
+  }, [activeApplicationSnapshot, activeNav, activeWorkspace]);
 
-  const runActiveProject = useCallback(async () => {
+  const openRunProjectDialog = useCallback(() => {
     if (!activeWorkspace) {
       setMessage('Open a project before running.');
       setActiveNav('projects');
@@ -332,8 +524,8 @@ function App(): React.ReactElement {
 
     const snapshotId = activeApplicationSnapshot?.snapshotId ?? null;
     if (!snapshotId) {
-      setMessage('Publish a project snapshot before running.');
-      setActiveNav('processes');
+      setMessage('Publish a production-line snapshot before running.');
+      setActiveNav('production');
       return;
     }
 
@@ -342,35 +534,113 @@ function App(): React.ReactElement {
       return;
     }
 
+    if (hubState !== 'Connected' || !runtimeHubConnectionRef.current) {
+      setMessage('Wait for the production monitor connection before running the project.');
+      return;
+    }
+
+    setProductionRunForm(emptyProductionRunForm);
+    setRunDialogOpen(true);
+  }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, hubState]);
+
+  const runActiveProject = useCallback(async () => {
+    if (!activeWorkspace || !activeApplicationSnapshot) {
+      setMessage('Open a published Application snapshot before running.');
+      setRunDialogOpen(false);
+      return;
+    }
+
+    const validationError = validateProductionRunForm(productionRunForm);
+    if (validationError) {
+      setMessage(validationError);
+      return;
+    }
+
+    const connection = runtimeHubConnectionRef.current;
+    if (backendStatus?.health !== 'Healthy' || hubState !== 'Connected' || !connection) {
+      setMessage('The runtime and production monitor connection must be healthy before starting.');
+      return;
+    }
+
     setBusy(true);
+    const snapshotId = activeApplicationSnapshot.snapshotId;
+    const productionRunId = crypto.randomUUID();
+    const runScope: RuntimeMonitoringScope = {
+      projectId: activeWorkspace.project.projectId,
+      applicationId: activeApplicationSnapshot.applicationId,
+      projectSnapshotId: snapshotId,
+      topologyId: activeApplicationSnapshot.topologyId,
+      productionRunId
+    };
+    const request = {
+      productionRunId,
+      dutIdentityValue: productionRunForm.dutIdentityValue,
+      actorId: productionRunForm.actorId,
+      batchId: optionalRunIdentity(productionRunForm.batchId),
+      fixtureId: optionalRunIdentity(productionRunForm.fixtureId),
+      deviceId: optionalRunIdentity(productionRunForm.deviceId)
+    };
     setMessage(`Starting published snapshot ${snapshotId}`);
     try {
-      const response = await startProjectSnapshotRuntimeSession(
-        activeWorkspace.project.projectId,
-        snapshotId,
-        {
-          serialNumber: null,
-          batchId: null,
-          fixtureId: null,
-          deviceId: null,
-          actorId: 'openlineops-ide'
-        });
-      if (!response.ok || !response.body) {
-        setMessage(`Project run failed: ${response.status} ${response.text}`);
-        return;
-      }
-
-      setLastProjectRun(response.body);
+      monitoringScopeRef.current = runScope;
+      await synchronizeRuntimeProductionRunGroup(
+        connection,
+        joinedMonitoringScopeRef.current,
+        runScope);
+      joinedMonitoringScopeRef.current = runScope;
+      setActiveProductionRunId(productionRunId);
+      setLastProjectRun(null);
       setWorkspaceMode('run');
       setActiveNav('topology');
-      setMessage(`Project run ${response.body.status}: ${response.body.sessionId}`);
-      await refresh();
+      setStations([]);
+      setTargetStatuses([]);
+      setTimeline([]);
+
+      const response = await startProjectSnapshotProductionRun(
+        activeWorkspace.project.projectId,
+        snapshotId,
+        request);
+      if (!response.ok || !response.body) {
+        throw new Error(`${response.status} ${response.text}`);
+      }
+
+      assertProductionRunResponseIdentity(response.body, runScope, request);
+
+      setLastProjectRun(response.body);
+      setRunDialogOpen(false);
+      setMessage(`Production run ${response.body.status}: ${response.body.productionRunId}`);
+      const stationRows = (await getStationStatuses(runScope))
+        .filter(status => runtimeStatusMatchesScope(status, runScope)
+          && isRuntimeSessionStatus(status.sessionStatus));
+      setStations(stationRows);
+      const targetRows = await getTargetStatuses(
+        runScope,
+        stationRows.map(station => station.stationSystemId));
+      setTargetStatuses(targetRows.filter(status =>
+        runtimeStatusMatchesScope(status, runScope)
+        && isRuntimeCommandStatus(status.commandStatus)));
+      const runtimeSessionId = latestProductionRunSessionId(response.body);
+      if (runtimeSessionId) {
+        setTimeline((await getTimeline(runtimeSessionId, runScope))
+          .filter(entry => runtimeTimelineMatchesScope(entry, runScope)));
+      }
     } catch (error) {
-      setMessage(`Project run failed: ${String(error)}`);
+      setMessage(`Production run failed: ${String(error)}`);
+      monitoringScopeRef.current = null;
+      await synchronizeRuntimeProductionRunGroup(
+        connection,
+        joinedMonitoringScopeRef.current,
+        null).catch(() => undefined);
+      joinedMonitoringScopeRef.current = null;
+      setActiveProductionRunId(null);
+      setWorkspaceMode('edit');
+      setStations([]);
+      setTargetStatuses([]);
+      setTimeline([]);
     } finally {
       setBusy(false);
     }
-  }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, refresh]);
+  }, [activeApplicationSnapshot, activeWorkspace, backendStatus?.health, hubState, productionRunForm]);
 
   const selectApplication = useCallback((applicationId: string) => {
     if (!applicationId) {
@@ -379,6 +649,10 @@ function App(): React.ReactElement {
 
     setActiveApplicationId(applicationId);
     setLastProjectRun(null);
+    setActiveProductionRunId(null);
+    setStations([]);
+    setTargetStatuses([]);
+    setTimeline([]);
     setWorkspaceMode('edit');
     setMessage(`Application selected ${applicationId}`);
   }, []);
@@ -390,6 +664,8 @@ function App(): React.ReactElement {
           <TopologyDesigner
             activeWorkspace={activeWorkspace}
             activeApplicationId={activeApplication?.applicationId ?? null}
+            projectSnapshotId={activeApplicationSnapshot?.snapshotId ?? null}
+            activeProductionRunId={activeMonitoringScope?.productionRunId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             workspaceMode={workspaceMode}
             runtimeConnected={hubState === 'Connected'}
@@ -422,7 +698,6 @@ function App(): React.ReactElement {
             activeWorkspace={activeWorkspace}
             activeApplicationId={activeApplication?.applicationId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
-            onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
           />
         </React.Suspense>
@@ -436,6 +711,7 @@ function App(): React.ReactElement {
             activeWorkspace={activeWorkspace}
             activeApplicationId={activeApplication?.applicationId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
+            onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
           />
         </React.Suspense>
@@ -480,6 +756,8 @@ function App(): React.ReactElement {
       return (
         <TraceWorkbench
           isBackendHealthy={backendStatus?.health === 'Healthy'}
+          projectId={activeWorkspace?.project.projectId ?? null}
+          applicationId={activeApplication?.applicationId ?? null}
           onMessage={setMessage}
         />
       );
@@ -495,7 +773,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, targetStatuses, timeline, traceRows, workspaceMode]);
+  }, [acknowledge, activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeMonitoringScope?.productionRunId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, targetStatuses, timeline, traceRows, workspaceMode]);
 
   return (
     <main
@@ -572,8 +850,8 @@ function App(): React.ReactElement {
           <button
             type="button"
             className="ide-run-button"
-            onClick={runActiveProject}
-            disabled={busy || !activeWorkspace || !activeApplicationSnapshot || backendStatus?.health !== 'Healthy'}
+            onClick={openRunProjectDialog}
+            disabled={busy || !activeWorkspace || !activeApplicationSnapshot || backendStatus?.health !== 'Healthy' || hubState !== 'Connected'}
             title={activeApplicationSnapshot ? 'Run selected application snapshot' : 'Publish a snapshot for the selected application before running'}
             data-testid="run-active-project"
           >
@@ -663,7 +941,7 @@ function App(): React.ReactElement {
           </div>
           {activeNav === 'dashboard' ? (
             <div className="ide-editor-toolbar-actions">
-              <span>Latest: {lastProjectRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}</span>
+              <span>Latest: {lastProjectRun?.productionRunId ?? latestStation?.latestSessionId ?? 'none'}</span>
             </div>
           ) : null}
             </div>
@@ -680,8 +958,25 @@ function App(): React.ReactElement {
           </div>
           {workspaceMode === 'run' ? (
             <div className="ide-runtime-summary">
-              <InfoCell label="Session" value={lastProjectRun?.sessionId ?? 'waiting'} />
+              <InfoCell label="Production Run" value={lastProjectRun?.productionRunId ?? 'waiting'} />
               <InfoCell label="Status" value={lastProjectRun?.status ?? 'Idle'} />
+              <InfoCell
+                label="DUT"
+                value={lastProjectRun
+                  ? `${lastProjectRun.dutModelId} / ${lastProjectRun.dutIdentityInputKey}=${lastProjectRun.dutIdentityValue}`
+                  : 'waiting'}
+              />
+              <InfoCell label="Actor" value={lastProjectRun?.actorId ?? 'waiting'} />
+              <InfoCell label="Batch" value={lastProjectRun?.batchId ?? 'none'} />
+              <InfoCell label="Fixture" value={lastProjectRun?.fixtureId ?? 'none'} />
+              <InfoCell label="Device" value={lastProjectRun?.deviceId ?? 'none'} />
+              <InfoCell
+                label="Stages"
+                value={lastProjectRun
+                  ? `${lastProjectRun.completedStageCount}/${lastProjectRun.stages.length}`
+                  : 'waiting'}
+              />
+              <InfoCell label="Runtime Session" value={lastProjectRunSessionId ?? 'waiting'} />
               <InfoCell label="Timeline" value={`${timeline.length} events`} />
               <InfoCell label="Alarms" value={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
             </div>
@@ -699,6 +994,138 @@ function App(): React.ReactElement {
         <span>{platform ? `${platform.serviceName} ${platform.version}` : 'OpenLineOps.Api'}</span>
         <span>{platform?.environment ?? 'local'} · PID {backendStatus?.pid ?? '—'} · {healthStatus}</span>
       </footer>
+
+      {runDialogOpen ? (
+      <dialog
+        ref={runDialogRef}
+        className="project-start-dialog production-run-dialog"
+        aria-labelledby="production-run-dialog-title"
+        aria-busy={busy}
+        onCancel={event => {
+          event.preventDefault();
+          if (!busy) {
+            setRunDialogOpen(false);
+          }
+        }}
+        data-testid="production-run-dialog"
+      >
+        <header>
+          <div>
+            <span>Immutable production snapshot</span>
+            <h2 id="production-run-dialog-title">Run Project</h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRunDialogOpen(false)}
+            disabled={busy}
+            aria-label="Close Run Project"
+          >
+            <X size={17} />
+          </button>
+        </header>
+        <form
+          id="production-run-form"
+          className="project-start-dialog-body production-run-dialog-form"
+          onSubmit={event => {
+            event.preventDefault();
+            void runActiveProject();
+          }}
+        >
+          <div className="production-run-context">
+            <span>Snapshot</span>
+            <strong>{activeApplicationSnapshot?.snapshotId ?? 'Unavailable'}</strong>
+            <small>{activeWorkspace?.project.projectId} / {activeApplication?.applicationId}</small>
+          </div>
+          <label>
+            <span>DUT identity</span>
+            <input
+              value={productionRunForm.dutIdentityValue}
+              onChange={event => setProductionRunForm(current => ({
+                ...current,
+                dutIdentityValue: event.target.value
+              }))}
+              autoFocus
+              required
+              autoComplete="off"
+              data-testid="production-run-dut-identity"
+            />
+          </label>
+          <label>
+            <span>Actor</span>
+            <input
+              value={productionRunForm.actorId}
+              onChange={event => setProductionRunForm(current => ({
+                ...current,
+                actorId: event.target.value
+              }))}
+              required
+              autoComplete="off"
+              data-testid="production-run-actor"
+            />
+          </label>
+          <div className="production-run-optional-grid">
+            <label>
+              <span>Batch (optional)</span>
+              <input
+                value={productionRunForm.batchId}
+                onChange={event => setProductionRunForm(current => ({
+                  ...current,
+                  batchId: event.target.value
+                }))}
+                autoComplete="off"
+                data-testid="production-run-batch"
+              />
+            </label>
+            <label>
+              <span>Fixture (optional)</span>
+              <input
+                value={productionRunForm.fixtureId}
+                onChange={event => setProductionRunForm(current => ({
+                  ...current,
+                  fixtureId: event.target.value
+                }))}
+                autoComplete="off"
+                data-testid="production-run-fixture"
+              />
+            </label>
+            <label>
+              <span>Device (optional)</span>
+              <input
+                value={productionRunForm.deviceId}
+                onChange={event => setProductionRunForm(current => ({
+                  ...current,
+                  deviceId: event.target.value
+                }))}
+                autoComplete="off"
+                data-testid="production-run-device"
+              />
+            </label>
+          </div>
+          <p>Values are passed exactly to the frozen production line. Leading or trailing whitespace is rejected.</p>
+        </form>
+        <footer>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() => setRunDialogOpen(false)}
+            disabled={busy}
+            data-testid="cancel-production-run"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="production-run-form"
+            className="button primary"
+            disabled={busy}
+            data-testid="confirm-production-run"
+          >
+            <Play size={14} />
+            Start Run
+          </button>
+        </footer>
+      </dialog>
+      ) : null}
     </main>
   );
 }
@@ -744,7 +1171,7 @@ function ProjectExplorer({
     icon: React.ComponentType<{ size?: number }>;
   }> = [
     { nav: 'dashboard', label: 'Run & Monitor', detail: applicationSnapshot?.snapshotId ?? 'publish required', icon: Play },
-    { nav: 'trace', label: 'Trace Evidence', detail: 'sessions · results', icon: FileSearch },
+    { nav: 'trace', label: 'Trace Evidence', detail: 'production runs · stages', icon: FileSearch },
     { nav: 'plugins', label: 'Extensions', detail: 'blocks · drivers', icon: Package }
   ];
 
@@ -952,9 +1379,9 @@ function DashboardView({
         <div className="trace-strip">
           {traceRows.slice(0, 5).map(trace => (
             <div className="trace-row" key={trace.traceRecordId}>
-              <span>{trace.serialNumber}</span>
+              <span>{trace.dutIdentityValue}</span>
               <strong>{trace.judgement}</strong>
-              <span>{trace.stationId}</span>
+              <span>{trace.productionLineDefinitionId}</span>
               <time>{formatTime(trace.completedAtUtc)}</time>
             </div>
           ))}
@@ -994,7 +1421,7 @@ function SecondaryView({
             ))}
             {traceRows.slice(0, 3).map(trace => (
               <div className="surface-row" key={trace.traceRecordId}>
-                <span>{trace.serialNumber}</span>
+                <span>{trace.dutIdentityValue}</span>
                 <strong>{trace.judgement}</strong>
               </div>
             ))}
@@ -1020,11 +1447,11 @@ const secondaryCopy: Record<NavId, string> = {
   projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
   topology: 'The same semantic 2D layout is used for engineering and live production monitoring.',
   production: 'Production lines compose DUT models, topology-bound workstations, ordered stages and external test adapters.',
-  engineering: 'Workspace and project selection will use backend engineering contracts.',
+  engineering: 'Engineering workspaces, recipes, stations and snapshots use Application-scoped backend contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',
   devices: 'Device configuration is read from backend APIs and never from local databases.',
   trace: 'Trace query uses the traceability endpoints and runtime-linked read models.',
-  plugins: 'Plugin management will stay aligned to manifest and host lifecycle contracts.'
+  plugins: 'Plugin management uses the canonical manifest and explicit host lifecycle contracts.'
 };
 
 function InfoCell({ label, value }: { label: string; value: string }): React.ReactElement {
@@ -1093,9 +1520,229 @@ function upsertRuntimeTargetStatus(
   return [status, ...items.filter(candidate => runtimeTargetStatusKey(candidate) !== key)];
 }
 
-function runtimeTargetStatusKey(status: RuntimeTargetStatus): string {
-  return `${status.stationSystemId}\u0000${status.targetKind}\u0000${status.targetId}`;
+function latestProductionRunSessionId(
+  run: StartedProjectSnapshotProductionRunResponse | null
+): string | null {
+  if (!run) {
+    return null;
+  }
+
+  for (let index = run.stages.length - 1; index >= 0; index -= 1) {
+    const runtimeSessionId = run.stages[index]?.runtimeSessionId;
+    if (runtimeSessionId) {
+      return runtimeSessionId;
+    }
+  }
+
+  return null;
 }
+
+function runtimeTargetStatusKey(status: RuntimeTargetStatus): string {
+  return JSON.stringify([
+    status.projectId,
+    status.applicationId,
+    status.projectSnapshotId,
+    status.topologyId,
+    status.productionRunId,
+    status.productionLineDefinitionId,
+    status.stageId,
+    status.stageSequence,
+    status.workstationId,
+    status.stationSystemId,
+    status.targetKind,
+    status.targetId
+  ]);
+}
+
+function runtimeStationStatusKey(status: RuntimeStationStatus): string {
+  return JSON.stringify([
+    status.projectId,
+    status.applicationId,
+    status.projectSnapshotId,
+    status.topologyId,
+    status.productionRunId,
+    status.productionLineDefinitionId,
+    status.stageId,
+    status.stageSequence,
+    status.workstationId,
+    status.stationSystemId
+  ]);
+}
+
+function runtimeStatusMatchesScope(
+  status: Pick<RuntimeStationStatus, 'projectId' | 'applicationId' | 'projectSnapshotId' | 'topologyId' | 'productionRunId'>,
+  scope: RuntimeMonitoringScope | null
+): boolean {
+  return scope !== null
+    && status.projectId === scope.projectId
+    && status.applicationId === scope.applicationId
+    && status.projectSnapshotId === scope.projectSnapshotId
+    && status.topologyId === scope.topologyId
+    && status.productionRunId === scope.productionRunId;
+}
+
+function runtimeTimelineMatchesScope(
+  entry: RuntimeTimelineEntry,
+  scope: RuntimeMonitoringScope | null
+): boolean {
+  return scope !== null
+    && entry.projectId === scope.projectId
+    && entry.applicationId === scope.applicationId
+    && entry.projectSnapshotId === scope.projectSnapshotId
+    && entry.topologyId === scope.topologyId
+    && entry.productionRunId === scope.productionRunId;
+}
+
+function sameRuntimeStationScope(
+  target: RuntimeTargetStatus,
+  station: RuntimeStationStatus
+): boolean {
+  return target.projectId === station.projectId
+    && target.applicationId === station.applicationId
+    && target.projectSnapshotId === station.projectSnapshotId
+    && target.topologyId === station.topologyId
+    && target.productionRunId === station.productionRunId
+    && target.productionLineDefinitionId === station.productionLineDefinitionId
+    && target.stageId === station.stageId
+    && target.stageSequence === station.stageSequence
+    && target.workstationId === station.workstationId
+    && target.stationSystemId === station.stationSystemId;
+}
+
+function runtimeMonitoringScopesEqual(
+  left: RuntimeMonitoringScope | null,
+  right: RuntimeMonitoringScope | null
+): boolean {
+  return left === right
+    || (left !== null
+      && right !== null
+      && left.projectId === right.projectId
+      && left.applicationId === right.applicationId
+      && left.projectSnapshotId === right.projectSnapshotId
+      && left.topologyId === right.topologyId
+      && left.productionRunId === right.productionRunId);
+}
+
+async function joinRuntimeProductionRunGroup(
+  connection: ReturnType<typeof createRuntimeHubConnection>,
+  scope: RuntimeMonitoringScope
+): Promise<void> {
+  await connection.invoke(
+    'JoinProductionRunGroup',
+    scope.projectId,
+    scope.applicationId,
+    scope.projectSnapshotId,
+    scope.topologyId,
+    scope.productionRunId);
+}
+
+async function synchronizeRuntimeProductionRunGroup(
+  connection: ReturnType<typeof createRuntimeHubConnection>,
+  previousScope: RuntimeMonitoringScope | null,
+  nextScope: RuntimeMonitoringScope | null
+): Promise<void> {
+  if (runtimeMonitoringScopesEqual(previousScope, nextScope)) {
+    return;
+  }
+
+  if (previousScope) {
+    await connection.invoke(
+      'LeaveProductionRunGroup',
+      previousScope.projectId,
+      previousScope.applicationId,
+      previousScope.projectSnapshotId,
+      previousScope.topologyId,
+      previousScope.productionRunId);
+  }
+
+  if (nextScope) {
+    await joinRuntimeProductionRunGroup(connection, nextScope);
+  }
+}
+
+function validateProductionRunForm(form: ProductionRunFormState): string | null {
+  if (!isCanonicalRunIdentity(form.dutIdentityValue)) {
+    return 'DUT identity is required and cannot start or end with whitespace.';
+  }
+
+  if (!isCanonicalRunIdentity(form.actorId)) {
+    return 'Actor is required and cannot start or end with whitespace.';
+  }
+
+  for (const [label, value] of [
+    ['Batch', form.batchId],
+    ['Fixture', form.fixtureId],
+    ['Device', form.deviceId]
+  ] as const) {
+    if (value.length > 0 && !isCanonicalRunIdentity(value)) {
+      return `${label} cannot start or end with whitespace.`;
+    }
+  }
+
+  return null;
+}
+
+function isCanonicalRunIdentity(value: string): boolean {
+  return value.length > 0
+    && !/\s/u.test(value[0] ?? '')
+    && !/\s/u.test(value[value.length - 1] ?? '');
+}
+
+function optionalRunIdentity(value: string): string | null {
+  return value.length === 0 ? null : value;
+}
+
+function assertProductionRunResponseIdentity(
+  response: StartedProjectSnapshotProductionRunResponse,
+  scope: RuntimeMonitoringScope,
+  request: StartProjectSnapshotProductionRunRequest
+): void {
+  if (response.productionRunId !== scope.productionRunId
+      || response.projectId !== scope.projectId
+      || response.applicationId !== scope.applicationId
+      || response.snapshotId !== scope.projectSnapshotId
+      || response.topologyId !== scope.topologyId
+      || response.dutIdentityValue !== request.dutIdentityValue
+      || response.actorId !== request.actorId
+      || response.batchId !== (request.batchId ?? null)
+      || response.fixtureId !== (request.fixtureId ?? null)
+      || response.deviceId !== (request.deviceId ?? null)
+      || response.isTerminal !== ['Completed', 'Failed', 'Canceled'].includes(response.status)) {
+    throw new Error('Production run response identity did not exactly match the start request.');
+  }
+}
+
+function isRuntimeSessionStatus(value: string): value is RuntimeSessionStatus {
+  return runtimeSessionStatusTokens.has(value);
+}
+
+function isRuntimeCommandStatus(value: string): value is RuntimeCommandStatus {
+  return runtimeCommandStatusTokens.has(value);
+}
+
+const runtimeSessionStatusTokens = new Set<string>([
+  'Created',
+  'Queued',
+  'Running',
+  'Pausing',
+  'Paused',
+  'Stopping',
+  'Stopped',
+  'Completed',
+  'Failed',
+  'Canceled'
+]);
+
+const runtimeCommandStatusTokens = new Set<string>([
+  'Pending',
+  'Accepted',
+  'InProgress',
+  'Completed',
+  'Failed',
+  'TimedOut',
+  'Canceled',
+  'Rejected'
+]);
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {

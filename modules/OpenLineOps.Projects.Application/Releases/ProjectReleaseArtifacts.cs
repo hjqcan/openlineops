@@ -4,18 +4,73 @@ namespace OpenLineOps.Projects.Application.Releases;
 
 public sealed record ProjectReleaseSourceMetadata(
     string TopologyId,
-    string StationSystemId,
     IReadOnlyCollection<string> LayoutIds,
-    string ProcessDefinitionId,
-    string ProcessVersionId,
-    string FlowIrSchemaVersion,
-    string FlowIrSha256,
-    string FlowIrCanonicalJson,
-    string ConfigurationSnapshotId,
+    ProjectReleaseProductionLine ProductionLine,
     IReadOnlyCollection<ProjectReleaseCapabilityBinding> CapabilityBindings,
     IReadOnlyCollection<ProjectReleaseTargetReference> TargetReferences,
     IReadOnlyCollection<string> BlockVersionIds,
     IReadOnlyCollection<ProjectReleasePackageDependencyLock> PackageDependencies);
+
+public sealed record ProjectReleaseProductionLine(
+    string LineDefinitionId,
+    string DisplayName,
+    string TopologyId,
+    ProjectReleaseDutModel DutModel,
+    IReadOnlyCollection<ProjectReleaseWorkstation> Workstations,
+    IReadOnlyCollection<ProjectReleaseProductionStage> Stages,
+    IReadOnlyCollection<ProjectReleaseExternalTestProgramAdapter> ExternalTestProgramAdapters);
+
+public sealed record ProjectReleaseDutModel(
+    string DutModelId,
+    string ModelCode,
+    string IdentityInputKey);
+
+public sealed record ProjectReleaseWorkstation(
+    string WorkstationId,
+    string DisplayName,
+    string StationSystemId);
+
+public sealed record ProjectReleaseProductionStage(
+    string StageId,
+    int Sequence,
+    string DisplayName,
+    string WorkstationId,
+    string FlowDefinitionId,
+    string ConfigurationSnapshotId,
+    string FlowVersionId,
+    string FlowIrSchemaVersion,
+    string FlowIrSha256,
+    string FlowIrCanonicalJson,
+    IReadOnlyCollection<string> BlockVersionIds,
+    string? ExternalTestProgramAdapterId);
+
+public sealed record ProjectReleaseExternalTestProgramAdapter(
+    string AdapterId,
+    string DisplayName,
+    string CapabilityId,
+    string CommandName,
+    string LaunchKind,
+    string? Executable,
+    string? ProviderKey,
+    IReadOnlyCollection<string> ArgumentTemplates,
+    IReadOnlyCollection<ProjectReleaseExternalTestProgramInputMapping> InputMappings,
+    IReadOnlyCollection<ProjectReleaseExternalTestProgramResultMapping> ResultMappings,
+    ProjectReleaseExternalTestProgramOutcomeMapping OutcomeMapping,
+    long TimeoutMilliseconds);
+
+public sealed record ProjectReleaseExternalTestProgramInputMapping(
+    string Source,
+    string Target);
+
+public sealed record ProjectReleaseExternalTestProgramResultMapping(
+    string SourcePath,
+    string TargetKey);
+
+public sealed record ProjectReleaseExternalTestProgramOutcomeMapping(
+    string SourcePath,
+    string PassedToken,
+    string FailedToken,
+    string AbortedToken);
 
 public sealed record ProjectReleaseCapabilityBinding(
     string CapabilityId,

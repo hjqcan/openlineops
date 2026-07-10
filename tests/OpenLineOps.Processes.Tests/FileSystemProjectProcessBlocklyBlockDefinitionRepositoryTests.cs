@@ -39,9 +39,9 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             applicationA,
             blockType,
             "Fixture",
-            "Application A Fixture Action V2",
-            BlockJson(blockType, "application A fixture action v2"),
-            "test.fixture.application-a.v2",
+            "Application A Fixture Action Revised",
+            BlockJson(blockType, "application A fixture action revised"),
+            "test.fixture.application-a.revised",
             SecondRecordedAtUtc);
         var applicationBFirst = await SaveNewVersionAsync(
             writer,
@@ -242,9 +242,9 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
 
         Assert.NotNull(latestA);
         Assert.Equal(2, latestA.Version);
-        Assert.Equal("Application A Fixture Action V2", latestA.DisplayName);
-        Assert.Equal(BlockJson(blockType, "application A fixture action v2"), latestA.BlocklyJson);
-        AssertCanonicalContract(latestA, "test.fixture.application-a.v2");
+        Assert.Equal("Application A Fixture Action Revised", latestA.DisplayName);
+        Assert.Equal(BlockJson(blockType, "application A fixture action revised"), latestA.BlocklyJson);
+        AssertCanonicalContract(latestA, "test.fixture.application-a.revised");
         Assert.Equal(FirstRecordedAtUtc, latestA.CreatedAtUtc);
         Assert.Equal(SecondRecordedAtUtc, latestA.UpdatedAtUtc);
         Assert.Single(listedA);
@@ -254,8 +254,8 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             block =>
             {
                 Assert.Equal(2, block.Version);
-                Assert.Equal("Application A Fixture Action V2", block.DisplayName);
-                AssertCanonicalContract(block, "test.fixture.application-a.v2");
+                Assert.Equal("Application A Fixture Action Revised", block.DisplayName);
+                AssertCanonicalContract(block, "test.fixture.application-a.revised");
             },
             block =>
             {

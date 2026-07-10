@@ -6,6 +6,26 @@ namespace OpenLineOps.Production.Tests;
 
 public sealed class ProductionLineDefinitionDomainTests
 {
+    [Theory]
+    [InlineData(" provider.test")]
+    [InlineData("provider.test ")]
+    [InlineData("")]
+    public void ExternalAdapterRejectsNonCanonicalProviderKey(string providerKey)
+    {
+        Assert.Throws<ArgumentException>(() => ExternalTestProgramAdapter.Create(
+            new ExternalTestProgramAdapterId("adapter.test"),
+            "Vendor Test",
+            "test.external",
+            "run",
+            null,
+            providerKey,
+            [],
+            ValidInputs(),
+            ValidResults(),
+            ValidOutcome(),
+            TimeSpan.FromSeconds(1)));
+    }
+
     private static readonly DateTimeOffset CreatedAtUtc =
         new(2026, 7, 10, 10, 0, 0, TimeSpan.Zero);
 
@@ -23,12 +43,36 @@ public sealed class ProductionLineDefinitionDomainTests
             CreatedAtUtc);
 
         Assert.Equal(["stage.load", "stage.test"], definition.Stages.Select(stage => stage.Id.Value));
+        Assert.Equal(
+            ["configuration.flow.load", "configuration.flow.test"],
+            definition.Stages.Select(stage => stage.ConfigurationSnapshotId));
         Assert.Equal("MODEL-A", definition.DutModel.ModelCode);
         var adapter = Assert.Single(definition.ExternalTestProgramAdapters);
         Assert.Equal(ExternalTestProgramLaunchKind.Provider, adapter.LaunchKind);
         Assert.Equal("provider.test", adapter.ProviderKey);
         Assert.Equal(TimeSpan.FromSeconds(30), adapter.Timeout);
         Assert.Equal(["model", "serial"], adapter.InputMappings.Select(mapping => mapping.Target));
+        Assert.Equal("$.outcome", adapter.OutcomeMapping.SourcePath);
+        Assert.Equal("Passed", adapter.OutcomeMapping.PassedToken);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(" configuration.main")]
+    [InlineData("configuration.main ")]
+    public void ProcessStageRejectsMissingOrNonCanonicalConfigurationSnapshotId(
+        string? configurationSnapshotId)
+    {
+        Assert.Throws<ArgumentException>(() => ProcessStage.Create(
+            new ProcessStageId("stage.invalid-configuration"),
+            1,
+            "Invalid Configuration",
+            new WorkstationId("workstation.eol"),
+            "flow.load",
+            configurationSnapshotId!,
+            null));
     }
 
     [Fact]
@@ -60,6 +104,7 @@ public sealed class ProductionLineDefinitionDomainTests
             [],
             ValidInputs(),
             ValidResults(),
+            ValidOutcome(),
             TimeSpan.FromSeconds(30)));
 
         var exception = Assert.Throws<ArgumentException>(() => ExternalTestProgramAdapter.Create(
@@ -72,6 +117,7 @@ public sealed class ProductionLineDefinitionDomainTests
             [],
             [new ExternalTestProgramInputMapping("runtime.temperature", "temperature")],
             ValidResults(),
+            ValidOutcome(),
             TimeSpan.FromSeconds(30)));
 
         Assert.Contains("DUT identity", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -99,6 +145,7 @@ public sealed class ProductionLineDefinitionDomainTests
             [],
             ValidInputs(),
             ValidResults(),
+            ValidOutcome(),
             TimeSpan.FromTicks(1)));
     }
 
@@ -138,6 +185,7 @@ public sealed class ProductionLineDefinitionDomainTests
             id,
             new WorkstationId("workstation.eol"),
             flowId,
+            $"configuration.{flowId}",
             adapterId is null ? null : new ExternalTestProgramAdapterId(adapterId));
     }
 
@@ -153,6 +201,7 @@ public sealed class ProductionLineDefinitionDomainTests
             ["--serial", "{{dut.identity}}"],
             ValidInputs(),
             ValidResults(),
+            ValidOutcome(),
             TimeSpan.FromSeconds(30));
     }
 
@@ -164,4 +213,7 @@ public sealed class ProductionLineDefinitionDomainTests
 
     internal static ExternalTestProgramResultMapping[] ValidResults() =>
     [new ExternalTestProgramResultMapping("$.outcome", "test.outcome")];
+
+    internal static ExternalTestProgramOutcomeMapping ValidOutcome() =>
+        new("$.outcome", "Passed", "Failed", "Aborted");
 }

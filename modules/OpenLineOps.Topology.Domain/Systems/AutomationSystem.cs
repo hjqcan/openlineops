@@ -1,6 +1,6 @@
+using System.Collections.ObjectModel;
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Topology.Domain.Identifiers;
-using System.Collections.ObjectModel;
 
 namespace OpenLineOps.Topology.Domain.Systems;
 

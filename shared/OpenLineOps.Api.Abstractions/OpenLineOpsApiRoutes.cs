@@ -9,6 +9,7 @@ public static class OpenLineOpsApiRoutes
     public const string AutomationProjects = "api/automation-projects";
     public const string AutomationProjectWorkspaces = "api/automation-project-workspaces";
     public const string RuntimeMonitoring = "api/runtime/monitoring";
+    public const string RuntimeProductionRuns = "api/runtime/production-runs";
     public const string RuntimeSessions = "api/runtime/sessions";
     public const string ProjectApplicationTopologies =
         AutomationProjects + "/{projectId}/applications/{applicationId}/topologies";

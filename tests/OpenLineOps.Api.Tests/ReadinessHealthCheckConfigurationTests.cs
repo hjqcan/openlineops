@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using OpenLineOps.Api.Health;
+using OpenLineOps.Operations.Infra.Data.Persistence;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -32,7 +33,7 @@ public sealed class ReadinessHealthCheckConfigurationTests
             {
                 ["ConnectionStrings:OpenLineOpsEventBus"] =
                     "Host=localhost;Database=openlineops;Username=openlineops;Password=openlineops",
-                ["OpenLineOps:Operations:Persistence:Provider"] = "Postgres",
+                ["OpenLineOps:Operations:Persistence:Provider"] = OperationsPersistenceProviders.PostgreSql,
                 ["OpenLineOps:Operations:Persistence:ConnectionString"] =
                     "Host=localhost;Database=openlineops;Username=openlineops;Password=openlineops",
                 ["OpenLineOps:EventBus:UseInMemory"] = "false",
@@ -95,5 +96,25 @@ public sealed class ReadinessHealthCheckConfigurationTests
             && registration.Tags.Contains("rabbitmq")
             && registration.Tags.Contains("eventbus")
             && registration.Tags.Contains("cap"));
+    }
+
+    [Theory]
+    [InlineData("Postgres")]
+    [InlineData("PostgreSQL")]
+    [InlineData("postgresql")]
+    public void AddOpenLineOpsReadinessHealthChecksRejectsNonCanonicalOperationsProvider(string provider)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Operations:Persistence:Provider"] = provider
+            })
+            .Build();
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOpenLineOpsReadinessHealthChecks(configuration));
+
+        Assert.Contains("Expected exactly", exception.Message, StringComparison.Ordinal);
     }
 }

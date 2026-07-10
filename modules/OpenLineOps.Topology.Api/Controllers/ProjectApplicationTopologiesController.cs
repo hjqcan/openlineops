@@ -3,25 +3,26 @@ using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Topology.Api.Models;
+using OpenLineOps.Topology.Api.ReleaseReading;
 using OpenLineOps.Topology.Application.ProjectWorkspaces;
 using ApiAddCapabilityRequest = OpenLineOps.Topology.Api.Models.AddCapabilityContractRequest;
 using ApiAddDriverBindingRequest = OpenLineOps.Topology.Api.Models.AddDriverBindingRequest;
-using ApiAddSystemRequest = OpenLineOps.Topology.Api.Models.AddAutomationSystemRequest;
 using ApiAddSlotGroupRequest = OpenLineOps.Topology.Api.Models.AddSlotGroupRequest;
 using ApiAddSlotRequest = OpenLineOps.Topology.Api.Models.AddSlotDefinitionRequest;
+using ApiAddSystemRequest = OpenLineOps.Topology.Api.Models.AddAutomationSystemRequest;
 using ApiCreateTopologyRequest = OpenLineOps.Topology.Api.Models.CreateAutomationTopologyRequest;
-using ApiUpdateSystemRequest = OpenLineOps.Topology.Api.Models.UpdateAutomationSystemRequest;
 using ApiUpdateSlotGroupRequest = OpenLineOps.Topology.Api.Models.UpdateSlotGroupRequest;
 using ApiUpdateSlotRequest = OpenLineOps.Topology.Api.Models.UpdateSlotDefinitionRequest;
+using ApiUpdateSystemRequest = OpenLineOps.Topology.Api.Models.UpdateAutomationSystemRequest;
 using AppAddCapabilityRequest = OpenLineOps.Topology.Application.Topologies.AddCapabilityContractRequest;
 using AppAddDriverBindingRequest = OpenLineOps.Topology.Application.Topologies.AddDriverBindingRequest;
-using AppAddSystemRequest = OpenLineOps.Topology.Application.Topologies.AddAutomationSystemRequest;
 using AppAddSlotGroupRequest = OpenLineOps.Topology.Application.Topologies.AddSlotGroupRequest;
 using AppAddSlotRequest = OpenLineOps.Topology.Application.Topologies.AddSlotDefinitionRequest;
+using AppAddSystemRequest = OpenLineOps.Topology.Application.Topologies.AddAutomationSystemRequest;
 using AppCreateTopologyRequest = OpenLineOps.Topology.Application.Topologies.CreateAutomationTopologyRequest;
-using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.UpdateAutomationSystemRequest;
 using AppUpdateSlotGroupRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotGroupRequest;
 using AppUpdateSlotRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotDefinitionRequest;
+using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.UpdateAutomationSystemRequest;
 
 namespace OpenLineOps.Topology.Api.Controllers;
 
@@ -31,10 +32,14 @@ namespace OpenLineOps.Topology.Api.Controllers;
 public sealed class ProjectApplicationTopologiesController : ControllerBase
 {
     private readonly IProjectAutomationTopologyService _topologyService;
+    private readonly ProjectReleaseTopologyReader _releaseReader;
 
-    public ProjectApplicationTopologiesController(IProjectAutomationTopologyService topologyService)
+    public ProjectApplicationTopologiesController(
+        IProjectAutomationTopologyService topologyService,
+        ProjectReleaseTopologyReader releaseReader)
     {
         _topologyService = topologyService;
+        _releaseReader = releaseReader;
     }
 
     [HttpPost]
@@ -103,11 +108,21 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         string projectId,
         string applicationId,
         string topologyId,
+        [FromQuery] string? snapshotId,
         CancellationToken cancellationToken)
     {
-        var result = await _topologyService
-            .GetByIdAsync(projectId, applicationId, topologyId, cancellationToken)
-            .ConfigureAwait(false);
+        var result = snapshotId is null
+            ? await _topologyService
+                .GetByIdAsync(projectId, applicationId, topologyId, cancellationToken)
+                .ConfigureAwait(false)
+            : await _releaseReader
+                .GetTopologyAsync(
+                    projectId,
+                    applicationId,
+                    snapshotId,
+                    topologyId,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         return result.IsFailure
             ? ToProblem(result.Error)

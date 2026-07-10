@@ -20,7 +20,7 @@ This project is in early platform development.
   SlotGroups, and Slots share a parent-local 2D layout so moving a Station moves
   its complete visual subtree. Production, Flow, Runtime, and Trace use the same
   Station `systemId`.
-- Persistence: in-memory and SQLite for local development, PostgreSQL adapters for deployment mode, and reusable `OpenLineOps.Infrastructure.Data.Core` package adoption through the `OpenLineOps.SampleInspection` template and Devices `EfSqlite` provider.
+- Persistence: canonical `InMemory`, `Sqlite`, `PostgreSql`, and `FileSystem` configuration tokens, with EF-backed SQLite for local operation and PostgreSQL adapters for deployment mode.
 - Runtime: immutable Project Snapshot launch verifies the current release manifest,
   canonical frozen Flow IR, release-scoped process/configuration source, and
   release-scoped device routing. Blockly actions are statically compiled into
@@ -112,7 +112,7 @@ Run an already-published immutable Project Snapshot without opening Studio:
 ```powershell
 dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
   run C:\Projects\LineA --snapshot active `
-  --serial SN-001 --batch BATCH-001 --actor operator-a
+  --dut DUT-001 --batch BATCH-001 --actor operator-a
 ```
 
 Runner writes one JSON result using Runner output schema v1 to standard output
@@ -121,9 +121,11 @@ and returns a stable exit code. It accepts a project directory or
 draft-only projects or snapshots without an immutable release.
 See `docs/automation-ide-product-shell.md` for the current codes and limitations.
 
-The only runtime-start path is the Project Snapshot endpoint (or the Runner,
-which opens the same immutable release). There are no simulated, direct
-process-definition, global-repository, or editable-source fallback start paths.
+The only Production-start path is the Project Snapshot Production Run endpoint
+(or the Runner, which opens the same immutable release). Every line stage uses
+its frozen Flow IR, engineering configuration, Workstation, and Station route.
+There are no simulated, direct process-definition, global-repository, or
+editable-source fallback start paths.
 
 If Electron binary download is blocked in your network, retry with:
 

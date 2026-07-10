@@ -12,6 +12,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
         ProcessNodeKind kind,
         string displayName,
         ProcessCapabilityId? requiredCapability,
+        ProcessActionTargetKind? targetKind,
+        string? targetId,
         string? commandName,
         TimeSpan? commandTimeout,
         string? inputPayload,
@@ -26,6 +28,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
         Kind = kind;
         DisplayName = ProcessIdGuard.NotBlank(displayName, nameof(displayName));
         RequiredCapability = requiredCapability;
+        TargetKind = targetKind;
+        TargetId = NormalizeOptional(targetId);
         CommandName = NormalizeOptional(commandName);
         CommandTimeout = commandTimeout;
         InputPayload = NormalizeOptional(inputPayload);
@@ -42,6 +46,10 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
     public string DisplayName { get; }
 
     public ProcessCapabilityId? RequiredCapability { get; }
+
+    public ProcessActionTargetKind? TargetKind { get; }
+
+    public string? TargetId { get; }
 
     public string? CommandName { get; }
 
@@ -74,6 +82,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.Start,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: null,
             inputPayload: null,
@@ -89,6 +99,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
         ProcessNodeId id,
         string displayName,
         ProcessCapabilityId? requiredCapability,
+        ProcessActionTargetKind? targetKind,
+        string? targetId,
         string? commandName = null,
         TimeSpan? commandTimeout = null,
         string? inputPayload = null)
@@ -98,6 +110,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.Command,
             displayName,
             requiredCapability,
+            targetKind,
+            targetId,
             commandName,
             commandTimeout,
             inputPayload,
@@ -124,6 +138,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.PythonScript,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: null,
             inputPayload: inputPayload,
@@ -149,6 +165,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.Blockly,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: executionTimeout,
             inputPayload: inputPayload,
@@ -167,6 +185,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.Decision,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: null,
             inputPayload: null,
@@ -185,6 +205,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.Delay,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: null,
             inputPayload: null,
@@ -203,6 +225,8 @@ public sealed class ProcessNode : Entity<ProcessNodeId>
             ProcessNodeKind.End,
             displayName,
             requiredCapability: null,
+            targetKind: null,
+            targetId: null,
             commandName: null,
             commandTimeout: null,
             inputPayload: null,

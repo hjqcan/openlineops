@@ -33,11 +33,35 @@ public sealed class RuntimeMonitoringController : ControllerBase
     [HttpGet("stations")]
     [ProducesResponseType<RuntimeStationStatusesResponse>(StatusCodes.Status200OK)]
     public async Task<ActionResult<RuntimeStationStatusesResponse>> GetStationStatusesAsync(
+        [FromQuery] string? projectId,
+        [FromQuery] string? applicationId,
+        [FromQuery] string? projectSnapshotId,
+        [FromQuery] string? topologyId,
+        [FromQuery] string? productionRunId,
         [FromQuery] string? stationSystemId,
         CancellationToken cancellationToken)
     {
+        var scopeResult = CreateMonitoringScope(
+            projectId,
+            applicationId,
+            projectSnapshotId,
+            topologyId,
+            productionRunId);
+        if (scopeResult.IsFailure)
+        {
+            return ToProblem(scopeResult.Error);
+        }
+
+        var stationSystemIdError = ValidateOptionalCanonical(
+            stationSystemId,
+            nameof(stationSystemId));
+        if (stationSystemIdError is not null)
+        {
+            return ToProblem(stationSystemIdError);
+        }
+
         var statuses = await _monitoringService
-            .GetStationStatusesAsync(stationSystemId, cancellationToken)
+            .GetStationStatusesAsync(scopeResult.Value, stationSystemId, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new RuntimeStationStatusesResponse(
@@ -47,11 +71,35 @@ public sealed class RuntimeMonitoringController : ControllerBase
     [HttpGet("targets")]
     [ProducesResponseType<RuntimeTargetStatusesResponse>(StatusCodes.Status200OK)]
     public async Task<ActionResult<RuntimeTargetStatusesResponse>> GetTargetStatusesAsync(
+        [FromQuery] string? projectId,
+        [FromQuery] string? applicationId,
+        [FromQuery] string? projectSnapshotId,
+        [FromQuery] string? topologyId,
+        [FromQuery] string? productionRunId,
         [FromQuery] string? stationSystemId,
         CancellationToken cancellationToken)
     {
+        var scopeResult = CreateMonitoringScope(
+            projectId,
+            applicationId,
+            projectSnapshotId,
+            topologyId,
+            productionRunId);
+        if (scopeResult.IsFailure)
+        {
+            return ToProblem(scopeResult.Error);
+        }
+
+        var stationSystemIdError = ValidateOptionalCanonical(
+            stationSystemId,
+            nameof(stationSystemId));
+        if (stationSystemIdError is not null)
+        {
+            return ToProblem(stationSystemIdError);
+        }
+
         var statuses = await _monitoringService
-            .GetTargetStatusesAsync(stationSystemId, cancellationToken)
+            .GetTargetStatusesAsync(scopeResult.Value, stationSystemId, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new RuntimeTargetStatusesResponse(
@@ -63,6 +111,11 @@ public sealed class RuntimeMonitoringController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<RuntimeTimelineResponse>> GetSessionTimelineAsync(
         Guid sessionId,
+        [FromQuery] string? projectId,
+        [FromQuery] string? applicationId,
+        [FromQuery] string? projectSnapshotId,
+        [FromQuery] string? topologyId,
+        [FromQuery] string? productionRunId,
         CancellationToken cancellationToken)
     {
         if (sessionId == Guid.Empty)
@@ -70,8 +123,22 @@ public sealed class RuntimeMonitoringController : ControllerBase
             return BadRequest();
         }
 
+        var scopeResult = CreateMonitoringScope(
+            projectId,
+            applicationId,
+            projectSnapshotId,
+            topologyId,
+            productionRunId);
+        if (scopeResult.IsFailure)
+        {
+            return ToProblem(scopeResult.Error);
+        }
+
         var timeline = await _monitoringService
-            .GetSessionTimelineAsync(new RuntimeSessionId(sessionId), cancellationToken)
+            .GetSessionTimelineAsync(
+                new RuntimeSessionId(sessionId),
+                scopeResult.Value,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new RuntimeTimelineResponse(
@@ -138,5 +205,66 @@ public sealed class RuntimeMonitoringController : ControllerBase
             title: error.Code,
             detail: error.Message,
             statusCode: statusCode);
+    }
+
+    private static Result<RuntimeMonitoringScope> CreateMonitoringScope(
+        string? projectId,
+        string? applicationId,
+        string? projectSnapshotId,
+        string? topologyId,
+        string? productionRunId)
+    {
+        if (projectId is null
+            || applicationId is null
+            || projectSnapshotId is null
+            || topologyId is null)
+        {
+            return Result.Failure<RuntimeMonitoringScope>(ApplicationError.Validation(
+                "Runtime.MonitoringScopeRequired",
+                "ProjectId, ApplicationId, ProjectSnapshotId, and TopologyId are required."));
+        }
+
+        try
+        {
+            ProductionRunId? parsedProductionRunId = null;
+            if (productionRunId is not null)
+            {
+                if (!Guid.TryParseExact(productionRunId, "D", out var parsedValue)
+                    || parsedValue == Guid.Empty
+                    || !string.Equals(parsedValue.ToString("D"), productionRunId, StringComparison.Ordinal))
+                {
+                    return Result.Failure<RuntimeMonitoringScope>(ApplicationError.Validation(
+                        "Runtime.ProductionRunFilterInvalid",
+                        "ProductionRunId must be null or a non-empty canonical Production Run ID."));
+                }
+
+                parsedProductionRunId = new ProductionRunId(parsedValue);
+            }
+
+            return Result.Success(new RuntimeMonitoringScope(
+                projectId,
+                applicationId,
+                projectSnapshotId,
+                topologyId,
+                parsedProductionRunId));
+        }
+        catch (ArgumentException exception)
+        {
+            return Result.Failure<RuntimeMonitoringScope>(ApplicationError.Validation(
+                "Runtime.MonitoringScopeInvalid",
+                exception.Message));
+        }
+    }
+
+    private static ApplicationError? ValidateOptionalCanonical(string? value, string fieldName)
+    {
+        return value is null
+            || (!string.IsNullOrWhiteSpace(value)
+                && !char.IsWhiteSpace(value[0])
+                && !char.IsWhiteSpace(value[^1]))
+            ? null
+            : ApplicationError.Validation(
+                "Runtime.MonitoringFilterInvalid",
+                $"{fieldName} must be null or a non-empty canonical string.");
     }
 }
