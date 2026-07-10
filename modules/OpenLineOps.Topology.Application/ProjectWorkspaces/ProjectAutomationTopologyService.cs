@@ -4,9 +4,6 @@ using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Topology.Application.Layouts;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.Topologies;
-using OpenLineOps.Topology.Domain.Identifiers;
-using OpenLineOps.Topology.Domain.Layouts;
-using OpenLineOps.Topology.Domain.Topology;
 
 namespace OpenLineOps.Topology.Application.ProjectWorkspaces;
 
@@ -67,17 +64,46 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             cancellationToken);
     }
 
-    public Task<Result<AutomationTopologyDetails>> AddEquipmentNodeAsync(
+    public Task<Result<AutomationTopologyDetails>> AddSystemAsync(
         string projectId,
         string applicationId,
         string topologyId,
-        AddEquipmentNodeRequest request,
+        AddAutomationSystemRequest request,
         CancellationToken cancellationToken = default)
     {
         return InScopeAsync(
             projectId,
             applicationId,
-            service => service.AddEquipmentNodeAsync(topologyId, request, cancellationToken),
+            service => service.AddSystemAsync(topologyId, request, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<AutomationTopologyDetails>> UpdateSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
+        UpdateAutomationSystemRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.UpdateSystemAsync(topologyId, systemId, request, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<TopologyTargetDeletionDetails>> DeleteSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.DeleteSystemAsync(topologyId, systemId, cancellationToken),
             cancellationToken);
     }
 
@@ -92,20 +118,6 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             projectId,
             applicationId,
             service => service.AddCapabilityAsync(topologyId, request, cancellationToken),
-            cancellationToken);
-    }
-
-    public Task<Result<AutomationTopologyDetails>> AddModuleAsync(
-        string projectId,
-        string applicationId,
-        string topologyId,
-        AddAutomationModuleRequest request,
-        CancellationToken cancellationToken = default)
-    {
-        return InScopeAsync(
-            projectId,
-            applicationId,
-            service => service.AddModuleAsync(topologyId, request, cancellationToken),
             cancellationToken);
     }
 
@@ -137,6 +149,35 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             cancellationToken);
     }
 
+    public Task<Result<AutomationTopologyDetails>> UpdateSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        UpdateSlotGroupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.UpdateSlotGroupAsync(topologyId, slotGroupId, request, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<TopologyTargetDeletionDetails>> DeleteSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.DeleteSlotGroupAsync(topologyId, slotGroupId, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<Result<AutomationTopologyDetails>> AddSlotAsync(
         string projectId,
         string applicationId,
@@ -148,6 +189,35 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             projectId,
             applicationId,
             service => service.AddSlotAsync(topologyId, request, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<AutomationTopologyDetails>> UpdateSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
+        UpdateSlotDefinitionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.UpdateSlotAsync(topologyId, slotId, request, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<TopologyTargetDeletionDetails>> DeleteSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.DeleteSlotAsync(topologyId, slotId, cancellationToken),
             cancellationToken);
     }
 
@@ -206,10 +276,25 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             cancellationToken);
     }
 
+    public Task<Result<SiteLayoutDetails>> UpdateLayoutElementPresentationAsync(
+        string projectId,
+        string applicationId,
+        string layoutId,
+        string elementId,
+        UpdateSiteLayoutElementPresentationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.UpdateLayoutElementPresentationAsync(layoutId, elementId, request, cancellationToken),
+            cancellationToken);
+    }
+
     private async Task<Result<T>> InScopeAsync<T>(
         string projectId,
         string applicationId,
-        Func<IAutomationTopologyService, Task<Result<T>>> execute,
+        Func<ApplicationAutomationTopologyEditor, Task<Result<T>>> execute,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(applicationId))
@@ -229,76 +314,13 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
                 $"Application {applicationId} was not found in project {projectId}."));
         }
 
-        var service = new AutomationTopologyService(
-            new ScopedAutomationTopologyRepository(scope, _topologyRepository),
-            new ScopedSiteLayoutRepository(scope, _layoutRepository),
+        var service = new ApplicationAutomationTopologyEditor(
+            scope,
+            _topologyRepository,
+            _layoutRepository,
             _clock);
 
         return await execute(service).ConfigureAwait(false);
     }
 
-    private sealed class ScopedAutomationTopologyRepository : IAutomationTopologyRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectAutomationTopologyRepository _repository;
-
-        public ScopedAutomationTopologyRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectAutomationTopologyRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public ValueTask SaveAsync(AutomationTopology topology, CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, topology, cancellationToken);
-        }
-
-        public ValueTask<AutomationTopology?> GetByIdAsync(
-            AutomationTopologyId topologyId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, topologyId, cancellationToken);
-        }
-
-        public ValueTask<IReadOnlyCollection<AutomationTopology>> ListAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListAsync(_scope, cancellationToken);
-        }
-    }
-
-    private sealed class ScopedSiteLayoutRepository : ISiteLayoutRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectSiteLayoutRepository _repository;
-
-        public ScopedSiteLayoutRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectSiteLayoutRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public ValueTask SaveAsync(SiteLayout layout, CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, layout, cancellationToken);
-        }
-
-        public ValueTask<SiteLayout?> GetByIdAsync(
-            SiteLayoutId layoutId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, layoutId, cancellationToken);
-        }
-
-        public ValueTask<IReadOnlyCollection<SiteLayout>> ListByTopologyAsync(
-            AutomationTopologyId topologyId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListByTopologyAsync(_scope, topologyId, cancellationToken);
-        }
-    }
 }

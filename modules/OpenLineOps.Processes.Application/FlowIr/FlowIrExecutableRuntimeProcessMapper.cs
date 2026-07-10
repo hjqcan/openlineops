@@ -2,6 +2,7 @@ using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Scripting;
+using OpenLineOps.Runtime.Domain.Targets;
 using RuntimeCapabilityId = OpenLineOps.Runtime.Domain.Identifiers.RuntimeCapabilityId;
 using RuntimeActionId = OpenLineOps.Runtime.Domain.Identifiers.RuntimeActionId;
 using RuntimeNodeId = OpenLineOps.Runtime.Domain.Identifiers.RuntimeNodeId;
@@ -147,13 +148,9 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
             timeout,
             inputPayload,
             new RuntimeActionId(action.ActionId),
-            action.DynamicChildren is null
-                ? null
-                : new ExecutableRuntimeDynamicActionSlot(
-                    action.DynamicChildren.SlotId,
-                    action.DynamicChildren.ChildActionIdPrefix,
-                    action.DynamicChildren.SequenceBase,
-                    action.DynamicChildren.SourceMappingMode.ToString()));
+            new RuntimeTargetReference(
+                action.Target.Kind.ToString(),
+                action.Target.Reference));
     }
 
     private static IEnumerable<ExecutableRuntimeTransition> CreateBlocklyInternalTransitions(

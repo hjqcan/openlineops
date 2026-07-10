@@ -23,11 +23,26 @@ public interface IProjectAutomationTopologyService
         string applicationId,
         CancellationToken cancellationToken = default);
 
-    Task<Result<AutomationTopologyDetails>> AddEquipmentNodeAsync(
+    Task<Result<AutomationTopologyDetails>> AddSystemAsync(
         string projectId,
         string applicationId,
         string topologyId,
-        AddEquipmentNodeRequest request,
+        AddAutomationSystemRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<AutomationTopologyDetails>> UpdateSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
+        UpdateAutomationSystemRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<TopologyTargetDeletionDetails>> DeleteSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
         CancellationToken cancellationToken = default);
 
     Task<Result<AutomationTopologyDetails>> AddCapabilityAsync(
@@ -35,13 +50,6 @@ public interface IProjectAutomationTopologyService
         string applicationId,
         string topologyId,
         AddCapabilityContractRequest request,
-        CancellationToken cancellationToken = default);
-
-    Task<Result<AutomationTopologyDetails>> AddModuleAsync(
-        string projectId,
-        string applicationId,
-        string topologyId,
-        AddAutomationModuleRequest request,
         CancellationToken cancellationToken = default);
 
     Task<Result<AutomationTopologyDetails>> AddDriverBindingAsync(
@@ -58,11 +66,41 @@ public interface IProjectAutomationTopologyService
         AddSlotGroupRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<Result<AutomationTopologyDetails>> UpdateSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        UpdateSlotGroupRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<TopologyTargetDeletionDetails>> DeleteSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        CancellationToken cancellationToken = default);
+
     Task<Result<AutomationTopologyDetails>> AddSlotAsync(
         string projectId,
         string applicationId,
         string topologyId,
         AddSlotDefinitionRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<AutomationTopologyDetails>> UpdateSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
+        UpdateSlotDefinitionRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<TopologyTargetDeletionDetails>> DeleteSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
         CancellationToken cancellationToken = default);
 
     Task<Result<SiteLayoutDetails>> CreateLayoutAsync(
@@ -90,5 +128,13 @@ public interface IProjectAutomationTopologyService
         string layoutId,
         string elementId,
         UpdateSiteLayoutElementGeometryRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<SiteLayoutDetails>> UpdateLayoutElementPresentationAsync(
+        string projectId,
+        string applicationId,
+        string layoutId,
+        string elementId,
+        UpdateSiteLayoutElementPresentationRequest request,
         CancellationToken cancellationToken = default);
 }

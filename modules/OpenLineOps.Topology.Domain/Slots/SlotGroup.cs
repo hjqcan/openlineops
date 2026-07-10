@@ -10,7 +10,7 @@ public sealed class SlotGroup : Entity<SlotGroupId>
 
     private SlotGroup(
         SlotGroupId id,
-        EquipmentNodeId parentNodeId,
+        AutomationSystemId parentSystemId,
         string displayName,
         SlotGroupKind kind,
         int capacity)
@@ -21,30 +21,30 @@ public sealed class SlotGroup : Entity<SlotGroupId>
             throw new ArgumentOutOfRangeException(nameof(capacity), "Slot group capacity must be positive.");
         }
 
-        ParentNodeId = parentNodeId;
+        ParentSystemId = parentSystemId;
         DisplayName = TopologyIdGuard.NotBlank(displayName, nameof(displayName));
         Kind = kind;
         Capacity = capacity;
     }
 
-    public EquipmentNodeId ParentNodeId { get; }
+    public AutomationSystemId ParentSystemId { get; }
 
-    public string DisplayName { get; }
+    public string DisplayName { get; private set; }
 
-    public SlotGroupKind Kind { get; }
+    public SlotGroupKind Kind { get; private set; }
 
-    public int Capacity { get; }
+    public int Capacity { get; private set; }
 
     public IReadOnlyCollection<SlotDefinitionId> SlotIds => _slotIds.AsReadOnly();
 
     public static SlotGroup Create(
         SlotGroupId id,
-        EquipmentNodeId parentNodeId,
+        AutomationSystemId parentSystemId,
         string displayName,
         SlotGroupKind kind,
         int capacity)
     {
-        return new SlotGroup(id, parentNodeId, displayName, kind, capacity);
+        return new SlotGroup(id, parentSystemId, displayName, kind, capacity);
     }
 
     internal TopologyOperationResult AddSlot(SlotDefinitionId slotId)
@@ -66,5 +66,36 @@ public sealed class SlotGroup : Entity<SlotGroupId>
         _slotIds.Add(slotId);
 
         return TopologyOperationResult.Accepted("Slot added to group.");
+    }
+
+    internal TopologyOperationResult Update(
+        string displayName,
+        SlotGroupKind kind,
+        int capacity)
+    {
+        if (capacity <= 0)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotGroupCapacityInvalid",
+                $"Slot group {Id} capacity must be positive.");
+        }
+
+        if (capacity < _slotIds.Count)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotGroupCapacityBelowSlotCount",
+                $"Slot group {Id} capacity {capacity} cannot be lower than its {_slotIds.Count} existing slots.");
+        }
+
+        var validatedDisplayName = TopologyIdGuard.NotBlank(displayName, nameof(displayName));
+        DisplayName = validatedDisplayName;
+        Kind = kind;
+        Capacity = capacity;
+        return TopologyOperationResult.Accepted("Slot group updated.");
+    }
+
+    internal void RemoveSlot(SlotDefinitionId slotId)
+    {
+        _slotIds.Remove(slotId);
     }
 }

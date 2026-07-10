@@ -37,7 +37,7 @@ public sealed class ProjectApplicationProcessBlocklyBlocksController : Controlle
             return ToProblem(result.Error);
         }
 
-        return Ok(result.Value.Select(ProcessBlocklyBlocksController.ToResponse).ToArray());
+        return Ok(result.Value.Select(ProcessBlocklyBlockApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpGet("{blockType}/versions")]
@@ -58,7 +58,7 @@ public sealed class ProjectApplicationProcessBlocklyBlocksController : Controlle
             return ToProblem(result.Error);
         }
 
-        return Ok(result.Value.Select(ProcessBlocklyBlocksController.ToResponse).ToArray());
+        return Ok(result.Value.Select(ProcessBlocklyBlockApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpPost]
@@ -72,7 +72,7 @@ public sealed class ProjectApplicationProcessBlocklyBlocksController : Controlle
         RegisterApiBlockRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = ProcessBlocklyBlocksController.Validate(request);
+        var validationErrors = ProcessBlocklyBlockApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -82,7 +82,7 @@ public sealed class ProjectApplicationProcessBlocklyBlocksController : Controlle
             .RegisterAsync(
                 projectId,
                 applicationId,
-                ProcessBlocklyBlocksController.ToApplicationRequest(request),
+                ProcessBlocklyBlockApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -90,7 +90,7 @@ public sealed class ProjectApplicationProcessBlocklyBlocksController : Controlle
             return ToProblem(result.Error);
         }
 
-        var response = ProcessBlocklyBlocksController.ToResponse(result.Value);
+        var response = ProcessBlocklyBlockApiContractMapper.ToResponse(result.Value);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/process-blocks/{Uri.EscapeDataString(response.BlockType)}",
             response);

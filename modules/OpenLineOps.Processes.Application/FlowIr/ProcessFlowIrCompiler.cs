@@ -96,7 +96,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
                 continue;
             }
 
-            nodes.Add(ToNode(definition, node, diagnostics));
+            nodes.Add(ToNode(definition, node));
         }
 
         var transitions = definition.Transitions
@@ -105,7 +105,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             .ToImmutableArray();
 
         var document = new FlowIrDocument(
-            FlowIrSchemaVersions.V1,
+            FlowIrSchemaVersions.V2,
             definition.Id.Value,
             definition.VersionId.Value,
             definition.DisplayName,
@@ -139,15 +139,13 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
 
     private static FlowIrNode ToNode(
         ProcessDefinition definition,
-        ProcessNode node,
-        ImmutableArray<FlowIrCompilationDiagnostic>.Builder diagnostics)
+        ProcessNode node)
     {
         var source = NodeSource(definition, node);
         var actions = node.Kind switch
         {
             ProcessNodeKind.Command => ImmutableArray.Create(ToDeviceCommandAction(node, source)),
-            ProcessNodeKind.PythonScript => ImmutableArray.Create(
-                ToPythonScriptAction(node, source, diagnostics)),
+            ProcessNodeKind.PythonScript => ImmutableArray.Create(ToPythonScriptAction(node, source)),
             _ => ImmutableArray<FlowIrAction>.Empty
         };
 
@@ -175,33 +173,15 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             node.InputPayload,
             CreateExecutionPolicy(node.CommandTimeout!.Value),
             PythonScript: null,
-            DynamicChildren: null,
             source);
     }
 
     private static FlowIrAction ToPythonScriptAction(
         ProcessNode node,
-        FlowIrSourceTrace source,
-        ImmutableArray<FlowIrCompilationDiagnostic>.Builder diagnostics)
+        FlowIrSourceTrace source)
     {
-        var actionId = CreateActionId(node);
-        var dynamicSlot = new FlowIrDynamicActionSlot(
-            $"{actionId}:automation-plan",
-            FlowIrDynamicActionExpansionKind.RuntimeAutomationPlan,
-            $"{actionId}:child:",
-            SequenceBase: 1,
-            IsCompileTimeResolved: false,
-            FlowIrChildSourceMappingMode.ContainerOnly,
-            source);
-
-        diagnostics.Add(new FlowIrCompilationDiagnostic(
-            FlowIrDiagnosticSeverity.Warning,
-            "Processes.FlowIrPythonChildActionsRuntimeResolved",
-            $"Python script node {node.Id} can emit automation_plan child actions only at runtime; Flow IR preserves a dynamic child slot with container-level source mapping.",
-            source));
-
         return new FlowIrAction(
-            actionId,
+            CreateActionId(node),
             FlowIrActionKind.PythonScript,
             node.DisplayName,
             RuntimeScriptCommand.PythonCapability,
@@ -216,7 +196,6 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
                 node.ScriptSourceCode!,
                 node.ScriptSourceHash!,
                 node.ScriptVersion!),
-            dynamicSlot,
             source);
     }
 
@@ -250,7 +229,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             {
                 return ApplicationError.Validation(
                     "Processes.FlowIrTimeoutPrecisionUnsupported",
-                    $"Process node {node.Id} timeout must be representable as a whole number of milliseconds in Flow IR v1.");
+                    $"Process node {node.Id} timeout must be representable as a whole number of milliseconds in Flow IR v2.");
             }
 
             var timeoutMilliseconds = checked(timeout.Ticks / TimeSpan.TicksPerMillisecond);
@@ -258,7 +237,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             {
                 return ApplicationError.Validation(
                     "Processes.FlowIrTimeoutInvalid",
-                    $"Process node {node.Id} timeout must be at least one millisecond in Flow IR v1.");
+                    $"Process node {node.Id} timeout must be at least one millisecond in Flow IR v2.");
             }
         }
 

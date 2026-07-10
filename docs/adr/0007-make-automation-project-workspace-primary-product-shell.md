@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0009](0009-model-production-lines-and-compile-blockly-directly.md)
 
 ## Date
 
@@ -139,6 +139,7 @@ layout and composition.
 
 ## Related Decisions
 
+- ADR-0009: Model Production Lines Separately And Compile Blockly Directly (supersedes this decision).
 - ADR-0001: Use Modular Monolith First.
 - ADR-0002: Enforce DDD Layering And Boundaries.
 - ADR-0003: Keep Electron Behind Backend API Boundary.

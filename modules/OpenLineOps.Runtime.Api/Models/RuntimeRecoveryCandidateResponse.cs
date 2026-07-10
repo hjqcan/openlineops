@@ -2,7 +2,7 @@ namespace OpenLineOps.Runtime.Api.Models;
 
 public sealed record RuntimeRecoveryCandidateResponse(
     Guid SessionId,
-    string StationId,
+    string StationSystemId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     string RecipeSnapshotId,

@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Application.Processes;
 
@@ -8,15 +9,13 @@ public sealed record ExecutableRuntimeNode(
     RuntimeCapabilityId TargetCapability,
     string CommandName,
     TimeSpan Timeout,
-    string? InputPayload = null,
-    RuntimeActionId? ActionId = null,
-    ExecutableRuntimeDynamicActionSlot? DynamicChildren = null)
+    string? InputPayload,
+    RuntimeActionId ActionId,
+    RuntimeTargetReference Target)
 {
-    public RuntimeActionId EffectiveActionId =>
-        ActionId ?? new RuntimeActionId($"{NodeId.Value}:action:1");
-
     public bool IsValid => Timeout > TimeSpan.Zero
+        && ActionId is not null
+        && Target is not null
         && !string.IsNullOrWhiteSpace(DisplayName)
-        && !string.IsNullOrWhiteSpace(CommandName)
-        && (DynamicChildren is null || DynamicChildren.IsValid);
+        && !string.IsNullOrWhiteSpace(CommandName);
 }

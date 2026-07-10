@@ -84,6 +84,7 @@ public sealed class RuntimeSessionRecoveryServiceTests
             new ProcessVersionId($"process-packaging@{suffix}"),
             new ConfigurationSnapshotId($"snapshot-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
-            createdAtUtc);
+            createdAtUtc,
+            RuntimeTestReleaseIdentity.TraceMetadata());
     }
 }

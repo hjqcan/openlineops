@@ -2,28 +2,26 @@ namespace OpenLineOps.Runtime.Domain.Sessions;
 
 public sealed record RuntimeSessionTraceMetadata
 {
-    public static RuntimeSessionTraceMetadata Empty { get; } = new(null, null, null, null, null);
-
     public RuntimeSessionTraceMetadata(
         string? serialNumber,
         string? batchId,
         string? fixtureId,
         string? deviceId,
         string? actorId,
-        string? projectId = null,
-        string? applicationId = null,
-        string? projectSnapshotId = null,
-        string? topologyId = null)
+        string projectId,
+        string applicationId,
+        string projectSnapshotId,
+        string topologyId)
     {
         SerialNumber = NormalizeOptional(serialNumber);
         BatchId = NormalizeOptional(batchId);
         FixtureId = NormalizeOptional(fixtureId);
         DeviceId = NormalizeOptional(deviceId);
         ActorId = NormalizeOptional(actorId);
-        ProjectId = NormalizeOptional(projectId);
-        ApplicationId = NormalizeOptional(applicationId);
-        ProjectSnapshotId = NormalizeOptional(projectSnapshotId);
-        TopologyId = NormalizeOptional(topologyId);
+        ProjectId = Required(projectId, nameof(projectId));
+        ApplicationId = Required(applicationId, nameof(applicationId));
+        ProjectSnapshotId = Required(projectSnapshotId, nameof(projectSnapshotId));
+        TopologyId = Required(topologyId, nameof(topologyId));
     }
 
     public string? SerialNumber { get; }
@@ -36,13 +34,13 @@ public sealed record RuntimeSessionTraceMetadata
 
     public string? ActorId { get; }
 
-    public string? ProjectId { get; }
+    public string ProjectId { get; }
 
-    public string? ApplicationId { get; }
+    public string ApplicationId { get; }
 
-    public string? ProjectSnapshotId { get; }
+    public string ProjectSnapshotId { get; }
 
-    public string? TopologyId { get; }
+    public string TopologyId { get; }
 
     public bool CanCreateTraceRecord =>
         SerialNumber is not null
@@ -53,6 +51,13 @@ public sealed record RuntimeSessionTraceMetadata
     {
         return string.IsNullOrWhiteSpace(value)
             ? null
+            : value.Trim();
+    }
+
+    private static string Required(string value, string parameterName)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? throw new ArgumentException($"{parameterName} cannot be empty.", parameterName)
             : value.Trim();
     }
 }

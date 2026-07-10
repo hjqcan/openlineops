@@ -112,6 +112,7 @@ public sealed class DevicePersistenceRepositoryTests
 
         await using (var context = new DevicesDbContext(options, dispatcher))
         {
+            await context.Database.MigrateAsync();
             var definitionRepository = new EfDeviceDefinitionRepository(context);
             var instanceRepository = new EfDeviceInstanceRepository(context);
 
@@ -184,70 +185,6 @@ public sealed class DevicePersistenceRepositoryTests
             domainEvent => domainEvent is DeviceConnectionStatusChangedDomainEvent changed
             && changed.DeviceInstanceId == instance.Id
             && changed.NewStatus == DeviceConnectionStatus.Disconnected);
-    }
-
-    [Fact]
-    public async Task EfSqliteDeviceRepositoriesImportSqliteSnapshotProviderTables()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var snapshotDefinitionRepository = new SqliteDeviceDefinitionRepository(database.ConnectionString);
-        using var snapshotInstanceRepository = new SqliteDeviceInstanceRepository(database.ConnectionString);
-        var definition = CreateScannerDefinition();
-        var instance = CreateScannerInstance("scanner-01", "station-eol");
-
-        Assert.True(instance.RequestConnection(BaseTimeUtc.AddSeconds(1)).Succeeded);
-        Assert.True(instance.ConfirmConnected(BaseTimeUtc.AddSeconds(2)).Succeeded);
-
-        await snapshotDefinitionRepository.SaveAsync(definition);
-        await snapshotInstanceRepository.SaveAsync(instance);
-
-        var options = new DbContextOptionsBuilder<DevicesDbContext>()
-            .UseSqlite(database.ConnectionString)
-            .Options;
-
-        await using var context = new DevicesDbContext(options);
-        var definitionRepository = new EfDeviceDefinitionRepository(context);
-        var instanceRepository = new EfDeviceInstanceRepository(context);
-
-        var definitions = await definitionRepository.ListAsync();
-        var instances = await instanceRepository.ListByStationAsync("station-eol");
-        var restoredDefinition = Assert.Single(definitions);
-        var restoredInstance = Assert.Single(instances);
-
-        Assert.Equal(definition.Id, restoredDefinition.Id);
-        Assert.Equal("scanner-plugin", restoredDefinition.PluginId);
-        Assert.Equal("device.scanner", Assert.Single(restoredDefinition.Capabilities).Id.Value);
-        Assert.Equal(instance.Id, restoredInstance.Id);
-        Assert.Equal(DeviceConnectionStatus.Connected, restoredInstance.Status);
-        Assert.Equal(BaseTimeUtc.AddSeconds(2), restoredInstance.ConnectedAtUtc);
-    }
-
-    [Fact]
-    public async Task EfSqliteDeviceRepositoriesBootstrapExistingEnsureCreatedSchemaAsMigrated()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        var options = new DbContextOptionsBuilder<DevicesDbContext>()
-            .UseSqlite(database.ConnectionString)
-            .Options;
-
-        await using (var ensureCreatedContext = new DevicesDbContext(options))
-        {
-            await ensureCreatedContext.Database.EnsureCreatedAsync();
-        }
-
-        await using (var context = new DevicesDbContext(options))
-        {
-            var repository = new EfDeviceDefinitionRepository(context);
-
-            await repository.SaveAsync(CreateScannerDefinition());
-        }
-
-        await using (var context = new DevicesDbContext(options))
-        {
-            var pendingMigrations = await context.Database.GetPendingMigrationsAsync();
-
-            Assert.Empty(pendingMigrations);
-        }
     }
 
     private static DeviceDefinition CreateScannerDefinition()

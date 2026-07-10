@@ -7,6 +7,6 @@ public static class TopologyApiMvcBuilderExtensions
 {
     public static IMvcBuilder AddOpenLineOpsTopologyApi(this IMvcBuilder mvcBuilder)
     {
-        return mvcBuilder.AddApplicationPart(typeof(AutomationTopologiesController).Assembly);
+        return mvcBuilder.AddApplicationPart(typeof(ProjectApplicationTopologiesController).Assembly);
     }
 }

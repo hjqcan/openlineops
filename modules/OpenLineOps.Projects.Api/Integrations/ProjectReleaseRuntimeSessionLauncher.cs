@@ -144,7 +144,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
             }
 
             var configuration = configurationResult.Value;
-            var configurationMismatch = FindConfigurationMismatch(snapshot, configuration);
+            var configurationMismatch = FindConfigurationMismatch(snapshot, release.Metadata, configuration);
             if (configurationMismatch is not null)
             {
                 return Failure(
@@ -155,7 +155,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
             var runResult = await _sessionRunner
                 .RunAsync(
                     new OpenLineOps.Runtime.Application.Sessions.StartRuntimeSessionRequest(
-                        new RuntimeStationId(configuration.StationId),
+                        new RuntimeStationId(release.Metadata.StationSystemId),
                         new RuntimeConfigurationSnapshotId(configuration.ConfigurationSnapshotId),
                         new RuntimeRecipeSnapshotId(configuration.RecipeSnapshotId),
                         executableProcessResult.Value,
@@ -225,6 +225,14 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
         if (!string.Equals(metadata.TopologyId, snapshot.TopologyId, StringComparison.Ordinal))
         {
             return $"topology id is {metadata.TopologyId}, expected {snapshot.TopologyId}";
+        }
+
+        if (string.IsNullOrWhiteSpace(metadata.StationSystemId)
+            || !metadata.TargetReferences.Any(target =>
+                string.Equals(target.Kind, "System", StringComparison.Ordinal)
+                && string.Equals(target.TargetId, metadata.StationSystemId, StringComparison.Ordinal)))
+        {
+            return "station system id is missing or is not a frozen System target";
         }
 
         if (!SequenceEqualOrdinal(metadata.LayoutIds, snapshot.LayoutIds))
@@ -331,6 +339,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
 
     private static string? FindConfigurationMismatch(
         PublishedProjectSnapshotDetails snapshot,
+        ProjectReleaseSourceMetadata metadata,
         RuntimeConfigurationSnapshotDetails configuration)
     {
         if (!string.Equals(
@@ -347,6 +356,14 @@ public sealed class ProjectReleaseRuntimeSessionLauncher : IProjectReleaseRuntim
                 StringComparison.Ordinal))
         {
             return $"process definition id is {configuration.ProcessDefinitionId}, expected {snapshot.ProcessDefinitionId}";
+        }
+
+        if (!string.Equals(
+                configuration.StationSystemId,
+                metadata.StationSystemId,
+                StringComparison.Ordinal))
+        {
+            return $"station system id is {configuration.StationSystemId}, expected {metadata.StationSystemId}";
         }
 
         return string.Equals(

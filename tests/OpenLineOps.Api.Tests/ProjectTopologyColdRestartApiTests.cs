@@ -208,7 +208,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 _projectDirectory);
 
             using var mutateLiveLayout = await client.PutAsJsonAsync(
-                $"{ProjectLayoutPath(projectId, applicationA, layoutId)}/elements/element.site/geometry",
+                $"{ProjectLayoutPath(projectId, applicationA, layoutId)}/elements/element.station/geometry",
                 new
                 {
                     x = 125,
@@ -282,9 +282,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 ProjectProcessPath(projectId, applicationB, processDefinitionId));
 
             Assert.Equal("Application A Topology", topologyA.RootElement.GetProperty("displayName").GetString());
-            Assert.Equal("Application A Site", topologyA.RootElement.GetProperty("nodes")[0].GetProperty("displayName").GetString());
+            Assert.Equal("Application A Site", topologyA.RootElement.GetProperty("systems")[0].GetProperty("displayName").GetString());
             Assert.Equal("Application B Topology", topologyB.RootElement.GetProperty("displayName").GetString());
-            Assert.Equal("Application B Site", topologyB.RootElement.GetProperty("nodes")[0].GetProperty("displayName").GetString());
+            Assert.Equal("Application B Site", topologyB.RootElement.GetProperty("systems")[0].GetProperty("displayName").GetString());
             Assert.Equal(125, layoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.Equal(425, layoutB.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.True(File.Exists(Path.Combine(
@@ -511,13 +511,17 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(HttpStatusCode.Created, createTopology.StatusCode);
 
         using var addNode = await client.PostAsJsonAsync(
-            $"{topologiesPath}/{topologyId}/nodes",
+            $"{topologiesPath}/{topologyId}/systems",
             new
             {
-                nodeId = "site.main",
-                parentNodeId = (string?)null,
-                kind = "Site",
-                displayName = nodeName
+                systemId = "station.main",
+                parentSystemId = (string?)null,
+                kind = "Station",
+                systemType = "test.station",
+                displayName = nodeName,
+                requiredCapabilityIds = Array.Empty<string>(),
+                providedCapabilityIds = Array.Empty<string>(),
+                metadata = new Dictionary<string, string>()
             });
         Assert.Equal(HttpStatusCode.OK, addNode.StatusCode);
 
@@ -563,17 +567,17 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             $"{layoutsPath}/{layoutId}/elements",
             new
             {
-                elementId = "element.site",
-                kind = "NodeShape",
-                targetKind = "EquipmentNode",
-                targetId = "site.main",
+                elementId = "element.station",
+                kind = "SystemShape",
+                target = new { kind = "System", targetId = "station.main" },
+                parentElementId = (string?)null,
                 x = elementX,
                 y = 40,
                 width = 100,
                 height = 80,
                 rotationDegrees = 0,
-                layerId = "equipment",
-                label = nodeName
+                zIndex = 1,
+                style = new Dictionary<string, string>()
             });
         Assert.Equal(HttpStatusCode.OK, addElement.StatusCode);
     }
@@ -704,6 +708,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             new
             {
                 stationProfileId,
+                stationSystemId = "station.main",
                 displayName = $"{applicationName} Station",
                 deviceBindings = new[]
                 {
@@ -791,7 +796,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.True(File.Exists(absoluteManifestPath));
         using var manifest = JsonDocument.Parse(File.ReadAllText(absoluteManifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
 
         return new PublishedProjectRelease(relativeManifestPath, contentSha256, absoluteManifestPath);
@@ -874,6 +879,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(recipeParameterValue, parameter.GetProperty("value").GetString());
 
         Assert.Equal(stationProfileId, station.RootElement.GetProperty("stationProfileId").GetString());
+        Assert.Equal("station.main", station.RootElement.GetProperty("stationSystemId").GetString());
         Assert.Equal($"{applicationName} Station", station.RootElement.GetProperty("displayName").GetString());
         var binding = Assert.Single(station.RootElement.GetProperty("deviceBindings").EnumerateArray());
         Assert.Equal("binding.primary", binding.GetProperty("deviceBindingId").GetString());

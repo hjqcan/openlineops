@@ -46,6 +46,7 @@ internal static class EngineeringSnapshotMapper
     {
         return new PersistedStationProfile(
             stationProfile.Id.Value,
+            stationProfile.StationSystemId,
             stationProfile.DisplayName,
             stationProfile.DeviceBindings.Select(ToSnapshot).ToArray());
     }
@@ -95,6 +96,7 @@ internal static class EngineeringSnapshotMapper
 
         return StationProfile.Restore(
             new StationProfileId(snapshot.StationProfileId),
+            snapshot.StationSystemId,
             snapshot.DisplayName,
             snapshot.DeviceBindings.Select(ToAggregate));
     }
@@ -217,6 +219,7 @@ internal sealed record PersistedRecipeParameter(string Key, string Value);
 
 internal sealed record PersistedStationProfile(
     string StationProfileId,
+    string StationSystemId,
     string DisplayName,
     PersistedDeviceBinding[] DeviceBindings);
 

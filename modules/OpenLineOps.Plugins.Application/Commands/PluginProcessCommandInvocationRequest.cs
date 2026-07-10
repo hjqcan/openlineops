@@ -15,4 +15,6 @@ public sealed record PluginProcessCommandInvocationRequest(
     string CommandName,
     string? InputPayload,
     int TimeoutMilliseconds,
-    PluginPackageRuntimeIdentity? PackageIdentity = null);
+    PluginPackageRuntimeIdentity? PackageIdentity = null,
+    string? TargetKind = null,
+    string? TargetId = null);

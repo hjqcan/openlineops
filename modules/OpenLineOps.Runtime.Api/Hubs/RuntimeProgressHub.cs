@@ -4,18 +4,18 @@ namespace OpenLineOps.Runtime.Api.Hubs;
 
 public sealed class RuntimeProgressHub : Hub<IRuntimeProgressClient>
 {
-    public Task JoinStationGroup(string stationId)
+    public Task JoinStationSystemGroup(string stationSystemId)
     {
-        return string.IsNullOrWhiteSpace(stationId)
+        return string.IsNullOrWhiteSpace(stationSystemId)
             ? Task.CompletedTask
-            : Groups.AddToGroupAsync(Context.ConnectionId, StationGroup(stationId));
+            : Groups.AddToGroupAsync(Context.ConnectionId, StationSystemGroup(stationSystemId));
     }
 
-    public Task LeaveStationGroup(string stationId)
+    public Task LeaveStationSystemGroup(string stationSystemId)
     {
-        return string.IsNullOrWhiteSpace(stationId)
+        return string.IsNullOrWhiteSpace(stationSystemId)
             ? Task.CompletedTask
-            : Groups.RemoveFromGroupAsync(Context.ConnectionId, StationGroup(stationId));
+            : Groups.RemoveFromGroupAsync(Context.ConnectionId, StationSystemGroup(stationSystemId));
     }
 
     public Task JoinSessionGroup(Guid sessionId)
@@ -32,9 +32,9 @@ public sealed class RuntimeProgressHub : Hub<IRuntimeProgressClient>
             : Groups.RemoveFromGroupAsync(Context.ConnectionId, SessionGroup(sessionId));
     }
 
-    internal static string StationGroup(string stationId)
+    internal static string StationSystemGroup(string stationSystemId)
     {
-        return $"runtime:station:{stationId.Trim()}";
+        return $"runtime:station-system:{stationSystemId.Trim()}";
     }
 
     internal static string SessionGroup(Guid sessionId)

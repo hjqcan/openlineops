@@ -129,8 +129,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 workstation is null
                 || string.IsNullOrWhiteSpace(workstation.WorkstationId)
                 || string.IsNullOrWhiteSpace(workstation.DisplayName)
-                || string.IsNullOrWhiteSpace(workstation.TopologyStationNodeId)
-                || string.IsNullOrWhiteSpace(workstation.TopologySystemModuleId))
+                || string.IsNullOrWhiteSpace(workstation.StationSystemId))
             || request.Stages.Any(stage =>
                 stage is null
                 || string.IsNullOrWhiteSpace(stage.StageId)
@@ -157,8 +156,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 new OpenLineOps.Production.Application.LineDefinitions.WorkstationRequest(
                     workstation!.WorkstationId!,
                     workstation.DisplayName!,
-                    workstation.TopologyStationNodeId!,
-                    workstation.TopologySystemModuleId!)).ToArray(),
+                    workstation.StationSystemId!)).ToArray(),
             request.Stages.Select(stage =>
                 new OpenLineOps.Production.Application.LineDefinitions.ProcessStageRequest(
                     stage!.StageId!,
@@ -224,8 +222,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             details.Workstations.Select(workstation => new WorkstationResponse(
                 workstation.WorkstationId,
                 workstation.DisplayName,
-                workstation.TopologyStationNodeId,
-                workstation.TopologySystemModuleId)).ToArray(),
+                workstation.StationSystemId)).ToArray(),
             details.Stages.Select(stage => new ProcessStageResponse(
                 stage.StageId,
                 stage.Sequence,

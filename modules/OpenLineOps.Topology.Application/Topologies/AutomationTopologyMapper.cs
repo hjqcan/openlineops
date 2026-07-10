@@ -2,9 +2,8 @@ using OpenLineOps.Topology.Application.Layouts;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Layouts;
-using OpenLineOps.Topology.Domain.Modules;
-using OpenLineOps.Topology.Domain.Nodes;
 using OpenLineOps.Topology.Domain.Slots;
+using OpenLineOps.Topology.Domain.Systems;
 using OpenLineOps.Topology.Domain.Topology;
 
 namespace OpenLineOps.Topology.Application.Topologies;
@@ -17,8 +16,7 @@ public static class AutomationTopologyMapper
             topology.Id.Value,
             topology.DisplayName,
             topology.CreatedAtUtc,
-            topology.Nodes.OrderBy(node => node.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
-            topology.Modules.OrderBy(module => module.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
+            topology.Systems.OrderBy(system => system.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
             topology.Capabilities.OrderBy(capability => capability.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
             topology.DriverBindings.OrderBy(binding => binding.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
             topology.SlotGroups.OrderBy(group => group.Id.Value, StringComparer.Ordinal).Select(ToDetails).ToArray(),
@@ -30,8 +28,8 @@ public static class AutomationTopologyMapper
         return new AutomationTopologySummary(
             topology.Id.Value,
             topology.DisplayName,
-            topology.Nodes.Count,
-            topology.Modules.Count,
+            topology.Systems.Count,
+            topology.Systems.Count(system => system is StationSystem),
             topology.Slots.Count);
     }
 
@@ -50,24 +48,17 @@ public static class AutomationTopologyMapper
                 .ToArray());
     }
 
-    private static EquipmentNodeDetails ToDetails(EquipmentNode node)
+    private static AutomationSystemDetails ToDetails(AutomationSystem system)
     {
-        return new EquipmentNodeDetails(
-            node.Id.Value,
-            node.ParentId?.Value,
-            node.Kind.ToString(),
-            node.DisplayName);
-    }
-
-    private static AutomationModuleDetails ToDetails(AutomationModule module)
-    {
-        return new AutomationModuleDetails(
-            module.Id.Value,
-            module.NodeId.Value,
-            module.ModuleKind,
-            module.DisplayName,
-            module.RequiredCapabilities.Select(capabilityId => capabilityId.Value).ToArray(),
-            module.ProvidedCapabilities.Select(capabilityId => capabilityId.Value).ToArray());
+        return new AutomationSystemDetails(
+            system.Id.Value,
+            system.ParentSystemId?.Value,
+            system.Kind.ToString(),
+            system.SystemType,
+            system.DisplayName,
+            system.RequiredCapabilities.Select(capabilityId => capabilityId.Value).ToArray(),
+            system.ProvidedCapabilities.Select(capabilityId => capabilityId.Value).ToArray(),
+            ToSortedDictionary(system.Metadata));
     }
 
     private static CapabilityContractDetails ToDetails(CapabilityContract capability)
@@ -95,7 +86,7 @@ public static class AutomationTopologyMapper
     {
         return new SlotGroupDetails(
             group.Id.Value,
-            group.ParentNodeId.Value,
+            group.ParentSystemId.Value,
             group.DisplayName,
             group.Kind.ToString(),
             group.Capacity,
@@ -106,7 +97,8 @@ public static class AutomationTopologyMapper
     {
         return new SlotDefinitionDetails(
             slot.Id.Value,
-            slot.ParentNodeId.Value,
+            slot.SlotGroupId.Value,
+            slot.ParentSystemId.Value,
             slot.Address,
             slot.DisplayName,
             slot.MaterialKind.ToString(),
@@ -120,12 +112,25 @@ public static class AutomationTopologyMapper
             element.Kind.ToString(),
             element.Target.Kind.ToString(),
             element.Target.TargetId,
+            element.ParentElementId?.Value,
             element.X,
             element.Y,
             element.Width,
             element.Height,
             element.RotationDegrees,
-            element.LayerId,
-            element.Label);
+            element.ZIndex,
+            ToSortedDictionary(element.Style));
+    }
+
+    private static SortedDictionary<string, string> ToSortedDictionary(
+        IReadOnlyDictionary<string, string> source)
+    {
+        var result = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in source)
+        {
+            result.Add(pair.Key, pair.Value);
+        }
+
+        return result;
     }
 }

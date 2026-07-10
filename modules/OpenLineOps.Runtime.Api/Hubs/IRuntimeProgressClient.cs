@@ -8,6 +8,8 @@ public interface IRuntimeProgressClient
 
     Task StationStatusChanged(RuntimeStationStatusResponse status);
 
+    Task TargetStatusChanged(RuntimeTargetStatusResponse status);
+
     Task AlarmRaised(RuntimeAlarmResponse alarm);
 
     Task AlarmAcknowledged(RuntimeAlarmResponse alarm);

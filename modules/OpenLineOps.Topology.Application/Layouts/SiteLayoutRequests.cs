@@ -13,13 +13,14 @@ public sealed record AddSiteLayoutElementRequest(
     string Kind,
     string TargetKind,
     string TargetId,
+    string? ParentElementId,
     double X,
     double Y,
     double Width,
     double Height,
     double RotationDegrees,
-    string LayerId,
-    string Label);
+    int ZIndex,
+    IReadOnlyDictionary<string, string> Style);
 
 public sealed record UpdateSiteLayoutElementGeometryRequest(
     double X,
@@ -27,3 +28,7 @@ public sealed record UpdateSiteLayoutElementGeometryRequest(
     double Width,
     double Height,
     double RotationDegrees);
+
+public sealed record UpdateSiteLayoutElementPresentationRequest(
+    int? ZIndex,
+    IReadOnlyDictionary<string, string>? Style);

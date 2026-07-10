@@ -3,7 +3,7 @@ namespace OpenLineOps.Runtime.Api.Models;
 public sealed record RuntimeAlarmResponse(
     Guid AlarmId,
     Guid SessionId,
-    string StationId,
+    string StationSystemId,
     string Severity,
     string Code,
     string Message,

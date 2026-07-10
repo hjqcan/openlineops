@@ -153,7 +153,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         await repository.SaveAsync(scope, configuration.Workspace);
         var path = FindDocumentPath(_projectDirectory, "resourceId", WorkspaceIdValue);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        document["schemaVersion"] = 1;
+        document["schemaVersion"] = 2;
         await File.WriteAllTextAsync(path, document.ToJsonString());
 
         await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -270,7 +270,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             "*.json",
             SearchOption.AllDirectories);
         Assert.Equal(4, documents.Length);
-        Assert.All(documents, path => AssertPortableV2Document(path, applicationId));
+        Assert.All(documents, path => AssertPortableV3Document(path, applicationId));
 
         CopyDirectoryByteForByte(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
         AssertApplicationFoldersHaveEqualBytes(sourceScope.ApplicationRootPath, destinationScope.ApplicationRootPath);
@@ -403,6 +403,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
 
         var station = StationProfile.Create(
             new StationProfileId(StationProfileIdValue),
+            "station.eol",
             $"{prefix} Station");
         AssertAccepted(station.AddDeviceBinding(DeviceBinding.Create(
             new DeviceBindingId("binding.primary"),
@@ -498,12 +499,12 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         }
     }
 
-    private static void AssertPortableV2Document(string path, string applicationId)
+    private static void AssertPortableV3Document(string path, string applicationId)
     {
         using var document = JsonDocument.Parse(File.ReadAllText(path));
         var root = document.RootElement;
 
-        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(applicationId, root.GetProperty("applicationId").GetString());
         Assert.False(root.TryGetProperty("projectId", out _));
     }

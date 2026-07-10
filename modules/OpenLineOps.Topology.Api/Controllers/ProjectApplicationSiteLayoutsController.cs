@@ -7,9 +7,11 @@ using OpenLineOps.Topology.Application.ProjectWorkspaces;
 using ApiAddElementRequest = OpenLineOps.Topology.Api.Models.AddSiteLayoutElementRequest;
 using ApiCreateLayoutRequest = OpenLineOps.Topology.Api.Models.CreateSiteLayoutRequest;
 using ApiUpdateElementGeometryRequest = OpenLineOps.Topology.Api.Models.UpdateSiteLayoutElementGeometryRequest;
+using ApiUpdateElementPresentationRequest = OpenLineOps.Topology.Api.Models.UpdateSiteLayoutElementPresentationRequest;
 using AppAddElementRequest = OpenLineOps.Topology.Application.Layouts.AddSiteLayoutElementRequest;
 using AppCreateLayoutRequest = OpenLineOps.Topology.Application.Layouts.CreateSiteLayoutRequest;
 using AppUpdateElementGeometryRequest = OpenLineOps.Topology.Application.Layouts.UpdateSiteLayoutElementGeometryRequest;
+using AppUpdateElementPresentationRequest = OpenLineOps.Topology.Application.Layouts.UpdateSiteLayoutElementPresentationRequest;
 
 namespace OpenLineOps.Topology.Api.Controllers;
 
@@ -36,7 +38,7 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
         ApiCreateLayoutRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = SiteLayoutsController.Validate(request);
+        var validationErrors = SiteLayoutApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -60,7 +62,7 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
             return ToProblem(result.Error);
         }
 
-        var response = SiteLayoutsController.ToResponse(result.Value);
+        var response = SiteLayoutApiContract.ToResponse(result.Value);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/layouts/{Uri.EscapeDataString(response.LayoutId)}",
             response);
@@ -81,7 +83,7 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(SiteLayoutsController.ToResponse(result.Value));
+            : Ok(SiteLayoutApiContract.ToResponse(result.Value));
     }
 
     [HttpPost("{layoutId}/elements")]
@@ -96,7 +98,7 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
         ApiAddElementRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = SiteLayoutsController.Validate(request);
+        var validationErrors = SiteLayoutApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -110,21 +112,22 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
                 new AppAddElementRequest(
                     request.ElementId!,
                     request.Kind!,
-                    request.TargetKind!,
-                    request.TargetId!,
+                    request.Target!.Kind!,
+                    request.Target.TargetId!,
+                    request.ParentElementId,
                     request.X!.Value,
                     request.Y!.Value,
                     request.Width!.Value,
                     request.Height!.Value,
                     request.RotationDegrees!.Value,
-                    request.LayerId!,
-                    request.Label!),
+                    request.ZIndex!.Value,
+                    request.Style!),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(SiteLayoutsController.ToResponse(result.Value));
+            : Ok(SiteLayoutApiContract.ToResponse(result.Value));
     }
 
     [HttpPut("{layoutId}/elements/{elementId}/geometry")]
@@ -139,7 +142,7 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
         ApiUpdateElementGeometryRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = SiteLayoutsController.Validate(request);
+        var validationErrors = SiteLayoutApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -162,7 +165,37 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(SiteLayoutsController.ToResponse(result.Value));
+            : Ok(SiteLayoutApiContract.ToResponse(result.Value));
+    }
+
+    [HttpPatch("{layoutId}/elements/{elementId}")]
+    [ProducesResponseType<SiteLayoutResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<SiteLayoutResponse>> UpdateElementPresentationAsync(
+        string projectId,
+        string applicationId,
+        string layoutId,
+        string elementId,
+        ApiUpdateElementPresentationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = SiteLayoutApiContract.Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService.UpdateLayoutElementPresentationAsync(
+            projectId,
+            applicationId,
+            layoutId,
+            elementId,
+            new AppUpdateElementPresentationRequest(request.ZIndex, request.Style),
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(SiteLayoutApiContract.ToResponse(result.Value));
     }
 
     private ObjectResult ToProblem(ApplicationError error)

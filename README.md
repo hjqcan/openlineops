@@ -12,14 +12,22 @@ This project is in early platform development.
 - DDD foundation: local `lib/NetDevPack` integrated through OpenLineOps domain abstractions while preserving strong typed aggregate IDs, with shared EF Core data foundations, integration-event DTO conversion, CAP-backed EventBus publishing, a compileable bounded-context living template, a production Devices EF adapter, and a repo-local modular DDD bounded-context scaffolder in place.
 - Desktop: Electron, React, TypeScript, Vite, and SignalR, with a VS-inspired
   New/Open/Recent Start Center before a project is opened and an IDE workbench
-  scoped to the active project and application after open.
+  scoped to the active project and application after open. The independent 2D
+  Layout workbench is a hierarchical drag editor in Edit mode and the default
+  live production overview in Run mode.
+- Topology: strict Application-local topology v2 uses one canonical
+  `AutomationSystem` identity. `StationSystem` derives from it; nested Systems,
+  SlotGroups, and Slots share a parent-local 2D layout so moving a Station moves
+  its complete visual subtree. Production, Flow, Runtime, and Trace use the same
+  Station `systemId`.
 - Persistence: in-memory and SQLite for local development, PostgreSQL adapters for deployment mode, and reusable `OpenLineOps.Infrastructure.Data.Core` package adoption through the `OpenLineOps.SampleInspection` template and Devices `EfSqlite` provider.
 - Runtime: immutable Project Snapshot launch verifies the current release manifest,
   canonical frozen Flow IR, release-scoped process/configuration source, and
   release-scoped device routing. Blockly actions are statically compiled into
   Flow IR actions with source block identity and enter the same runtime command,
   monitoring, timeout, failure, cancellation, and trace lifecycle as native
-  commands. Python remains an explicit isolated dynamic-action node.
+  commands. Python remains an explicit isolated published action and cannot
+  emit an undeclared runtime action plan.
 - Blockly and Python: `Blockly` and `PythonScript` are separate node kinds.
   Blockly workspaces are the sole visual source and compile server-side from
   canonical Runtime Action Contracts; no Python is generated or persisted for
@@ -28,7 +36,7 @@ This project is in early platform development.
   content-addressed provider packages; runtime has no live-inventory fallback.
 - Production lines: the independent `OpenLineOps.Production` bounded context
   stores strict Application-local line definitions under `production/lines`.
-  Each definition composes a DUT model, topology-bound workstations, contiguous
+  Each definition composes a DUT model, Station-System-bound workstations, contiguous
   stages, published flows, and optional external-test adapters. Vendor programs
   are declared as Application executables or exact providers and are invoked only
   through a workstation-targeted Flow IR command.
@@ -56,7 +64,7 @@ This project is in early platform development.
 - `src/OpenLineOps.ScriptWorker`: process-isolated Python script worker entry point.
 - `src/OpenLineOps.Runner`: one-shot headless immutable Project Snapshot runner.
 - `shared`: cross-cutting contracts, DDD/application abstractions, shared infrastructure foundations, and CAP-backed EventBus integration with optional EF Core transaction coordination.
-- `modules`: bounded contexts for projects, topology, processes, engineering,
+- `modules`: bounded contexts for projects, topology, production, processes, engineering,
   runtime, devices, operations, traceability, and plugins.
 - `apps/desktop`: Electron desktop application.
 - `lib/pythonscript`: in-repository Python scripting component used for Python script validation and execution integration.
@@ -113,10 +121,9 @@ and returns a stable exit code. It accepts a project directory or
 draft-only projects or snapshots without an immutable release.
 See `docs/automation-ide-product-shell.md` for the current codes and limitations.
 
-The production runtime-start path is the Project Snapshot endpoint. The
-development-only simulated and direct process-definition start endpoints return `403` unless both
-the host environment is `Development` or `Test` and
-`OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is explicitly configured.
+The only runtime-start path is the Project Snapshot endpoint (or the Runner,
+which opens the same immutable release). There are no simulated, direct
+process-definition, global-repository, or editable-source fallback start paths.
 
 If Electron binary download is blocked in your network, retry with:
 

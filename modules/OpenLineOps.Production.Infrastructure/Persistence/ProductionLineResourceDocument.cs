@@ -1,3 +1,5 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+
 namespace OpenLineOps.Production.Infrastructure.Persistence;
 
 internal sealed record ProductionLineResourceDocument(
@@ -14,7 +16,7 @@ internal sealed record ProductionLineResourceDocument(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc)
 {
-    public const string CurrentSchemaVersion = "openlineops.production-line/v1";
+    public const string CurrentSchemaVersion = ApplicationResourceSchemaVersions.ProductionLine;
 
     public const string Kind = "OpenLineOps.ProductionLine";
 }
@@ -27,8 +29,7 @@ internal sealed record DutModelDocument(
 internal sealed record WorkstationDocument(
     string WorkstationId,
     string DisplayName,
-    string TopologyStationNodeId,
-    string TopologySystemModuleId);
+    string StationSystemId);
 
 internal sealed record ProcessStageDocument(
     string StageId,

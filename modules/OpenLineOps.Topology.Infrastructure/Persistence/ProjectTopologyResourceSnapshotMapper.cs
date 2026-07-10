@@ -3,10 +3,9 @@ using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
 using OpenLineOps.Topology.Domain.Layouts;
-using OpenLineOps.Topology.Domain.Modules;
-using OpenLineOps.Topology.Domain.Nodes;
 using OpenLineOps.Topology.Domain.Operations;
 using OpenLineOps.Topology.Domain.Slots;
+using OpenLineOps.Topology.Domain.Systems;
 using OpenLineOps.Topology.Domain.Topology;
 
 namespace OpenLineOps.Topology.Infrastructure.Persistence;
@@ -17,29 +16,22 @@ internal static class ProjectTopologyResourceSnapshotMapper
         ProjectApplicationWorkspaceScope scope,
         AutomationTopology topology)
     {
-        var slotGroupsBySlotId = topology.SlotGroups
-            .SelectMany(group => group.SlotIds.Select(slotId => (slotId, group.Id)))
-            .ToDictionary(candidate => candidate.slotId, candidate => candidate.Id);
-
         return new ProjectAutomationTopologyDocument(
-            ProjectAutomationTopologyDocument.CurrentFormatVersion,
+            ProjectAutomationTopologyDocument.CurrentSchemaVersion,
             ProjectAutomationTopologyDocument.Kind,
             scope.ApplicationId,
             topology.Id.Value,
             topology.DisplayName,
             topology.CreatedAtUtc,
-            topology.Nodes.Select(node => new EquipmentNodeDocument(
-                node.Id.Value,
-                node.ParentId?.Value,
-                node.Kind.ToString(),
-                node.DisplayName)).ToArray(),
-            topology.Modules.Select(module => new AutomationModuleDocument(
-                module.Id.Value,
-                module.NodeId.Value,
-                module.ModuleKind,
-                module.DisplayName,
-                module.RequiredCapabilities.Select(capabilityId => capabilityId.Value).ToArray(),
-                module.ProvidedCapabilities.Select(capabilityId => capabilityId.Value).ToArray())).ToArray(),
+            topology.Systems.Select(system => new AutomationSystemDocument(
+                system.Id.Value,
+                system.ParentSystemId?.Value,
+                system.Kind.ToString(),
+                system.SystemType,
+                system.DisplayName,
+                system.RequiredCapabilities.Select(id => id.Value).ToArray(),
+                system.ProvidedCapabilities.Select(id => id.Value).ToArray(),
+                ToSortedDictionary(system.Metadata))).ToArray(),
             topology.Capabilities.Select(capability => new CapabilityContractDocument(
                 capability.Id.Value,
                 capability.CommandName,
@@ -55,16 +47,14 @@ internal static class ProjectTopologyResourceSnapshotMapper
                 binding.ProviderKey)).ToArray(),
             topology.SlotGroups.Select(group => new SlotGroupDocument(
                 group.Id.Value,
-                group.ParentNodeId.Value,
+                group.ParentSystemId.Value,
                 group.DisplayName,
                 group.Kind.ToString(),
                 group.Capacity)).ToArray(),
             topology.Slots.Select(slot => new SlotDefinitionDocument(
-                slotGroupsBySlotId.TryGetValue(slot.Id, out var slotGroupId)
-                    ? slotGroupId.Value
-                    : throw new InvalidDataException($"Slot {slot.Id} is not assigned to a slot group."),
                 slot.Id.Value,
-                slot.ParentNodeId.Value,
+                slot.SlotGroupId.Value,
+                slot.ParentSystemId.Value,
                 slot.Address,
                 slot.DisplayName,
                 slot.MaterialKind.ToString(),
@@ -77,20 +67,24 @@ internal static class ProjectTopologyResourceSnapshotMapper
     {
         ValidateIdentity(
             scope,
-            document.FormatVersion,
-            ProjectAutomationTopologyDocument.CurrentFormatVersion,
+            document.SchemaVersion,
+            ProjectAutomationTopologyDocument.CurrentSchemaVersion,
             document.ResourceKind,
             ProjectAutomationTopologyDocument.Kind,
             document.ApplicationId);
+
+        var systems = Required(document.Systems, nameof(document.Systems));
+        var capabilities = Required(document.Capabilities, nameof(document.Capabilities));
+        var bindings = Required(document.DriverBindings, nameof(document.DriverBindings));
+        var groups = Required(document.SlotGroups, nameof(document.SlotGroups));
+        var slots = Required(document.Slots, nameof(document.Slots));
 
         var topology = AutomationTopology.Create(
             new AutomationTopologyId(document.TopologyId),
             document.DisplayName,
             document.CreatedAtUtc);
 
-        RestoreNodes(topology, document.Nodes ?? []);
-
-        foreach (var capability in document.Capabilities ?? [])
+        foreach (var capability in capabilities)
         {
             if (!Version.TryParse(capability.Version, out var version))
             {
@@ -98,62 +92,47 @@ internal static class ProjectTopologyResourceSnapshotMapper
                     $"Capability {capability.CapabilityId} has invalid version '{capability.Version}'.");
             }
 
-            EnsureSucceeded(
-                topology.AddCapability(CapabilityContract.Create(
-                    new CapabilityContractId(capability.CapabilityId),
-                    capability.CommandName,
-                    version,
-                    capability.InputSchema,
-                    capability.OutputSchema,
-                    TimeSpan.FromTicks(capability.TimeoutTicks),
-                    ParseEnum<SafetyClass>(capability.SafetyClass, "safety class"))));
+            EnsureSucceeded(topology.AddCapability(CapabilityContract.Create(
+                new CapabilityContractId(capability.CapabilityId),
+                capability.CommandName,
+                version,
+                capability.InputSchema,
+                capability.OutputSchema,
+                TimeSpan.FromTicks(capability.TimeoutTicks),
+                ParseEnum<SafetyClass>(capability.SafetyClass, "safety class"))));
         }
 
-        foreach (var module in document.Modules ?? [])
+        RestoreSystems(topology, systems);
+
+        foreach (var binding in bindings)
         {
-            EnsureSucceeded(
-                topology.AddModule(AutomationModule.Create(
-                    new AutomationModuleId(module.ModuleId),
-                    new EquipmentNodeId(module.NodeId),
-                    module.ModuleKind,
-                    module.DisplayName,
-                    (module.RequiredCapabilityIds ?? []).Select(id => new CapabilityContractId(id)),
-                    (module.ProvidedCapabilityIds ?? []).Select(id => new CapabilityContractId(id)))));
+            EnsureSucceeded(topology.AddDriverBinding(DriverBinding.Create(
+                new DriverBindingId(binding.BindingId),
+                new CapabilityContractId(binding.CapabilityId),
+                ParseEnum<DriverProviderKind>(binding.ProviderKind, "driver provider kind"),
+                binding.ProviderKey)));
         }
 
-        foreach (var binding in document.DriverBindings ?? [])
+        foreach (var group in groups)
         {
-            EnsureSucceeded(
-                topology.AddDriverBinding(DriverBinding.Create(
-                    new DriverBindingId(binding.BindingId),
-                    new CapabilityContractId(binding.CapabilityId),
-                    ParseEnum<DriverProviderKind>(binding.ProviderKind, "driver provider kind"),
-                    binding.ProviderKey)));
+            EnsureSucceeded(topology.AddSlotGroup(SlotGroup.Create(
+                new SlotGroupId(group.SlotGroupId),
+                new AutomationSystemId(group.ParentSystemId),
+                group.DisplayName,
+                ParseEnum<SlotGroupKind>(group.Kind, "slot group kind"),
+                group.Capacity)));
         }
 
-        foreach (var group in document.SlotGroups ?? [])
+        foreach (var slot in slots)
         {
-            EnsureSucceeded(
-                topology.AddSlotGroup(SlotGroup.Create(
-                    new SlotGroupId(group.SlotGroupId),
-                    new EquipmentNodeId(group.ParentNodeId),
-                    group.DisplayName,
-                    ParseEnum<SlotGroupKind>(group.Kind, "slot group kind"),
-                    group.Capacity)));
-        }
-
-        foreach (var slot in document.Slots ?? [])
-        {
-            EnsureSucceeded(
-                topology.AddSlotToGroup(
-                    new SlotGroupId(slot.SlotGroupId),
-                    SlotDefinition.Create(
-                        new SlotDefinitionId(slot.SlotId),
-                        new EquipmentNodeId(slot.ParentNodeId),
-                        slot.Address,
-                        slot.DisplayName,
-                        ParseEnum<SlotMaterialKind>(slot.MaterialKind, "slot material kind"),
-                        slot.IsEnabled)));
+            EnsureSucceeded(topology.AddSlot(SlotDefinition.Create(
+                new SlotDefinitionId(slot.SlotId),
+                new SlotGroupId(slot.SlotGroupId),
+                new AutomationSystemId(slot.ParentSystemId),
+                slot.Address,
+                slot.DisplayName,
+                ParseEnum<SlotMaterialKind>(slot.MaterialKind, "slot material kind"),
+                slot.IsEnabled)));
         }
 
         return topology;
@@ -164,7 +143,7 @@ internal static class ProjectTopologyResourceSnapshotMapper
         SiteLayout layout)
     {
         return new ProjectSiteLayoutDocument(
-            ProjectSiteLayoutDocument.CurrentFormatVersion,
+            ProjectSiteLayoutDocument.CurrentSchemaVersion,
             ProjectSiteLayoutDocument.Kind,
             scope.ApplicationId,
             layout.Id.Value,
@@ -176,15 +155,15 @@ internal static class ProjectTopologyResourceSnapshotMapper
             layout.Elements.Select(element => new SiteLayoutElementDocument(
                 element.Id.Value,
                 element.Kind.ToString(),
-                element.Target.Kind.ToString(),
-                element.Target.TargetId,
+                new LayoutTargetDocument(element.Target.Kind.ToString(), element.Target.TargetId),
+                element.ParentElementId?.Value,
                 element.X,
                 element.Y,
                 element.Width,
                 element.Height,
                 element.RotationDegrees,
-                element.LayerId,
-                element.Label)).ToArray());
+                element.ZIndex,
+                ToSortedDictionary(element.Style))).ToArray());
     }
 
     public static SiteLayout ToLayout(
@@ -193,8 +172,8 @@ internal static class ProjectTopologyResourceSnapshotMapper
     {
         ValidateIdentity(
             scope,
-            document.FormatVersion,
-            ProjectSiteLayoutDocument.CurrentFormatVersion,
+            document.SchemaVersion,
+            ProjectSiteLayoutDocument.CurrentSchemaVersion,
             document.ResourceKind,
             ProjectSiteLayoutDocument.Kind,
             document.ApplicationId);
@@ -207,57 +186,86 @@ internal static class ProjectTopologyResourceSnapshotMapper
             document.CanvasHeight,
             document.Units);
 
-        foreach (var element in document.Elements ?? [])
+        var remaining = Required(document.Elements, nameof(document.Elements)).ToList();
+        while (remaining.Count > 0)
         {
-            EnsureSucceeded(
-                layout.AddElement(SiteLayoutElement.Create(
+            var restored = 0;
+            foreach (var element in remaining.ToArray())
+            {
+                if (element.ParentElementId is not null
+                    && layout.Elements.All(candidate => candidate.Id.Value != element.ParentElementId))
+                {
+                    continue;
+                }
+
+                if (element.Target is null)
+                {
+                    throw new InvalidDataException($"Layout element {element.ElementId} has no target.");
+                }
+
+                EnsureSucceeded(layout.AddElement(SiteLayoutElement.Create(
                     new LayoutElementId(element.ElementId),
                     ParseEnum<LayoutElementKind>(element.Kind, "layout element kind"),
                     new LayoutTargetReference(
-                        ParseEnum<LayoutTargetKind>(element.TargetKind, "layout target kind"),
-                        element.TargetId),
+                        ParseEnum<LayoutTargetKind>(element.Target.Kind, "layout target kind"),
+                        element.Target.TargetId),
+                    element.ParentElementId is null ? null : new LayoutElementId(element.ParentElementId),
                     element.X,
                     element.Y,
                     element.Width,
                     element.Height,
                     element.RotationDegrees,
-                    element.LayerId,
-                    element.Label)));
+                    element.ZIndex,
+                    Required(element.Style, $"{nameof(element.Style)} for {element.ElementId}"))));
+                remaining.Remove(element);
+                restored++;
+            }
+
+            if (restored == 0)
+            {
+                throw new InvalidDataException(
+                    $"Layout {layout.Id} contains elements with missing or cyclic parents.");
+            }
         }
 
         return layout;
     }
 
-    private static void RestoreNodes(
+    private static void RestoreSystems(
         AutomationTopology topology,
-        IReadOnlyCollection<EquipmentNodeDocument> nodeDocuments)
+        IReadOnlyCollection<AutomationSystemDocument> documents)
     {
-        var remaining = nodeDocuments.ToList();
+        var remaining = documents.ToList();
         while (remaining.Count > 0)
         {
-            var restoredInPass = 0;
-            foreach (var node in remaining.ToArray())
+            var restored = 0;
+            foreach (var system in remaining.ToArray())
             {
-                if (node.ParentNodeId is not null
-                    && topology.Nodes.All(candidate => candidate.Id.Value != node.ParentNodeId))
+                if (system.ParentSystemId is not null
+                    && topology.Systems.All(candidate => candidate.Id.Value != system.ParentSystemId))
                 {
                     continue;
                 }
 
-                EnsureSucceeded(
-                    topology.AddEquipmentNode(EquipmentNode.Create(
-                        new EquipmentNodeId(node.NodeId),
-                        node.ParentNodeId is null ? null : new EquipmentNodeId(node.ParentNodeId),
-                        ParseEnum<EquipmentNodeKind>(node.Kind, "equipment node kind"),
-                        node.DisplayName)));
-                remaining.Remove(node);
-                restoredInPass++;
+                EnsureSucceeded(topology.AddSystem(AutomationSystem.Create(
+                    new AutomationSystemId(system.SystemId),
+                    system.ParentSystemId is null ? null : new AutomationSystemId(system.ParentSystemId),
+                    ParseEnum<SystemKind>(system.Kind, "system kind"),
+                    system.SystemType,
+                    system.DisplayName,
+                    Required(system.RequiredCapabilityIds, $"required capabilities for {system.SystemId}")
+                        .Select(id => new CapabilityContractId(id)),
+                    Required(system.ProvidedCapabilityIds, $"provided capabilities for {system.SystemId}")
+                        .Select(id => new CapabilityContractId(id)),
+                    Required(system.Metadata, $"metadata for {system.SystemId}"))));
+                remaining.Remove(system);
+                restored++;
             }
 
-            if (restoredInPass == 0)
+            if (restored == 0)
             {
                 throw new InvalidDataException(
-                    $"Topology {topology.Id} contains nodes with missing or cyclic parents.");
+                    $"Topology {topology.Id} contains systems with missing or cyclic parents.");
             }
         }
     }
@@ -265,9 +273,27 @@ internal static class ProjectTopologyResourceSnapshotMapper
     private static TEnum ParseEnum<TEnum>(string value, string field)
         where TEnum : struct, Enum
     {
-        return Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed)
+        return Enum.TryParse<TEnum>(value, ignoreCase: false, out var parsed) && Enum.IsDefined(parsed)
             ? parsed
             : throw new InvalidDataException($"Unsupported {field} '{value}'.");
+    }
+
+    private static T Required<T>(T? value, string field)
+        where T : class
+    {
+        return value ?? throw new InvalidDataException($"Project resource field '{field}' is required.");
+    }
+
+    private static SortedDictionary<string, string> ToSortedDictionary(
+        IReadOnlyDictionary<string, string> source)
+    {
+        var result = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in source)
+        {
+            result.Add(pair.Key, pair.Value);
+        }
+
+        return result;
     }
 
     private static void EnsureSucceeded(TopologyOperationResult result)
@@ -280,16 +306,16 @@ internal static class ProjectTopologyResourceSnapshotMapper
 
     private static void ValidateIdentity(
         ProjectApplicationWorkspaceScope scope,
-        int actualFormatVersion,
-        int currentFormatVersion,
+        string actualSchemaVersion,
+        string expectedSchemaVersion,
         string actualResourceKind,
         string expectedResourceKind,
         string actualApplicationId)
     {
-        if (actualFormatVersion != currentFormatVersion)
+        if (!string.Equals(actualSchemaVersion, expectedSchemaVersion, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Project resource format version {actualFormatVersion} is not supported.");
+                $"Project resource schema '{actualSchemaVersion}' is not supported; expected '{expectedSchemaVersion}'.");
         }
 
         if (!string.Equals(actualResourceKind, expectedResourceKind, StringComparison.Ordinal))

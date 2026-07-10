@@ -2,6 +2,7 @@ using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -103,65 +104,30 @@ public sealed class RuntimeSessionTests
     }
 
     [Fact]
-    public void ChildStepRequiresRunningParentAndCarriesSemanticIdentityToCommand()
+    public void StepAndCommandCarryRequiredActionAndTargetIdentity()
     {
         var session = CreateRunningSession();
-        var parent = session.StartStep(
+        var target = new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester");
+        var step = session.StartStep(
             RuntimeStepId.New(),
-            new RuntimeNodeId("script-node"),
-            "Script",
+            new RuntimeNodeId("inspect"),
+            "Inspect",
             StartedAtUtc.AddSeconds(1),
-            new RuntimeActionId("script-node:action:1"));
-        var child = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("script-node:slot:node:1"),
-            "Move axis",
-            StartedAtUtc.AddSeconds(2),
-            new RuntimeActionId("script-node:action:1:child:1"),
-            parent.Id,
-            dynamicSequence: 1);
+            new RuntimeActionId("inspect:action:1"),
+            target);
         var command = session.CreateCommand(
             RuntimeCommandId.New(),
-            child.Id,
-            new RuntimeCapabilityId("motion.axis"),
-            "MoveAxis",
-            StartedAtUtc.AddSeconds(3),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(2),
             TimeSpan.FromSeconds(5));
 
-        Assert.Equal(parent.Id, child.ParentStepId);
-        Assert.Equal(1, child.DynamicSequence);
-        Assert.Equal(child.ActionId, command.ActionId);
-        Assert.Throws<InvalidOperationException>(() => session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("script-node:slot:different-node"),
-            "Duplicate sequence",
-            StartedAtUtc.AddSeconds(3),
-            new RuntimeActionId("script-node:action:1:different-action"),
-            parent.Id,
-            dynamicSequence: 1));
-        Assert.Throws<InvalidOperationException>(() => session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("script-node:slot:different-node-2"),
-            "Duplicate action",
-            StartedAtUtc.AddSeconds(3),
-            child.ActionId,
-            parent.Id,
-            dynamicSequence: 2));
-
-        var parentCompletedEarly = session.CompleteStep(parent.Id, StartedAtUtc.AddSeconds(4));
-        Assert.False(parentCompletedEarly.Succeeded);
-        Assert.Equal("Runtime.StepChildrenStillRunning", parentCompletedEarly.Code);
-        Assert.True(session.CancelCommand(command.Id, StartedAtUtc.AddSeconds(5)).Succeeded);
-        Assert.True(session.CancelStep(child.Id, StartedAtUtc.AddSeconds(5)).Succeeded);
-        Assert.True(session.CompleteStep(parent.Id, StartedAtUtc.AddSeconds(6)).Succeeded);
-        Assert.Throws<InvalidOperationException>(() => session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("script-node:slot:node:2"),
-            "Second child",
-            StartedAtUtc.AddSeconds(7),
-            new RuntimeActionId("script-node:action:1:child:2"),
-            parent.Id,
-            dynamicSequence: 2));
+        Assert.Equal("inspect:action:1", step.ActionId.Value);
+        Assert.Equal(RuntimeTargetKinds.System, step.TargetKind);
+        Assert.Equal("system.tester", step.TargetId);
+        Assert.Equal(step.ActionId, command.ActionId);
+        Assert.Equal(step.Target, command.Target);
     }
 
     private static RuntimeSession CreateRunningSession()
@@ -183,6 +149,7 @@ public sealed class RuntimeSessionTests
             new ProcessVersionId("process-packaging@1.0.0"),
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RecipeSnapshotId("recipe-20260629-001"),
-            StartedAtUtc.AddMinutes(-1));
+            StartedAtUtc.AddMinutes(-1),
+            RuntimeTestReleaseIdentity.TraceMetadata());
     }
 }

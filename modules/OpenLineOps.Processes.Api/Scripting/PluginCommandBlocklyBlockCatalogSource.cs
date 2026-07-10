@@ -120,12 +120,10 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
                         name = "TARGET_KIND",
                         options = new[]
                         {
-                            new[] { "Module", RuntimeActionTargetKinds.AutomationModule },
-                            new[] { "Equipment", RuntimeActionTargetKinds.EquipmentNode },
+                            new[] { "System", RuntimeActionTargetKinds.System },
                             new[] { "Slot group", RuntimeActionTargetKinds.SlotGroup },
                             new[] { "Slot", RuntimeActionTargetKinds.Slot },
                             new[] { "DUT", RuntimeActionTargetKinds.Dut },
-                            new[] { "System", RuntimeActionTargetKinds.System },
                             new[] { "Capability", RuntimeActionTargetKinds.Capability },
                             new[] { "Driver", RuntimeActionTargetKinds.Driver }
                         }

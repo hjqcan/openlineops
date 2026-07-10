@@ -7,6 +7,6 @@ public static class EngineeringApiMvcBuilderExtensions
 {
     public static IMvcBuilder AddOpenLineOpsEngineeringApi(this IMvcBuilder mvcBuilder)
     {
-        return mvcBuilder.AddApplicationPart(typeof(EngineeringConfigurationController).Assembly);
+        return mvcBuilder.AddApplicationPart(typeof(ProjectApplicationEngineeringConfigurationController).Assembly);
     }
 }

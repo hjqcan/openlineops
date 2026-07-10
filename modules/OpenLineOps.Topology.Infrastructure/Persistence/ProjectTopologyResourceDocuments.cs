@@ -1,36 +1,33 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+
 namespace OpenLineOps.Topology.Infrastructure.Persistence;
 
 internal sealed record ProjectAutomationTopologyDocument(
-    int FormatVersion,
+    string SchemaVersion,
     string ResourceKind,
     string ApplicationId,
     string TopologyId,
     string DisplayName,
     DateTimeOffset CreatedAtUtc,
-    EquipmentNodeDocument[] Nodes,
-    AutomationModuleDocument[] Modules,
+    AutomationSystemDocument[] Systems,
     CapabilityContractDocument[] Capabilities,
     DriverBindingDocument[] DriverBindings,
     SlotGroupDocument[] SlotGroups,
     SlotDefinitionDocument[] Slots)
 {
-    public const int CurrentFormatVersion = 2;
+    public const string CurrentSchemaVersion = ApplicationResourceSchemaVersions.AutomationTopology;
     public const string Kind = "OpenLineOps.AutomationTopology";
 }
 
-internal sealed record EquipmentNodeDocument(
-    string NodeId,
-    string? ParentNodeId,
+internal sealed record AutomationSystemDocument(
+    string SystemId,
+    string? ParentSystemId,
     string Kind,
-    string DisplayName);
-
-internal sealed record AutomationModuleDocument(
-    string ModuleId,
-    string NodeId,
-    string ModuleKind,
+    string SystemType,
     string DisplayName,
     string[] RequiredCapabilityIds,
-    string[] ProvidedCapabilityIds);
+    string[] ProvidedCapabilityIds,
+    IReadOnlyDictionary<string, string> Metadata);
 
 internal sealed record CapabilityContractDocument(
     string CapabilityId,
@@ -49,22 +46,22 @@ internal sealed record DriverBindingDocument(
 
 internal sealed record SlotGroupDocument(
     string SlotGroupId,
-    string ParentNodeId,
+    string ParentSystemId,
     string DisplayName,
     string Kind,
     int Capacity);
 
 internal sealed record SlotDefinitionDocument(
-    string SlotGroupId,
     string SlotId,
-    string ParentNodeId,
+    string SlotGroupId,
+    string ParentSystemId,
     string Address,
     string DisplayName,
     string MaterialKind,
     bool IsEnabled);
 
 internal sealed record ProjectSiteLayoutDocument(
-    int FormatVersion,
+    string SchemaVersion,
     string ResourceKind,
     string ApplicationId,
     string LayoutId,
@@ -75,19 +72,23 @@ internal sealed record ProjectSiteLayoutDocument(
     string Units,
     SiteLayoutElementDocument[] Elements)
 {
-    public const int CurrentFormatVersion = 2;
+    public const string CurrentSchemaVersion = ApplicationResourceSchemaVersions.SiteLayout;
     public const string Kind = "OpenLineOps.SiteLayout";
 }
+
+internal sealed record LayoutTargetDocument(
+    string Kind,
+    string TargetId);
 
 internal sealed record SiteLayoutElementDocument(
     string ElementId,
     string Kind,
-    string TargetKind,
-    string TargetId,
+    LayoutTargetDocument Target,
+    string? ParentElementId,
     double X,
     double Y,
     double Width,
     double Height,
     double RotationDegrees,
-    string LayerId,
-    string Label);
+    int ZIndex,
+    IReadOnlyDictionary<string, string> Style);

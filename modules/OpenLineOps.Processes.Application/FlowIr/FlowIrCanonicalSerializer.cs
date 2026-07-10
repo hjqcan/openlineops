@@ -103,7 +103,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static ApplicationError? Validate(FlowIrDocument document)
     {
-        if (!string.Equals(document.SchemaVersion, FlowIrSchemaVersions.V1, StringComparison.Ordinal))
+        if (!string.Equals(document.SchemaVersion, FlowIrSchemaVersions.V2, StringComparison.Ordinal))
         {
             return Invalid($"Schema version '{document.SchemaVersion}' is not supported.");
         }
@@ -311,7 +311,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
         if (node.Kind != FlowIrNodeKind.Blockly && node.Actions.Length != 1)
         {
-            return Invalid($"Executable node {node.NodeId} must contain exactly one action in Flow IR v1.");
+            return Invalid($"Executable node {node.NodeId} must contain exactly one action in Flow IR v2.");
         }
 
         if (node.Kind == FlowIrNodeKind.Blockly && node.Actions.IsDefaultOrEmpty)
@@ -341,7 +341,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 || compiledAction.Execution.RetryLimit != 0
                 || compiledAction.Execution.CancellationMode != FlowIrCancellationMode.Cooperative)
             {
-                return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by Flow IR v1.");
+                return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by Flow IR v2.");
             }
 
         }
@@ -373,7 +373,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         {
             FlowIrNodeKind.Command when action.Kind == FlowIrActionKind.DeviceCommand
                                          && action.PythonScript is null
-                                         && action.DynamicChildren is null
                                          && action.Source.ContentHash is null => null,
             FlowIrNodeKind.PythonScript when action.Kind == FlowIrActionKind.PythonScript
                                              && string.Equals(
@@ -384,7 +383,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                                                  action.CommandName,
                                                  RuntimeScriptCommand.PythonCommandName,
                                                  StringComparison.Ordinal) =>
-                ValidatePythonAction(node, action),
+                ValidatePythonAction(action),
             _ => Invalid($"Action {action.ActionId} kind does not match node kind {node.Kind}.")
         };
     }
@@ -404,7 +403,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         {
             if (action.Kind != FlowIrActionKind.DeviceCommand
                 || action.PythonScript is not null
-                || action.DynamicChildren is not null
                 || action.Source.ElementKind != FlowIrSourceElementKind.BlocklyBlock
                 || !IsCanonicalValue(action.Source.ElementId)
                 || !blockIds.Add(action.Source.ElementId)
@@ -428,10 +426,9 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         return null;
     }
 
-    private static ApplicationError? ValidatePythonAction(FlowIrNode node, FlowIrAction action)
+    private static ApplicationError? ValidatePythonAction(FlowIrAction action)
     {
         var script = action.PythonScript;
-        var slot = action.DynamicChildren;
         if (script is null
             || !string.Equals(script.Language, "Python", StringComparison.Ordinal)
             || string.IsNullOrWhiteSpace(script.SourceCode)
@@ -449,19 +446,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         if (!string.Equals(script.SourceHash, computedSourceHash, StringComparison.Ordinal))
         {
             return Invalid($"Python action {action.ActionId} source hash does not match its UTF-8 source code.");
-        }
-
-        if (slot is null
-            || !string.Equals(slot.SlotId, $"{action.ActionId}:automation-plan", StringComparison.Ordinal)
-            || slot.ExpansionKind != FlowIrDynamicActionExpansionKind.RuntimeAutomationPlan
-            || !string.Equals(slot.ChildActionIdPrefix, $"{action.ActionId}:child:", StringComparison.Ordinal)
-            || slot.SequenceBase != 1
-            || slot.IsCompileTimeResolved
-            || slot.SourceMappingMode != FlowIrChildSourceMappingMode.ContainerOnly
-            || slot.Source is null
-            || slot.Source != node.Source)
-        {
-            return Invalid($"Python action {action.ActionId} dynamic child slot is invalid.");
         }
 
         return null;
@@ -606,16 +590,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
             WritePythonScript(writer, action.PythonScript);
         }
 
-        writer.WritePropertyName("dynamicChildren");
-        if (action.DynamicChildren is null)
-        {
-            writer.WriteNullValue();
-        }
-        else
-        {
-            WriteDynamicChildren(writer, action.DynamicChildren);
-        }
-
         writer.WritePropertyName("source");
         WriteSource(writer, action.Source);
         writer.WriteEndObject();
@@ -628,20 +602,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         writer.WriteString("sourceCode", script.SourceCode);
         writer.WriteString("sourceHash", script.SourceHash);
         writer.WriteString("version", script.Version);
-        writer.WriteEndObject();
-    }
-
-    private static void WriteDynamicChildren(Utf8JsonWriter writer, FlowIrDynamicActionSlot slot)
-    {
-        writer.WriteStartObject();
-        writer.WriteString("slotId", slot.SlotId);
-        writer.WriteString("expansionKind", ExpansionKind(slot.ExpansionKind));
-        writer.WriteString("childActionIdPrefix", slot.ChildActionIdPrefix);
-        writer.WriteNumber("sequenceBase", slot.SequenceBase);
-        writer.WriteBoolean("isCompileTimeResolved", slot.IsCompileTimeResolved);
-        writer.WriteString("sourceMappingMode", SourceMappingMode(slot.SourceMappingMode));
-        writer.WritePropertyName("source");
-        WriteSource(writer, slot.Source);
         writer.WriteEndObject();
     }
 
@@ -711,12 +671,10 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static string TargetKind(FlowIrTargetReferenceKind value) => value switch
     {
-        FlowIrTargetReferenceKind.AutomationModule => "automationModule",
-        FlowIrTargetReferenceKind.EquipmentNode => "equipmentNode",
+        FlowIrTargetReferenceKind.System => "system",
         FlowIrTargetReferenceKind.SlotGroup => "slotGroup",
         FlowIrTargetReferenceKind.Slot => "slot",
         FlowIrTargetReferenceKind.Dut => "dut",
-        FlowIrTargetReferenceKind.System => "system",
         FlowIrTargetReferenceKind.Capability => "capability",
         FlowIrTargetReferenceKind.Driver => "driver",
         _ => throw new InvalidOperationException($"Unsupported Flow IR target kind {value}.")
@@ -726,19 +684,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
     {
         FlowIrCancellationMode.Cooperative => "cooperative",
         _ => throw new InvalidOperationException($"Unsupported Flow IR cancellation mode {value}.")
-    };
-
-    private static string ExpansionKind(FlowIrDynamicActionExpansionKind value) => value switch
-    {
-        FlowIrDynamicActionExpansionKind.RuntimeAutomationPlan => "runtimeAutomationPlan",
-        _ => throw new InvalidOperationException($"Unsupported Flow IR expansion kind {value}.")
-    };
-
-    private static string SourceMappingMode(FlowIrChildSourceMappingMode value) => value switch
-    {
-        FlowIrChildSourceMappingMode.ContainerOnly => "containerOnly",
-        FlowIrChildSourceMappingMode.ExactBlock => "exactBlock",
-        _ => throw new InvalidOperationException($"Unsupported Flow IR source mapping mode {value}.")
     };
 
     private static string LoopPolicy(FlowIrLoopPolicy value) => value switch

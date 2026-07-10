@@ -27,8 +27,7 @@ internal static class ProductionLineResourceMapper
                 .Select(workstation => new WorkstationDocument(
                     workstation.Id.Value,
                     workstation.DisplayName,
-                    workstation.TopologyStationNodeId,
-                    workstation.TopologySystemModuleId))
+                    workstation.StationSystemId))
                 .ToArray(),
             definition.Stages
                 .OrderBy(stage => stage.Sequence)
@@ -76,8 +75,7 @@ internal static class ProductionLineResourceMapper
             document.Workstations.Select(workstation => WorkstationDefinition.Create(
                 new WorkstationId(workstation.WorkstationId),
                 workstation.DisplayName,
-                workstation.TopologyStationNodeId,
-                workstation.TopologySystemModuleId)),
+                workstation.StationSystemId)),
             document.Stages.Select(stage => ProcessStage.Create(
                 new ProcessStageId(stage.StageId),
                 stage.Sequence,

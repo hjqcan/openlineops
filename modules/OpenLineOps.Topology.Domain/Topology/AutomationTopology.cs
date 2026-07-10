@@ -2,17 +2,15 @@ using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
-using OpenLineOps.Topology.Domain.Modules;
-using OpenLineOps.Topology.Domain.Nodes;
 using OpenLineOps.Topology.Domain.Operations;
 using OpenLineOps.Topology.Domain.Slots;
+using OpenLineOps.Topology.Domain.Systems;
 
 namespace OpenLineOps.Topology.Domain.Topology;
 
 public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
 {
-    private readonly List<EquipmentNode> _nodes = [];
-    private readonly List<AutomationModule> _modules = [];
+    private readonly List<AutomationSystem> _systems = [];
     private readonly List<CapabilityContract> _capabilities = [];
     private readonly List<DriverBinding> _driverBindings = [];
     private readonly List<SlotGroup> _slotGroups = [];
@@ -29,9 +27,7 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
 
     public DateTimeOffset CreatedAtUtc { get; }
 
-    public IReadOnlyCollection<EquipmentNode> Nodes => _nodes.AsReadOnly();
-
-    public IReadOnlyCollection<AutomationModule> Modules => _modules.AsReadOnly();
+    public IReadOnlyCollection<AutomationSystem> Systems => _systems.AsReadOnly();
 
     public IReadOnlyCollection<CapabilityContract> Capabilities => _capabilities.AsReadOnly();
 
@@ -49,47 +45,37 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         return new AutomationTopology(id, displayName, createdAtUtc);
     }
 
-    public TopologyOperationResult AddEquipmentNode(EquipmentNode node)
+    public TopologyOperationResult AddSystem(AutomationSystem system)
     {
-        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(system);
 
-        if (_nodes.Any(candidate => candidate.Id == node.Id))
+        if (_systems.Any(candidate => candidate.Id == system.Id))
         {
             return TopologyOperationResult.Rejected(
-                "Topology.NodeAlreadyExists",
-                $"Equipment node {node.Id} already exists in topology {Id}.");
+                "Topology.SystemAlreadyExists",
+                $"Automation system {system.Id} already exists in topology {Id}.");
         }
 
-        if (node.ParentId is null)
+        if (system.ParentSystemId is not null
+            && _systems.All(candidate => candidate.Id != system.ParentSystemId))
         {
-            if (_nodes.Any(candidate => candidate.ParentId is null))
-            {
-                return TopologyOperationResult.Rejected(
-                    "Topology.RootAlreadyExists",
-                    $"Topology {Id} already has a root equipment node.");
-            }
+            return TopologyOperationResult.Rejected(
+                "Topology.ParentSystemMissing",
+                $"Parent automation system {system.ParentSystemId} was not found in topology {Id}.");
         }
-        else
+
+        var missingCapability = system.RequiredCapabilities
+            .Concat(system.ProvidedCapabilities)
+            .FirstOrDefault(capabilityId => _capabilities.All(candidate => candidate.Id != capabilityId));
+        if (missingCapability is not null)
         {
-            var parent = _nodes.SingleOrDefault(candidate => candidate.Id == node.ParentId);
-            if (parent is null)
-            {
-                return TopologyOperationResult.Rejected(
-                    "Topology.ParentNodeMissing",
-                    $"Parent equipment node {node.ParentId} was not found in topology {Id}.");
-            }
-
-            if (!IsChildKindAllowed(parent.Kind, node.Kind))
-            {
-                return TopologyOperationResult.Rejected(
-                    "Topology.NodeKindNotAllowed",
-                    $"Equipment node kind {node.Kind} is not allowed under parent kind {parent.Kind}.");
-            }
+            return TopologyOperationResult.Rejected(
+                "Topology.SystemCapabilityMissing",
+                $"Capability contract {missingCapability} must exist before system {system.Id} can reference it.");
         }
 
-        _nodes.Add(node);
-
-        return TopologyOperationResult.Accepted("Equipment node added.");
+        _systems.Add(system);
+        return TopologyOperationResult.Accepted("Automation system added.");
     }
 
     public TopologyOperationResult AddCapability(CapabilityContract capability)
@@ -104,42 +90,7 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         }
 
         _capabilities.Add(capability);
-
         return TopologyOperationResult.Accepted("Capability contract added.");
-    }
-
-    public TopologyOperationResult AddModule(AutomationModule module)
-    {
-        ArgumentNullException.ThrowIfNull(module);
-
-        if (_modules.Any(candidate => candidate.Id == module.Id))
-        {
-            return TopologyOperationResult.Rejected(
-                "Topology.ModuleAlreadyExists",
-                $"Automation module {module.Id} already exists in topology {Id}.");
-        }
-
-        if (_nodes.All(candidate => candidate.Id != module.NodeId))
-        {
-            return TopologyOperationResult.Rejected(
-                "Topology.ModuleNodeMissing",
-                $"Equipment node {module.NodeId} must exist before module {module.Id} can be added.");
-        }
-
-        var missingCapability = module.RequiredCapabilities
-            .Concat(module.ProvidedCapabilities)
-            .FirstOrDefault(capabilityId => _capabilities.All(candidate => candidate.Id != capabilityId));
-
-        if (missingCapability is not null)
-        {
-            return TopologyOperationResult.Rejected(
-                "Topology.ModuleCapabilityMissing",
-                $"Capability contract {missingCapability} must exist before module {module.Id} can reference it.");
-        }
-
-        _modules.Add(module);
-
-        return TopologyOperationResult.Accepted("Automation module added.");
     }
 
     public TopologyOperationResult AddDriverBinding(DriverBinding binding)
@@ -168,7 +119,6 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         }
 
         _driverBindings.Add(binding);
-
         return TopologyOperationResult.Accepted("Driver binding added.");
     }
 
@@ -183,35 +133,42 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Slot group {slotGroup.Id} already exists in topology {Id}.");
         }
 
-        if (_nodes.All(candidate => candidate.Id != slotGroup.ParentNodeId))
+        var parent = _systems.SingleOrDefault(candidate => candidate.Id == slotGroup.ParentSystemId);
+        if (parent is null)
         {
             return TopologyOperationResult.Rejected(
-                "Topology.SlotGroupNodeMissing",
-                $"Equipment node {slotGroup.ParentNodeId} must exist before slot group {slotGroup.Id} can be added.");
+                "Topology.SlotGroupSystemMissing",
+                $"Automation system {slotGroup.ParentSystemId} must exist before slot group {slotGroup.Id} can be added.");
+        }
+
+        if (parent is not StationSystem)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotGroupRequiresStation",
+                $"Slot group {slotGroup.Id} must belong to a Station system.");
         }
 
         _slotGroups.Add(slotGroup);
-
         return TopologyOperationResult.Accepted("Slot group added.");
     }
 
-    public TopologyOperationResult AddSlotToGroup(SlotGroupId slotGroupId, SlotDefinition slot)
+    public TopologyOperationResult AddSlot(SlotDefinition slot)
     {
         ArgumentNullException.ThrowIfNull(slot);
 
-        var slotGroup = _slotGroups.SingleOrDefault(candidate => candidate.Id == slotGroupId);
+        var slotGroup = _slotGroups.SingleOrDefault(candidate => candidate.Id == slot.SlotGroupId);
         if (slotGroup is null)
         {
             return TopologyOperationResult.Rejected(
                 "Topology.SlotGroupMissing",
-                $"Slot group {slotGroupId} was not found in topology {Id}.");
+                $"Slot group {slot.SlotGroupId} was not found in topology {Id}.");
         }
 
-        if (_nodes.All(candidate => candidate.Id != slot.ParentNodeId))
+        if (slotGroup.ParentSystemId != slot.ParentSystemId)
         {
             return TopologyOperationResult.Rejected(
-                "Topology.SlotNodeMissing",
-                $"Equipment node {slot.ParentNodeId} must exist before slot {slot.Id} can be added.");
+                "Topology.SlotSystemMismatch",
+                $"Slot {slot.Id} and slot group {slotGroup.Id} must belong to the same Station system.");
         }
 
         if (_slots.Any(candidate => candidate.Id == slot.Id))
@@ -221,12 +178,12 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Slot {slot.Id} already exists in topology {Id}.");
         }
 
-        if (_slots.Any(candidate => candidate.ParentNodeId == slot.ParentNodeId
-            && string.Equals(candidate.Address, slot.Address, StringComparison.OrdinalIgnoreCase)))
+        if (_slots.Any(candidate => candidate.ParentSystemId == slot.ParentSystemId
+            && string.Equals(candidate.Address, slot.Address, StringComparison.Ordinal)))
         {
             return TopologyOperationResult.Rejected(
                 "Topology.SlotAddressAlreadyExists",
-                $"Slot address {slot.Address} already exists under equipment node {slot.ParentNodeId}.");
+                $"Slot address {slot.Address} already exists under system {slot.ParentSystemId}.");
         }
 
         var addToGroup = slotGroup.AddSlot(slot.Id);
@@ -236,53 +193,139 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         }
 
         _slots.Add(slot);
-
         return TopologyOperationResult.Accepted("Slot added.");
     }
 
-    public bool HasLayoutTarget(string targetId)
+    public TopologyOperationResult UpdateSystem(
+        AutomationSystemId systemId,
+        string systemType,
+        string displayName,
+        IReadOnlyDictionary<string, string> metadata)
     {
-        return _nodes.Any(candidate => candidate.Id.Value == targetId)
-            || _modules.Any(candidate => candidate.Id.Value == targetId)
-            || _slotGroups.Any(candidate => candidate.Id.Value == targetId)
-            || _slots.Any(candidate => candidate.Id.Value == targetId);
+        var system = FindSystem(systemId);
+        if (system is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SystemNotFound",
+                $"Automation system {systemId} was not found in topology {Id}.");
+        }
+
+        system.Update(systemType, displayName, metadata);
+        return TopologyOperationResult.Accepted("Automation system updated.");
     }
 
-    private static bool IsChildKindAllowed(EquipmentNodeKind parent, EquipmentNodeKind child)
+    public TopologyOperationResult RemoveSystem(AutomationSystemId systemId)
     {
-        return parent switch
+        if (FindSystem(systemId) is null)
         {
-            EquipmentNodeKind.Site => child is not EquipmentNodeKind.Site,
-            EquipmentNodeKind.Area => child is EquipmentNodeKind.Line
-                or EquipmentNodeKind.Cell
-                or EquipmentNodeKind.Station
-                or EquipmentNodeKind.Unit
-                or EquipmentNodeKind.Module
-                or EquipmentNodeKind.Buffer
-                or EquipmentNodeKind.Transport
-                or EquipmentNodeKind.DeviceMount
-                or EquipmentNodeKind.ExternalSystem
-                or EquipmentNodeKind.LogicalGroup,
-            EquipmentNodeKind.Line => child is EquipmentNodeKind.Cell
-                or EquipmentNodeKind.Station
-                or EquipmentNodeKind.Unit
-                or EquipmentNodeKind.Module
-                or EquipmentNodeKind.Buffer
-                or EquipmentNodeKind.Transport
-                or EquipmentNodeKind.DeviceMount
-                or EquipmentNodeKind.ExternalSystem
-                or EquipmentNodeKind.LogicalGroup,
-            EquipmentNodeKind.Cell or EquipmentNodeKind.Station or EquipmentNodeKind.Unit => child is EquipmentNodeKind.Module
-                or EquipmentNodeKind.Fixture
-                or EquipmentNodeKind.Buffer
-                or EquipmentNodeKind.Transport
-                or EquipmentNodeKind.DeviceMount
-                or EquipmentNodeKind.ExternalSystem
-                or EquipmentNodeKind.LogicalGroup,
-            EquipmentNodeKind.LogicalGroup => child is not EquipmentNodeKind.Site
-                and not EquipmentNodeKind.Area
-                and not EquipmentNodeKind.Line,
-            _ => false
-        };
+            return TopologyOperationResult.Rejected(
+                "Topology.SystemNotFound",
+                $"Automation system {systemId} was not found in topology {Id}.");
+        }
+
+        var removedSystemIds = new HashSet<AutomationSystemId> { systemId };
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var child in _systems.Where(candidate => candidate.ParentSystemId is not null
+                         && removedSystemIds.Contains(candidate.ParentSystemId)))
+            {
+                changed |= removedSystemIds.Add(child.Id);
+            }
+        }
+
+        var removedGroupIds = _slotGroups
+            .Where(group => removedSystemIds.Contains(group.ParentSystemId))
+            .Select(group => group.Id)
+            .ToHashSet();
+        _slots.RemoveAll(slot => removedSystemIds.Contains(slot.ParentSystemId)
+            || removedGroupIds.Contains(slot.SlotGroupId));
+        _slotGroups.RemoveAll(group => removedGroupIds.Contains(group.Id));
+        _systems.RemoveAll(system => removedSystemIds.Contains(system.Id));
+
+        return TopologyOperationResult.Accepted("Automation system subtree removed.");
     }
+
+    public TopologyOperationResult UpdateSlotGroup(
+        SlotGroupId slotGroupId,
+        string displayName,
+        SlotGroupKind kind,
+        int capacity)
+    {
+        var group = FindSlotGroup(slotGroupId);
+        return group is null
+            ? TopologyOperationResult.Rejected(
+                "Topology.SlotGroupNotFound",
+                $"Slot group {slotGroupId} was not found in topology {Id}.")
+            : group.Update(displayName, kind, capacity);
+    }
+
+    public TopologyOperationResult RemoveSlotGroup(SlotGroupId slotGroupId)
+    {
+        var group = FindSlotGroup(slotGroupId);
+        if (group is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotGroupNotFound",
+                $"Slot group {slotGroupId} was not found in topology {Id}.");
+        }
+
+        _slots.RemoveAll(slot => slot.SlotGroupId == slotGroupId);
+        _slotGroups.Remove(group);
+        return TopologyOperationResult.Accepted("Slot group and its slots removed.");
+    }
+
+    public TopologyOperationResult UpdateSlot(
+        SlotDefinitionId slotId,
+        string address,
+        string displayName,
+        SlotMaterialKind materialKind,
+        bool isEnabled)
+    {
+        var slot = FindSlot(slotId);
+        if (slot is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotNotFound",
+                $"Slot {slotId} was not found in topology {Id}.");
+        }
+
+        var normalizedAddress = TopologyIdGuard.NotBlank(address, nameof(address));
+        if (_slots.Any(candidate => candidate.Id != slotId
+            && candidate.ParentSystemId == slot.ParentSystemId
+            && string.Equals(candidate.Address, normalizedAddress, StringComparison.Ordinal)))
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotAddressAlreadyExists",
+                $"Slot address {normalizedAddress} already exists under system {slot.ParentSystemId}.");
+        }
+
+        slot.Update(normalizedAddress, displayName, materialKind, isEnabled);
+        return TopologyOperationResult.Accepted("Slot updated.");
+    }
+
+    public TopologyOperationResult RemoveSlot(SlotDefinitionId slotId)
+    {
+        var slot = FindSlot(slotId);
+        if (slot is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SlotNotFound",
+                $"Slot {slotId} was not found in topology {Id}.");
+        }
+
+        FindSlotGroup(slot.SlotGroupId)?.RemoveSlot(slotId);
+        _slots.Remove(slot);
+        return TopologyOperationResult.Accepted("Slot removed.");
+    }
+
+    public AutomationSystem? FindSystem(AutomationSystemId systemId) =>
+        _systems.SingleOrDefault(candidate => candidate.Id == systemId);
+
+    public SlotGroup? FindSlotGroup(SlotGroupId slotGroupId) =>
+        _slotGroups.SingleOrDefault(candidate => candidate.Id == slotGroupId);
+
+    public SlotDefinition? FindSlot(SlotDefinitionId slotId) =>
+        _slots.SingleOrDefault(candidate => candidate.Id == slotId);
 }

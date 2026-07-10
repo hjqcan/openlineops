@@ -28,13 +28,16 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
         string snapshotId,
         string capabilityId,
         string commandName,
+        string? targetKind = null,
+        string? targetId = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(projectId)
             || string.IsNullOrWhiteSpace(applicationId)
             || string.IsNullOrWhiteSpace(snapshotId)
             || string.IsNullOrWhiteSpace(capabilityId)
-            || string.IsNullOrWhiteSpace(commandName))
+            || string.IsNullOrWhiteSpace(commandName)
+            || (string.IsNullOrWhiteSpace(targetKind) != string.IsNullOrWhiteSpace(targetId)))
         {
             return null;
         }
@@ -82,11 +85,55 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
             return null;
         }
 
+        if (targetKind is not null
+            && release.Metadata.TargetReferences.Count(target =>
+                string.Equals(target.Kind, targetKind, StringComparison.Ordinal)
+                && string.Equals(target.TargetId, targetId, StringComparison.Ordinal)) != 1)
+        {
+            return null;
+        }
+
+        var bindingMatches = release.Metadata.CapabilityBindings
+            .Where(binding => string.Equals(
+                                  binding.CapabilityId,
+                                  capabilityId,
+                                  StringComparison.Ordinal)
+                              && (!string.Equals(targetKind, "Driver", StringComparison.Ordinal)
+                                  || string.Equals(binding.BindingId, targetId, StringComparison.Ordinal)))
+            .Take(2)
+            .ToArray();
+        if (bindingMatches.Length != 1
+            || !string.Equals(
+                bindingMatches[0].ProviderKind,
+                "ProcessCommandProvider",
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var binding = bindingMatches[0];
+
         var matches = release.Metadata.PackageDependencies
+            .Where(dependency => string.Equals(
+                                     dependency.CapabilityId,
+                                     binding.CapabilityId,
+                                     StringComparison.Ordinal)
+                                 && string.Equals(
+                                     dependency.BindingId,
+                                     binding.BindingId,
+                                     StringComparison.Ordinal)
+                                 && string.Equals(
+                                     dependency.ProviderKind,
+                                     binding.ProviderKind,
+                                     StringComparison.Ordinal)
+                                 && string.Equals(
+                                     dependency.ProviderKey,
+                                     binding.ProviderKey,
+                                     StringComparison.Ordinal))
             .SelectMany(dependency => dependency.Commands
                 .Where(command => string.Equals(command.Kind, "Process", StringComparison.Ordinal)
                                   && string.Equals(command.CapabilityId, capabilityId, StringComparison.Ordinal)
-                                  && string.Equals(command.CommandName, commandName, StringComparison.OrdinalIgnoreCase))
+                                  && string.Equals(command.CommandName, commandName, StringComparison.Ordinal))
                 .Select(command => new { Dependency = dependency, Command = command }))
             .Take(2)
             .ToArray();

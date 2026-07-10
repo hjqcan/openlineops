@@ -2,10 +2,9 @@ import * as signalR from '@microsoft/signalr';
 import type { ApiResponse } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
 import type {
-  AddAutomationModuleRequest,
+  AddAutomationSystemRequest,
   AddCapabilityContractRequest,
   AddDriverBindingRequest,
-  AddEquipmentNodeRequest,
   AddSiteLayoutElementRequest,
   AddProjectApplicationRequest,
   ImportProjectApplicationRequest,
@@ -51,7 +50,6 @@ import type {
   SiteLayoutResponse,
   RuntimeAlarm,
   RuntimeAlarmsResponse,
-  RuntimeSessionRunResponse,
   RuntimeStationStatus,
   RuntimeStationStatusesResponse,
   RuntimeTimelineEntry,
@@ -59,15 +57,16 @@ import type {
   SaveProductionLineRequest,
   RegisterProcessBlocklyBlockDefinitionRequest,
   StartedProjectSnapshotRuntimeSessionResponse,
-  StartedProcessRuntimeSessionResponse,
   StartProjectSnapshotRuntimeSessionRequest,
-  StartProcessRuntimeSessionRequest,
-  StartRuntimeSessionRequest,
   StationProfileResponse,
   TraceRecordExportPackageResponse,
   TraceRecordQueryResponse,
   TraceRecordResponse,
+  TopologyTargetDeletionResponse,
+  UpdateAutomationSystemRequest,
   UpdateSiteLayoutElementGeometryRequest,
+  UpdateSlotDefinitionRequest,
+  UpdateSlotGroupRequest,
   WorkspaceResponse
 } from './contracts';
 
@@ -197,7 +196,7 @@ export interface ProjectApplicationApiScope {
 }
 
 export async function listAutomationTopologies(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<AutomationTopologySummaryResponse[]> {
   const response = await desktop.apiRequest<AutomationTopologySummaryResponse[]>(
     topologyCollectionPath(scope));
@@ -206,7 +205,7 @@ export async function listAutomationTopologies(
 
 export async function getAutomationTopology(
   topologyId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}`);
@@ -214,7 +213,7 @@ export async function getAutomationTopology(
 
 export async function createAutomationTopology(
   request: CreateAutomationTopologyRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     topologyCollectionPath(scope),
@@ -224,23 +223,47 @@ export async function createAutomationTopology(
     });
 }
 
-export async function addEquipmentNode(
+export async function addAutomationSystem(
   topologyId: string,
-  request: AddEquipmentNodeRequest,
-  scope?: ProjectApplicationApiScope
+  request: AddAutomationSystemRequest,
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
-    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/nodes`,
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems`,
     {
       method: 'POST',
       body: request
     });
 }
 
+export async function updateAutomationSystem(
+  topologyId: string,
+  systemId: string,
+  request: UpdateAutomationSystemRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems/${encodeURIComponent(systemId)}`,
+    {
+      method: 'PATCH',
+      body: request
+    });
+}
+
+export async function deleteAutomationSystem(
+  topologyId: string,
+  systemId: string,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
+  return desktop.apiRequest<TopologyTargetDeletionResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems/${encodeURIComponent(systemId)}`,
+    { method: 'DELETE' });
+}
+
 export async function addCapabilityContract(
   topologyId: string,
   request: AddCapabilityContractRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/capabilities`,
@@ -250,23 +273,10 @@ export async function addCapabilityContract(
     });
 }
 
-export async function addAutomationModule(
-  topologyId: string,
-  request: AddAutomationModuleRequest,
-  scope?: ProjectApplicationApiScope
-): Promise<ApiResponse<AutomationTopologyResponse>> {
-  return desktop.apiRequest<AutomationTopologyResponse>(
-    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/modules`,
-    {
-      method: 'POST',
-      body: request
-    });
-}
-
 export async function addDriverBinding(
   topologyId: string,
   request: AddDriverBindingRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/driver-bindings`,
@@ -279,7 +289,7 @@ export async function addDriverBinding(
 export async function addSlotGroup(
   topologyId: string,
   request: AddSlotGroupRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups`,
@@ -289,10 +299,34 @@ export async function addSlotGroup(
     });
 }
 
+export async function updateSlotGroup(
+  topologyId: string,
+  slotGroupId: string,
+  request: UpdateSlotGroupRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups/${encodeURIComponent(slotGroupId)}`,
+    {
+      method: 'PATCH',
+      body: request
+    });
+}
+
+export async function deleteSlotGroup(
+  topologyId: string,
+  slotGroupId: string,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
+  return desktop.apiRequest<TopologyTargetDeletionResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups/${encodeURIComponent(slotGroupId)}`,
+    { method: 'DELETE' });
+}
+
 export async function addSlotDefinition(
   topologyId: string,
   request: AddSlotDefinitionRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots`,
@@ -302,9 +336,33 @@ export async function addSlotDefinition(
     });
 }
 
+export async function updateSlotDefinition(
+  topologyId: string,
+  slotId: string,
+  request: UpdateSlotDefinitionRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots/${encodeURIComponent(slotId)}`,
+    {
+      method: 'PATCH',
+      body: request
+    });
+}
+
+export async function deleteSlotDefinition(
+  topologyId: string,
+  slotId: string,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
+  return desktop.apiRequest<TopologyTargetDeletionResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots/${encodeURIComponent(slotId)}`,
+    { method: 'DELETE' });
+}
+
 export async function getSiteLayout(
   layoutId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}`);
@@ -312,7 +370,7 @@ export async function getSiteLayout(
 
 export async function createSiteLayout(
   request: CreateSiteLayoutRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     siteLayoutCollectionPath(scope),
@@ -325,7 +383,7 @@ export async function createSiteLayout(
 export async function addSiteLayoutElement(
   layoutId: string,
   request: AddSiteLayoutElementRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements`,
@@ -339,7 +397,7 @@ export async function updateSiteLayoutElementGeometry(
   layoutId: string,
   elementId: string,
   request: UpdateSiteLayoutElementGeometryRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements/${encodeURIComponent(elementId)}/geometry`,
@@ -349,26 +407,20 @@ export async function updateSiteLayoutElementGeometry(
     });
 }
 
-function topologyCollectionPath(scope?: ProjectApplicationApiScope): string {
-  return scope
-    ? `${projectApplicationPath(scope)}/topologies`
-    : '/api/automation-topologies';
+function topologyCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/topologies`;
 }
 
-function siteLayoutCollectionPath(scope?: ProjectApplicationApiScope): string {
-  return scope
-    ? `${projectApplicationPath(scope)}/layouts`
-    : '/api/site-layouts';
+function siteLayoutCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/layouts`;
 }
 
 function projectApplicationPath(scope: ProjectApplicationApiScope): string {
   return `/api/automation-projects/${encodeURIComponent(scope.projectId)}/applications/${encodeURIComponent(scope.applicationId)}`;
 }
 
-function engineeringPath(scope?: ProjectApplicationApiScope): string {
-  return scope
-    ? `${projectApplicationPath(scope)}/engineering`
-    : '/api/engineering';
+function engineeringPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/engineering`;
 }
 
 export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
@@ -429,7 +481,7 @@ export async function acknowledgeAlarm(alarmId: string, acknowledgedBy: string):
 }
 
 export async function listWorkspaces(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<WorkspaceResponse[]> {
   const response = await desktop.apiRequest<WorkspaceResponse[]>(
     `${engineeringPath(scope)}/workspaces`);
@@ -438,7 +490,7 @@ export async function listWorkspaces(
 
 export async function createWorkspace(
   request: CreateWorkspaceRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<WorkspaceResponse>> {
   return desktop.apiRequest<WorkspaceResponse>(
     `${engineeringPath(scope)}/workspaces`,
@@ -449,7 +501,7 @@ export async function createWorkspace(
 }
 
 export async function listEngineeringProjects(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<EngineeringProjectResponse[]> {
   const response = await desktop.apiRequest<EngineeringProjectResponse[]>(
     `${engineeringPath(scope)}/projects`);
@@ -458,7 +510,7 @@ export async function listEngineeringProjects(
 
 export async function createEngineeringProject(
   request: CreateEngineeringProjectRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<EngineeringProjectResponse>> {
   return desktop.apiRequest<EngineeringProjectResponse>(
     `${engineeringPath(scope)}/projects`,
@@ -469,7 +521,7 @@ export async function createEngineeringProject(
 }
 
 export async function listRecipes(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<RecipeResponse[]> {
   const response = await desktop.apiRequest<RecipeResponse[]>(
     `${engineeringPath(scope)}/recipes`);
@@ -478,7 +530,7 @@ export async function listRecipes(
 
 export async function createRecipe(
   request: CreateRecipeRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<RecipeResponse>> {
   return desktop.apiRequest<RecipeResponse>(
     `${engineeringPath(scope)}/recipes`,
@@ -490,7 +542,7 @@ export async function createRecipe(
 
 export async function publishRecipe(
   recipeId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<RecipeResponse>> {
   return desktop.apiRequest<RecipeResponse>(
     `${engineeringPath(scope)}/recipes/${encodeURIComponent(recipeId)}/publish`,
@@ -500,7 +552,7 @@ export async function publishRecipe(
 }
 
 export async function listStationProfiles(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<StationProfileResponse[]> {
   const response = await desktop.apiRequest<StationProfileResponse[]>(
     `${engineeringPath(scope)}/station-profiles`);
@@ -509,7 +561,7 @@ export async function listStationProfiles(
 
 export async function createStationProfile(
   request: CreateStationProfileRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<StationProfileResponse>> {
   return desktop.apiRequest<StationProfileResponse>(
     `${engineeringPath(scope)}/station-profiles`,
@@ -522,7 +574,7 @@ export async function createStationProfile(
 export async function publishConfigurationSnapshot(
   projectId: string,
   request: PublishConfigurationSnapshotRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<EngineeringProjectResponse>> {
   return desktop.apiRequest<EngineeringProjectResponse>(
     `${engineeringPath(scope)}/projects/${encodeURIComponent(projectId)}/configuration-snapshots`,
@@ -641,7 +693,7 @@ export async function listPluginEvents(
 }
 
 export async function listProcessDefinitions(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ProcessDefinitionSummary[]> {
   const response = await desktop.apiRequest<ProcessDefinitionSummary[]>(processCollectionPath(scope));
   return response.body ?? [];
@@ -689,7 +741,7 @@ export async function replaceProductionLine(
 }
 
 export async function listProcessBlocklyBlocks(
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ProcessBlocklyBlockDefinition[]> {
   const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
     processBlockCollectionPath(scope));
@@ -698,7 +750,7 @@ export async function listProcessBlocklyBlocks(
 
 export async function listProcessBlocklyBlockVersions(
   blockType: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ProcessBlocklyBlockDefinition[]> {
   const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
     `${processBlockCollectionPath(scope)}/${encodeURIComponent(blockType)}/versions`);
@@ -707,7 +759,7 @@ export async function listProcessBlocklyBlockVersions(
 
 export async function registerProcessBlocklyBlock(
   request: RegisterProcessBlocklyBlockDefinitionRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessBlocklyBlockDefinition>> {
   return desktop.apiRequest<ProcessBlocklyBlockDefinition>(
     processBlockCollectionPath(scope),
@@ -719,7 +771,7 @@ export async function registerProcessBlocklyBlock(
 
 export async function createProcessDefinition(
   request: CreateProcessDefinitionRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     processCollectionPath(scope),
@@ -732,7 +784,7 @@ export async function createProcessDefinition(
 export async function updateProcessDefinition(
   processDefinitionId: string,
   request: CreateProcessDefinitionRequest,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}`,
@@ -744,7 +796,7 @@ export async function updateProcessDefinition(
 
 export async function getProcessDefinition(
   processDefinitionId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}`);
@@ -752,7 +804,7 @@ export async function getProcessDefinition(
 
 export async function publishProcessDefinition(
   processDefinitionId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}/publish`,
@@ -763,81 +815,23 @@ export async function publishProcessDefinition(
 
 export async function validateProcessDefinition(
   processDefinitionId: string,
-  scope?: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope
 ): Promise<ProcessGraphValidationReport | null> {
   const response = await desktop.apiRequest<ProcessGraphValidationReport>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}/validation`);
   return response.body;
 }
 
-function processCollectionPath(scope?: ProjectApplicationApiScope): string {
-  return scope
-    ? `${projectApplicationPath(scope)}/processes`
-    : '/api/process-definitions';
+function processCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/processes`;
 }
 
 function productionLineCollectionPath(scope: ProjectApplicationApiScope): string {
   return `${projectApplicationPath(scope)}/production-lines`;
 }
 
-function processBlockCollectionPath(scope?: ProjectApplicationApiScope): string {
-  return scope
-    ? `${projectApplicationPath(scope)}/process-blocks`
-    : '/api/process-blocks';
-}
-
-export async function startProcessRuntimeSession(
-  processDefinitionId: string,
-  request: StartProcessRuntimeSessionRequest
-): Promise<ApiResponse<StartedProcessRuntimeSessionResponse>> {
-  return desktop.apiRequest<StartedProcessRuntimeSessionResponse>(
-    `/api/process-definitions/${encodeURIComponent(processDefinitionId)}/runtime-sessions`,
-    {
-      method: 'POST',
-      body: request
-    });
-}
-
-export async function startDemoRuntimeSession(seed: string): Promise<RuntimeSessionRunResponse | null> {
-  const request: StartRuntimeSessionRequest = {
-    stationId: `station-desktop-${seed}`,
-    configurationSnapshotId: `snapshot-desktop-${seed}`,
-    recipeSnapshotId: `recipe-desktop-${seed}`,
-    processDefinitionId: `process-desktop-${seed}`,
-    processVersionId: `process-desktop-${seed}@1.0.0`,
-    serialNumber: `SN-${seed.toUpperCase()}`,
-    batchId: `batch-${seed}`,
-    fixtureId: `fixture-${seed}`,
-    deviceId: `device-${seed}`,
-    actorId: 'desktop-operator',
-    nodes: [
-      {
-        nodeId: 'node-scan',
-        displayName: 'Scan barcode',
-        targetCapability: 'device.scanner',
-        commandName: 'Scan',
-        timeoutSeconds: 30,
-        inputPayload: 'scan-ok'
-      },
-      {
-        nodeId: 'node-measure',
-        displayName: 'Measure voltage',
-        targetCapability: 'device.multimeter',
-        commandName: 'MeasureVoltage',
-        timeoutSeconds: 30,
-        inputPayload: Math.random() > 0.75 ? 'fail' : 'measure-ok'
-      }
-    ]
-  };
-
-  const response = await desktop.apiRequest<RuntimeSessionRunResponse>(
-    '/api/runtime/sessions/simulated',
-    {
-      method: 'POST',
-      body: request
-    });
-
-  return response.body;
+function processBlockCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/process-blocks`;
 }
 
 export function createRuntimeHubConnection(apiBaseUrl: string): signalR.HubConnection {

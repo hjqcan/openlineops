@@ -6,6 +6,7 @@ using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
+using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Processes.Application.Definitions;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
@@ -254,6 +255,28 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             return Result.Failure<ProjectReleaseSourceMetadata>(snapshotValidation);
         }
 
+        var stationProfile = await _engineeringRepository
+            .GetByIdAsync(
+                scope,
+                new StationProfileId(configurationSnapshot.StationProfileId),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (stationProfile is null)
+        {
+            return Result.Failure<ProjectReleaseSourceMetadata>(ApplicationError.NotFound(
+                "Projects.ReleaseStationProfileNotFound",
+                $"Station profile {configurationSnapshot.StationProfileId} was not found in application {scope.ApplicationId}."));
+        }
+
+        var stationSystem = topology.Systems.SingleOrDefault(system =>
+            string.Equals(system.SystemId, stationProfile.StationSystemId, StringComparison.Ordinal));
+        if (stationSystem is null || !string.Equals(stationSystem.Kind, "Station", StringComparison.Ordinal))
+        {
+            return Result.Failure<ProjectReleaseSourceMetadata>(ApplicationError.Conflict(
+                "Projects.ReleaseStationSystemInvalid",
+                $"Station profile {stationProfile.Id} must reference an existing Station system in topology {topology.TopologyId}."));
+        }
+
         var bindingValidation = ValidateRequiredCapabilityBindings(
             flowIrCompilationResult.Value.Document,
             process.ProcessDefinitionId,
@@ -305,6 +328,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
         return Result.Success(new ProjectReleaseSourceMetadata(
             topology.TopologyId,
+            stationSystem.SystemId,
             layoutIds,
             process.ProcessDefinitionId,
             process.VersionId,
@@ -429,11 +453,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     private static ProjectReleaseTargetReference[] CreateTargetReferences(
         AutomationTopologyDetails topology)
     {
-        return topology.Nodes
-            .Select(node => new ProjectReleaseTargetReference("EquipmentNode", node.NodeId))
-            .Concat(topology.Modules.Select(module => new ProjectReleaseTargetReference(
-                "AutomationModule",
-                module.ModuleId)))
+        return topology.Systems
+            .Select(system => new ProjectReleaseTargetReference("System", system.SystemId))
             .Concat(topology.SlotGroups.Select(group => new ProjectReleaseTargetReference(
                 "SlotGroup",
                 group.SlotGroupId)))
@@ -446,14 +467,10 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             .Concat(topology.DriverBindings.Select(binding => new ProjectReleaseTargetReference(
                 "Driver",
                 binding.BindingId)))
-            .Concat(topology.Modules.Select(module => new ProjectReleaseTargetReference(
-                "System",
-                module.ModuleId)))
-            .Append(new ProjectReleaseTargetReference("System", topology.TopologyId))
             .Concat(topology.Slots
-                .Where(slot => string.Equals(slot.MaterialKind, "Dut", StringComparison.OrdinalIgnoreCase))
+                .Where(slot => string.Equals(slot.MaterialKind, "Dut", StringComparison.Ordinal))
                 .Select(slot => new ProjectReleaseTargetReference("Dut", slot.SlotId)))
-            .DistinctBy(target => $"{target.Kind}\u001f{target.TargetId}", StringComparer.OrdinalIgnoreCase)
+            .DistinctBy(target => $"{target.Kind}\u001f{target.TargetId}", StringComparer.Ordinal)
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
             .ToArray();
@@ -656,38 +673,27 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 reference,
                 capabilityId,
                 StringComparison.Ordinal),
-            FlowIrTargetReferenceKind.AutomationModule => topology.Modules.Any(module =>
-                string.Equals(module.ModuleId, reference, StringComparison.Ordinal)
-                && ModuleSupportsCapability(module, capabilityId)),
-            FlowIrTargetReferenceKind.EquipmentNode => topology.Nodes.Any(node =>
-                string.Equals(node.NodeId, reference, StringComparison.Ordinal))
-                && topology.Modules.Any(module => string.Equals(module.NodeId, reference, StringComparison.Ordinal)
-                    && ModuleSupportsCapability(module, capabilityId)),
             FlowIrTargetReferenceKind.SlotGroup => topology.SlotGroups.Any(group =>
                 string.Equals(group.SlotGroupId, reference, StringComparison.Ordinal)
-                && topology.Modules.Any(module => string.Equals(
-                        module.NodeId,
-                        group.ParentNodeId,
+                && topology.Systems.Any(system => string.Equals(
+                        system.SystemId,
+                        group.ParentSystemId,
                         StringComparison.Ordinal)
-                    && ModuleSupportsCapability(module, capabilityId))),
+                    && SystemSupportsCapability(system, capabilityId))),
             FlowIrTargetReferenceKind.Slot => topology.Slots.Any(slot =>
                 string.Equals(slot.SlotId, reference, StringComparison.Ordinal)
-                && topology.Modules.Any(module => string.Equals(
-                        module.NodeId,
-                        slot.ParentNodeId,
+                && topology.Systems.Any(system => string.Equals(
+                        system.SystemId,
+                        slot.ParentSystemId,
                         StringComparison.Ordinal)
-                    && ModuleSupportsCapability(module, capabilityId))),
+                    && SystemSupportsCapability(system, capabilityId))),
             FlowIrTargetReferenceKind.Driver => topology.DriverBindings.Any(binding =>
                 string.Equals(binding.BindingId, reference, StringComparison.Ordinal)
                 && string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal)),
             FlowIrTargetReferenceKind.Dut => topology.Slots.Any(slot =>
                 string.Equals(slot.SlotId, reference, StringComparison.Ordinal)
-                && string.Equals(slot.MaterialKind, "Dut", StringComparison.OrdinalIgnoreCase)),
-            FlowIrTargetReferenceKind.System => string.Equals(
-                    reference,
-                    topology.TopologyId,
-                    StringComparison.Ordinal)
-                || (string.Equals(
+                && string.Equals(slot.MaterialKind, "Dut", StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.System => (string.Equals(
                         capabilityId,
                         RuntimeFlowCommand.Capability,
                         StringComparison.Ordinal)
@@ -695,11 +701,11 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                         reference,
                         RuntimeFlowCommand.Capability,
                         StringComparison.Ordinal))
-                || topology.Modules.Any(module => string.Equals(
-                        module.ModuleId,
+                || topology.Systems.Any(system => string.Equals(
+                        system.SystemId,
                         reference,
                         StringComparison.Ordinal)
-                    && ModuleSupportsCapability(module, capabilityId)),
+                    && SystemSupportsCapability(system, capabilityId)),
             _ => false
         };
         return targetExists
@@ -709,12 +715,12 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 $"Flow IR action {action.ActionId} target {action.Target.Kind}/{reference} does not resolve inside topology {topology.TopologyId}."));
     }
 
-    private static bool ModuleSupportsCapability(
-        AutomationModuleDetails module,
+    private static bool SystemSupportsCapability(
+        AutomationSystemDetails system,
         string capabilityId)
     {
-        return module.RequiredCapabilityIds.Contains(capabilityId, StringComparer.Ordinal)
-            || module.ProvidedCapabilityIds.Contains(capabilityId, StringComparer.Ordinal);
+        return system.RequiredCapabilityIds.Contains(capabilityId, StringComparer.Ordinal)
+            || system.ProvidedCapabilityIds.Contains(capabilityId, StringComparer.Ordinal);
     }
 
     private static ResolvedPackageCommand[] GetPackageCommands(

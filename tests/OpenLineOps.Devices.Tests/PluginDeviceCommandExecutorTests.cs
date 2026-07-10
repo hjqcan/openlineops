@@ -1,7 +1,6 @@
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
-using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Commands;
 
 namespace OpenLineOps.Devices.Tests;
@@ -9,84 +8,37 @@ namespace OpenLineOps.Devices.Tests;
 public sealed class PluginDeviceCommandExecutorTests
 {
     [Fact]
-    public async Task ExecuteAsyncInvokesPluginDeviceCommand()
+    public async Task ExecuteAsyncUsesFrozenReleasePackageIdentity()
     {
         var invoker = new CapturingPluginDeviceCommandInvoker(
             PluginDeviceCommandInvocationResult.Completed("{\"barcode\":\"ABC-123\"}"));
-        var executor = new PluginDeviceCommandExecutor(
-            new InMemoryPluginDeviceCommandInventory(ScannerCommand),
-            invoker);
+        var executor = new PluginDeviceCommandExecutor(invoker);
 
-        var result = await executor.ExecuteAsync(CreateRequest());
+        var result = await executor.ExecuteAsync(CreateRequest(LockedPackage()));
 
         Assert.Equal(DeviceCommandExecutionOutcome.Completed, result.Outcome);
         Assert.Equal("{\"barcode\":\"ABC-123\"}", result.ResultPayload);
-        Assert.NotNull(invoker.Request);
-        Assert.Equal("openlineops.scanner-driver", invoker.Request.PluginId);
-        Assert.Equal("scanner-01", invoker.Request.DeviceInstanceId);
-        Assert.Equal("device.scanner:scan", invoker.Request.CommandDefinitionId);
-        Assert.Equal("device.scanner", invoker.Request.Capability);
-        Assert.Equal("Scan", invoker.Request.CommandName);
-        Assert.Equal("{\"serial\":\"ABC\"}", invoker.Request.InputPayload);
-        Assert.Equal(30000, invoker.Request.TimeoutMilliseconds);
+        var request = Assert.IsType<PluginDeviceCommandInvocationRequest>(invoker.Request);
+        Assert.Equal("openlineops.scanner-driver", request.PluginId);
+        Assert.Equal("scanner-01", request.DeviceInstanceId);
+        Assert.Equal("device.scanner:scan", request.CommandDefinitionId);
+        Assert.Equal("4.5.6", request.PackageIdentity!.Version);
+        Assert.Equal(new string('a', 64), request.PackageIdentity.PackageContentSha256);
     }
 
     [Fact]
-    public async Task ExecuteAsyncRejectsCommandWhenPluginManifestDoesNotDeclareIt()
+    public async Task ExecuteAsyncRejectsIncompleteFrozenPackageIdentity()
     {
         var invoker = new CapturingPluginDeviceCommandInvoker(
             PluginDeviceCommandInvocationResult.Completed("should-not-run"));
-        var executor = new PluginDeviceCommandExecutor(
-            new InMemoryPluginDeviceCommandInventory(),
-            invoker);
+        var executor = new PluginDeviceCommandExecutor(invoker);
+        var package = LockedPackage() with { PackageContentSha256 = string.Empty };
 
-        var result = await executor.ExecuteAsync(CreateRequest());
-
-        Assert.Equal(DeviceCommandExecutionOutcome.Rejected, result.Outcome);
-        Assert.Contains("No plugin device command", result.FailureReason, StringComparison.Ordinal);
-        Assert.Null(invoker.Request);
-    }
-
-    [Fact]
-    public async Task ExecuteAsyncRejectsCommandWhenDefinitionDoesNotMatchManifestCommand()
-    {
-        var invoker = new CapturingPluginDeviceCommandInvoker(
-            PluginDeviceCommandInvocationResult.Completed("should-not-run"));
-        var executor = new PluginDeviceCommandExecutor(
-            new InMemoryPluginDeviceCommandInventory(ScannerCommand),
-            invoker);
-
-        var result = await executor.ExecuteAsync(CreateRequest(commandDefinitionId: "device.scanner:other"));
+        var result = await executor.ExecuteAsync(CreateRequest(package));
 
         Assert.Equal(DeviceCommandExecutionOutcome.Rejected, result.Outcome);
-        Assert.Contains("does not match requested definition", result.FailureReason, StringComparison.Ordinal);
+        Assert.Contains("incomplete", result.FailureReason, StringComparison.OrdinalIgnoreCase);
         Assert.Null(invoker.Request);
-    }
-
-    [Fact]
-    public async Task ExecuteAsyncProjectReleaseUsesLockedPackageIdentityWithoutLiveInventory()
-    {
-        var invoker = new CapturingPluginDeviceCommandInvoker(
-            PluginDeviceCommandInvocationResult.Completed("locked"));
-        var executor = new PluginDeviceCommandExecutor(
-            new InMemoryPluginDeviceCommandInventory(),
-            invoker);
-        var package = new DevicePluginPackageIdentity(
-            "openlineops.scanner-driver",
-            "4.5.6",
-            new string('a', 64),
-            new string('b', 64),
-            new string('c', 64),
-            "1.0.0",
-            "win-x64",
-            "openlineops.plugin-abi/1");
-
-        var result = await executor.ExecuteAsync(CreateRequest(pluginPackage: package));
-
-        Assert.Equal(DeviceCommandExecutionOutcome.Completed, result.Outcome);
-        Assert.NotNull(invoker.Request);
-        Assert.Equal("4.5.6", invoker.Request.PackageIdentity!.Version);
-        Assert.Equal(new string('a', 64), invoker.Request.PackageIdentity.PackageContentSha256);
     }
 
     [Theory]
@@ -101,52 +53,39 @@ public sealed class PluginDeviceCommandExecutorTests
             pluginOutcome,
             null,
             "plugin terminal outcome"));
-        var executor = new PluginDeviceCommandExecutor(
-            new InMemoryPluginDeviceCommandInventory(ScannerCommand),
-            invoker);
+        var executor = new PluginDeviceCommandExecutor(invoker);
 
-        var result = await executor.ExecuteAsync(CreateRequest());
+        var result = await executor.ExecuteAsync(CreateRequest(LockedPackage()));
 
         Assert.Equal(expectedOutcome, result.Outcome);
         Assert.Equal("plugin terminal outcome", result.FailureReason);
     }
 
-    private static PluginDeviceCommandDescriptor ScannerCommand { get; } = new(
-        "openlineops.scanner-driver",
-        "Scanner Driver",
-        PluginKind.DeviceDriver,
-        "device.scanner:scan",
-        "device.scanner",
-        "Scan",
-        "{\"type\":\"object\"}",
-        "{\"type\":\"object\"}",
-        30000,
-        0);
+    private static DevicePluginPackageIdentity LockedPackage()
+    {
+        return new DevicePluginPackageIdentity(
+            "openlineops.scanner-driver",
+            "4.5.6",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64),
+            "1.0.0",
+            "win-x64",
+            "openlineops.plugin-abi/1");
+    }
 
-    private static DeviceCommandExecutionRequest CreateRequest(
-        string commandDefinitionId = "device.scanner:scan",
-        DevicePluginPackageIdentity? pluginPackage = null)
+    private static DeviceCommandExecutionRequest CreateRequest(DevicePluginPackageIdentity package)
     {
         return new DeviceCommandExecutionRequest(
+            ProjectReleaseRuntimeProviderKinds.PluginCommand,
+            "plugin://openlineops.scanner-driver/device.scanner:scan",
             new DeviceInstanceId("scanner-01"),
-            new DeviceCommandDefinitionId(commandDefinitionId),
+            new DeviceCommandDefinitionId("device.scanner:scan"),
             new DeviceCapabilityId("device.scanner"),
             "Scan",
             "{\"serial\":\"ABC\"}",
             TimeSpan.FromSeconds(30),
-            pluginPackage);
-    }
-
-    private sealed class InMemoryPluginDeviceCommandInventory(
-        params PluginDeviceCommandDescriptor[] commands) : IPluginDeviceCommandInventory
-    {
-        public ValueTask<IReadOnlyCollection<PluginDeviceCommandDescriptor>> ListDeviceCommandsAsync(
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            return ValueTask.FromResult<IReadOnlyCollection<PluginDeviceCommandDescriptor>>(commands);
-        }
+            package);
     }
 
     private sealed class CapturingPluginDeviceCommandInvoker(
@@ -160,7 +99,6 @@ public sealed class PluginDeviceCommandExecutorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Request = request;
-
             return ValueTask.FromResult(result);
         }
     }

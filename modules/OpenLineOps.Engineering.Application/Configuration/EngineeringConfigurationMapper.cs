@@ -49,6 +49,7 @@ public static class EngineeringConfigurationMapper
     {
         return new StationProfileDetails(
             stationProfile.Id.Value,
+            stationProfile.StationSystemId,
             stationProfile.DisplayName,
             stationProfile.DeviceBindings
                 .OrderBy(binding => binding.Id.Value, StringComparer.Ordinal)

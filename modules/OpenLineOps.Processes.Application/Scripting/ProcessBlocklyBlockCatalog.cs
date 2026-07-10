@@ -295,7 +295,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 "Runtime Action Contract schema does not match its JSON contract.");
         }
 
-        HashSet<string> blockFields;
+        Dictionary<string, string> blockFields;
         try
         {
             blockFields = ReadBlocklyFieldNames(request.BlocklyJson);
@@ -308,20 +308,38 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
         }
 
         var contractFields = contractResult.Value.Fields.Keys.ToHashSet(StringComparer.Ordinal);
-        if (!blockFields.SetEquals(contractFields))
+        if (!blockFields.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(contractFields))
         {
             return ApplicationError.Validation(
                 "Processes.BlocklyBlockContractFieldsMismatch",
                 "Blockly field names must exactly match the Runtime Action Contract field names.");
         }
 
+        foreach (var (fieldName, definition) in contractResult.Value.Fields)
+        {
+            if (!IsCompatibleBlocklyField(blockFields[fieldName], definition.Type))
+            {
+                return ApplicationError.Validation(
+                    "Processes.BlocklyBlockContractFieldTypeMismatch",
+                    $"Blockly field {fieldName} type {blockFields[fieldName]} is incompatible with contract type {definition.Type}.");
+            }
+        }
+
+        if (contractResult.Value.Emit is RuntimeDeviceCommandEmit
+            && !blockFields.Keys.Take(2).SequenceEqual(["TARGET_KIND", "TARGET_ID"], StringComparer.Ordinal))
+        {
+            return ApplicationError.Validation(
+                "Processes.BlocklyBlockTargetFieldOrderInvalid",
+                "Device command Blockly definitions must begin with TARGET_KIND and TARGET_ID fields.");
+        }
+
         return null;
     }
 
-    private static HashSet<string> ReadBlocklyFieldNames(string blocklyJson)
+    private static Dictionary<string, string> ReadBlocklyFieldNames(string blocklyJson)
     {
         using var document = JsonDocument.Parse(blocklyJson);
-        var fields = new HashSet<string>(StringComparer.Ordinal);
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!document.RootElement.TryGetProperty("args0", out var args)
             || args.ValueKind != JsonValueKind.Array)
         {
@@ -333,15 +351,27 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             if (argument.ValueKind != JsonValueKind.Object
                 || !argument.TryGetProperty("type", out var type)
                 || type.ValueKind != JsonValueKind.String
-                || !type.GetString()!.StartsWith("field_", StringComparison.Ordinal)
-                || !argument.TryGetProperty("name", out var name)
-                || name.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(name.GetString()))
+                || string.IsNullOrWhiteSpace(type.GetString()))
+            {
+                throw new InvalidDataException("BlocklyJson args0 entries must declare a type.");
+            }
+
+            var fieldType = type.GetString()!;
+            if (string.Equals(fieldType, "input_dummy", StringComparison.Ordinal))
             {
                 continue;
             }
 
-            if (!fields.Add(name.GetString()!))
+            if (fieldType is not ("field_input" or "field_number" or "field_checkbox" or "field_dropdown")
+                || !argument.TryGetProperty("name", out var name)
+                || name.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(name.GetString()))
+            {
+                throw new InvalidDataException(
+                    $"BlocklyJson argument type '{fieldType}' is not supported by static declarative blocks.");
+            }
+
+            if (!fields.TryAdd(name.GetString()!, fieldType))
             {
                 throw new InvalidDataException(
                     $"BlocklyJson contains duplicate field name '{name.GetString()}'.");
@@ -349,6 +379,22 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
         }
 
         return fields;
+    }
+
+    private static bool IsCompatibleBlocklyField(
+        string blocklyFieldType,
+        RuntimeActionFieldType contractFieldType)
+    {
+        return contractFieldType switch
+        {
+            RuntimeActionFieldType.Text or RuntimeActionFieldType.TargetReference =>
+                blocklyFieldType is "field_input" or "field_dropdown",
+            RuntimeActionFieldType.Number or RuntimeActionFieldType.WholeNumber =>
+                blocklyFieldType == "field_number",
+            RuntimeActionFieldType.Boolean => blocklyFieldType == "field_checkbox",
+            RuntimeActionFieldType.Json => blocklyFieldType == "field_input",
+            _ => false
+        };
     }
 
     private static string NormalizeJson(string json)
@@ -408,7 +454,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -467,7 +513,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -513,7 +559,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -590,7 +636,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["Module", "AutomationModule"], ["Equipment", "EquipmentNode"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["System", "System"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",

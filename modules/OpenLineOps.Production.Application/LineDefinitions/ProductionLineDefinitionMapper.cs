@@ -20,8 +20,7 @@ public static class ProductionLineDefinitionMapper
                 .Select(workstation => new WorkstationDetails(
                     workstation.Id.Value,
                     workstation.DisplayName,
-                    workstation.TopologyStationNodeId,
-                    workstation.TopologySystemModuleId))
+                    workstation.StationSystemId))
                 .ToArray(),
             orderedStages
                 .Select((stage, index) => new ProcessStageDetails(

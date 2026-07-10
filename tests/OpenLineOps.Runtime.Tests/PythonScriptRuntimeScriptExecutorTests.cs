@@ -130,6 +130,12 @@ public sealed class PythonScriptRuntimeScriptExecutorTests
             new RuntimeCapabilityId(RuntimeScriptCommand.PythonCapability),
             RuntimeScriptCommand.PythonCommandName,
             null,
-            TimeSpan.FromSeconds(15));
+            TimeSpan.FromSeconds(15),
+            new RuntimeActionId("node-normalize:action:1"),
+            "Capability",
+            RuntimeScriptCommand.PythonCapability,
+            "project.main",
+            "application.main",
+            "snapshot.release");
     }
 }

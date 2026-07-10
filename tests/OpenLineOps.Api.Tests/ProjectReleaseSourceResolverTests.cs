@@ -12,20 +12,21 @@ namespace OpenLineOps.Api.Tests;
 public sealed class ProjectReleaseSourceResolverTests
 {
     [Fact]
-    public void ResolveActionCapabilityTargetUsesRequiredCapabilityForAutomationModuleTarget()
+    public void ResolveActionCapabilityTargetUsesRequiredCapabilityForSystemTarget()
     {
         var topology = new AutomationTopologyDetails(
             "topology.main",
             "Main",
             DateTimeOffset.UtcNow,
-            [new EquipmentNodeDetails("node.main", null, "Station", "Main")],
-            [new AutomationModuleDetails(
-                "module.axis",
-                "node.main",
+            [new AutomationSystemDetails(
+                "system.axis",
+                null,
+                "Station",
                 "Axis",
                 "Axis",
                 ["motion.axis"],
-                [])],
+                [],
+                new Dictionary<string, string>())],
             [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
             [new DriverBindingDetails("binding.axis", "motion.axis", "PluginCommand", "plugin.axis")],
             [],
@@ -36,10 +37,9 @@ public sealed class ProjectReleaseSourceResolverTests
             "Move",
             "motion.axis",
             "Move",
-            new FlowIrTargetReference(FlowIrTargetReferenceKind.AutomationModule, "module.axis"),
+            new FlowIrTargetReference(FlowIrTargetReferenceKind.System, "system.axis"),
             "{}",
             new FlowIrExecutionPolicy(30_000, 0, FlowIrCancellationMode.Cooperative),
-            null,
             null,
             new FlowIrSourceTrace(
                 "process.main",
@@ -96,8 +96,9 @@ public sealed class ProjectReleaseSourceResolverTests
                 "topology.main",
                 "Main",
                 DateTimeOffset.UtcNow,
-                [new EquipmentNodeDetails("node.main", null, "Station", "Main")],
-                [new AutomationModuleDetails("module.axis", "node.main", "Axis", "Axis", ["motion.axis"], [])],
+                [new AutomationSystemDetails(
+                    "system.axis", null, "Station", "Axis", "Axis",
+                    ["motion.axis"], [], new Dictionary<string, string>())],
                 [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
                 [new DriverBindingDetails(
                     "binding.axis",
@@ -112,10 +113,9 @@ public sealed class ProjectReleaseSourceResolverTests
                 "Move",
                 "motion.axis",
                 "Move",
-                new FlowIrTargetReference(FlowIrTargetReferenceKind.AutomationModule, "module.axis"),
+                new FlowIrTargetReference(FlowIrTargetReferenceKind.System, "system.axis"),
                 "{}",
                 new FlowIrExecutionPolicy(30_000, 0, FlowIrCancellationMode.Cooperative),
-                null,
                 null,
                 new FlowIrSourceTrace(
                     "process.main",
@@ -124,7 +124,7 @@ public sealed class ProjectReleaseSourceResolverTests
                     "node.move",
                     null));
             var document = new FlowIrDocument(
-                FlowIrSchemaVersions.V1,
+                FlowIrSchemaVersions.V2,
                 "process.main",
                 "process.main@1",
                 "Main",

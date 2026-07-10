@@ -16,8 +16,6 @@ public sealed class EfDeviceInstanceRepository(DevicesDbContext context)
     {
         ArgumentNullException.ThrowIfNull(instance);
 
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         var exists = await DbSet
             .AsNoTracking()
             .AnyAsync(candidate => candidate.Id == instance.Id, cancellationToken)
@@ -41,16 +39,12 @@ public sealed class EfDeviceInstanceRepository(DevicesDbContext context)
     {
         ArgumentNullException.ThrowIfNull(instanceId);
 
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         return await GetByIdAsync(instanceId, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<IReadOnlyCollection<DeviceInstance>> ListAsync(
         CancellationToken cancellationToken = default)
     {
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         var instances = await DbSet
             .AsNoTracking()
             .ToListAsync(cancellationToken)
@@ -67,8 +61,6 @@ public sealed class EfDeviceInstanceRepository(DevicesDbContext context)
         {
             return [];
         }
-
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
 
         var normalizedStationId = stationId.Trim();
         var instances = await DbSet

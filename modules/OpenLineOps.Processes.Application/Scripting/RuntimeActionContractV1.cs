@@ -14,23 +14,19 @@ public static class ProcessBlocklyBlockExecutionModes
 
 public static class RuntimeActionTargetKinds
 {
-    public const string AutomationModule = "AutomationModule";
-    public const string EquipmentNode = "EquipmentNode";
+    public const string System = "System";
     public const string SlotGroup = "SlotGroup";
     public const string Slot = "Slot";
     public const string Dut = "Dut";
-    public const string System = "System";
     public const string Capability = "Capability";
     public const string Driver = "Driver";
 
     public static IReadOnlyCollection<string> All { get; } =
     [
-        AutomationModule,
-        EquipmentNode,
+        System,
         SlotGroup,
         Slot,
         Dut,
-        System,
         Capability,
         Driver
     ];

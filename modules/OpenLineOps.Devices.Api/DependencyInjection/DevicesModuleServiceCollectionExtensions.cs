@@ -10,8 +10,6 @@ using OpenLineOps.Devices.Infrastructure.Persistence;
 using OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 using OpenLineOps.Devices.Infrastructure.Time;
 using OpenLineOps.Engineering.Application.Persistence;
-using OpenLineOps.Plugins.Application.Capabilities;
-using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
@@ -30,42 +28,29 @@ public static class DevicesModuleServiceCollectionExtensions
         services.TryAddSingleton<IConfiguration>(_ => configuration ?? new ConfigurationBuilder().Build());
         services.TryAddSingleton<IClock, SystemClock>();
 
-        var options = LoadOptions(configuration);
-        services.AddSingleton(options);
-
         var persistenceOptions = LoadPersistenceOptions(configuration);
         services.AddSingleton(persistenceOptions);
         AddDevicePersistence(services, persistenceOptions);
 
-        var configuredSimulatorOptions = LoadConfiguredSimulatorOptions(configuration);
-        services.AddSingleton(configuredSimulatorOptions);
-
-        var commandExecutionOptions = LoadCommandExecutionOptions(configuration);
-        services.AddSingleton(commandExecutionOptions);
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
 
-        services.TryAddSingleton<FakeDeviceCommandExecutor>();
-        services.TryAddSingleton<ConfiguredSimulatorDeviceCommandExecutor>();
-        services.TryAddSingleton<IDeviceCommandExecutor, ConfigurableDeviceCommandExecutor>();
-        services.TryAddSingleton<StaticDeviceCommandRouteResolver>();
-        services.TryAddSingleton(serviceProvider => new EngineeringConfigurationDeviceCommandRouteResolver(
-            serviceProvider.GetRequiredService<IEngineeringProjectRepository>(),
-            serviceProvider.GetService<IPluginCapabilityInventory>(),
-            serviceProvider.GetService<IPluginDeviceCommandInventory>()));
+        services.TryAddSingleton<ProjectReleaseSimulatorDeviceCommandExecutor>();
+        services.TryAddSingleton<PluginDeviceCommandExecutor>();
+        services.TryAddSingleton<IDeviceCommandExecutor, ProjectReleaseDeviceCommandExecutor>();
         services.TryAddSingleton(serviceProvider => new ProjectReleaseDeviceCommandRouteResolver(
             serviceProvider.GetRequiredService<IAutomationProjectRepository>(),
             serviceProvider.GetRequiredService<IProjectReleaseArtifactStore>(),
             serviceProvider.GetRequiredService<IProjectEngineeringConfigurationRepository>()));
-        services.Replace(ServiceDescriptor.Singleton<IDeviceCommandRouteResolver, ConfigurableDeviceCommandRouteResolver>());
+        services.Replace(ServiceDescriptor.Singleton<IProjectReleaseRuntimeCommandRouteResolver>(serviceProvider =>
+            serviceProvider.GetRequiredService<ProjectReleaseDeviceCommandRouteResolver>()));
         services.TryAddSingleton<DeviceRuntimeCommandExecutor>();
-        services.TryAddSingleton<SimulatedRuntimeCommandExecutor>();
         services.TryAddSingleton<RuntimeFlowCommandExecutor>();
+        services.TryAddSingleton<PluginRuntimeCommandExecutor>();
         services.TryAddSingleton<PythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<IRuntimeScriptExecutor, ConfigurableRuntimeScriptExecutor>();
-        services.TryAddSingleton<RuntimeAutomationPlanExpander>();
-        services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ConfigurableRuntimeCommandExecutor>());
+        services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ProjectReleaseRuntimeCommandExecutor>());
         services.AddScoped<IDeviceConfigurationService, DeviceConfigurationService>();
 
         return services;
@@ -78,6 +63,7 @@ public static class DevicesModuleServiceCollectionExtensions
         if (IsEfSqlite(persistenceOptions.Provider))
         {
             services.AddEfSqliteDevicePersistence(persistenceOptions.ResolveSqliteConnectionString());
+            services.AddHostedService<EfSqliteDevicesDatabaseMigrator>();
         }
         else if (IsSqlite(persistenceOptions.Provider))
         {
@@ -103,18 +89,6 @@ public static class DevicesModuleServiceCollectionExtensions
         }
     }
 
-    private static DeviceRuntimeBridgeOptions LoadOptions(IConfiguration? configuration)
-    {
-        var runtimeSection = configuration?.GetSection(DeviceRuntimeBridgeOptions.RuntimeSectionName);
-        var routingSection = configuration?.GetSection(DeviceRuntimeBridgeOptions.DevicesRoutingSectionName);
-
-        return new DeviceRuntimeBridgeOptions
-        {
-            CommandExecutor = runtimeSection?["CommandExecutor"] ?? DeviceRuntimeCommandExecutors.Simulator,
-            RouteResolver = routingSection?["Provider"] ?? DeviceCommandRouteResolvers.Engineering
-        };
-    }
-
     private static DevicePersistenceOptions LoadPersistenceOptions(IConfiguration? configuration)
     {
         var section = configuration?.GetSection(DevicePersistenceOptions.SectionName);
@@ -124,49 +98,6 @@ public static class DevicesModuleServiceCollectionExtensions
             Provider = section?["Provider"] ?? DevicePersistenceProviders.EfSqlite,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-devices.sqlite"
-        };
-    }
-
-    private static ConfiguredSimulatorDeviceCommandOptions LoadConfiguredSimulatorOptions(IConfiguration? configuration)
-    {
-        var section = configuration?.GetSection(ConfiguredSimulatorDeviceCommandOptions.SectionName);
-        var options = new ConfiguredSimulatorDeviceCommandOptions
-        {
-            DefaultOutcome = section?["DefaultOutcome"] ?? nameof(DeviceCommandExecutionOutcome.Rejected),
-            DefaultResultPayload = section?["DefaultResultPayload"],
-            DefaultFailureReason = section?["DefaultFailureReason"],
-            DefaultDelayMilliseconds = ReadInt(section?["DefaultDelayMilliseconds"])
-        };
-
-        if (section is null)
-        {
-            return options;
-        }
-
-        foreach (var commandSection in section.GetSection("Commands").GetChildren())
-        {
-            options.Commands.Add(new ConfiguredSimulatorDeviceCommandRule
-            {
-                CommandDefinitionId = commandSection["CommandDefinitionId"],
-                CapabilityId = commandSection["CapabilityId"],
-                CommandName = commandSection["CommandName"],
-                Outcome = commandSection["Outcome"] ?? nameof(DeviceCommandExecutionOutcome.Completed),
-                ResultPayload = commandSection["ResultPayload"],
-                FailureReason = commandSection["FailureReason"],
-                DelayMilliseconds = ReadInt(commandSection["DelayMilliseconds"])
-            });
-        }
-
-        return options;
-    }
-
-    private static DeviceCommandExecutionOptions LoadCommandExecutionOptions(IConfiguration? configuration)
-    {
-        var section = configuration?.GetSection(DeviceRuntimeBridgeOptions.DevicesExecutionSectionName);
-
-        return new DeviceCommandExecutionOptions
-        {
-            Provider = section?["Provider"] ?? DeviceCommandExecutorProviders.Fake
         };
     }
 
@@ -237,13 +168,6 @@ public static class DevicesModuleServiceCollectionExtensions
     {
         return string.Equals(provider, DevicePersistenceProviders.InMemory, StringComparison.OrdinalIgnoreCase)
             || string.Equals(provider, "Memory", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static int ReadInt(string? value)
-    {
-        return int.TryParse(value, out var parsed)
-            ? parsed
-            : 0;
     }
 
     private static bool TryReadBoolean(string? value, bool defaultValue)

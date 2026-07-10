@@ -1,6 +1,7 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Domain.Commands;
 
@@ -13,7 +14,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         string commandName,
         DateTimeOffset createdAtUtc,
         TimeSpan timeout,
-        RuntimeActionId? actionId)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
         : base(id)
     {
         if (timeout <= TimeSpan.Zero)
@@ -22,7 +24,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         }
 
         StepId = stepId;
-        ActionId = actionId ?? new RuntimeActionId($"legacy:command:{id.Value:D}");
+        ActionId = actionId ?? throw new ArgumentNullException(nameof(actionId));
+        Target = target ?? throw new ArgumentNullException(nameof(target));
         TargetCapability = targetCapability;
         CommandName = string.IsNullOrWhiteSpace(commandName)
             ? throw new ArgumentException("Command name cannot be empty.", nameof(commandName))
@@ -36,6 +39,12 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
     public RuntimeStepId StepId { get; }
 
     public RuntimeActionId ActionId { get; }
+
+    public RuntimeTargetReference Target { get; }
+
+    public string TargetKind => Target.Kind;
+
+    public string TargetId => Target.TargetId;
 
     public RuntimeCapabilityId TargetCapability { get; }
 
@@ -72,7 +81,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         string commandName,
         DateTimeOffset createdAtUtc,
         TimeSpan timeout,
-        RuntimeActionId? actionId = null)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
     {
         return new RuntimeCommand(
             id,
@@ -81,7 +91,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             commandName,
             createdAtUtc,
             timeout,
-            actionId);
+            actionId,
+            target);
     }
 
     public static RuntimeCommand Restore(
@@ -97,7 +108,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset? completedAtUtc,
         string? resultPayload,
         string? failureReason,
-        RuntimeActionId? actionId = null)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
     {
         var command = new RuntimeCommand(
             id,
@@ -106,7 +118,8 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             commandName,
             createdAtUtc,
             timeout,
-            actionId)
+            actionId,
+            target)
         {
             Status = status,
             AcceptedAtUtc = acceptedAtUtc,

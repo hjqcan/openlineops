@@ -1,6 +1,7 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Domain.Steps;
 
@@ -11,15 +12,13 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
         RuntimeNodeId nodeId,
         string displayName,
         DateTimeOffset startedAtUtc,
-        RuntimeActionId? actionId,
-        RuntimeStepId? parentStepId,
-        int? dynamicSequence)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
         : base(id)
     {
         NodeId = nodeId;
-        ActionId = actionId ?? new RuntimeActionId($"{nodeId.Value}:action:1");
-        ParentStepId = parentStepId;
-        DynamicSequence = dynamicSequence;
+        ActionId = actionId ?? throw new ArgumentNullException(nameof(actionId));
+        Target = target ?? throw new ArgumentNullException(nameof(target));
         DisplayName = string.IsNullOrWhiteSpace(displayName)
             ? nodeId.Value
             : displayName.Trim();
@@ -31,9 +30,11 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
 
     public RuntimeActionId ActionId { get; }
 
-    public RuntimeStepId? ParentStepId { get; }
+    public RuntimeTargetReference Target { get; }
 
-    public int? DynamicSequence { get; }
+    public string TargetKind => Target.Kind;
+
+    public string TargetId => Target.TargetId;
 
     public string DisplayName { get; }
 
@@ -55,19 +56,16 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
         RuntimeNodeId nodeId,
         string displayName,
         DateTimeOffset startedAtUtc,
-        RuntimeActionId? actionId = null,
-        RuntimeStepId? parentStepId = null,
-        int? dynamicSequence = null)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
     {
-        ValidateDynamicIdentity(parentStepId, dynamicSequence);
         return new RuntimeStep(
             id,
             nodeId,
             displayName,
             startedAtUtc,
             actionId,
-            parentStepId,
-            dynamicSequence);
+            target);
     }
 
     public static RuntimeStep Restore(
@@ -78,19 +76,16 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
         DateTimeOffset startedAtUtc,
         DateTimeOffset? completedAtUtc,
         string? failureReason,
-        RuntimeActionId? actionId = null,
-        RuntimeStepId? parentStepId = null,
-        int? dynamicSequence = null)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
     {
-        ValidateDynamicIdentity(parentStepId, dynamicSequence);
         var step = new RuntimeStep(
             id,
             nodeId,
             displayName,
             startedAtUtc,
             actionId,
-            parentStepId,
-            dynamicSequence)
+            target)
         {
             Status = status,
             CompletedAtUtc = completedAtUtc,
@@ -146,23 +141,4 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
             : value.Trim();
     }
 
-    private static void ValidateDynamicIdentity(
-        RuntimeStepId? parentStepId,
-        int? dynamicSequence)
-    {
-        if (parentStepId is null && dynamicSequence is not null)
-        {
-            throw new ArgumentException(
-                "DynamicSequence requires a parent runtime step.",
-                nameof(dynamicSequence));
-        }
-
-        if (parentStepId is not null && dynamicSequence is not > 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(dynamicSequence),
-                dynamicSequence,
-                "A child runtime step must declare a positive dynamic sequence.");
-        }
-    }
 }

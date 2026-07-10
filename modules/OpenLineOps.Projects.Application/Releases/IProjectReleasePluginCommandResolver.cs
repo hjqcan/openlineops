@@ -8,6 +8,8 @@ public interface IProjectReleasePluginCommandResolver
         string snapshotId,
         string capabilityId,
         string commandName,
+        string? targetKind = null,
+        string? targetId = null,
         CancellationToken cancellationToken = default);
 }
 

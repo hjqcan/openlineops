@@ -18,10 +18,13 @@ public sealed class RuntimeMonitoringProjection :
 {
     private readonly IRuntimeSessionRepository _sessionRepository;
     private readonly ConcurrentDictionary<string, RuntimeStationStatusProjection> _stationStatuses =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<RuntimeTargetStatusKey, RuntimeTargetStatusState> _targetStatuses =
+        new(RuntimeTargetStatusKeyComparer.Instance);
     private readonly ConcurrentDictionary<Guid, RuntimeTimelineEntry[]> _timelines = new();
     private readonly ConcurrentDictionary<Guid, RuntimeAlarmProjection> _alarms = new();
     private long _sequence;
+    private long _targetStatusSequence;
 
     public RuntimeMonitoringProjection(IRuntimeSessionRepository sessionRepository)
     {
@@ -64,24 +67,51 @@ public sealed class RuntimeMonitoringProjection :
                 {
                     UpsertAlarm(session, incidentEvent);
                 }
+
+                if (envelope.DomainEvent is RuntimeCommandStatusChangedDomainEvent commandStatusEvent)
+                {
+                    UpsertTargetStatus(session, commandStatusEvent);
+                }
             }
         }
     }
 
     public ValueTask<IReadOnlyCollection<RuntimeStationStatusProjection>> GetStationStatusesAsync(
-        string? stationId = null,
+        string? stationSystemId = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var normalizedStationId = string.IsNullOrWhiteSpace(stationId)
+        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
             ? null
-            : stationId.Trim();
+            : stationSystemId.Trim();
 
         IReadOnlyCollection<RuntimeStationStatusProjection> statuses = _stationStatuses.Values
-            .Where(status => normalizedStationId is null
-                || string.Equals(status.StationId, normalizedStationId, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(status => status.StationId, StringComparer.OrdinalIgnoreCase)
+            .Where(status => normalizedStationSystemId is null
+                || string.Equals(status.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
+            .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
+            .ToArray();
+
+        return ValueTask.FromResult(statuses);
+    }
+
+    public ValueTask<IReadOnlyCollection<RuntimeTargetStatusProjection>> GetTargetStatusesAsync(
+        string? stationSystemId = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
+            ? null
+            : stationSystemId.Trim();
+
+        IReadOnlyCollection<RuntimeTargetStatusProjection> statuses = _targetStatuses.Values
+            .Select(state => state.Projection)
+            .Where(status => normalizedStationSystemId is null
+                || string.Equals(status.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
+            .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
+            .ThenBy(status => status.TargetKind, StringComparer.Ordinal)
+            .ThenBy(status => status.TargetId, StringComparer.Ordinal)
             .ToArray();
 
         return ValueTask.FromResult(statuses);
@@ -101,20 +131,20 @@ public sealed class RuntimeMonitoringProjection :
     }
 
     public ValueTask<IReadOnlyCollection<RuntimeAlarmProjection>> GetAlarmsAsync(
-        string? stationId = null,
+        string? stationSystemId = null,
         bool includeAcknowledged = false,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var normalizedStationId = string.IsNullOrWhiteSpace(stationId)
+        var normalizedStationSystemId = string.IsNullOrWhiteSpace(stationSystemId)
             ? null
-            : stationId.Trim();
+            : stationSystemId.Trim();
 
         IReadOnlyCollection<RuntimeAlarmProjection> alarms = _alarms.Values
             .Where(alarm => includeAcknowledged || !alarm.IsAcknowledged)
-            .Where(alarm => normalizedStationId is null
-                || string.Equals(alarm.StationId, normalizedStationId, StringComparison.OrdinalIgnoreCase))
+            .Where(alarm => normalizedStationSystemId is null
+                || string.Equals(alarm.StationSystemId, normalizedStationSystemId, StringComparison.Ordinal))
             .OrderByDescending(alarm => alarm.OccurredAtUtc)
             .ThenBy(alarm => alarm.AlarmId.Value)
             .ToArray();
@@ -193,6 +223,25 @@ public sealed class RuntimeMonitoringProjection :
                 AcknowledgedBy: null,
                 AcknowledgedAtUtc: null),
             (_, existing) => existing);
+    }
+
+    private void UpsertTargetStatus(
+        RuntimeSession session,
+        RuntimeCommandStatusChangedDomainEvent commandStatusEvent)
+    {
+        var projection = RuntimeTargetStatusProjection.FromCommandStatusChanged(session, commandStatusEvent);
+        var key = new RuntimeTargetStatusKey(
+            projection.StationSystemId,
+            projection.TargetKind,
+            projection.TargetId);
+        var candidate = new RuntimeTargetStatusState(
+            Interlocked.Increment(ref _targetStatusSequence),
+            projection);
+
+        _targetStatuses.AddOrUpdate(
+            key,
+            candidate,
+            (_, current) => candidate.Sequence > current.Sequence ? candidate : current);
     }
 
     private RuntimeTimelineEntry ToTimelineEntry(IDomainEvent domainEvent, RuntimeSession session)
@@ -311,4 +360,33 @@ public sealed class RuntimeMonitoringProjection :
     }
 
     private sealed record RuntimeEventEnvelope(IDomainEvent DomainEvent, RuntimeSessionId? SessionId);
+
+    private readonly record struct RuntimeTargetStatusKey(
+        string StationSystemId,
+        string TargetKind,
+        string TargetId);
+
+    private sealed record RuntimeTargetStatusState(
+        long Sequence,
+        RuntimeTargetStatusProjection Projection);
+
+    private sealed class RuntimeTargetStatusKeyComparer : IEqualityComparer<RuntimeTargetStatusKey>
+    {
+        public static RuntimeTargetStatusKeyComparer Instance { get; } = new();
+
+        public bool Equals(RuntimeTargetStatusKey x, RuntimeTargetStatusKey y)
+        {
+            return StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId)
+                && StringComparer.Ordinal.Equals(x.TargetKind, y.TargetKind)
+                && StringComparer.Ordinal.Equals(x.TargetId, y.TargetId);
+        }
+
+        public int GetHashCode(RuntimeTargetStatusKey obj)
+        {
+            return HashCode.Combine(
+                StringComparer.Ordinal.GetHashCode(obj.StationSystemId),
+                StringComparer.Ordinal.GetHashCode(obj.TargetKind),
+                StringComparer.Ordinal.GetHashCode(obj.TargetId));
+        }
+    }
 }

@@ -17,8 +17,7 @@ public sealed record DutModelRequest(
 public sealed record WorkstationRequest(
     string WorkstationId,
     string DisplayName,
-    string TopologyStationNodeId,
-    string TopologySystemModuleId);
+    string StationSystemId);
 
 public sealed record ProcessStageRequest(
     string StageId,

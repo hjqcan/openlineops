@@ -9,7 +9,7 @@ public sealed record RuntimeTimelineEntry(
     DateTimeOffset OccurredAtUtc,
     string EventName,
     RuntimeSessionId SessionId,
-    string StationId,
+    string StationSystemId,
     string EntityKind,
     string? EntityId,
     string? FromStatus,

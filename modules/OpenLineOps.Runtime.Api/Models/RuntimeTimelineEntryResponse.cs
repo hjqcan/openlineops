@@ -6,7 +6,7 @@ public sealed record RuntimeTimelineEntryResponse(
     DateTimeOffset OccurredAtUtc,
     string EventName,
     Guid SessionId,
-    string StationId,
+    string StationSystemId,
     string EntityKind,
     string? EntityId,
     string? FromStatus,

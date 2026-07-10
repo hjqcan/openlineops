@@ -4,11 +4,20 @@ public sealed record CreateAutomationTopologyRequest(
     string TopologyId,
     string DisplayName);
 
-public sealed record AddEquipmentNodeRequest(
-    string NodeId,
-    string? ParentNodeId,
+public sealed record AddAutomationSystemRequest(
+    string SystemId,
+    string? ParentSystemId,
     string Kind,
-    string DisplayName);
+    string SystemType,
+    string DisplayName,
+    IReadOnlyCollection<string> RequiredCapabilityIds,
+    IReadOnlyCollection<string> ProvidedCapabilityIds,
+    IReadOnlyDictionary<string, string> Metadata);
+
+public sealed record UpdateAutomationSystemRequest(
+    string? SystemType,
+    string? DisplayName,
+    IReadOnlyDictionary<string, string>? Metadata);
 
 public sealed record AddCapabilityContractRequest(
     string CapabilityId,
@@ -19,14 +28,6 @@ public sealed record AddCapabilityContractRequest(
     int TimeoutSeconds,
     string SafetyClass);
 
-public sealed record AddAutomationModuleRequest(
-    string ModuleId,
-    string NodeId,
-    string ModuleKind,
-    string DisplayName,
-    IReadOnlyCollection<string> RequiredCapabilityIds,
-    IReadOnlyCollection<string> ProvidedCapabilityIds);
-
 public sealed record AddDriverBindingRequest(
     string BindingId,
     string CapabilityId,
@@ -35,16 +36,33 @@ public sealed record AddDriverBindingRequest(
 
 public sealed record AddSlotGroupRequest(
     string SlotGroupId,
-    string ParentNodeId,
+    string ParentSystemId,
     string DisplayName,
     string Kind,
     int Capacity);
 
+public sealed record UpdateSlotGroupRequest(
+    string? DisplayName,
+    string? Kind,
+    int? Capacity);
+
 public sealed record AddSlotDefinitionRequest(
     string SlotGroupId,
     string SlotId,
-    string ParentNodeId,
+    string ParentSystemId,
     string Address,
     string DisplayName,
     string MaterialKind,
     bool IsEnabled = true);
+
+public sealed record UpdateSlotDefinitionRequest(
+    string? Address,
+    string? DisplayName,
+    string? MaterialKind,
+    bool? IsEnabled);
+
+public sealed record TopologyTargetDeletionDetails(
+    AutomationTopologyDetails Topology,
+    int UpdatedLayoutCount,
+    int RemovedLayoutElementCount,
+    string PublicationImpact);

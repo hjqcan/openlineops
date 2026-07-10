@@ -51,6 +51,7 @@ interface EngineeringDraft {
   recipeVersionId: string;
   recipeName: string;
   stationProfileId: string;
+  stationSystemId: string;
   stationName: string;
   deviceBindingId: string;
   capabilityId: string;
@@ -285,6 +286,7 @@ export function EngineeringWorkbench({
       if (!hasStation) {
         const station = await createStationProfile({
           stationProfileId: draft.stationProfileId,
+          stationSystemId: draft.stationSystemId,
           displayName: draft.stationName,
           deviceBindings: [
             {
@@ -434,6 +436,11 @@ export function EngineeringWorkbench({
                 label="Station Profile ID"
                 value={draft.stationProfileId}
                 onChange={value => setDraft(current => ({ ...current, stationProfileId: value }))}
+              />
+              <TextField
+                label="Station System ID"
+                value={draft.stationSystemId}
+                onChange={value => setDraft(current => ({ ...current, stationSystemId: value }))}
               />
               <TextField
                 label="Display Name"
@@ -669,6 +676,7 @@ function createEngineeringDraft(
     recipeVersionId: `${recipeId}@1.0.0`,
     recipeName: 'Application Runtime Recipe',
     stationProfileId: `${prefix}-station-${seed}`,
+    stationSystemId: `${applicationId || 'application'}.station.1`,
     stationName: 'Application Runtime Station',
     deviceBindingId: 'loopback-primary',
     capabilityId: 'device.loopback',

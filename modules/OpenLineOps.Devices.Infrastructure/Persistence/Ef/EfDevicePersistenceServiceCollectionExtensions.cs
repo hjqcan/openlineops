@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using OpenLineOps.Devices.Application.Persistence;
+using OpenLineOps.Devices.Infrastructure.Persistence;
 
 namespace OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 
@@ -18,6 +19,7 @@ public static class EfDevicePersistenceServiceCollectionExtensions
         }
 
         var normalizedConnectionString = connectionString.Trim();
+        SqliteDeviceStorage.EnsureDatabaseDirectory(normalizedConnectionString);
 
         services.AddDbContext<DevicesDbContext>(options => options.UseSqlite(normalizedConnectionString));
         services.AddScoped<IDeviceDefinitionRepository, EfDeviceDefinitionRepository>();

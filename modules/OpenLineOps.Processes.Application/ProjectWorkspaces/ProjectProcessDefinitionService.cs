@@ -110,7 +110,7 @@ public sealed class ProjectProcessDefinitionService : IProjectProcessDefinitionS
     private async Task<Result<T>> InScopeAsync<T>(
         string projectId,
         string applicationId,
-        Func<IProcessDefinitionService, Task<Result<T>>> execute,
+        Func<ProcessDefinitionAuthoringEngine, Task<Result<T>>> execute,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(applicationId))
@@ -130,7 +130,7 @@ public sealed class ProjectProcessDefinitionService : IProjectProcessDefinitionS
                 $"Application {applicationId} was not found in project {projectId}."));
         }
 
-        var service = new ProcessDefinitionService(
+        var service = new ProcessDefinitionAuthoringEngine(
             new ScopedProcessDefinitionRepository(scope, _repository),
             _clock,
             _scriptValidator);

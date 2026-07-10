@@ -636,7 +636,6 @@ internal static class BlocklyWorkspaceActionCompiler
                 retryLimit,
                 FlowIrCancellationMode.Cooperative),
             PythonScript: null,
-            DynamicChildren: null,
             source);
     }
 
@@ -810,12 +809,10 @@ internal static class BlocklyWorkspaceActionCompiler
     {
         kind = value switch
         {
-            RuntimeActionTargetKinds.AutomationModule => FlowIrTargetReferenceKind.AutomationModule,
-            RuntimeActionTargetKinds.EquipmentNode => FlowIrTargetReferenceKind.EquipmentNode,
+            RuntimeActionTargetKinds.System => FlowIrTargetReferenceKind.System,
             RuntimeActionTargetKinds.SlotGroup => FlowIrTargetReferenceKind.SlotGroup,
             RuntimeActionTargetKinds.Slot => FlowIrTargetReferenceKind.Slot,
             RuntimeActionTargetKinds.Dut => FlowIrTargetReferenceKind.Dut,
-            RuntimeActionTargetKinds.System => FlowIrTargetReferenceKind.System,
             RuntimeActionTargetKinds.Capability => FlowIrTargetReferenceKind.Capability,
             RuntimeActionTargetKinds.Driver => FlowIrTargetReferenceKind.Driver,
             _ => default

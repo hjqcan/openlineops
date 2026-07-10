@@ -5,4 +5,4 @@ public sealed record RuntimeConfigurationSnapshotDetails(
     string ProcessDefinitionId,
     string ProcessVersionId,
     string RecipeSnapshotId,
-    string StationId);
+    string StationSystemId);

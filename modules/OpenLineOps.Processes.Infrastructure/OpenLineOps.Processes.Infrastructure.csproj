@@ -7,12 +7,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" />
-    <PackageReference Include="Npgsql" />
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Processes.Domain\OpenLineOps.Processes.Domain.csproj" />
     <ProjectReference Include="..\..\lib\pythonscript\PythonScript\PythonScript.csproj" />

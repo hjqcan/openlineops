@@ -17,7 +17,7 @@ internal sealed record ProjectReleaseArtifactManifest(
 {
     public const string CurrentSchema = "openlineops.project-release-artifact";
 
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
 
     public const string FileName = "release.json";
 }

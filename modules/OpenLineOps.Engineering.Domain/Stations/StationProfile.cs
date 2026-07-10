@@ -8,29 +8,33 @@ public sealed class StationProfile : Entity<StationProfileId>
 {
     private readonly List<DeviceBinding> _deviceBindings = [];
 
-    private StationProfile(StationProfileId id, string displayName)
+    private StationProfile(StationProfileId id, string stationSystemId, string displayName)
         : base(id)
     {
+        StationSystemId = EngineeringIdGuard.NotBlank(stationSystemId, nameof(stationSystemId));
         DisplayName = EngineeringIdGuard.NotBlank(displayName, nameof(displayName));
     }
+
+    public string StationSystemId { get; }
 
     public string DisplayName { get; }
 
     public IReadOnlyCollection<DeviceBinding> DeviceBindings => _deviceBindings.AsReadOnly();
 
-    public static StationProfile Create(StationProfileId id, string displayName)
+    public static StationProfile Create(StationProfileId id, string stationSystemId, string displayName)
     {
-        return new StationProfile(id, displayName);
+        return new StationProfile(id, stationSystemId, displayName);
     }
 
     public static StationProfile Restore(
         StationProfileId id,
+        string stationSystemId,
         string displayName,
         IEnumerable<DeviceBinding> deviceBindings)
     {
         ArgumentNullException.ThrowIfNull(deviceBindings);
 
-        var stationProfile = new StationProfile(id, displayName);
+        var stationProfile = new StationProfile(id, stationSystemId, displayName);
         stationProfile._deviceBindings.AddRange(deviceBindings);
 
         return stationProfile;

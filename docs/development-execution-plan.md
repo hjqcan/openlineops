@@ -1892,3 +1892,7 @@ Current result on 2026-07-09:
 - Desktop `npm run build`: passed after adding transition loop-policy editor support.
 - Desktop `node --check scripts/electron-smoke.mjs`: passed after hardening generated transition-id discovery.
 - Desktop `npm run smoke:e2e`: passed after adding Decision-controlled counted loop-policy UI editing, API persistence verification, process publication, and published-runtime launch coverage.
+
+## Current-model note (2026-07-10)
+
+The dated delivery logs above are historical evidence, not current contracts. References in those logs to `automation_plan`, `RuntimeAutomationPlanDispatcher`, global `/api/process-definitions` or `/api/process-blocks` routes, simulated runtime starts, global process persistence, and legacy runtime configuration resolvers describe deleted implementations. The current model compiles Blockly directly to Flow IR v2, keeps Python as one controlled published action, scopes authoring to Project/Application resources, and starts runtime only from immutable project release snapshots. No compatibility path exists for those removed surfaces or for runtime snapshots missing ActionId, TargetKind, or TargetId.

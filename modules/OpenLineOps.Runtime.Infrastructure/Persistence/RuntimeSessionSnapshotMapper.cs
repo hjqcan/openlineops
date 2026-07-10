@@ -3,6 +3,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -34,7 +35,6 @@ internal static class RuntimeSessionSnapshotMapper
         ArgumentNullException.ThrowIfNull(snapshot);
 
         var steps = snapshot.Steps.Select(ToAggregate).ToArray();
-        var stepsById = steps.ToDictionary(step => step.Id.Value);
 
         return RuntimeSession.Restore(
             new RuntimeSessionId(snapshot.SessionId),
@@ -50,7 +50,7 @@ internal static class RuntimeSessionSnapshotMapper
             snapshot.PausedAtUtc,
             snapshot.CompletedAtUtc,
             steps,
-            snapshot.Commands.Select(command => ToAggregate(command, stepsById)),
+            snapshot.Commands.Select(ToAggregate),
             snapshot.Incidents.Select(ToAggregate),
             ToAggregate(snapshot.TraceMetadata));
     }
@@ -80,8 +80,8 @@ internal static class RuntimeSessionSnapshotMapper
             step.CompletedAtUtc,
             step.FailureReason,
             step.ActionId.Value,
-            step.ParentStepId?.Value,
-            step.DynamicSequence);
+            step.TargetKind,
+            step.TargetId);
     }
 
     private static PersistedRuntimeCommand ToSnapshot(RuntimeCommand command)
@@ -99,7 +99,9 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
-            command.ActionId.Value);
+            command.ActionId.Value,
+            command.TargetKind,
+            command.TargetId);
     }
 
     private static PersistedRuntimeIncident ToSnapshot(RuntimeIncident incident)
@@ -122,24 +124,12 @@ internal static class RuntimeSessionSnapshotMapper
             step.StartedAtUtc,
             step.CompletedAtUtc,
             step.FailureReason,
-            string.IsNullOrWhiteSpace(step.ActionId)
-                ? new RuntimeActionId($"{step.NodeId}:action:1")
-                : new RuntimeActionId(step.ActionId),
-            step.ParentStepId is null
-                ? null
-                : new RuntimeStepId(step.ParentStepId.Value),
-            step.DynamicSequence);
+            RequiredActionId(step.ActionId, $"runtime step {step.StepId:D}"),
+            RequiredTarget(step.TargetKind, step.TargetId, $"runtime step {step.StepId:D}"));
     }
 
-    private static RuntimeCommand ToAggregate(
-        PersistedRuntimeCommand command,
-        Dictionary<Guid, RuntimeStep> stepsById)
+    private static RuntimeCommand ToAggregate(PersistedRuntimeCommand command)
     {
-        var actionId = string.IsNullOrWhiteSpace(command.ActionId)
-            && stepsById.TryGetValue(command.StepId, out var step)
-                ? step.ActionId
-                : new RuntimeActionId(command.ActionId ?? $"legacy:command:{command.CommandId:D}");
-
         return RuntimeCommand.Restore(
             new RuntimeCommandId(command.CommandId),
             new RuntimeStepId(command.StepId),
@@ -153,7 +143,31 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
-            actionId);
+            RequiredActionId(command.ActionId, $"runtime command {command.CommandId:D}"),
+            RequiredTarget(command.TargetKind, command.TargetId, $"runtime command {command.CommandId:D}"));
+    }
+
+    private static RuntimeActionId RequiredActionId(string? value, string owner)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"Persisted {owner} does not declare an ActionId.");
+        }
+
+        return new RuntimeActionId(value);
+    }
+
+    private static RuntimeTargetReference RequiredTarget(
+        string? kind,
+        string? targetId,
+        string owner)
+    {
+        if (string.IsNullOrWhiteSpace(kind) || string.IsNullOrWhiteSpace(targetId))
+        {
+            throw new InvalidOperationException($"Persisted {owner} does not declare TargetKind and TargetId.");
+        }
+
+        return new RuntimeTargetReference(kind, targetId);
     }
 
     private static RuntimeIncident ToAggregate(PersistedRuntimeIncident incident)
@@ -168,18 +182,30 @@ internal static class RuntimeSessionSnapshotMapper
 
     private static RuntimeSessionTraceMetadata ToAggregate(PersistedRuntimeTraceMetadata? traceMetadata)
     {
-        return traceMetadata is null
-            ? RuntimeSessionTraceMetadata.Empty
-            : new RuntimeSessionTraceMetadata(
-                traceMetadata.SerialNumber,
-                traceMetadata.BatchId,
-                traceMetadata.FixtureId,
-                traceMetadata.DeviceId,
-                traceMetadata.ActorId,
-                traceMetadata.ProjectId,
-                traceMetadata.ApplicationId,
-                traceMetadata.ProjectSnapshotId,
-                traceMetadata.TopologyId);
+        if (traceMetadata is null)
+        {
+            throw new InvalidDataException(
+                "Persisted runtime session does not declare release trace metadata.");
+        }
+
+        return new RuntimeSessionTraceMetadata(
+            traceMetadata.SerialNumber,
+            traceMetadata.BatchId,
+            traceMetadata.FixtureId,
+            traceMetadata.DeviceId,
+            traceMetadata.ActorId,
+            RequiredTraceIdentity(traceMetadata.ProjectId, "project id"),
+            RequiredTraceIdentity(traceMetadata.ApplicationId, "application id"),
+            RequiredTraceIdentity(traceMetadata.ProjectSnapshotId, "project snapshot id"),
+            RequiredTraceIdentity(traceMetadata.TopologyId, "topology id"));
+    }
+
+    private static string RequiredTraceIdentity(string? value, string fieldName)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidDataException(
+                $"Persisted runtime session trace metadata does not declare {fieldName}.")
+            : value;
     }
 
     private static TEnum ParseEnum<TEnum>(string value, string fieldName)
@@ -231,9 +257,9 @@ internal sealed record PersistedRuntimeStep(
     DateTimeOffset StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
     string? FailureReason,
-    string? ActionId = null,
-    Guid? ParentStepId = null,
-    int? DynamicSequence = null);
+    string ActionId,
+    string TargetKind,
+    string TargetId);
 
 internal sealed record PersistedRuntimeCommand(
     Guid CommandId,
@@ -248,7 +274,9 @@ internal sealed record PersistedRuntimeCommand(
     DateTimeOffset? CompletedAtUtc,
     string? ResultPayload,
     string? FailureReason,
-    string? ActionId = null);
+    string ActionId,
+    string TargetKind,
+    string TargetId);
 
 internal sealed record PersistedRuntimeIncident(
     Guid IncidentId,

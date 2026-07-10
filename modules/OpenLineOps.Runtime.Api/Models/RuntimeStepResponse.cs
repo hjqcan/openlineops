@@ -9,5 +9,5 @@ public sealed record RuntimeStepResponse(
     DateTimeOffset? CompletedAtUtc,
     string? FailureReason,
     string ActionId,
-    Guid? ParentStepId,
-    int? DynamicSequence);
+    string TargetKind,
+    string TargetId);

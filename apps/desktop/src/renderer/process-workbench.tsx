@@ -29,8 +29,7 @@ import type {
   ProcessNodeResponse,
   PublishedProjectSnapshotResponse,
   RegisterProcessBlocklyBlockDefinitionRequest,
-  StartedProcessRuntimeSessionResponse,
-  StartProcessRuntimeSessionRequest
+  StartedProjectSnapshotRuntimeSessionResponse
 } from './contracts';
 import {
   createProcessDefinition,
@@ -45,7 +44,6 @@ import {
   registerProcessBlocklyBlock,
   saveAutomationProjectManifest,
   startProjectSnapshotRuntimeSession,
-  startProcessRuntimeSession,
   updateProcessDefinition,
   validateProcessDefinition
 } from './api';
@@ -186,7 +184,7 @@ export function ProcessWorkbench({
   const [draft, setDraft] = useState<ProcessDraft>(() => createDraft());
   const [launchDraft, setLaunchDraft] = useState<RuntimeLaunchDraft>(() => createRuntimeLaunchDraft());
   const [lastStartedSession, setLastStartedSession] =
-    useState<StartedProcessRuntimeSessionResponse | null>(null);
+    useState<StartedProjectSnapshotRuntimeSessionResponse | null>(null);
   const [blockCatalog, setBlockCatalog] =
     useState<ProcessBlocklyBlockDefinition[]>([]);
   const [customBlockDraft, setCustomBlockDraft] =
@@ -250,7 +248,7 @@ export function ProcessWorkbench({
     [activeApplication, activeWorkspace, projectTopology]);
 
   const loadDefinitions = useCallback(async () => {
-    if (!isBackendHealthy) {
+    if (!isBackendHealthy || !projectApplicationApiScope) {
       return;
     }
 
@@ -260,7 +258,7 @@ export function ProcessWorkbench({
 
   const loadBlocklyBlocks = useCallback(async () => {
     const requestedScopeKey = editorScopeKey;
-    if (!isBackendHealthy) {
+    if (!isBackendHealthy || !projectApplicationApiScope) {
       if (blockScopeKeyRef.current === requestedScopeKey) {
         setBlockCatalog([]);
       }
@@ -274,7 +272,7 @@ export function ProcessWorkbench({
   }, [editorScopeKey, isBackendHealthy, projectApplicationApiScope]);
 
   const loadProjectTopology = useCallback(async () => {
-    if (!isBackendHealthy || !activeApplication?.topologyId) {
+    if (!isBackendHealthy || !activeApplication?.topologyId || !projectApplicationApiScope) {
       setProjectTopology(null);
       return;
     }
@@ -331,7 +329,7 @@ export function ProcessWorkbench({
   }, [customBlocks]);
 
   useEffect(() => {
-    if (!isBackendHealthy || !selectedBlockHistoryType) {
+    if (!isBackendHealthy || !selectedBlockHistoryType || !projectApplicationApiScope) {
       setBlockHistory([]);
       setBlockHistoryBusy(false);
       return;
@@ -388,6 +386,11 @@ export function ProcessWorkbench({
   }, [blockCatalog]);
 
   const saveDraft = useCallback(async () => {
+    if (!projectApplicationApiScope) {
+      onMessage('Open a project Application before saving a process.');
+      return;
+    }
+
     if (isLoadedDefinitionReadOnly) {
       onMessage('Published process definitions cannot be overwritten. Create a new draft to continue.');
       return;
@@ -426,7 +429,7 @@ export function ProcessWorkbench({
   ]);
 
   const validateSelected = useCallback(async () => {
-    if (!selectedDefinition) {
+    if (!selectedDefinition || !projectApplicationApiScope) {
       return;
     }
 
@@ -438,7 +441,7 @@ export function ProcessWorkbench({
   }, [onMessage, projectApplicationApiScope, selectedDefinition]);
 
   const publishSelected = useCallback(async () => {
-    if (!selectedDefinition) {
+    if (!selectedDefinition || !projectApplicationApiScope) {
       return;
     }
 
@@ -466,6 +469,10 @@ export function ProcessWorkbench({
   }, [blockCatalog, loadDefinitions, onMessage, projectApplicationApiScope, selectedDefinition]);
 
   const loadExisting = useCallback(async (summary: ProcessDefinitionSummary) => {
+    if (!projectApplicationApiScope) {
+      return;
+    }
+
     setBusy(true);
     setValidationReport(null);
     try {
@@ -490,25 +497,22 @@ export function ProcessWorkbench({
   const startPublishedRuntimeSession = useCallback(async () => {
     const projectSnapshotId = selectedApplicationSnapshot?.snapshotId ?? null;
 
-    if (activeWorkspace && !projectSnapshotId) {
-      onMessage('Publish a project snapshot before starting runtime');
+    if (!activeWorkspace) {
+      onMessage('Open a project Application before starting runtime');
       return;
     }
 
-    if (!projectSnapshotId && !selectedDefinition) {
+    if (!projectSnapshotId) {
+      onMessage('Publish a project snapshot before starting runtime');
       return;
     }
 
     setBusy(true);
     try {
-      const response = activeWorkspace
-        ? await startProjectSnapshotRuntimeSession(
-          activeWorkspace.project.projectId,
-          projectSnapshotId!,
-          toStartProjectSnapshotRuntimeSessionRequest(launchDraft))
-        : await startProcessRuntimeSession(
-          selectedDefinition!.processDefinitionId,
-          toStartRuntimeSessionRequest(launchDraft));
+      const response = await startProjectSnapshotRuntimeSession(
+        activeWorkspace.project.projectId,
+        projectSnapshotId,
+        toStartProjectSnapshotRuntimeSessionRequest(launchDraft));
       if (!response.ok || !response.body) {
         onMessage(`Runtime start failed: ${response.status} ${response.text}`);
         return;
@@ -681,7 +685,7 @@ export function ProcessWorkbench({
   }, [mutateDraft]);
 
   const registerCustomBlocklyBlock = useCallback(async () => {
-    if (!isBackendHealthy) {
+    if (!isBackendHealthy || !projectApplicationApiScope) {
       onMessage('Backend is required to register Blockly blocks');
       return;
     }
@@ -765,7 +769,7 @@ export function ProcessWorkbench({
   const restoreBlocklyBlockVersion = useCallback(async (
     block: ProcessBlocklyBlockDefinition
   ) => {
-    if (!isBackendHealthy) {
+    if (!isBackendHealthy || !projectApplicationApiScope) {
       onMessage('Backend is required to restore Blockly blocks');
       return;
     }
@@ -1858,7 +1862,7 @@ function RuntimeLaunchPanel({
   busy: boolean;
   selectedDefinition: ProcessDefinitionResponse | null;
   launchDraft: RuntimeLaunchDraft;
-  lastStartedSession: StartedProcessRuntimeSessionResponse | null;
+  lastStartedSession: StartedProjectSnapshotRuntimeSessionResponse | null;
   lastProjectSnapshot: PublishedProjectSnapshotResponse | null;
   onChange(updater: (current: RuntimeLaunchDraft) => RuntimeLaunchDraft): void;
   onPublishProjectSnapshot(): void;
@@ -1877,16 +1881,15 @@ function RuntimeLaunchPanel({
     && launchDraft.configurationSnapshotId.trim().length > 0
     && !busy;
   const canStart = isBackendHealthy
-    && (activeWorkspace
-      ? launchSnapshotId !== null
-      : isPublished && launchDraft.configurationSnapshotId.trim().length > 0)
+    && activeWorkspace !== null
+    && launchSnapshotId !== null
     && !busy;
 
   return (
     <div className="runtime-launch-box">
       <div className="runtime-launch-header">
         <div>
-          <strong>Published Runtime</strong>
+          <strong>Project Snapshot Runtime</strong>
           <span data-testid="runtime-selected-process">
             {isPublished ? selectedDefinition.processDefinitionId : 'Publish a graph first'}
           </span>
@@ -2075,20 +2078,13 @@ function createProjectTargetOptions(
     };
   };
 
-  const moduleTargets = topology.modules.map((module, index) => createOption(
-    `module-${index}`,
-    module.moduleKind === 'System' ? 'System' : 'AutomationModule',
-    module.moduleId,
-    module.displayName,
-    `${module.moduleKind} on ${module.nodeId}`,
-    module.providedCapabilityIds[0] ?? module.requiredCapabilityIds[0] ?? ''));
-
-  const equipmentTargets = topology.nodes.map((node, index) => createOption(
-    `equipment-${index}`,
-    'EquipmentNode',
-    node.nodeId,
-    node.displayName,
-    `${node.kind}${node.parentNodeId ? ` under ${node.parentNodeId}` : ''}`));
+  const systemTargets = topology.systems.map((system, index) => createOption(
+    `system-${index}`,
+    'System',
+    system.systemId,
+    system.displayName,
+    `${system.kind} · ${system.systemType}${system.parentSystemId ? ` under ${system.parentSystemId}` : ''}`,
+    system.providedCapabilityIds[0] ?? system.requiredCapabilityIds[0] ?? ''));
 
   const slotGroupTargets = topology.slotGroups.map((group, index) => createOption(
     `slot-group-${index}`,
@@ -2121,8 +2117,7 @@ function createProjectTargetOptions(
     binding.capabilityId));
 
   return [
-    ...moduleTargets,
-    ...equipmentTargets,
+    ...systemTargets,
     ...slotGroupTargets,
     ...slotTargets,
     ...capabilityTargets,
@@ -2208,8 +2203,7 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
           type: 'field_dropdown',
           name: 'TARGET_KIND',
           options: [
-            ['Automation module', 'AutomationModule'],
-            ['Equipment node', 'EquipmentNode'],
+            ['System', 'System'],
             ['Slot group', 'SlotGroup'],
             ['Slot', 'Slot'],
             ['DUT', 'Dut'],
@@ -2252,12 +2246,10 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
           type: 'string',
           required: true,
           enum: [
-            'AutomationModule',
-            'EquipmentNode',
+            'System',
             'SlotGroup',
             'Slot',
             'Dut',
-            'System',
             'Capability',
             'Driver'
           ],
@@ -2383,17 +2375,6 @@ function toCreateRequest(draft: ProcessDraft): CreateProcessDefinitionRequest {
         ? Math.max(1, Math.trunc(transition.maxTraversals))
         : null
     }))
-  };
-}
-
-function toStartRuntimeSessionRequest(draft: RuntimeLaunchDraft): StartProcessRuntimeSessionRequest {
-  return {
-    configurationSnapshotId: draft.configurationSnapshotId,
-    serialNumber: toOptionalString(draft.serialNumber),
-    batchId: toOptionalString(draft.batchId),
-    fixtureId: toOptionalString(draft.fixtureId),
-    deviceId: toOptionalString(draft.deviceId),
-    actorId: toOptionalString(draft.actorId)
   };
 }
 

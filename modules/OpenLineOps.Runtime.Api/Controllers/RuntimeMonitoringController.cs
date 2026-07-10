@@ -33,14 +33,28 @@ public sealed class RuntimeMonitoringController : ControllerBase
     [HttpGet("stations")]
     [ProducesResponseType<RuntimeStationStatusesResponse>(StatusCodes.Status200OK)]
     public async Task<ActionResult<RuntimeStationStatusesResponse>> GetStationStatusesAsync(
-        [FromQuery] string? stationId,
+        [FromQuery] string? stationSystemId,
         CancellationToken cancellationToken)
     {
         var statuses = await _monitoringService
-            .GetStationStatusesAsync(stationId, cancellationToken)
+            .GetStationStatusesAsync(stationSystemId, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new RuntimeStationStatusesResponse(
+            statuses.Select(RuntimeMonitoringResponseMapper.ToResponse).ToArray()));
+    }
+
+    [HttpGet("targets")]
+    [ProducesResponseType<RuntimeTargetStatusesResponse>(StatusCodes.Status200OK)]
+    public async Task<ActionResult<RuntimeTargetStatusesResponse>> GetTargetStatusesAsync(
+        [FromQuery] string? stationSystemId,
+        CancellationToken cancellationToken)
+    {
+        var statuses = await _monitoringService
+            .GetTargetStatusesAsync(stationSystemId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Ok(new RuntimeTargetStatusesResponse(
             statuses.Select(RuntimeMonitoringResponseMapper.ToResponse).ToArray()));
     }
 
@@ -67,12 +81,12 @@ public sealed class RuntimeMonitoringController : ControllerBase
     [HttpGet("alarms")]
     [ProducesResponseType<RuntimeAlarmsResponse>(StatusCodes.Status200OK)]
     public async Task<ActionResult<RuntimeAlarmsResponse>> GetAlarmsAsync(
-        [FromQuery] string? stationId,
+        [FromQuery] string? stationSystemId,
         [FromQuery] bool includeAcknowledged = false,
         CancellationToken cancellationToken = default)
     {
         var alarms = await _monitoringService
-            .GetAlarmsAsync(stationId, includeAcknowledged, cancellationToken)
+            .GetAlarmsAsync(stationSystemId, includeAcknowledged, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new RuntimeAlarmsResponse(

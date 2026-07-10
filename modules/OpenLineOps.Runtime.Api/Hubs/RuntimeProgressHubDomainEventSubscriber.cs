@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Runtime.Api.Models;
 using OpenLineOps.Runtime.Application.Events;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -56,6 +57,12 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
                 var timelineEntry = ToTimelineEntry(envelope.DomainEvent, session);
                 await BroadcastRuntimeEventAsync(timelineEntry, session, cancellationToken).ConfigureAwait(false);
 
+                if (envelope.DomainEvent is RuntimeCommandStatusChangedDomainEvent commandStatusEvent)
+                {
+                    var targetStatus = ToTargetStatus(session, commandStatusEvent);
+                    await BroadcastTargetStatusAsync(targetStatus, session, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (envelope.DomainEvent is RuntimeIncidentRecordedDomainEvent incidentEvent)
                 {
                     var alarm = ToAlarmResponse(session, incidentEvent);
@@ -68,6 +75,25 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
         }
     }
 
+    private async Task BroadcastTargetStatusAsync(
+        RuntimeTargetStatusResponse status,
+        RuntimeSession session,
+        CancellationToken cancellationToken)
+    {
+        await _hubContext.Clients.All
+            .TargetStatusChanged(status)
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await _hubContext.Clients.Group(RuntimeProgressHub.SessionGroup(session.Id.Value))
+            .TargetStatusChanged(status)
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
+            .TargetStatusChanged(status)
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private async Task BroadcastStationStatusAsync(
         RuntimeStationStatusResponse status,
         RuntimeSession session,
@@ -77,7 +103,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .StationStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
             .StationStatusChanged(status)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -96,7 +122,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .RuntimeEvent(entry)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
             .RuntimeEvent(entry)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -111,7 +137,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             .AlarmRaised(alarm)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
-        await _hubContext.Clients.Group(RuntimeProgressHub.StationGroup(session.StationId.Value))
+        await _hubContext.Clients.Group(RuntimeProgressHub.StationSystemGroup(session.StationId.Value))
             .AlarmRaised(alarm)
             .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -198,6 +224,14 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             session.Incidents.Count,
             session.LastTransitionAtUtc,
             session.IsTerminal);
+    }
+
+    private static RuntimeTargetStatusResponse ToTargetStatus(
+        RuntimeSession session,
+        RuntimeCommandStatusChangedDomainEvent commandStatusEvent)
+    {
+        return RuntimeMonitoringResponseMapper.ToResponse(
+            RuntimeTargetStatusProjection.FromCommandStatusChanged(session, commandStatusEvent));
     }
 
     private static RuntimeAlarmResponse? ToAlarmResponse(

@@ -160,15 +160,18 @@ project-relative reference without rewriting the application's internal files.
 
 ### Edit Mode
 
-Edit mode exposes topology, site layout, configuration, device binding, Blockly
-flow, Python, block catalog, and trace-navigation editors.
+Edit mode exposes the Application's hierarchical 2D System layout, production
+line composition, configuration, device binding, Blockly flow, Python, block
+catalog, and trace-navigation editors.
 
 Saving persists project source. Publishing performs cross-context validation
 and produces a release. Save and Publish are separate operations.
 
 ### Run Mode
 
-The target Run mode is an operational workspace, not another dashboard page.
+Run mode opens the same published 2D layout as a read-only operational
+workspace, with Station and target state overlaid by stable System identity. It
+is not another table-first dashboard page.
 Its state machine is:
 
 ```text
@@ -331,16 +334,14 @@ not redirect the resource to a global database. Engineering JSON is
 schema-versioned and atomically replaced; each custom block version is an
 immutable `version-000001.json`-style artifact.
 
-The current release manifest records the exact Application project path plus the
-selected topology, layouts, process and version, Engineering configuration
-snapshot, capability bindings, target
-references, publish-selected Blockly block versions, canonical Flow IR schema,
-JSON and SHA-256, every copied file's size and SHA-256, and a content digest.
-The block version is currently the catalog version selected at publish time for
-each block type found in the workspace. Exact workspace block-version/contract
-locks, a complete provider/plugin dependency lock, package signatures, and an
-active-release pointer are not implemented. They remain future publisher and
-deployment outputs, never trusted editable-source inputs.
+The current release manifest records the exact Application project path plus
+Topology v1, hierarchical Layout v1, production definitions, process and
+version, Station-System configuration, capability bindings, target references,
+exact Blockly block versions and contract hashes, canonical Flow IR v2 JSON and
+SHA-256, complete content-addressed provider package locks, every copied file's
+size and SHA-256, and a release content digest. Package signatures and an
+active-release pointer remain future deployment outputs, never trusted editable
+source inputs.
 
 Physical resource keys use a readable slug plus a stable hash. User-provided
 ids are data inside the document and are never used as unchecked path segments.
@@ -367,7 +368,7 @@ The implemented `ProjectReleasePublisher` performs this use case:
 4. Resolve topology targets and bindings plus the current catalog version for
    every Blockly block type found in the process workspace.
 5. Compile the published process graph to canonical
-   `openlineops.flow-ir/v1`, then record its schema, JSON, and SHA-256.
+   `openlineops.flow-ir/v2`, then record its schema, JSON, and SHA-256.
 6. Copy the complete application source into a staging release, write per-file
    size and SHA-256 records, and compute the release content digest.
 7. Verify the staged release, atomically move it into its immutable final
@@ -385,17 +386,14 @@ frozen source root and maps that Flow IR into the executable runtime process.
 Release-identified device commands resolve the topology capability and device
 binding from that same release, with no mutable/global configuration fallback.
 
-This is a local immutable release boundary. It freezes provider package binaries
-and hashes but does not yet create or sign an `.olopkg`, update an active-release
-pointer, or provide deployment-package verification. The current one-shot
+This is a local immutable release boundary. It freezes complete provider package
+trees and hashes but does not yet create or sign an `.olopkg`, update an
+active-release pointer, or provide deployment-package verification. The one-shot
 Runner consumes this local release boundary; it is not an `.olopkg` verifier.
 
-The development-only `POST /api/runtime/sessions/simulated` and
-`POST /api/process-definitions/{id}/runtime-sessions` endpoints are isolated as
-Development/Test diagnostics. They return `403` unless the host
-environment is `Development` or `Test` and
-`OpenLineOps:Runtime:DevelopmentStarts:Enabled=true` is explicitly enabled.
-Project Snapshot launch is the production execution route.
+Project Snapshot launch and the Runner are the only execution routes. Simulated,
+direct process-definition, and global-repository runtime-start endpoints have
+been deleted rather than gated behind an environment flag.
 
 ## Frozen Flow IR And Action Lifecycle
 
@@ -406,10 +404,11 @@ Runtime Action Contract hash. Each emitted action carries its source block id,
 action type, explicit topology target, capability, command, payload, timeout,
 retry policy and trace identity.
 
-Blockly never generates Python. PythonScript remains an explicit dynamic action
-slot and uses the governed script executor. Both static and dynamic actions are
-represented by aggregate Runtime steps and commands, so failure, rejection,
-cancellation and timeout propagate through the same lifecycle.
+Blockly never generates Python. PythonScript remains one explicit published
+action and uses the governed script executor; it cannot emit undeclared child
+actions. Every Flow action is represented by an aggregate Runtime step and
+command with required action and target identity, so failure, rejection,
+cancellation, timeout, monitoring, and trace use the same lifecycle.
 
 ## Declarative Runtime Action Contracts And Dependency Locks
 
@@ -441,7 +440,7 @@ A future deployable package should contain at least:
   required;
 - complete recipe values and station configuration;
 - resolved capability/target/command to provider/device/plugin route table;
-- topology, modules, groups, slots, and layout needed by Runner/operator UI;
+- Systems, Groups, Slots, and hierarchical layout needed by Runner/operator UI;
 - required driver/plugin packages and dependency lock;
 - references to secrets, never secret values;
 - `checksums.sha256` and package signature.
@@ -590,8 +589,10 @@ Future production policy requires:
   Center and transition to the project workbench only after open.
 - Implemented: explicit active project/application selection, Activity Bar,
   explorer/editor workbench, bottom-panel surfaces, and status messaging.
-- Remaining: richer editor tabs, dirty-resource workflow, topology editing, and
-  clearer complete Edit/Run operator state behavior.
+- Implemented: independent hierarchical 2D layout editor with Station/System,
+  Group, and Slot drag composition; Run enters the same layout in Monitor mode.
+- Remaining: richer editor tabs, dirty-resource workflow, and complete
+  Pause/Continue/Stop operator state behavior.
 
 ### Phase 1: Durable Project Source
 
@@ -617,8 +618,8 @@ Future production policy requires:
 - Implemented: the current release manifest freezes the exact Application
   project path, canonical Flow IR, static Blockly actions, exact block contract
   locks, and content-addressed provider package dependency locks.
-- Implemented: direct simulated/process-definition starts are gated to an
-  explicitly enabled Development/Test host.
+- Implemented breaking cutover: simulated/direct/global Process starts and
+  repositories were deleted; Project Snapshot is the only runtime start path.
 - Implemented: declarative Runtime Action Contract v1 for built-in, custom and
   plugin-generated blocks, with server-side workspace compilation, canonical
   JSON/hash and strict validation.

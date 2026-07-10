@@ -11,8 +11,7 @@ using OpenLineOps.Production.Infrastructure.Persistence;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
-using OpenLineOps.Topology.Domain.Modules;
-using OpenLineOps.Topology.Domain.Nodes;
+using OpenLineOps.Topology.Domain.Systems;
 using OpenLineOps.Topology.Domain.Topology;
 using OpenLineOps.Topology.Infrastructure.Persistence;
 
@@ -161,7 +160,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "Main Line",
             "topology.main",
             new DutModelRequest("dut.model-a", "MODEL-A", "serialNumber"),
-            [new WorkstationRequest("workstation.eol", "EOL", "station.eol", "system.tester")],
+            [new WorkstationRequest("workstation.eol", "EOL", "station.eol")],
             [
                 new ProcessStageRequest("stage.load", 1, "Load", "workstation.eol", "flow.load", null),
                 new ProcessStageRequest(
@@ -194,21 +193,6 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             new AutomationTopologyId("topology.main"),
             "Main",
             Now);
-        Assert.True(topology.AddEquipmentNode(EquipmentNode.Create(
-            new EquipmentNodeId("site.main"),
-            null,
-            EquipmentNodeKind.Site,
-            "Site")).Succeeded);
-        Assert.True(topology.AddEquipmentNode(EquipmentNode.Create(
-            new EquipmentNodeId("line.main"),
-            new EquipmentNodeId("site.main"),
-            EquipmentNodeKind.Line,
-            "Line")).Succeeded);
-        Assert.True(topology.AddEquipmentNode(EquipmentNode.Create(
-            new EquipmentNodeId("station.eol"),
-            new EquipmentNodeId("line.main"),
-            EquipmentNodeKind.Station,
-            "EOL")).Succeeded);
         Assert.True(topology.AddCapability(CapabilityContract.Create(
             new CapabilityContractId("test.external"),
             "ExecuteTestProgram",
@@ -216,12 +200,14 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "{}",
             "{}",
             TimeSpan.FromSeconds(30))).Succeeded);
-        Assert.True(topology.AddModule(AutomationModule.Create(
-            new AutomationModuleId("system.tester"),
-            new EquipmentNodeId("station.eol"),
+        Assert.True(topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("station.eol"),
+            null,
+            SystemKind.Station,
             "TestSystem",
             "Tester",
-            providedCapabilities: [new CapabilityContractId("test.external")])).Succeeded);
+            providedCapabilities: [new CapabilityContractId("test.external")],
+            metadata: new Dictionary<string, string>())).Succeeded);
         Assert.True(topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.external"),
             new CapabilityContractId("test.external"),
@@ -285,8 +271,8 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                 "type": "openlineops_run_external_test",
                 "id": "external-test",
                 "fields": {
-                  "TARGET_KIND": "AutomationModule",
-                  "TARGET_ID": "system.tester",
+                  "TARGET_KIND": "System",
+                  "TARGET_ID": "station.eol",
                   "CAPABILITY": "{{capabilityId}}",
                   "COMMAND": "{{commandName}}",
                   "ADAPTER_ID": "{{adapterId}}",

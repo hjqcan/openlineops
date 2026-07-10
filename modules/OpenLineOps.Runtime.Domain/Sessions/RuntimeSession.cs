@@ -5,6 +5,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Steps;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Domain.Sessions;
 
@@ -21,7 +22,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         ProcessVersionId processVersionId,
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
-        RuntimeSessionTraceMetadata? traceMetadata,
+        RuntimeSessionTraceMetadata traceMetadata,
         DateTimeOffset createdAtUtc)
         : base(id)
     {
@@ -30,7 +31,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         ProcessVersionId = processVersionId;
         ConfigurationSnapshotId = configurationSnapshotId;
         RecipeSnapshotId = recipeSnapshotId;
-        TraceMetadata = traceMetadata ?? RuntimeSessionTraceMetadata.Empty;
+        TraceMetadata = traceMetadata ?? throw new ArgumentNullException(nameof(traceMetadata));
         CreatedAtUtc = createdAtUtc;
         LastTransitionAtUtc = createdAtUtc;
         Status = RuntimeSessionStatus.Created;
@@ -76,7 +77,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
         DateTimeOffset createdAtUtc,
-        RuntimeSessionTraceMetadata? traceMetadata = null)
+        RuntimeSessionTraceMetadata traceMetadata)
     {
         var session = new RuntimeSession(
             id,
@@ -109,11 +110,30 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         IEnumerable<RuntimeStep> steps,
         IEnumerable<RuntimeCommand> commands,
         IEnumerable<RuntimeIncident> incidents,
-        RuntimeSessionTraceMetadata? traceMetadata = null)
+        RuntimeSessionTraceMetadata traceMetadata)
     {
         ArgumentNullException.ThrowIfNull(steps);
         ArgumentNullException.ThrowIfNull(commands);
         ArgumentNullException.ThrowIfNull(incidents);
+
+        var restoredSteps = steps.ToArray();
+        var restoredCommands = commands.ToArray();
+        var restoredIncidents = incidents.ToArray();
+        var stepsById = restoredSteps.ToDictionary(step => step.Id);
+        foreach (var command in restoredCommands)
+        {
+            if (!stepsById.TryGetValue(command.StepId, out var step))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime command {command.Id} references missing step {command.StepId}.");
+            }
+
+            if (command.ActionId != step.ActionId || command.Target != step.Target)
+            {
+                throw new InvalidOperationException(
+                    $"Runtime command {command.Id} semantic identity differs from owning step {step.Id}.");
+            }
+        }
 
         var session = new RuntimeSession(
             id,
@@ -132,9 +152,9 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             CompletedAtUtc = completedAtUtc
         };
 
-        session._steps.AddRange(steps);
-        session._commands.AddRange(commands);
-        session._incidents.AddRange(incidents);
+        session._steps.AddRange(restoredSteps);
+        session._commands.AddRange(restoredCommands);
+        session._incidents.AddRange(restoredIncidents);
         session.ClearDomainEvents();
 
         return session;
@@ -218,37 +238,10 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         RuntimeNodeId nodeId,
         string displayName,
         DateTimeOffset startedAtUtc,
-        RuntimeActionId? actionId = null,
-        RuntimeStepId? parentStepId = null,
-        int? dynamicSequence = null)
+        RuntimeActionId actionId,
+        RuntimeTargetReference target)
     {
         EnsureCanExecuteWork();
-
-        if (parentStepId is not null)
-        {
-            var parent = _steps.SingleOrDefault(candidate => candidate.Id == parentStepId.Value);
-            if (parent is null)
-            {
-                throw new InvalidOperationException(
-                    $"Parent runtime step {parentStepId} does not exist in session {Id}.");
-            }
-
-            if (parent.Status != RuntimeStepStatus.Running)
-            {
-                throw new InvalidOperationException(
-                    $"Parent runtime step {parentStepId} is not running in session {Id}.");
-            }
-
-            var resolvedActionId = actionId ?? new RuntimeActionId($"{nodeId.Value}:action:1");
-            if (_steps.Any(candidate =>
-                    candidate.ParentStepId == parentStepId
-                    && (candidate.ActionId == resolvedActionId
-                        || candidate.DynamicSequence == dynamicSequence)))
-            {
-                throw new InvalidOperationException(
-                    $"Dynamic action {resolvedActionId} or sequence {dynamicSequence} already exists under parent step {parentStepId}.");
-            }
-        }
 
         var step = RuntimeStep.Start(
             stepId,
@@ -256,8 +249,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             displayName,
             startedAtUtc,
             actionId,
-            parentStepId,
-            dynamicSequence);
+            target);
         _steps.Add(step);
 
         RaiseDomainEvent(new RuntimeStepStatusChangedDomainEvent(
@@ -271,13 +263,6 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
 
     public RuntimeOperationResult CompleteStep(RuntimeStepId stepId, DateTimeOffset completedAtUtc)
     {
-        if (_steps.Any(step => step.ParentStepId == stepId && !step.IsTerminal))
-        {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.StepChildrenStillRunning",
-                $"Runtime step {stepId} cannot complete while a child step is still running.");
-        }
-
         return ChangeStepStatus(stepId, step => step.Complete(completedAtUtc));
     }
 
@@ -313,7 +298,8 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             commandName,
             createdAtUtc,
             timeout,
-            _steps.Single(step => step.Id == stepId).ActionId);
+            _steps.Single(step => step.Id == stepId).ActionId,
+            _steps.Single(step => step.Id == stepId).Target);
 
         _commands.Add(command);
 

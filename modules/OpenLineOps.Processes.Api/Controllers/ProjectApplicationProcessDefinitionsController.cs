@@ -31,7 +31,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
         CreateApiDefinitionRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = ProcessDefinitionsController.Validate(request);
+        var validationErrors = ProcessDefinitionApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -41,7 +41,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
             .CreateAsync(
                 projectId,
                 applicationId,
-                ProcessDefinitionsController.ToApplicationRequest(request),
+                ProcessDefinitionApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -49,7 +49,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
             return ToProblem(result.Error);
         }
 
-        var response = ProcessDefinitionsController.ToResponse(result.Value);
+        var response = ProcessDefinitionApiContractMapper.ToResponse(result.Value);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/processes/{Uri.EscapeDataString(response.ProcessDefinitionId)}",
             response);
@@ -67,7 +67,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
         CreateApiDefinitionRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = ProcessDefinitionsController.Validate(request);
+        var validationErrors = ProcessDefinitionApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -78,13 +78,13 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
                 projectId,
                 applicationId,
                 processDefinitionId,
-                ProcessDefinitionsController.ToApplicationRequest(request),
+                ProcessDefinitionApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionsController.ToResponse(result.Value));
+            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpGet]
@@ -103,7 +103,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
             return ToProblem(result.Error);
         }
 
-        return Ok(result.Value.Select(ProcessDefinitionsController.ToSummaryResponse).ToArray());
+        return Ok(result.Value.Select(ProcessDefinitionApiContractMapper.ToSummaryResponse).ToArray());
     }
 
     [HttpGet("{processDefinitionId}")]
@@ -121,7 +121,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionsController.ToResponse(result.Value));
+            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpGet("{processDefinitionId}/validation")]
@@ -139,7 +139,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionsController.ToResponse(result.Value));
+            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("{processDefinitionId}/publish")]
@@ -158,7 +158,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionsController.ToResponse(result.Value));
+            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
     }
 
     private ObjectResult ToProblem(ApplicationError error)

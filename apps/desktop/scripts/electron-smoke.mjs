@@ -127,22 +127,126 @@ async function main() {
     + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Automation Project"))()',
     30000,
     'automation project workspace to reopen from desktop');
-  await clickByTestId('seed-project-topology');
+  let openedProject = await getAutomationProjectByPath(smokeProjectPath);
+  let openedApplication = openedProject.applications?.[0];
+  if (!openedApplication) {
+    throw new Error(`Opened automation project has no application: ${JSON.stringify(openedProject)}`);
+  }
+  activeProjectApplicationScope = {
+    projectId: openedProject.projectId,
+    applicationId: openedApplication.applicationId
+  };
+  const topologyId = `${openedApplication.applicationId}.topology.main`;
+  const layoutId = `${openedApplication.applicationId}.layout.main`;
+  const capabilityId = `${openedApplication.applicationId}.motion.axis.move`;
+  const topologyBasePath = `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
+    + `/applications/${encodeURIComponent(openedApplication.applicationId)}`
+    + `/topologies/${encodeURIComponent(topologyId)}`;
+
+  await clickByTestId('nav-topology');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Topology seeded project-")'
-    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes(".topology.main")'
-    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes("Modules")'
-    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes("Left Nest Slot 1")'
-    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("Station 1"))()',
-    45000,
-    'project topology and site layout to seed from desktop');
-  await setInputByTestId('layout-geometry-x', '160');
+    '(() => Boolean(document.querySelector("[data-testid=\\"topology-workbench\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"new-topology-layout-empty\\"]")))()',
+    30000,
+    '2D layout workbench to render');
+  await clickByTestId('new-topology-layout-empty');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("2D layout ready ")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"topology-canvas\\"]")))()',
+    30000,
+    'Application topology and 2D layout to create');
+  await expectApiStatus(
+    `${topologyBasePath}/capabilities`,
+    {
+      method: 'POST',
+      body: {
+        capabilityId,
+        commandName: 'MoveAxis',
+        version: '1.0.0',
+        inputSchema: '{"axis":"string","position":"number","unit":"string"}',
+        outputSchema: '{"completed":"boolean"}',
+        timeoutSeconds: 15,
+        safetyClass: 'Motion'
+      }
+    },
+    200,
+    'add Application motion capability');
+  await expectApiStatus(
+    `${topologyBasePath}/driver-bindings`,
+    {
+      method: 'POST',
+      body: {
+        bindingId: `${openedApplication.applicationId}.binding.axis.simulator`,
+        capabilityId,
+        providerKind: 'Simulator',
+        providerKey: 'simulator.axis.x'
+      }
+    },
+    200,
+    'bind Application motion simulator');
+  await clickByTestId('refresh-topology-layout');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"topology-workbench\\"]")?.textContent?.includes("1 capabilities"))()',
+    30000,
+    'capability to refresh into the 2D layout editor');
+  await dragPaletteItemToCanvas('add-topology-station', 0.32, 0.38);
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Station added ")'
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("Station 01"))()',
+    30000,
+    'Station to be dragged onto the Application canvas');
+  await dragPaletteItemToCanvas('add-topology-system', 0.31, 0.31);
+  await waitForExpression(
+    '(() => document.body.innerText.includes("System added ")'
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 1"))()',
+    30000,
+    'child System to be dragged into the Station');
+  await dragPaletteItemToCanvas('add-topology-system', 0.43, 0.31);
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 2")'
+    + ' && document.querySelector("[data-testid=\\"topology-property-display-name\\"]")?.value === "System 2")()',
+    30000,
+    'disposable child System to be added and selected');
+  await setInputByTestId('topology-property-display-name', 'Temporary Vision Node');
+  await setInputByTestId('topology-property-system-type', 'vision.controller');
+  await clickByTestId('save-topology-target');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("Temporary Vision Node")'
+    + ' && document.body.innerText.includes("Properties saved "))()',
+    30000,
+    'disposable child System properties to be renamed');
+  await clickByTestId('delete-topology-target');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"delete-topology-target\\"]")?.textContent?.includes("Confirm Delete"))()',
+    15000,
+    'destructive target deletion to enter explicit confirmation state');
+  await clickByTestId('delete-topology-target');
+  await waitForExpression(
+    '(() => !document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("Temporary Vision Node")'
+    + ' && document.body.innerText.includes("Deleted "))()',
+    30000,
+    'confirmed child System deletion to update canvas and hierarchy');
+  await dragPaletteItemToCanvas('add-topology-group', 0.35, 0.48);
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Slot Group added ")'
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("Fixture Group 1"))()',
+    30000,
+    'Slot Group to be dragged into the Station');
+  await dragPaletteItemToCanvas('add-topology-slot', 0.35, 0.48);
+  await waitForExpression(
+    '(() => document.body.innerText.includes("DUT Slot added ")'
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("S1"))()',
+    30000,
+    'DUT Slot to be dragged into its Slot Group');
+  await captureSmokeScreenshot('topology-edit.png');
+  await setInputByTestId('layout-geometry-x', '18');
   await clickByTestId('save-layout-geometry');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Layout geometry saved")'
-    + ' && document.querySelector("[data-testid=\\"layout-geometry-x\\"]")?.value === "160")()',
+    '(() => document.body.innerText.includes("Layout saved")'
+    + ' && document.querySelector("[data-testid=\\"layout-geometry-x\\"]")?.value === "18")()',
     30000,
-    'site layout geometry to be edited and saved');
+    'nested Slot local geometry to be edited and saved');
+  await clickByTestId('nav-projects');
   await clickByTestId('switch-project-workspace');
   await waitForExpression(
     '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
@@ -156,32 +260,41 @@ async function main() {
   await setInputByTestId('open-project-path-input', smokeProjectPath);
   await clickByTestId('open-project-workspace');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Project opened project-")'
-    + ' && document.querySelector("[data-testid=\\"project-topology-designer\\"]")?.textContent?.includes(".topology.main")'
-    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("L1"))()',
+    '(() => document.body.innerText.includes("Project opened project-"))()',
     30000,
-    'automation project topology link to persist through manifest reopen');
-
-  const openedProject = await getAutomationProjectByPath(smokeProjectPath);
-  const openedApplication = openedProject.applications?.[0];
-  if (!openedApplication) {
-    throw new Error(`Opened automation project has no application: ${JSON.stringify(openedProject)}`);
-  }
-  activeProjectApplicationScope = {
-    projectId: openedProject.projectId,
-    applicationId: openedApplication.applicationId
-  };
-  const layoutId = `${openedProject.projectId}.layout.main`;
+    'automation project to reopen after layout edit');
+  await clickByTestId('nav-topology');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("S1")'
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 1"))()',
+    30000,
+    'nested Application layout to persist through manifest reopen');
   const layoutResponse = await apiRequest(
     `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
     + `/applications/${encodeURIComponent(openedApplication.applicationId)}`
     + `/layouts/${encodeURIComponent(layoutId)}`);
   const editedElement = layoutResponse.body?.elements?.find(
-    element => element.targetId === `${openedProject.projectId}.module.axis.x`);
-  if (layoutResponse.status !== 200 || editedElement?.x !== 160) {
+    element => element.target?.targetId === `${openedApplication.applicationId}.station.1.group.1.slot.1`);
+  if (layoutResponse.status !== 200 || editedElement?.x !== 18 || !editedElement?.parentElementId) {
     throw new Error(`Edited layout geometry was not persisted: ${layoutResponse.text}`);
   }
+  const topologyResponseAfterReopen = await apiRequest(topologyBasePath);
+  const topologySystemIds = topologyResponseAfterReopen.body?.systems?.map(system => system.systemId) ?? [];
+  if (topologyResponseAfterReopen.status !== 200
+      || !topologySystemIds.includes(`${openedApplication.applicationId}.station.1`)
+      || !topologySystemIds.includes(`${openedApplication.applicationId}.station.1.component.1`)
+      || topologySystemIds.includes(`${openedApplication.applicationId}.station.1.component.2`)) {
+    throw new Error(`Topology rename/delete was not persisted: ${topologyResponseAfterReopen.text}`);
+  }
 
+  openedProject = await getAutomationProjectByPath(smokeProjectPath);
+  openedApplication = openedProject.applications?.find(
+    application => application.applicationId === activeProjectApplicationScope.applicationId);
+  if (!openedApplication?.topologyId) {
+    throw new Error(`Application topology link was not persisted: ${JSON.stringify(openedProject)}`);
+  }
+
+  await clickByTestId('nav-projects');
   const portableTarget = await copyAndImportPortableApplication(
     smokeProjectPath,
     openedProject,
@@ -206,56 +319,12 @@ async function main() {
     'secondary project application to be created and selected');
   await assertProjectFileLayout(smokeProjectPath, 2);
   await setSelectByTestId('active-application-selector', openedApplication.applicationId);
+  await clickByTestId('nav-topology');
   await waitForExpression(
     `(() => document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(openedApplication.applicationId)}`
-    + ' && document.querySelector("[data-testid=\\"site-layout-canvas\\"]")?.textContent?.includes("L1"))()',
+    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("S1"))()',
     30000,
     'primary project application topology to be restored after switching applications');
-
-  await clickByTestId('nav-dashboard');
-  await waitForExpression(
-    '(() => document.body.innerText.includes("Station Runtime Dashboard")'
-    + ' && Boolean(document.querySelector("[data-testid=\\"run-simulation\\"]")))()',
-    15000,
-    'dashboard to render before simulated runtime session');
-
-  await evaluate('Math.random = () => 0.1');
-  await clickByTestId('run-simulation');
-
-  const result = await waitForExpression(
-    `(() => {
-      const text = document.body.innerText;
-      const events = window.__openlineopsSmokeEvents ?? {};
-      return text.includes("Simulated session Completed")
-        && text.includes("station-desktop-")
-        && text.includes("SN-")
-        && (events.RuntimeEvent ?? 0) > 0
-        && (events.StationStatusChanged ?? 0) > 0;
-    })()`,
-    45000,
-    'completed simulated session with SignalR updates and trace row');
-
-  if (!result) {
-    throw new Error('Smoke assertions did not return true.');
-  }
-
-  await clickByTestId('nav-trace');
-  await waitForExpression(
-    '(() => document.body.innerText.includes("Traceability Search")'
-    + ' && Boolean(document.querySelector("[data-testid=\\"trace-result-row\\"]")))()',
-    30000,
-    'trace workbench to render search results');
-  await clickByTestId('trace-result-row');
-  await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("SN-")'
-    + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Measurements"))()',
-    30000,
-    'trace detail to load from selected row');
-  await clickByTestId('trace-export-package');
-  await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.trace-package.v1"))()',
-    30000,
-    'trace export package to load');
 
   await clickByTestId('nav-processes');
   await waitForExpression(
@@ -264,7 +333,7 @@ async function main() {
     + ' && document.body.innerText.includes("Automation Blocks")'
     + ' && document.body.innerText.includes("Transitions")'
     + ' && document.body.innerText.includes("Block Catalog")'
-    + ' && document.querySelector("[data-testid=\\"project-target-panel\\"]")?.textContent?.includes("X Axis")'
+    + ' && document.querySelector("[data-testid=\\"project-target-panel\\"]")?.textContent?.includes("Station 01")'
     + ' && Boolean(document.querySelector("[data-testid=\\"blockly-workspace\\"]")))()',
     15000,
     'process workbench to render');
@@ -299,9 +368,9 @@ async function main() {
     '(() => Boolean(document.querySelector("[data-testid=\\"process-node-command-1\\"]")))()',
     15000,
     'process graph command node to be added');
-  await clickByTestId('apply-project-target-module-0');
+  await clickByTestId('apply-project-target-system-0');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Project target applied X Axis"))()',
+    '(() => document.body.innerText.includes("Project target applied Station 01"))()',
     15000,
     'project topology target to apply to the command node');
   await clickByTestId('add-decision-node');
@@ -334,7 +403,7 @@ async function main() {
   const savedBlocklyNode = savedDefinition.nodes
     ?.find(node => node.nodeId === 'automation' && node.kind === 'Blockly');
   if (savedBlocklyNode?.scriptSourceCode !== null
-    || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.module.axis.x')
+    || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.station.1')
     || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.motion.axis.move')) {
     throw new Error(`Direct Blockly target binding was not persisted: ${JSON.stringify(savedBlocklyNode)}`);
   }
@@ -421,19 +490,45 @@ async function main() {
   if (publishedProjectSnapshot.processDefinitionId !== publishedDefinition.processDefinitionId
     || publishedProjectSnapshot.processVersionId !== publishedDefinition.versionId
     || publishedProjectSnapshot.configurationSnapshotId !== configurationSnapshotId
-    || !publishedProjectSnapshot.targetReferences?.some(target => target.targetId.includes('.module.axis.x'))
+    || !publishedProjectSnapshot.targetReferences?.some(target => target.targetId.includes('.station.1'))
     || !publishedProjectSnapshot.capabilityBindings?.some(binding => binding.providerKey === 'simulator.axis.x')
     || !publishedProjectSnapshot.blockVersionIds?.some(blockVersionId => blockVersionId.startsWith('openlineops_move_axis@'))) {
     throw new Error(`Project snapshot payload was incomplete: ${JSON.stringify(publishedProjectSnapshot)}`);
   }
-  await clickByTestId('start-published-process-session');
+  await clickByTestId('run-active-project');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Started ")'
-    + ' && document.body.innerText.includes("Completed")'
-    + ` && document.querySelector("[data-testid=\\"runtime-start-result\\"]")?.textContent?.includes(${JSON.stringify(projectSnapshotId)})`
-    + ' && document.body.innerText.includes("commands"))()',
+    `(() => {
+      const events = window.__openlineopsSmokeEvents ?? {};
+      const workbench = document.querySelector('[data-testid="topology-workbench"]');
+      return document.body.innerText.includes('Project run Completed')
+        && workbench?.textContent?.includes('Live line overview')
+        && workbench?.textContent?.includes('Station 01')
+        && workbench?.textContent?.includes('Completed')
+        && (events.RuntimeEvent ?? 0) > 0
+        && (events.StationStatusChanged ?? 0) > 0;
+    })()`,
     45000,
-    'published project snapshot runtime session to complete');
+    'formal project snapshot runtime to open the topology Monitor view');
+  await captureSmokeScreenshot('topology-monitor.png');
+
+  await clickByTestId('nav-trace');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Traceability Search")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"trace-result-row\\"]")))()',
+    30000,
+    'trace workbench to render formal project results');
+  await clickByTestId('trace-result-row');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("SN-")'
+    + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Measurements"))()',
+    30000,
+    'trace detail to load from the project run');
+  await clickByTestId('trace-export-package');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.trace-package.v1"))()',
+    30000,
+    'trace export package to load');
+
   await clickByTestId('nav-engineering');
   await waitForExpression(
     '(() => document.body.innerText.includes("Engineering Configuration")'
@@ -527,6 +622,25 @@ async function clickByTestId(testId) {
       throw new Error('Missing element: ${testId}');
     }
     element.click();
+    return true;
+  })()`);
+}
+
+async function dragPaletteItemToCanvas(testId, xRatio, yRatio) {
+  await evaluate(`(() => {
+    const source = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
+    const canvas = document.querySelector('[data-testid="topology-canvas"]');
+    if (!(source instanceof HTMLElement) || !(canvas instanceof HTMLElement)) {
+      throw new Error('Missing topology drag source or canvas: ${testId}');
+    }
+    const transfer = new DataTransfer();
+    const bounds = canvas.getBoundingClientRect();
+    const clientX = bounds.left + bounds.width * ${JSON.stringify(xRatio)};
+    const clientY = bounds.top + bounds.height * ${JSON.stringify(yRatio)};
+    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    canvas.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX, clientY }));
+    canvas.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX, clientY }));
+    source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer, clientX, clientY }));
     return true;
   })()`);
 }
@@ -864,6 +978,7 @@ async function createPublishedEngineeringSnapshot(definition) {
       method: 'POST',
       body: {
         stationProfileId,
+        stationSystemId: `${activeProjectApplicationScope.applicationId}.station.1`,
         displayName: 'Desktop Process Runtime Station',
         deviceBindings: requiredCapabilities.map((capabilityId, index) => ({
           deviceBindingId: `runtime-primary-${index + 1}`,
@@ -995,7 +1110,7 @@ async function getPageState() {
   return evaluate(`(() => ({
     text: document.body?.innerText ?? '',
     hubState: document.querySelector(".rail-footer .status-pill")?.textContent?.trim() ?? null,
-    runDisabled: document.querySelector('[data-testid="run-simulation"]')?.disabled ?? null,
+    runDisabled: document.querySelector('[data-testid="run-active-project"]')?.disabled ?? null,
     refreshDisabled: document.querySelector('[data-testid="refresh-backend"]')?.disabled ?? null,
     events: window.__openlineopsSmokeEvents ?? null
   }))()`);
@@ -1011,7 +1126,7 @@ async function collectDiagnostics() {
       page: {
         text: document.body?.innerText ?? '',
         hubState: document.querySelector(".rail-footer .status-pill")?.textContent?.trim() ?? null,
-        runDisabled: document.querySelector('[data-testid="run-simulation"]')?.disabled ?? null,
+        runDisabled: document.querySelector('[data-testid="run-active-project"]')?.disabled ?? null,
         refreshDisabled: document.querySelector('[data-testid="refresh-backend"]')?.disabled ?? null,
         events: window.__openlineopsSmokeEvents ?? null
       },

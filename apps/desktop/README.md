@@ -1,6 +1,6 @@
 # OpenLineOps Desktop
 
-Electron desktop shell for the OpenLineOps local API.
+Electron IDE shell for authoring and operating portable OpenLineOps automation projects.
 
 ## Commands
 
@@ -20,47 +20,31 @@ $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 npm install
 ```
 
-## Runtime Boundary
+## Product Boundary
 
-- The renderer has no Node.js access.
-- Backend lifecycle and HTTP calls go through the preload `contextBridge`.
-- SignalR connects to `OpenLineOps.Api` at `/hubs/runtime-progress`.
-- API base URL defaults to `http://localhost:5135` and can be overridden with `OPENLINEOPS_API_BASE_URL`.
-- Backend project path can be overridden with `OPENLINEOPS_API_PROJECT`.
-- Repository root can be overridden with `OPENLINEOPS_REPO_ROOT`.
+- The renderer has no Node.js access; backend lifecycle and HTTP access cross the preload `contextBridge`.
+- Authoring APIs are always scoped to one Automation Project and one portable Application.
+- Blockly workspaces compile server-side directly to immutable Flow IR v2 actions. Python is a separate, explicit action type and cannot return a runtime execution plan.
+- Runtime starts only from a published project release snapshot. There is no simulated-session endpoint or direct ProcessDefinition launch path.
+- Runtime commands, steps, monitoring, and trace records carry required ActionId, TargetKind, and TargetId identities.
+- SignalR monitoring connects at `/hubs/runtime-progress`.
+- The API base URL defaults to `http://localhost:5135` and can be overridden with `OPENLINEOPS_API_BASE_URL`.
+- Backend project and repository roots can be overridden with `OPENLINEOPS_API_PROJECT` and `OPENLINEOPS_REPO_ROOT`.
+
+## Current Workbenches
+
+- Start window for creating, opening, importing, and reopening `.oloproj` projects.
+- Project explorer for independently portable `.oloapp` Applications.
+- Flow Designer for distinct Blockly, PythonScript, Command, Decision, Delay, Start, and End nodes.
+- Application-scoped declarative Blockly block catalog and registration.
+- Engineering, devices, plugins, traceability, monitoring, and alarm workbenches.
+- Line Designer for Application-owned production-line definitions, DUT identity, workstations, ordered stages, and external test adapters.
+- Release publication and release-snapshot runtime launch.
 
 ## Packaging
 
-`npm run package:win` builds the renderer and Electron main/preload code, then
-creates an unsigned Windows unpacked development package under
-`release/desktop/win-unpacked`. The package contains the Electron desktop shell
-only; the .NET API remains a separate release artifact or a source-run backend
-selected with `OPENLINEOPS_REPO_ROOT` or `OPENLINEOPS_API_PROJECT`.
+`npm run package:win` builds the renderer and Electron main/preload code, then creates an unsigned Windows development package under `release/desktop/win-unpacked`. The .NET API is a separate release artifact selected with `OPENLINEOPS_REPO_ROOT` or `OPENLINEOPS_API_PROJECT`.
 
-Signed installer or portable packaging is still required before a public
-production desktop release.
+## End-to-End Smoke Test
 
-## First Slice
-
-The first desktop screen covers:
-
-- API process start/stop from Electron main process.
-- Platform and health status.
-- Runtime station status resync.
-- SignalR runtime timeline updates.
-- Alarm acknowledgement.
-- Trace row preview from Traceability APIs.
-- Processes workbench for creating, loading, editing, validating, and publishing process graphs.
-- Node toolbox for PythonScript, Command, Decision, Delay, and End nodes.
-- Transition editor for maintaining process graph edges.
-- Published process runtime launch form bound to engineering configuration snapshots.
-- Engineering workbench for creating workspaces, projects, recipes, station profiles, and published configuration snapshots through backend contracts.
-- Devices workbench for registering device definitions and station-bound instances, then managing connection, disconnection, fault, and reset state through backend contracts.
-- Trace workbench for engineering trace search, facets, record details, measurements, artifacts, audit entries, and export package retrieval through Traceability APIs.
-- Plugins workbench for plugin package discovery, manifest validation, capability and command inventory, lifecycle start/stop, and external process event inspection through backend contracts.
-- Official Blockly workspace editing for PythonScript automation blocks, including axis movement, light output, motor rotation, wait, result blocks, and persisted/versioned user-registered custom blocks backed by Python code templates.
-- Blockly-generated automation plans are executed by the backend runtime through the existing simulator, device-backed, or plugin-backed command route.
-
-## Smoke Test
-
-`npm run smoke:e2e` starts Vite preview, launches Electron, starts the local .NET API through the Electron main process, runs a simulated runtime session from the rendered UI, verifies SignalR station/timeline events plus trace row output, opens the Trace workbench to load search results, details, and export data, then opens the Processes workbench, verifies the official Blockly workspace, registers a custom Blockly block, adds a Command node, creates/publishes a Blockly-default PythonScript process definition, creates a matching engineering configuration snapshot, starts the published process from the UI, publishes a second configuration snapshot through the Engineering workbench, registers/connects a device through the Devices workbench, and starts/stops the sample plugin through the Plugins workbench.
+`npm run smoke:e2e` launches the real Electron application and local API, opens a portable project/Application, authors and publishes a Blockly flow, publishes a project release, starts that immutable release, verifies runtime state, then creates and saves a production-line definition through Line Designer. The smoke path does not use removed global Process APIs or development runtime-start endpoints.

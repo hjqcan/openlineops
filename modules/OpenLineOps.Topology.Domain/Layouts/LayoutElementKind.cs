@@ -2,14 +2,7 @@ namespace OpenLineOps.Topology.Domain.Layouts;
 
 public enum LayoutElementKind
 {
-    NodeShape,
-    ModuleShape,
-    SlotShape,
+    SystemShape,
     GroupRegion,
-    DeviceShape,
-    ConnectionPath,
-    Zone,
-    SafetyArea,
-    Label,
-    OperatorPanel
+    SlotShape
 }

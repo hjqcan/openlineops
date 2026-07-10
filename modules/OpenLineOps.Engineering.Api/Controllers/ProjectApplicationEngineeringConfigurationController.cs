@@ -36,7 +36,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
         CreateApiWorkspaceRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = EngineeringConfigurationController.Validate(request);
+        var validationErrors = EngineeringApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -46,7 +46,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             .CreateWorkspaceAsync(
                 projectId,
                 applicationId,
-                EngineeringConfigurationController.ToApplicationRequest(request),
+                EngineeringApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -54,7 +54,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             return ToProblem(result.Error);
         }
 
-        var response = EngineeringConfigurationController.ToResponse(result.Value);
+        var response = EngineeringApiContractMapper.ToResponse(result.Value);
         return Created(
             $"{GetBasePath(projectId, applicationId)}/workspaces/{Uri.EscapeDataString(response.WorkspaceId)}",
             response);
@@ -74,7 +74,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(result.Value.Select(EngineeringConfigurationController.ToResponse).ToArray());
+            : Ok(result.Value.Select(EngineeringApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpGet("workspaces/{workspaceId}")]
@@ -92,7 +92,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("projects")]
@@ -106,7 +106,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
         CreateApiEngineeringProjectRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = EngineeringConfigurationController.Validate(request);
+        var validationErrors = EngineeringApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -116,7 +116,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             .CreateProjectAsync(
                 projectId,
                 applicationId,
-                EngineeringConfigurationController.ToApplicationRequest(request),
+                EngineeringApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -124,7 +124,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             return ToProblem(result.Error);
         }
 
-        var response = EngineeringConfigurationController.ToResponse(result.Value);
+        var response = EngineeringApiContractMapper.ToResponse(result.Value);
         return Created(
             $"{GetBasePath(projectId, applicationId)}/projects/{Uri.EscapeDataString(response.ProjectId)}",
             response);
@@ -144,7 +144,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(result.Value.Select(EngineeringConfigurationController.ToResponse).ToArray());
+            : Ok(result.Value.Select(EngineeringApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpGet("projects/{engineeringProjectId}")]
@@ -162,7 +162,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("recipes")]
@@ -176,7 +176,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
         CreateApiRecipeRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = EngineeringConfigurationController.Validate(request);
+        var validationErrors = EngineeringApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -186,7 +186,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             .CreateRecipeAsync(
                 projectId,
                 applicationId,
-                EngineeringConfigurationController.ToApplicationRequest(request),
+                EngineeringApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -194,7 +194,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             return ToProblem(result.Error);
         }
 
-        var response = EngineeringConfigurationController.ToResponse(result.Value);
+        var response = EngineeringApiContractMapper.ToResponse(result.Value);
         return Created(
             $"{GetBasePath(projectId, applicationId)}/recipes/{Uri.EscapeDataString(response.RecipeId)}",
             response);
@@ -214,7 +214,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(result.Value.Select(EngineeringConfigurationController.ToResponse).ToArray());
+            : Ok(result.Value.Select(EngineeringApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpGet("recipes/{recipeId}")]
@@ -232,7 +232,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("recipes/{recipeId}/publish")]
@@ -251,7 +251,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("station-profiles")]
@@ -265,7 +265,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
         CreateApiStationProfileRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = EngineeringConfigurationController.Validate(request);
+        var validationErrors = EngineeringApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -275,7 +275,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             .CreateStationProfileAsync(
                 projectId,
                 applicationId,
-                EngineeringConfigurationController.ToApplicationRequest(request),
+                EngineeringApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -283,7 +283,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             return ToProblem(result.Error);
         }
 
-        var response = EngineeringConfigurationController.ToResponse(result.Value);
+        var response = EngineeringApiContractMapper.ToResponse(result.Value);
         return Created(
             $"{GetBasePath(projectId, applicationId)}/station-profiles/{Uri.EscapeDataString(response.StationProfileId)}",
             response);
@@ -303,7 +303,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(result.Value.Select(EngineeringConfigurationController.ToResponse).ToArray());
+            : Ok(result.Value.Select(EngineeringApiContractMapper.ToResponse).ToArray());
     }
 
     [HttpGet("station-profiles/{stationProfileId}")]
@@ -325,7 +325,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpPost("projects/{engineeringProjectId}/configuration-snapshots")]
@@ -340,7 +340,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
         PublishApiConfigurationSnapshotRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = EngineeringConfigurationController.Validate(request);
+        var validationErrors = EngineeringApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -351,7 +351,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
                 projectId,
                 applicationId,
                 engineeringProjectId,
-                EngineeringConfigurationController.ToApplicationRequest(request),
+                EngineeringApiContractMapper.ToApplicationRequest(request),
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -359,7 +359,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             return ToProblem(result.Error);
         }
 
-        var response = EngineeringConfigurationController.ToResponse(result.Value);
+        var response = EngineeringApiContractMapper.ToResponse(result.Value);
         return Created(
             $"{GetBasePath(projectId, applicationId)}/projects/{Uri.EscapeDataString(response.ProjectId)}/configuration-snapshots/{Uri.EscapeDataString(request.SnapshotId!)}",
             response);
@@ -388,7 +388,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     [HttpGet("projects/{engineeringProjectId}/configuration-snapshots/{fromSnapshotId}/diff/{toSnapshotId}")]
@@ -415,7 +415,7 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(EngineeringConfigurationController.ToResponse(result.Value));
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
     private static string GetBasePath(string projectId, string applicationId)

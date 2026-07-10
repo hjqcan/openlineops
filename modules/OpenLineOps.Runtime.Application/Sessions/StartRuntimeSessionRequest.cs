@@ -4,9 +4,30 @@ using OpenLineOps.Runtime.Domain.Sessions;
 
 namespace OpenLineOps.Runtime.Application.Sessions;
 
-public sealed record StartRuntimeSessionRequest(
-    StationId StationId,
-    ConfigurationSnapshotId ConfigurationSnapshotId,
-    RecipeSnapshotId RecipeSnapshotId,
-    ExecutableRuntimeProcess Process,
-    RuntimeSessionTraceMetadata? TraceMetadata = null);
+public sealed record StartRuntimeSessionRequest
+{
+    public StartRuntimeSessionRequest(
+        StationId stationId,
+        ConfigurationSnapshotId configurationSnapshotId,
+        RecipeSnapshotId recipeSnapshotId,
+        ExecutableRuntimeProcess process,
+        RuntimeSessionTraceMetadata traceMetadata)
+    {
+        StationId = stationId ?? throw new ArgumentNullException(nameof(stationId));
+        ConfigurationSnapshotId = configurationSnapshotId
+            ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
+        RecipeSnapshotId = recipeSnapshotId ?? throw new ArgumentNullException(nameof(recipeSnapshotId));
+        Process = process ?? throw new ArgumentNullException(nameof(process));
+        TraceMetadata = traceMetadata ?? throw new ArgumentNullException(nameof(traceMetadata));
+    }
+
+    public StationId StationId { get; }
+
+    public ConfigurationSnapshotId ConfigurationSnapshotId { get; }
+
+    public RecipeSnapshotId RecipeSnapshotId { get; }
+
+    public ExecutableRuntimeProcess Process { get; }
+
+    public RuntimeSessionTraceMetadata TraceMetadata { get; }
+}

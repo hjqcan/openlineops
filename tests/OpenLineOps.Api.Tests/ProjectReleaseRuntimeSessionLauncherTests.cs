@@ -202,7 +202,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
                 "binding.axis.x",
                 "Driver",
                 "driver.axis.x")],
-            [new ProjectTargetReferenceDetails("Station", "station.main")],
+            [new ProjectTargetReferenceDetails("System", "station.main")],
             ["motion.move@1"],
             releaseManifestPath,
             releaseContentSha256);
@@ -228,6 +228,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
             Path.Combine(Path.GetDirectoryName(sourceRootPath)!, "release.json"),
             new ProjectReleaseSourceMetadata(
                 "topology.main",
+                "station.main",
                 ["layout.main"],
                 "process.main",
                 "process.main@1.0.0",
@@ -240,7 +241,7 @@ public sealed class ProjectReleaseRuntimeSessionLauncherTests
                     "binding.axis.x",
                     "Driver",
                     "driver.axis.x")],
-                [new ProjectReleaseTargetReference("Station", "station.main")],
+                [new ProjectReleaseTargetReference("System", "station.main")],
                 ["motion.move@1"],
                 []),
             []);

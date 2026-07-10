@@ -4,6 +4,7 @@ namespace OpenLineOps.Projects.Application.Releases;
 
 public sealed record ProjectReleaseSourceMetadata(
     string TopologyId,
+    string StationSystemId,
     IReadOnlyCollection<string> LayoutIds,
     string ProcessDefinitionId,
     string ProcessVersionId,

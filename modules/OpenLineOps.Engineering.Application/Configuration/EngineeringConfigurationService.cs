@@ -1,5 +1,7 @@
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Engineering.Domain.Projects;
@@ -8,27 +10,21 @@ using OpenLineOps.Engineering.Domain.Snapshots;
 using OpenLineOps.Engineering.Domain.Stations;
 using OpenLineOps.Engineering.Domain.Workspaces;
 
-namespace OpenLineOps.Engineering.Application.Configuration;
+namespace OpenLineOps.Engineering.Application.ProjectWorkspaces;
 
-public sealed class EngineeringConfigurationService : IEngineeringConfigurationService
+internal sealed class ProjectEngineeringConfigurationEngine
 {
-    private readonly IWorkspaceRepository _workspaceRepository;
-    private readonly IEngineeringProjectRepository _projectRepository;
-    private readonly IRecipeRepository _recipeRepository;
-    private readonly IStationProfileRepository _stationProfileRepository;
+    private readonly ProjectApplicationWorkspaceScope _scope;
+    private readonly IProjectEngineeringConfigurationRepository _repository;
     private readonly IClock _clock;
 
-    public EngineeringConfigurationService(
-        IWorkspaceRepository workspaceRepository,
-        IEngineeringProjectRepository projectRepository,
-        IRecipeRepository recipeRepository,
-        IStationProfileRepository stationProfileRepository,
+    public ProjectEngineeringConfigurationEngine(
+        ProjectApplicationWorkspaceScope scope,
+        IProjectEngineeringConfigurationRepository repository,
         IClock clock)
     {
-        _workspaceRepository = workspaceRepository;
-        _projectRepository = projectRepository;
-        _recipeRepository = recipeRepository;
-        _stationProfileRepository = stationProfileRepository;
+        _scope = scope;
+        _repository = repository;
         _clock = clock;
     }
 
@@ -47,8 +43,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
         try
         {
             var workspaceId = new WorkspaceId(request.WorkspaceId);
-            var existing = await _workspaceRepository
-                .GetByIdAsync(workspaceId, cancellationToken)
+            var existing = await _repository
+                .GetByIdAsync(_scope, workspaceId, cancellationToken)
                 .ConfigureAwait(false);
 
             if (existing is not null)
@@ -63,7 +59,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 request.DisplayName,
                 _clock.UtcNow);
 
-            await _workspaceRepository.SaveAsync(workspace, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, workspace, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(workspace));
         }
@@ -87,7 +83,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
     public async Task<Result<IReadOnlyCollection<WorkspaceDetails>>> ListWorkspacesAsync(
         CancellationToken cancellationToken = default)
     {
-        var workspaces = await _workspaceRepository.ListAsync(cancellationToken).ConfigureAwait(false);
+        var workspaces = await _repository.ListWorkspacesAsync(_scope, cancellationToken).ConfigureAwait(false);
         var details = workspaces
             .OrderBy(workspace => workspace.Id.Value, StringComparer.Ordinal)
             .Select(EngineeringConfigurationMapper.ToDetails)
@@ -112,8 +108,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
         {
             var projectId = new EngineeringProjectId(request.ProjectId);
             var workspaceId = new WorkspaceId(request.WorkspaceId);
-            var workspace = await _workspaceRepository
-                .GetByIdAsync(workspaceId, cancellationToken)
+            var workspace = await _repository
+                .GetByIdAsync(_scope, workspaceId, cancellationToken)
                 .ConfigureAwait(false);
 
             if (workspace is null)
@@ -121,8 +117,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 return Result.Failure<EngineeringProjectDetails>(WorkspaceNotFound(request.WorkspaceId));
             }
 
-            var existing = await _projectRepository
-                .GetByIdAsync(projectId, cancellationToken)
+            var existing = await _repository
+                .GetByIdAsync(_scope, projectId, cancellationToken)
                 .ConfigureAwait(false);
 
             if (existing is not null)
@@ -138,7 +134,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 request.DisplayName,
                 _clock.UtcNow);
 
-            await _projectRepository.SaveAsync(project, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, project, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(project));
         }
@@ -162,7 +158,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
     public async Task<Result<IReadOnlyCollection<EngineeringProjectDetails>>> ListProjectsAsync(
         CancellationToken cancellationToken = default)
     {
-        var projects = await _projectRepository.ListAsync(cancellationToken).ConfigureAwait(false);
+        var projects = await _repository.ListProjectsAsync(_scope, cancellationToken).ConfigureAwait(false);
         var details = projects
             .OrderBy(project => project.Id.Value, StringComparer.Ordinal)
             .Select(EngineeringConfigurationMapper.ToDetails)
@@ -186,8 +182,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
         try
         {
             var recipeId = new RecipeId(request.RecipeId);
-            var existing = await _recipeRepository
-                .GetByIdAsync(recipeId, cancellationToken)
+            var existing = await _repository
+                .GetByIdAsync(_scope, recipeId, cancellationToken)
                 .ConfigureAwait(false);
 
             if (existing is not null)
@@ -216,7 +212,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 }
             }
 
-            await _recipeRepository.SaveAsync(recipe, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, recipe, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(recipe));
         }
@@ -240,7 +236,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
     public async Task<Result<IReadOnlyCollection<RecipeDetails>>> ListRecipesAsync(
         CancellationToken cancellationToken = default)
     {
-        var recipes = await _recipeRepository.ListAsync(cancellationToken).ConfigureAwait(false);
+        var recipes = await _repository.ListRecipesAsync(_scope, cancellationToken).ConfigureAwait(false);
         var details = recipes
             .OrderBy(recipe => recipe.Id.Value, StringComparer.Ordinal)
             .Select(EngineeringConfigurationMapper.ToDetails)
@@ -267,7 +263,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 publishResult.Message));
         }
 
-        await _recipeRepository.SaveAsync(recipe, cancellationToken).ConfigureAwait(false);
+        await _repository.SaveAsync(_scope, recipe, cancellationToken).ConfigureAwait(false);
 
         return Result.Success(EngineeringConfigurationMapper.ToDetails(recipe));
     }
@@ -287,8 +283,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
         try
         {
             var stationProfileId = new StationProfileId(request.StationProfileId);
-            var existing = await _stationProfileRepository
-                .GetByIdAsync(stationProfileId, cancellationToken)
+            var existing = await _repository
+                .GetByIdAsync(_scope, stationProfileId, cancellationToken)
                 .ConfigureAwait(false);
 
             if (existing is not null)
@@ -298,7 +294,10 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                     $"Station profile {stationProfileId} already exists."));
             }
 
-            var stationProfile = StationProfile.Create(stationProfileId, request.DisplayName);
+            var stationProfile = StationProfile.Create(
+                stationProfileId,
+                request.StationSystemId,
+                request.DisplayName);
 
             foreach (var bindingRequest in request.DeviceBindings)
             {
@@ -315,7 +314,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 }
             }
 
-            await _stationProfileRepository.SaveAsync(stationProfile, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, stationProfile, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(stationProfile));
         }
@@ -340,7 +339,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
     public async Task<Result<IReadOnlyCollection<StationProfileDetails>>> ListStationProfilesAsync(
         CancellationToken cancellationToken = default)
     {
-        var stationProfiles = await _stationProfileRepository.ListAsync(cancellationToken).ConfigureAwait(false);
+        var stationProfiles = await _repository.ListStationProfilesAsync(_scope, cancellationToken).ConfigureAwait(false);
         var details = stationProfiles
             .OrderBy(stationProfile => stationProfile.Id.Value, StringComparer.Ordinal)
             .Select(EngineeringConfigurationMapper.ToDetails)
@@ -399,7 +398,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                     publishResult.Message));
             }
 
-            await _projectRepository.SaveAsync(project, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, project, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(project));
         }
@@ -442,7 +441,7 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
                 return Result.Failure<EngineeringProjectDetails>(error);
             }
 
-            await _projectRepository.SaveAsync(project, cancellationToken).ConfigureAwait(false);
+            await _repository.SaveAsync(_scope, project, cancellationToken).ConfigureAwait(false);
 
             return Result.Success(EngineeringConfigurationMapper.ToDetails(project));
         }
@@ -506,8 +505,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
             return null;
         }
 
-        return await _projectRepository
-            .GetByIdAsync(new EngineeringProjectId(projectId), cancellationToken)
+        return await _repository
+            .GetByIdAsync(_scope, new EngineeringProjectId(projectId), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -520,8 +519,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
             return null;
         }
 
-        return await _workspaceRepository
-            .GetByIdAsync(new WorkspaceId(workspaceId), cancellationToken)
+        return await _repository
+            .GetByIdAsync(_scope, new WorkspaceId(workspaceId), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -532,8 +531,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
             return null;
         }
 
-        return await _recipeRepository
-            .GetByIdAsync(new RecipeId(recipeId), cancellationToken)
+        return await _repository
+            .GetByIdAsync(_scope, new RecipeId(recipeId), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -546,8 +545,8 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
             return null;
         }
 
-        return await _stationProfileRepository
-            .GetByIdAsync(new StationProfileId(stationProfileId), cancellationToken)
+        return await _repository
+            .GetByIdAsync(_scope, new StationProfileId(stationProfileId), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -623,6 +622,11 @@ public sealed class EngineeringConfigurationService : IEngineeringConfigurationS
         if (string.IsNullOrWhiteSpace(request.StationProfileId))
         {
             return Required("Engineering.StationProfileIdRequired", "StationProfileId");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.StationSystemId))
+        {
+            return Required("Engineering.StationSystemIdRequired", "StationSystemId");
         }
 
         if (string.IsNullOrWhiteSpace(request.DisplayName))

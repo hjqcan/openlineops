@@ -1,6 +1,7 @@
 using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Application.Scripting;
+using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 
 namespace OpenLineOps.Processes.Tests;
@@ -137,7 +138,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
     [Fact]
     public async Task RegisterAsyncCreatesNewVersionForExistingUserBlockType()
     {
-        var repository = new InMemoryProcessBlocklyBlockDefinitionRepository();
+        var repository = new TestBlockRepository();
         var catalog = new ProcessBlocklyBlockCatalog(repository, new FixedClock(RegisteredAtUtc));
         var firstRequest = Registration(
             "user_open_clamp",
@@ -270,7 +271,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
         IEnumerable<IProcessBlocklyBlockCatalogSource>? sources = null)
     {
         return new ProcessBlocklyBlockCatalog(
-            new InMemoryProcessBlocklyBlockDefinitionRepository(),
+            new TestBlockRepository(),
             new FixedClock(RegisteredAtUtc),
             sources);
     }
@@ -390,6 +391,80 @@ public sealed class ProcessBlocklyBlockCatalogTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(blocks);
+        }
+    }
+
+    private sealed class TestBlockRepository : IProcessBlocklyBlockDefinitionRepository
+    {
+        private readonly Dictionary<string, List<ProcessBlocklyBlockDefinitionRecord>> _blocks =
+            new(StringComparer.Ordinal);
+
+        public ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>> ListLatestAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>>(
+                _blocks.Values
+                    .Select(versions => versions.MaxBy(block => block.Version)!)
+                    .OrderBy(block => block.BlockType, StringComparer.Ordinal)
+                    .ToArray());
+        }
+
+        public ValueTask<ProcessBlocklyBlockDefinitionRecord?> GetLatestAsync(
+            string blockType,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(_blocks.TryGetValue(blockType, out var versions)
+                ? versions.MaxBy(block => block.Version)
+                : null);
+        }
+
+        public ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>> ListVersionsAsync(
+            string blockType,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>>(
+                _blocks.TryGetValue(blockType, out var versions)
+                    ? versions.OrderByDescending(block => block.Version).ToArray()
+                    : []);
+        }
+
+        public ValueTask<ProcessBlocklyBlockDefinitionRecord> SaveNewVersionAsync(
+            string blockType,
+            string category,
+            string displayName,
+            string blocklyJson,
+            string executionMode,
+            string runtimeActionContractSchemaVersion,
+            string runtimeActionContractJson,
+            string runtimeActionContractSha256,
+            DateTimeOffset recordedAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_blocks.TryGetValue(blockType, out var versions))
+            {
+                versions = [];
+                _blocks.Add(blockType, versions);
+            }
+
+            var latest = versions.MaxBy(block => block.Version);
+            var record = new ProcessBlocklyBlockDefinitionRecord(
+                blockType,
+                category,
+                displayName,
+                blocklyJson,
+                executionMode,
+                runtimeActionContractSchemaVersion,
+                runtimeActionContractJson,
+                runtimeActionContractSha256,
+                latest?.Version + 1 ?? 1,
+                latest?.CreatedAtUtc ?? recordedAtUtc,
+                recordedAtUtc);
+            versions.Add(record);
+            return ValueTask.FromResult(record);
         }
     }
 }

@@ -74,8 +74,8 @@ public static class RunnerEntrypoint
             services.AddOpenLineOpsProjectsModule();
             services.AddOpenLineOpsTopologyModule();
             services.AddOpenLineOpsRuntimeModule(configuration);
-            services.AddOpenLineOpsProcessesModule(configuration);
-            services.AddOpenLineOpsEngineeringModule(configuration);
+            services.AddOpenLineOpsProcessesModule();
+            services.AddOpenLineOpsEngineeringModule();
             services.AddOpenLineOpsPluginsModule(configuration);
             services.AddOpenLineOpsDevicesModule(configuration);
             services.AddScoped<RunnerCommand>();

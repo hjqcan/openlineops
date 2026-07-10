@@ -11,15 +11,6 @@ export interface HealthResponse {
   service: string;
 }
 
-export interface RuntimeSessionRunResponse {
-  sessionId: string;
-  configurationSnapshotId: string;
-  status: string;
-  completedSteps: number;
-  commandCount: number;
-  incidentCount: number;
-}
-
 export interface RuntimeStationStatus {
   stationId: string;
   latestSessionId: string;
@@ -81,29 +72,6 @@ export interface RuntimeAlarm {
 
 export interface RuntimeAlarmsResponse {
   items: RuntimeAlarm[];
-}
-
-export interface StartRuntimeSessionRequest {
-  stationId: string;
-  configurationSnapshotId: string;
-  recipeSnapshotId: string;
-  processDefinitionId: string;
-  processVersionId: string;
-  serialNumber: string;
-  batchId: string;
-  fixtureId: string;
-  deviceId: string;
-  actorId: string;
-  nodes: StartRuntimeNodeRequest[];
-}
-
-export interface StartRuntimeNodeRequest {
-  nodeId: string;
-  displayName: string;
-  targetCapability: string;
-  commandName: string;
-  timeoutSeconds: number;
-  inputPayload: string;
 }
 
 export interface TraceRecordSummary {
@@ -300,6 +268,7 @@ export interface RecipeParameterResponse {
 
 export interface StationProfileResponse {
   stationProfileId: string;
+  stationSystemId: string;
   displayName: string;
   deviceBindings: DeviceBindingResponse[];
 }
@@ -487,11 +456,21 @@ export interface CreateAutomationTopologyRequest {
   displayName: string;
 }
 
-export interface AddEquipmentNodeRequest {
-  nodeId: string;
-  parentNodeId: string | null;
-  kind: string;
+export interface AddAutomationSystemRequest {
+  systemId: string;
+  parentSystemId: string | null;
+  kind: 'System' | 'Station';
+  systemType: string;
   displayName: string;
+  requiredCapabilityIds: string[];
+  providedCapabilityIds: string[];
+  metadata: Record<string, string>;
+}
+
+export interface UpdateAutomationSystemRequest {
+  systemType?: string;
+  displayName?: string;
+  metadata?: Record<string, string>;
 }
 
 export interface AddCapabilityContractRequest {
@@ -504,15 +483,6 @@ export interface AddCapabilityContractRequest {
   safetyClass: string;
 }
 
-export interface AddAutomationModuleRequest {
-  moduleId: string;
-  nodeId: string;
-  moduleKind: string;
-  displayName: string;
-  requiredCapabilityIds: string[];
-  providedCapabilityIds: string[];
-}
-
 export interface AddDriverBindingRequest {
   bindingId: string;
   capabilityId: string;
@@ -522,20 +492,33 @@ export interface AddDriverBindingRequest {
 
 export interface AddSlotGroupRequest {
   slotGroupId: string;
-  parentNodeId: string;
+  parentSystemId: string;
   displayName: string;
   kind: string;
   capacity: number;
 }
 
+export interface UpdateSlotGroupRequest {
+  displayName?: string;
+  kind?: string;
+  capacity?: number;
+}
+
 export interface AddSlotDefinitionRequest {
   slotGroupId: string;
   slotId: string;
-  parentNodeId: string;
+  parentSystemId: string;
   address: string;
   displayName: string;
   materialKind: string;
   isEnabled: boolean;
+}
+
+export interface UpdateSlotDefinitionRequest {
+  address?: string;
+  displayName?: string;
+  materialKind?: string;
+  isEnabled?: boolean;
 }
 
 export interface CreateSiteLayoutRequest {
@@ -549,16 +532,16 @@ export interface CreateSiteLayoutRequest {
 
 export interface AddSiteLayoutElementRequest {
   elementId: string;
-  kind: string;
-  targetKind: string;
-  targetId: string;
+  kind: 'SystemShape' | 'GroupRegion' | 'SlotShape';
+  target: SiteLayoutTargetReference;
+  parentElementId: string | null;
   x: number;
   y: number;
   width: number;
   height: number;
   rotationDegrees: number;
-  layerId: string;
-  label: string;
+  zIndex: number;
+  style: Record<string, string>;
 }
 
 export interface UpdateSiteLayoutElementGeometryRequest {
@@ -576,8 +559,8 @@ export interface LinkProjectTopologyRequest {
 export interface AutomationTopologySummaryResponse {
   topologyId: string;
   displayName: string;
-  nodeCount: number;
-  moduleCount: number;
+  systemCount: number;
+  stationCount: number;
   slotCount: number;
 }
 
@@ -585,28 +568,29 @@ export interface AutomationTopologyResponse {
   topologyId: string;
   displayName: string;
   createdAtUtc: string;
-  nodes: EquipmentNodeResponse[];
-  modules: AutomationModuleResponse[];
+  systems: AutomationSystemResponse[];
   capabilities: CapabilityContractResponse[];
   driverBindings: DriverBindingRouteResponse[];
   slotGroups: SlotGroupResponse[];
   slots: SlotDefinitionResponse[];
 }
 
-export interface EquipmentNodeResponse {
-  nodeId: string;
-  parentNodeId: string | null;
-  kind: string;
-  displayName: string;
+export interface TopologyTargetDeletionResponse {
+  topology: AutomationTopologyResponse;
+  updatedLayoutCount: number;
+  removedLayoutElementCount: number;
+  publicationImpact: string;
 }
 
-export interface AutomationModuleResponse {
-  moduleId: string;
-  nodeId: string;
-  moduleKind: string;
+export interface AutomationSystemResponse {
+  systemId: string;
+  parentSystemId: string | null;
+  kind: 'System' | 'Station';
+  systemType: string;
   displayName: string;
   requiredCapabilityIds: string[];
   providedCapabilityIds: string[];
+  metadata: Record<string, string>;
 }
 
 export interface CapabilityContractResponse {
@@ -628,7 +612,7 @@ export interface DriverBindingRouteResponse {
 
 export interface SlotGroupResponse {
   slotGroupId: string;
-  parentNodeId: string;
+  parentSystemId: string;
   displayName: string;
   kind: string;
   capacity: number;
@@ -637,7 +621,8 @@ export interface SlotGroupResponse {
 
 export interface SlotDefinitionResponse {
   slotId: string;
-  parentNodeId: string;
+  slotGroupId: string;
+  parentSystemId: string;
   address: string;
   displayName: string;
   materialKind: string;
@@ -656,16 +641,21 @@ export interface SiteLayoutResponse {
 
 export interface SiteLayoutElementResponse {
   elementId: string;
-  kind: string;
-  targetKind: string;
-  targetId: string;
+  kind: 'SystemShape' | 'GroupRegion' | 'SlotShape';
+  target: SiteLayoutTargetReference;
+  parentElementId: string | null;
   x: number;
   y: number;
   width: number;
   height: number;
   rotationDegrees: number;
-  layerId: string;
-  label: string;
+  zIndex: number;
+  style: Record<string, string>;
+}
+
+export interface SiteLayoutTargetReference {
+  kind: 'System' | 'SlotGroup' | 'Slot';
+  targetId: string;
 }
 
 export interface ProductionLineSummaryResponse {
@@ -698,8 +688,7 @@ export interface DutModelResponse {
 export interface ProductionWorkstationResponse {
   workstationId: string;
   displayName: string;
-  topologyStationNodeId: string;
-  topologySystemModuleId: string;
+  stationSystemId: string;
 }
 
 export interface ProductionStageResponse {
@@ -755,8 +744,7 @@ export interface DutModelRequest {
 export interface ProductionWorkstationRequest {
   workstationId: string;
   displayName: string;
-  topologyStationNodeId: string;
-  topologySystemModuleId: string;
+  stationSystemId: string;
 }
 
 export interface ProductionStageRequest {
@@ -816,6 +804,7 @@ export interface RecipeParameterRequest {
 
 export interface CreateStationProfileRequest {
   stationProfileId: string;
+  stationSystemId: string;
   displayName: string;
   deviceBindings: CreateDeviceBindingRequest[];
 }
@@ -955,25 +944,6 @@ export interface ProcessGraphValidationIssue {
   severity: string;
   code: string;
   message: string;
-}
-
-export interface StartProcessRuntimeSessionRequest {
-  configurationSnapshotId: string;
-  serialNumber: string | null;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
-  actorId: string | null;
-}
-
-export interface StartedProcessRuntimeSessionResponse {
-  sessionId: string;
-  snapshotId?: string;
-  configurationSnapshotId: string;
-  status: string;
-  completedSteps: number;
-  commandCount: number;
-  incidentCount: number;
 }
 
 export interface CreateProcessDefinitionRequest {

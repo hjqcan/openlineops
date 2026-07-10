@@ -1,7 +1,7 @@
 namespace OpenLineOps.Runtime.Api.Models;
 
 public sealed record RuntimeStationStatusResponse(
-    string StationId,
+    string StationSystemId,
     Guid LatestSessionId,
     string ProcessDefinitionId,
     string ProcessVersionId,

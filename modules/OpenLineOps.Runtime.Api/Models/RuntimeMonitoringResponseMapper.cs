@@ -7,7 +7,7 @@ internal static class RuntimeMonitoringResponseMapper
     public static RuntimeStationStatusResponse ToResponse(RuntimeStationStatusProjection projection)
     {
         return new RuntimeStationStatusResponse(
-            projection.StationId,
+            projection.StationSystemId,
             projection.LatestSessionId.Value,
             projection.ProcessDefinitionId,
             projection.ProcessVersionId,
@@ -27,6 +27,20 @@ internal static class RuntimeMonitoringResponseMapper
             projection.IsTerminal);
     }
 
+    public static RuntimeTargetStatusResponse ToResponse(RuntimeTargetStatusProjection projection)
+    {
+        return new RuntimeTargetStatusResponse(
+            projection.StationSystemId,
+            projection.SessionId.Value,
+            projection.ActionId,
+            projection.TargetKind,
+            projection.TargetId,
+            projection.CommandStatus.ToString(),
+            projection.LastTransitionAtUtc,
+            projection.IsTerminal,
+            projection.FailureReason);
+    }
+
     public static RuntimeTimelineEntryResponse ToResponse(RuntimeTimelineEntry entry)
     {
         return new RuntimeTimelineEntryResponse(
@@ -35,7 +49,7 @@ internal static class RuntimeMonitoringResponseMapper
             entry.OccurredAtUtc,
             entry.EventName,
             entry.SessionId.Value,
-            entry.StationId,
+            entry.StationSystemId,
             entry.EntityKind,
             entry.EntityId,
             entry.FromStatus,
@@ -51,7 +65,7 @@ internal static class RuntimeMonitoringResponseMapper
         return new RuntimeAlarmResponse(
             alarm.AlarmId.Value,
             alarm.SessionId.Value,
-            alarm.StationId,
+            alarm.StationSystemId,
             alarm.Severity.ToString(),
             alarm.Code,
             alarm.Message,

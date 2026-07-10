@@ -69,11 +69,13 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             processDefinitionId,
             processVersionId,
             capabilityId));
+        await engineeringRepository.SaveAsync(scope, CreateStationProfile(capabilityId));
         var packagePath = Path.Combine(_projectPath, "plugin-source");
         Directory.CreateDirectory(packagePath);
         await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.scanner\"}");
         await File.WriteAllTextAsync(Path.Combine(packagePath, "scanner.dll"), "scanner-plugin-binary");
         var packageDependency = CreatePackageDependency(packagePath, capabilityId);
+        WriteReleaseTopologyResources(scope);
 
         var releaseStore = new FileSystemProjectReleaseArtifactStore();
         var release = await releaseStore.PublishAsync(
@@ -82,6 +84,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             CreatedAtUtc.AddMinutes(1),
             new ProjectReleaseSourceMetadata(
                 "topology.release.route",
+                "station.eol",
                 ["layout.release.route"],
                 processDefinitionId,
                 processVersionId,
@@ -94,7 +97,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                     "binding.scanner",
                     "PluginCommand",
                     "plugin.scanner")],
-                [new ProjectReleaseTargetReference("EquipmentNode", "station-eol")],
+                [new ProjectReleaseTargetReference("System", "station.eol")],
                 ["openlineops_device_command@1"],
                 [packageDependency]));
 
@@ -125,7 +128,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                 "binding.scanner",
                 "PluginCommand",
                 "plugin.scanner")],
-            [new ProjectTargetReference("EquipmentNode", "station-eol")],
+            [new ProjectTargetReference("System", "station.eol")],
             ["openlineops_device_command@1"],
             Path.GetRelativePath(_projectPath, release.ManifestPath).Replace('\\', '/'),
             release.ContentSha256,
@@ -145,23 +148,25 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "step-release",
             "command-release",
             "node-scan",
-            "station-eol",
+            "station.eol",
             configurationSnapshotId,
             new OpenLineOps.Devices.Domain.Identifiers.DeviceCapabilityId(capabilityId),
             "Scan",
             projectId,
             applicationId,
-            snapshotId);
+            snapshotId,
+            "System",
+            "station.eol");
         var route = await resolver.ResolveAsync(request);
 
-        Assert.NotNull(route);
-        Assert.Equal("scanner-01", route.DeviceInstanceId.Value);
-        Assert.Equal(capabilityId, route.CapabilityId.Value);
-        Assert.Equal("device.scanner:scan.v2", route.CommandDefinitionId.Value);
-        Assert.NotNull(route.PluginPackage);
-        Assert.Equal("plugin.scanner", route.PluginPackage.PluginId);
-        Assert.Equal("2.0.0", route.PluginPackage.Version);
-        Assert.Equal(packageDependency.PackageContentSha256, route.PluginPackage.PackageContentSha256);
+        var deviceRoute = Assert.IsType<ProjectReleaseDeviceCommandRoute>(route);
+        Assert.Equal("scanner-01", deviceRoute.DeviceInstanceId.Value);
+        Assert.Equal(capabilityId, deviceRoute.CapabilityId.Value);
+        Assert.Equal("device.scanner:scan.v2", deviceRoute.CommandDefinitionId.Value);
+        Assert.NotNull(deviceRoute.PluginPackage);
+        Assert.Equal("plugin.scanner", deviceRoute.PluginPackage.PluginId);
+        Assert.Equal("2.0.0", deviceRoute.PluginPackage.Version);
+        Assert.Equal(packageDependency.PackageContentSha256, deviceRoute.PluginPackage.PackageContentSha256);
 
         await File.WriteAllTextAsync(
             Path.Combine(
@@ -171,6 +176,24 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "tampered-plugin-binary");
 
         Assert.Null(await resolver.ResolveAsync(request));
+    }
+
+    private static void WriteReleaseTopologyResources(ProjectApplicationWorkspaceScope scope)
+    {
+        var topologyDirectory = Path.Combine(scope.ApplicationRootPath, "topology");
+        var layoutDirectory = Path.Combine(scope.ApplicationRootPath, "layouts");
+        Directory.CreateDirectory(topologyDirectory);
+        Directory.CreateDirectory(layoutDirectory);
+        File.WriteAllText(
+            Path.Combine(topologyDirectory, "topology.json"),
+            $$"""
+            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"topology.release.route"}
+            """);
+        File.WriteAllText(
+            Path.Combine(layoutDirectory, "layout.json"),
+            $$"""
+            {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"layout.release.route"}
+            """);
     }
 
     public void Dispose()
@@ -197,15 +220,9 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             new EngineeringRecipeVersionId("recipe.release.route@1.0.0"),
             "Release Recipe",
             CreatedAtUtc);
-        var station = StationProfile.Create(
-            new EngineeringStationProfileId("station-eol"),
-            "EOL Station");
+        var station = CreateStationProfile(capabilityId);
 
         Assert.True(recipe.Publish(CreatedAtUtc.AddSeconds(1)).Succeeded);
-        Assert.True(station.AddDeviceBinding(DeviceBinding.Create(
-            new EngineeringDeviceBindingId("device-binding.scanner"),
-            new EngineeringDeviceCapabilityId(capabilityId),
-            "scanner-01")).Succeeded);
         Assert.True(project.PublishSnapshot(
             new EngineeringConfigurationSnapshotId(snapshotId),
             new EngineeringProcessDefinitionId(processDefinitionId),
@@ -215,6 +232,19 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             CreatedAtUtc.AddSeconds(2)).Succeeded);
 
         return project;
+    }
+
+    private static StationProfile CreateStationProfile(string capabilityId)
+    {
+        var station = StationProfile.Create(
+            new EngineeringStationProfileId("station-eol"),
+            "station.eol",
+            "EOL Station");
+        Assert.True(station.AddDeviceBinding(DeviceBinding.Create(
+            new EngineeringDeviceBindingId("device-binding.scanner"),
+            new EngineeringDeviceCapabilityId(capabilityId),
+            "scanner-01")).Succeeded);
+        return station;
     }
 
     private static ProjectReleasePackageDependencyLock CreatePackageDependency(

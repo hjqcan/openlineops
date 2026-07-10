@@ -4,6 +4,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
+using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -22,7 +23,9 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             RuntimeStepId.New(),
             new RuntimeNodeId("node-inspect"),
             "Inspect",
-            BaseTimeUtc.AddSeconds(2));
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("node-inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.inspect"));
         var command = session.CreateCommand(
             RuntimeCommandId.New(),
             step.Id,
@@ -106,79 +109,92 @@ public sealed class SqliteRuntimeSessionRepositoryTests
     }
 
     [Fact]
-    public async Task SaveAsyncRoundTripsDynamicStepAndActionIdentity()
+    public async Task SaveAsyncRoundTripsRequiredActionAndTargetIdentity()
     {
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
-        var session = CreateRunningSession("dynamic-identity", BaseTimeUtc);
-        var parent = session.StartStep(
+        var session = CreateRunningSession("semantic-identity", BaseTimeUtc);
+        var step = session.StartStep(
             RuntimeStepId.New(),
-            new RuntimeNodeId("script-node"),
-            "Script",
+            new RuntimeNodeId("inspect"),
+            "Inspect",
             BaseTimeUtc.AddSeconds(2),
-            new RuntimeActionId("script-node:action:1"));
-        var child = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("script-node:slot:node:4"),
-            "Child",
-            BaseTimeUtc.AddSeconds(3),
-            new RuntimeActionId("script-node:action:1:child:4"),
-            parent.Id,
-            dynamicSequence: 4);
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
         var command = session.CreateCommand(
             RuntimeCommandId.New(),
-            child.Id,
-            new RuntimeCapabilityId("motion.axis"),
-            "MoveAxis",
-            BaseTimeUtc.AddSeconds(4),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            BaseTimeUtc.AddSeconds(3),
             TimeSpan.FromSeconds(5));
 
         await repository.SaveAsync(session);
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = Assert.IsType<RuntimeSession>(await restartedRepository.GetByIdAsync(session.Id));
-        var restoredChild = restored.Steps.Single(step => step.Id == child.Id);
+        var restoredStep = Assert.Single(restored.Steps);
         var restoredCommand = Assert.Single(restored.Commands);
-        Assert.Equal("script-node:action:1:child:4", restoredChild.ActionId.Value);
-        Assert.Equal(parent.Id, restoredChild.ParentStepId);
-        Assert.Equal(4, restoredChild.DynamicSequence);
-        Assert.Equal(restoredChild.ActionId, restoredCommand.ActionId);
+        Assert.Equal("inspect:action:1", restoredStep.ActionId.Value);
+        Assert.Equal(RuntimeTargetKinds.System, restoredStep.TargetKind);
+        Assert.Equal("system.tester", restoredStep.TargetId);
+        Assert.Equal(restoredStep.ActionId, restoredCommand.ActionId);
+        Assert.Equal(restoredStep.Target, restoredCommand.Target);
         Assert.Equal(command.Id, restoredCommand.Id);
     }
 
     [Fact]
-    public void SnapshotMapperDerivesLegacyCommandActionIdentityFromOwningStep()
+    public void SnapshotMapperRejectsSnapshotWithoutActionIdentity()
     {
-        var session = CreateRunningSession("legacy-action", BaseTimeUtc);
-        var step = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("legacy-node"),
-            "Legacy",
-            BaseTimeUtc.AddSeconds(2));
-        session.CreateCommand(
-            RuntimeCommandId.New(),
-            step.Id,
-            new RuntimeCapabilityId("legacy.capability"),
-            "LegacyCommand",
-            BaseTimeUtc.AddSeconds(3),
-            TimeSpan.FromSeconds(5));
-        var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(session);
-        var legacySnapshot = snapshot with
+        var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(
+            CreateSessionWithCommand("missing-action"));
+        var invalidSnapshot = snapshot with
         {
             Steps = snapshot.Steps
-                .Select(candidate => candidate with { ActionId = null })
-                .ToArray(),
-            Commands = snapshot.Commands
-                .Select(candidate => candidate with { ActionId = null })
+                .Select(candidate => candidate with { ActionId = null! })
                 .ToArray()
         };
 
-        var restored = RuntimeSessionSnapshotMapper.ToAggregate(legacySnapshot);
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => RuntimeSessionSnapshotMapper.ToAggregate(invalidSnapshot));
 
-        var restoredStep = Assert.Single(restored.Steps);
-        var restoredCommand = Assert.Single(restored.Commands);
-        Assert.Equal("legacy-node:action:1", restoredStep.ActionId.Value);
-        Assert.Equal(restoredStep.ActionId, restoredCommand.ActionId);
+        Assert.Contains("ActionId", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SnapshotMapperRejectsSnapshotWithoutTargetIdentity()
+    {
+        var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(
+            CreateSessionWithCommand("missing-target"));
+        var invalidSnapshot = snapshot with
+        {
+            Commands = snapshot.Commands
+                .Select(candidate => candidate with { TargetKind = null!, TargetId = null! })
+                .ToArray()
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => RuntimeSessionSnapshotMapper.ToAggregate(invalidSnapshot));
+
+        Assert.Contains("TargetKind and TargetId", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SnapshotMapperRejectsCommandIdentityThatDiffersFromOwningStep()
+    {
+        var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(
+            CreateSessionWithCommand("mismatched-target"));
+        var invalidSnapshot = snapshot with
+        {
+            Commands = snapshot.Commands
+                .Select(candidate => candidate with { TargetId = "system.other" })
+                .ToArray()
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => RuntimeSessionSnapshotMapper.ToAggregate(invalidSnapshot));
+
+        Assert.Contains("semantic identity differs", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,6 +242,26 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         Assert.Null(session);
     }
 
+    private static RuntimeSession CreateSessionWithCommand(string suffix)
+    {
+        var session = CreateRunningSession(suffix, BaseTimeUtc);
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("inspect"),
+            "Inspect",
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
+        session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            BaseTimeUtc.AddSeconds(3),
+            TimeSpan.FromSeconds(5));
+        return session;
+    }
+
     private static RuntimeSession CreateRunningSession(
         string suffix,
         DateTimeOffset createdAtUtc,
@@ -239,7 +275,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             new ConfigurationSnapshotId($"snapshot-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
             createdAtUtc,
-            traceMetadata);
+            traceMetadata ?? RuntimeTestReleaseIdentity.TraceMetadata());
 
         var result = session.Start(createdAtUtc.AddSeconds(1));
         Assert.True(result.Succeeded, result.Message);

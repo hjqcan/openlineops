@@ -6,14 +6,10 @@ namespace OpenLineOps.Devices.Infrastructure.Execution;
 
 public sealed class PluginDeviceCommandExecutor : IDeviceCommandExecutor
 {
-    private readonly IPluginDeviceCommandInventory _commandInventory;
     private readonly IPluginDeviceCommandInvoker _commandInvoker;
 
-    public PluginDeviceCommandExecutor(
-        IPluginDeviceCommandInventory commandInventory,
-        IPluginDeviceCommandInvoker commandInvoker)
+    public PluginDeviceCommandExecutor(IPluginDeviceCommandInvoker commandInvoker)
     {
-        _commandInventory = commandInventory;
         _commandInvoker = commandInvoker;
     }
 
@@ -24,57 +20,35 @@ public sealed class PluginDeviceCommandExecutor : IDeviceCommandExecutor
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
-        string pluginId;
-        PluginPackageRuntimeIdentity? packageIdentity;
-        if (request.PluginPackage is not null)
+        if (!string.Equals(
+                request.ProviderKind,
+                ProjectReleaseRuntimeProviderKinds.PluginCommand,
+                StringComparison.Ordinal)
+            || request.PluginPackage is null)
         {
-            packageIdentity = new PluginPackageRuntimeIdentity(
-                request.PluginPackage.PluginId,
-                request.PluginPackage.Version,
-                request.PluginPackage.PackageContentSha256,
-                request.PluginPackage.ManifestSha256,
-                request.PluginPackage.EntryAssemblySha256,
-                request.PluginPackage.ContractVersion,
-                request.PluginPackage.RuntimeIdentifier,
-                request.PluginPackage.AbiVersion);
-            if (!packageIdentity.IsComplete)
-            {
-                return DeviceCommandExecutionResult.Rejected(
-                    "Project release plugin package identity is incomplete.");
-            }
-
-            pluginId = request.PluginPackage.PluginId;
+            return DeviceCommandExecutionResult.Rejected(
+                "Plugin device execution requires a PluginCommand release route with a frozen package identity.");
         }
-        else
+
+        var packageIdentity = new PluginPackageRuntimeIdentity(
+            request.PluginPackage.PluginId,
+            request.PluginPackage.Version,
+            request.PluginPackage.PackageContentSha256,
+            request.PluginPackage.ManifestSha256,
+            request.PluginPackage.EntryAssemblySha256,
+            request.PluginPackage.ContractVersion,
+            request.PluginPackage.RuntimeIdentifier,
+            request.PluginPackage.AbiVersion);
+        if (!packageIdentity.IsComplete)
         {
-            var descriptor = await _commandInventory
-                .FindDeviceCommandAsync(request.CapabilityId.Value, request.CommandName, cancellationToken)
-                .ConfigureAwait(false);
-            if (descriptor is null)
-            {
-                return DeviceCommandExecutionResult.Rejected(
-                    $"No plugin device command found for capability '{request.CapabilityId.Value}' and command '{request.CommandName}'.");
-            }
-
-            if (!string.Equals(
-                    descriptor.CommandDefinitionId,
-                    request.CommandDefinitionId.Value,
-                    StringComparison.Ordinal))
-            {
-                return DeviceCommandExecutionResult.Rejected(
-                    $"Plugin device command definition '{descriptor.CommandDefinitionId}' does not match requested definition '{request.CommandDefinitionId.Value}'.");
-            }
-
-            pluginId = descriptor.PluginId;
-            packageIdentity = descriptor.PackageIdentity is { IsComplete: true }
-                ? descriptor.PackageIdentity
-                : null;
+            return DeviceCommandExecutionResult.Rejected(
+                "Project release plugin package identity is incomplete.");
         }
 
         var invocationResult = await _commandInvoker
             .ExecuteAsync(
                 new PluginDeviceCommandInvocationRequest(
-                    pluginId,
+                    request.PluginPackage.PluginId,
                     request.DeviceInstanceId.Value,
                     request.CommandDefinitionId.Value,
                     request.CapabilityId.Value,

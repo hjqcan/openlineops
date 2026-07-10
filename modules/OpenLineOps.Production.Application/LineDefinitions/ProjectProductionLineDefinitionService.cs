@@ -12,7 +12,7 @@ using OpenLineOps.Production.Domain.Models;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
-using OpenLineOps.Topology.Domain.Nodes;
+using OpenLineOps.Topology.Domain.Systems;
 
 namespace OpenLineOps.Production.Application.LineDefinitions;
 
@@ -227,8 +227,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         var workstations = request.Workstations.Select(workstation => WorkstationDefinition.Create(
             new WorkstationId(workstation.WorkstationId),
             workstation.DisplayName,
-            workstation.TopologyStationNodeId,
-            workstation.TopologySystemModuleId));
+            workstation.StationSystemId));
         var adapters = request.ExternalTestProgramAdapters.Select(adapter =>
             ExternalTestProgramAdapter.Create(
                 new ExternalTestProgramAdapterId(adapter.AdapterId),
@@ -319,22 +318,13 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
 
         foreach (var workstation in definition.Workstations)
         {
-            var stationNode = topology.Nodes.SingleOrDefault(node =>
-                node.Id.Value == workstation.TopologyStationNodeId);
-            if (stationNode is null || stationNode.Kind != EquipmentNodeKind.Station)
+            var stationSystem = topology.Systems.SingleOrDefault(system =>
+                system.Id.Value == workstation.StationSystemId);
+            if (stationSystem is not StationSystem)
             {
                 return Validation(
-                    "WorkstationStationNodeInvalid",
-                    $"Workstation {workstation.Id} must reference a Station topology node.");
-            }
-
-            var systemModule = topology.Modules.SingleOrDefault(module =>
-                module.Id.Value == workstation.TopologySystemModuleId);
-            if (systemModule is null || systemModule.NodeId != stationNode.Id)
-            {
-                return Validation(
-                    "WorkstationSystemModuleInvalid",
-                    $"Workstation {workstation.Id} system module must exist on Station node {stationNode.Id}.");
+                    "WorkstationStationSystemInvalid",
+                    $"Workstation {workstation.Id} must reference an existing Station system.");
             }
         }
 
@@ -408,13 +398,13 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             var adapter = definition.ExternalTestProgramAdapters.Single(candidate =>
                 candidate.Id == stage.ExternalTestProgramAdapterId);
             var workstation = definition.Workstations.Single(candidate => candidate.Id == stage.WorkstationId);
-            var module = topology.Modules.Single(candidate =>
-                candidate.Id.Value == workstation.TopologySystemModuleId);
-            if (module.ProvidedCapabilities.All(capability => capability.Value != adapter.CapabilityId))
+            var stationSystem = topology.Systems.Single(candidate =>
+                candidate.Id.Value == workstation.StationSystemId);
+            if (stationSystem.ProvidedCapabilities.All(capability => capability.Value != adapter.CapabilityId))
             {
                 return Validation(
                     "ExternalTestCapabilityNotProvidedByWorkstation",
-                    $"Workstation {workstation.Id} system module does not provide capability {adapter.CapabilityId}.");
+                    $"Workstation {workstation.Id} Station system does not provide capability {adapter.CapabilityId}.");
             }
 
             var matchingActions = flowIr.Nodes
@@ -499,11 +489,10 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         FlowIrTargetReference target,
         WorkstationDefinition workstation)
     {
-        return target.Kind is FlowIrTargetReferenceKind.AutomationModule
-                or FlowIrTargetReferenceKind.System
+        return target.Kind == FlowIrTargetReferenceKind.System
             && string.Equals(
                 target.Reference,
-                workstation.TopologySystemModuleId,
+                workstation.StationSystemId,
                 StringComparison.Ordinal);
     }
 

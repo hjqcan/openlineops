@@ -6,18 +6,22 @@ using OpenLineOps.Topology.Api.Models;
 using OpenLineOps.Topology.Application.ProjectWorkspaces;
 using ApiAddCapabilityRequest = OpenLineOps.Topology.Api.Models.AddCapabilityContractRequest;
 using ApiAddDriverBindingRequest = OpenLineOps.Topology.Api.Models.AddDriverBindingRequest;
-using ApiAddModuleRequest = OpenLineOps.Topology.Api.Models.AddAutomationModuleRequest;
-using ApiAddNodeRequest = OpenLineOps.Topology.Api.Models.AddEquipmentNodeRequest;
+using ApiAddSystemRequest = OpenLineOps.Topology.Api.Models.AddAutomationSystemRequest;
 using ApiAddSlotGroupRequest = OpenLineOps.Topology.Api.Models.AddSlotGroupRequest;
 using ApiAddSlotRequest = OpenLineOps.Topology.Api.Models.AddSlotDefinitionRequest;
 using ApiCreateTopologyRequest = OpenLineOps.Topology.Api.Models.CreateAutomationTopologyRequest;
+using ApiUpdateSystemRequest = OpenLineOps.Topology.Api.Models.UpdateAutomationSystemRequest;
+using ApiUpdateSlotGroupRequest = OpenLineOps.Topology.Api.Models.UpdateSlotGroupRequest;
+using ApiUpdateSlotRequest = OpenLineOps.Topology.Api.Models.UpdateSlotDefinitionRequest;
 using AppAddCapabilityRequest = OpenLineOps.Topology.Application.Topologies.AddCapabilityContractRequest;
 using AppAddDriverBindingRequest = OpenLineOps.Topology.Application.Topologies.AddDriverBindingRequest;
-using AppAddModuleRequest = OpenLineOps.Topology.Application.Topologies.AddAutomationModuleRequest;
-using AppAddNodeRequest = OpenLineOps.Topology.Application.Topologies.AddEquipmentNodeRequest;
+using AppAddSystemRequest = OpenLineOps.Topology.Application.Topologies.AddAutomationSystemRequest;
 using AppAddSlotGroupRequest = OpenLineOps.Topology.Application.Topologies.AddSlotGroupRequest;
 using AppAddSlotRequest = OpenLineOps.Topology.Application.Topologies.AddSlotDefinitionRequest;
 using AppCreateTopologyRequest = OpenLineOps.Topology.Application.Topologies.CreateAutomationTopologyRequest;
+using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.UpdateAutomationSystemRequest;
+using AppUpdateSlotGroupRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotGroupRequest;
+using AppUpdateSlotRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotDefinitionRequest;
 
 namespace OpenLineOps.Topology.Api.Controllers;
 
@@ -44,7 +48,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         ApiCreateTopologyRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -62,7 +66,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
             return ToProblem(result.Error);
         }
 
-        var response = AutomationTopologiesController.ToResponse(result.Value);
+        var response = AutomationTopologyApiContract.ToResponse(result.Value);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/topologies/{Uri.EscapeDataString(response.TopologyId)}",
             response);
@@ -87,8 +91,8 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         return Ok(result.Value.Select(topology => new AutomationTopologySummaryResponse(
             topology.TopologyId,
             topology.DisplayName,
-            topology.NodeCount,
-            topology.ModuleCount,
+            topology.SystemCount,
+            topology.StationCount,
             topology.SlotCount)).ToArray());
     }
 
@@ -107,33 +111,91 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
 
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(AutomationTopologiesController.ToResponse(result.Value));
+            : Ok(AutomationTopologyApiContract.ToResponse(result.Value));
     }
 
-    [HttpPost("{topologyId}/nodes")]
-    public async Task<ActionResult<AutomationTopologyResponse>> AddEquipmentNodeAsync(
+    [HttpPost("{topologyId}/systems")]
+    public async Task<ActionResult<AutomationTopologyResponse>> AddSystemAsync(
         string projectId,
         string applicationId,
         string topologyId,
-        ApiAddNodeRequest request,
+        ApiAddSystemRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
         }
 
         var result = await _topologyService
-            .AddEquipmentNodeAsync(
+            .AddSystemAsync(
                 projectId,
                 applicationId,
                 topologyId,
-                new AppAddNodeRequest(request.NodeId!, request.ParentNodeId, request.Kind!, request.DisplayName!),
+                new AppAddSystemRequest(
+                    request.SystemId!,
+                    request.ParentSystemId,
+                    request.Kind!,
+                    request.SystemType!,
+                    request.DisplayName!,
+                    request.RequiredCapabilityIds!,
+                    request.ProvidedCapabilityIds!,
+                    request.Metadata!),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return ToActionResult(result);
+    }
+
+    [HttpPatch("{topologyId}/systems/{systemId}")]
+    [ProducesResponseType<AutomationTopologyResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<AutomationTopologyResponse>> UpdateSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
+        ApiUpdateSystemRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService.UpdateSystemAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            systemId,
+            new AppUpdateSystemRequest(request.SystemType, request.DisplayName, request.Metadata),
+            cancellationToken).ConfigureAwait(false);
+        return ToActionResult(result);
+    }
+
+    [HttpDelete("{topologyId}/systems/{systemId}")]
+    [ProducesResponseType<TopologyTargetDeletionResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<TopologyTargetDeletionResponse>> DeleteSystemAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string systemId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _topologyService.DeleteSystemAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            systemId,
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(AutomationTopologyApiContract.ToResponse(result.Value));
     }
 
     [HttpPost("{topologyId}/capabilities")]
@@ -144,7 +206,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         ApiAddCapabilityRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -169,38 +231,6 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         return ToActionResult(result);
     }
 
-    [HttpPost("{topologyId}/modules")]
-    public async Task<ActionResult<AutomationTopologyResponse>> AddModuleAsync(
-        string projectId,
-        string applicationId,
-        string topologyId,
-        ApiAddModuleRequest request,
-        CancellationToken cancellationToken)
-    {
-        var validationErrors = AutomationTopologiesController.Validate(request);
-        if (validationErrors.Count > 0)
-        {
-            return BadRequest(new ValidationProblemDetails(validationErrors));
-        }
-
-        var result = await _topologyService
-            .AddModuleAsync(
-                projectId,
-                applicationId,
-                topologyId,
-                new AppAddModuleRequest(
-                    request.ModuleId!,
-                    request.NodeId!,
-                    request.ModuleKind!,
-                    request.DisplayName!,
-                    request.RequiredCapabilityIds!,
-                    request.ProvidedCapabilityIds!),
-                cancellationToken)
-            .ConfigureAwait(false);
-
-        return ToActionResult(result);
-    }
-
     [HttpPost("{topologyId}/driver-bindings")]
     public async Task<ActionResult<AutomationTopologyResponse>> AddDriverBindingAsync(
         string projectId,
@@ -209,7 +239,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         ApiAddDriverBindingRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -239,7 +269,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         ApiAddSlotGroupRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -252,7 +282,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
                 topologyId,
                 new AppAddSlotGroupRequest(
                     request.SlotGroupId!,
-                    request.ParentNodeId!,
+                    request.ParentSystemId!,
                     request.DisplayName!,
                     request.Kind!,
                     request.Capacity!.Value),
@@ -260,6 +290,56 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
             .ConfigureAwait(false);
 
         return ToActionResult(result);
+    }
+
+    [HttpPatch("{topologyId}/slot-groups/{slotGroupId}")]
+    [ProducesResponseType<AutomationTopologyResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<AutomationTopologyResponse>> UpdateSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        ApiUpdateSlotGroupRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService.UpdateSlotGroupAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            slotGroupId,
+            new AppUpdateSlotGroupRequest(request.DisplayName, request.Kind, request.Capacity),
+            cancellationToken).ConfigureAwait(false);
+        return ToActionResult(result);
+    }
+
+    [HttpDelete("{topologyId}/slot-groups/{slotGroupId}")]
+    [ProducesResponseType<TopologyTargetDeletionResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<TopologyTargetDeletionResponse>> DeleteSlotGroupAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotGroupId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _topologyService.DeleteSlotGroupAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            slotGroupId,
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(AutomationTopologyApiContract.ToResponse(result.Value));
     }
 
     [HttpPost("{topologyId}/slots")]
@@ -270,7 +350,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         ApiAddSlotRequest request,
         CancellationToken cancellationToken)
     {
-        var validationErrors = AutomationTopologiesController.Validate(request);
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
         if (validationErrors.Count > 0)
         {
             return BadRequest(new ValidationProblemDetails(validationErrors));
@@ -284,7 +364,7 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
                 new AppAddSlotRequest(
                     request.SlotGroupId!,
                     request.SlotId!,
-                    request.ParentNodeId!,
+                    request.ParentSystemId!,
                     request.Address!,
                     request.DisplayName!,
                     request.MaterialKind!,
@@ -295,12 +375,66 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
         return ToActionResult(result);
     }
 
+    [HttpPatch("{topologyId}/slots/{slotId}")]
+    [ProducesResponseType<AutomationTopologyResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<AutomationTopologyResponse>> UpdateSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
+        ApiUpdateSlotRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService.UpdateSlotAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            slotId,
+            new AppUpdateSlotRequest(
+                request.Address,
+                request.DisplayName,
+                request.MaterialKind,
+                request.IsEnabled),
+            cancellationToken).ConfigureAwait(false);
+        return ToActionResult(result);
+    }
+
+    [HttpDelete("{topologyId}/slots/{slotId}")]
+    [ProducesResponseType<TopologyTargetDeletionResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<TopologyTargetDeletionResponse>> DeleteSlotAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string slotId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _topologyService.DeleteSlotAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            slotId,
+            cancellationToken).ConfigureAwait(false);
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(AutomationTopologyApiContract.ToResponse(result.Value));
+    }
+
     private ActionResult<AutomationTopologyResponse> ToActionResult(
         Result<OpenLineOps.Topology.Application.Topologies.AutomationTopologyDetails> result)
     {
         return result.IsFailure
             ? ToProblem(result.Error)
-            : Ok(AutomationTopologiesController.ToResponse(result.Value));
+            : Ok(AutomationTopologyApiContract.ToResponse(result.Value));
     }
 
     private ObjectResult ToProblem(ApplicationError error)

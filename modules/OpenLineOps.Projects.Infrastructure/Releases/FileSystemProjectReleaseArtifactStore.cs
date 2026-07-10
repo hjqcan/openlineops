@@ -421,6 +421,14 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             }
         }
 
+        await ValidateEmbeddedApplicationSchemasAsync(
+                sourceApplicationPath,
+                manifest.ApplicationId,
+                normalizedMetadata,
+                manifestPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         foreach (var dependency in normalizedMetadata.PackageDependencies)
         {
             var packageRootPath = ProjectReleaseArtifactPath.ResolveRelativePath(
@@ -468,6 +476,106 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             manifestPath,
             normalizedMetadata,
             manifest.Files);
+    }
+
+    private static async ValueTask ValidateEmbeddedApplicationSchemasAsync(
+        string sourceApplicationPath,
+        string applicationId,
+        ProjectReleaseSourceMetadata metadata,
+        string manifestPath,
+        CancellationToken cancellationToken)
+    {
+        var topologyDirectory = Path.Combine(sourceApplicationPath, "topology");
+        var layoutDirectory = Path.Combine(sourceApplicationPath, "layouts");
+        if (!Directory.Exists(topologyDirectory) || !Directory.Exists(layoutDirectory))
+        {
+            throw InvalidRelease(manifestPath, "embedded topology or layout directory is missing");
+        }
+
+        var topologyIds = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(topologyDirectory, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            var identity = await ReadEmbeddedResourceIdentityAsync(path, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(identity.SchemaVersion, ApplicationResourceSchemaVersions.AutomationTopology, StringComparison.Ordinal)
+                || !string.Equals(identity.ResourceKind, "OpenLineOps.AutomationTopology", StringComparison.Ordinal)
+                || !string.Equals(identity.ApplicationId, applicationId, StringComparison.Ordinal))
+            {
+                throw InvalidRelease(manifestPath, $"embedded topology '{Path.GetFileName(path)}' has an unsupported schema or identity");
+            }
+
+            topologyIds.Add(identity.ResourceId);
+        }
+
+        if (topologyIds.Count(id => string.Equals(id, metadata.TopologyId, StringComparison.Ordinal)) != 1)
+        {
+            throw InvalidRelease(manifestPath, $"embedded topology {metadata.TopologyId} is missing or duplicated");
+        }
+
+        var layoutIds = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(layoutDirectory, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            var identity = await ReadEmbeddedResourceIdentityAsync(path, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(identity.SchemaVersion, ApplicationResourceSchemaVersions.SiteLayout, StringComparison.Ordinal)
+                || !string.Equals(identity.ResourceKind, "OpenLineOps.SiteLayout", StringComparison.Ordinal)
+                || !string.Equals(identity.ApplicationId, applicationId, StringComparison.Ordinal))
+            {
+                throw InvalidRelease(manifestPath, $"embedded layout '{Path.GetFileName(path)}' has an unsupported schema or identity");
+            }
+
+            layoutIds.Add(identity.ResourceId);
+        }
+
+        if (metadata.LayoutIds.Any(layoutId =>
+                layoutIds.Count(candidate => string.Equals(candidate, layoutId, StringComparison.Ordinal)) != 1))
+        {
+            throw InvalidRelease(manifestPath, "one or more frozen layout identities are missing or duplicated");
+        }
+    }
+
+    private static async ValueTask<(string SchemaVersion, string ResourceKind, string ApplicationId, string ResourceId)>
+        ReadEmbeddedResourceIdentityAsync(
+            string path,
+            CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileBufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            var root = document.RootElement;
+            var resourceIdProperty = root.TryGetProperty("layoutId", out var layoutId)
+                ? layoutId
+                : root.TryGetProperty("topologyId", out var topologyId)
+                    ? topologyId
+                    : throw new InvalidDataException($"Embedded application resource '{path}' has no identity.");
+            return (
+                RequireJsonString(root, "schemaVersion", path),
+                RequireJsonString(root, "resourceKind", path),
+                RequireJsonString(root, "applicationId", path),
+                resourceIdProperty.ValueKind == JsonValueKind.String
+                    ? RequireValue(resourceIdProperty.GetString(), "resourceId")
+                    : throw new InvalidDataException($"Embedded application resource '{path}' has an invalid identity."));
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException($"Embedded application resource '{path}' is invalid JSON.", exception);
+        }
+    }
+
+    private static string RequireJsonString(JsonElement root, string propertyName, string path)
+    {
+        return root.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(property.GetString())
+                ? property.GetString()!
+                : throw new InvalidDataException(
+                    $"Embedded application resource '{path}' has no valid '{propertyName}'.");
     }
 
     private static void ValidateManifestIdentity(
@@ -639,6 +747,15 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
             .ToArray();
+        var stationSystemId = RequireValue(metadata.StationSystemId, nameof(metadata.StationSystemId));
+        if (targetReferences.Count(target =>
+                string.Equals(target.Kind, "System", StringComparison.Ordinal)
+                && string.Equals(target.TargetId, stationSystemId, StringComparison.Ordinal)) != 1)
+        {
+            throw new ArgumentException(
+                "StationSystemId must match exactly one frozen System target reference.",
+                nameof(metadata));
+        }
 
         var flowIr = NormalizeFlowIr(metadata);
         if (packageDependencies.Any(dependency => capabilityBindings.Count(binding =>
@@ -654,6 +771,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
 
         return new ProjectReleaseSourceMetadata(
             RequireValue(metadata.TopologyId, nameof(metadata.TopologyId)),
+            stationSystemId,
             layoutIds,
             RequireValue(metadata.ProcessDefinitionId, nameof(metadata.ProcessDefinitionId)),
             RequireValue(metadata.ProcessVersionId, nameof(metadata.ProcessVersionId)),

@@ -550,6 +550,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
         PersistedStationProfile snapshot)
     {
         Require(path, snapshot.StationProfileId, "station profile id");
+        Require(path, snapshot.StationSystemId, "station system id");
         Require(path, snapshot.DisplayName, "station profile display name");
         if (snapshot.DeviceBindings is null)
         {

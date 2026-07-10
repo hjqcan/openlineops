@@ -16,8 +16,6 @@ public sealed class EfDeviceDefinitionRepository(DevicesDbContext context)
     {
         ArgumentNullException.ThrowIfNull(definition);
 
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         var exists = await DbSet
             .AsNoTracking()
             .AnyAsync(candidate => candidate.Id == definition.Id, cancellationToken)
@@ -41,16 +39,12 @@ public sealed class EfDeviceDefinitionRepository(DevicesDbContext context)
     {
         ArgumentNullException.ThrowIfNull(definitionId);
 
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         return await GetByIdAsync(definitionId, cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<IReadOnlyCollection<DeviceDefinition>> ListAsync(
         CancellationToken cancellationToken = default)
     {
-        await Db.EnsureSchemaAndBackfillAsync(cancellationToken).ConfigureAwait(false);
-
         var definitions = await DbSet
             .AsNoTracking()
             .ToListAsync(cancellationToken)

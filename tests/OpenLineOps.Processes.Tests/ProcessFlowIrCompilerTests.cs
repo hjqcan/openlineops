@@ -38,7 +38,7 @@ public sealed class ProcessFlowIrCompilerTests
 
         var compilation = firstResult.Value;
         var document = compilation.Document;
-        Assert.Equal(FlowIrSchemaVersions.V1, document.SchemaVersion);
+        Assert.Equal(FlowIrSchemaVersions.V2, document.SchemaVersion);
         Assert.Equal("packaging-line-eol", document.ProcessDefinitionId);
         Assert.Equal("packaging-line-eol@1.0.0", document.ProcessVersionId);
         Assert.Equal("start", document.StartNodeId);
@@ -60,21 +60,20 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Equal(0, action.Execution.RetryLimit);
         Assert.Equal(FlowIrCancellationMode.Cooperative, action.Execution.CancellationMode);
         Assert.Null(action.PythonScript);
-        Assert.Null(action.DynamicChildren);
         Assert.Equal(FlowIrSourceElementKind.ProcessNode, action.Source.ElementKind);
         Assert.Equal("inspect", action.Source.ElementId);
         Assert.Null(action.Source.ContentHash);
     }
 
     [Fact]
-    public void CompileModelsPythonScriptAsRuntimeExpandedActionContainer()
+    public void CompileModelsPythonScriptAsSingleControlledAction()
     {
         var definition = CreateDefinition();
         AddNode(definition, ProcessNode.Start(NodeId("start"), "Start"));
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize",
-            sourceCode: "result = {'automation_plan': []}",
+            sourceCode: "result = {'normalized': True}",
             scriptVersion: "3",
             scriptTimeout: TimeSpan.FromSeconds(12),
             inputPayload: "raw-reading"));
@@ -96,34 +95,18 @@ public sealed class ProcessFlowIrCompilerTests
 
         var script = Assert.IsType<FlowIrPythonScript>(action.PythonScript);
         Assert.Equal("Python", script.Language);
-        Assert.Equal("result = {'automation_plan': []}", script.SourceCode);
+        Assert.Equal("result = {'normalized': True}", script.SourceCode);
         Assert.Equal("3", script.Version);
         Assert.Equal(action.Source.ContentHash, script.SourceHash);
-
-        var dynamicChildren = Assert.IsType<FlowIrDynamicActionSlot>(action.DynamicChildren);
-        Assert.Equal("normalize:action:1:automation-plan", dynamicChildren.SlotId);
-        Assert.Equal(FlowIrDynamicActionExpansionKind.RuntimeAutomationPlan, dynamicChildren.ExpansionKind);
-        Assert.Equal("normalize:action:1:child:", dynamicChildren.ChildActionIdPrefix);
-        Assert.Equal(1, dynamicChildren.SequenceBase);
-        Assert.False(dynamicChildren.IsCompileTimeResolved);
-        Assert.Equal(FlowIrChildSourceMappingMode.ContainerOnly, dynamicChildren.SourceMappingMode);
-        Assert.Equal("normalize", dynamicChildren.Source.ElementId);
 
         var runtimeResult = new FlowIrExecutableRuntimeProcessMapper(new FlowIrCanonicalSerializer())
             .Map(result.Value.Document);
         Assert.True(runtimeResult.IsSuccess, runtimeResult.Error.Message);
         var runtimeNode = Assert.Single(runtimeResult.Value.Nodes);
-        Assert.Equal("normalize:action:1", runtimeNode.EffectiveActionId.Value);
-        var runtimeSlot = Assert.IsType<OpenLineOps.Runtime.Application.Processes.ExecutableRuntimeDynamicActionSlot>(
-            runtimeNode.DynamicChildren);
-        Assert.Equal("normalize:action:1:automation-plan", runtimeSlot.SlotId);
-        Assert.Equal("normalize:action:1:child:", runtimeSlot.ChildActionIdPrefix);
-        Assert.Equal(1, runtimeSlot.SequenceBase);
-
-        var diagnostic = Assert.Single(result.Value.Diagnostics);
-        Assert.Equal(FlowIrDiagnosticSeverity.Warning, diagnostic.Severity);
-        Assert.Equal("Processes.FlowIrPythonChildActionsRuntimeResolved", diagnostic.Code);
-        Assert.Equal("normalize", diagnostic.Source.ElementId);
+        Assert.Equal("normalize:action:1", runtimeNode.ActionId.Value);
+        Assert.Equal("Capability", runtimeNode.Target.Kind);
+        Assert.Equal("process.python-script", runtimeNode.Target.TargetId);
+        Assert.Empty(result.Value.Diagnostics);
     }
 
     [Fact]
@@ -215,7 +198,7 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.True(second.IsSuccess, second.Error.Message);
         Assert.Equal(first.Value.CanonicalJson, second.Value.CanonicalJson);
         Assert.Equal(first.Value.Sha256, second.Value.Sha256);
-        Assert.StartsWith("{\"schemaVersion\":\"openlineops.flow-ir/v1\"", first.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.StartsWith("{\"schemaVersion\":\"openlineops.flow-ir/v2\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"kind\":\"deviceCommand\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"timeoutMilliseconds\":30000", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"cancellationMode\":\"cooperative\"", first.Value.CanonicalJson, StringComparison.Ordinal);
@@ -268,7 +251,7 @@ public sealed class ProcessFlowIrCompilerTests
     public void CanonicalDeserializerRejectsHostileNullStructureDeterministically()
     {
         const string hostileJson =
-            "{\"schemaVersion\":\"openlineops.flow-ir/v1\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1\",\"displayName\":\"Main\",\"startNodeId\":\"start\",\"nodes\":[null],\"transitions\":[]}";
+            "{\"schemaVersion\":\"openlineops.flow-ir/v2\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1\",\"displayName\":\"Main\",\"startNodeId\":\"start\",\"nodes\":[null],\"transitions\":[],\"blockDependencies\":[]}";
 
         var result = new FlowIrCanonicalSerializer().Deserialize(hostileJson);
 
@@ -388,7 +371,7 @@ public sealed class ProcessFlowIrCompilerTests
         AddNode(definition, ProcessNode.PythonScript(
             NodeId("normalize"),
             "Normalize",
-            sourceCode: "result = {'automation_plan': []}",
+            sourceCode: "result = {'normalized': True}",
             scriptVersion: "3",
             scriptTimeout: TimeSpan.FromSeconds(12)));
         AddNode(definition, ProcessNode.End(NodeId("end"), "End"));

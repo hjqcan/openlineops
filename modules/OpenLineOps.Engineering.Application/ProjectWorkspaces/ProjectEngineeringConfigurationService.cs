@@ -3,11 +3,6 @@ using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
-using OpenLineOps.Engineering.Domain.Identifiers;
-using OpenLineOps.Engineering.Domain.Projects;
-using OpenLineOps.Engineering.Domain.Recipes;
-using OpenLineOps.Engineering.Domain.Stations;
-using OpenLineOps.Engineering.Domain.Workspaces;
 
 namespace OpenLineOps.Engineering.Application.ProjectWorkspaces;
 
@@ -242,7 +237,7 @@ public sealed class ProjectEngineeringConfigurationService : IProjectEngineering
     private async Task<Result<T>> InScopeAsync<T>(
         string projectId,
         string applicationId,
-        Func<IEngineeringConfigurationService, Task<Result<T>>> execute,
+        Func<ProjectEngineeringConfigurationEngine, Task<Result<T>>> execute,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(applicationId))
@@ -262,145 +257,8 @@ public sealed class ProjectEngineeringConfigurationService : IProjectEngineering
                 $"Application {applicationId} was not found in project {projectId}."));
         }
 
-        var service = new EngineeringConfigurationService(
-            new ScopedWorkspaceRepository(scope, _repository),
-            new ScopedEngineeringProjectRepository(scope, _repository),
-            new ScopedRecipeRepository(scope, _repository),
-            new ScopedStationProfileRepository(scope, _repository),
-            _clock);
+        var service = new ProjectEngineeringConfigurationEngine(scope, _repository, _clock);
 
         return await execute(service).ConfigureAwait(false);
-    }
-
-    private sealed class ScopedWorkspaceRepository : IWorkspaceRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectEngineeringConfigurationRepository _repository;
-
-        public ScopedWorkspaceRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectEngineeringConfigurationRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public Task SaveAsync(Workspace workspace, CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, workspace, cancellationToken);
-        }
-
-        public Task<Workspace?> GetByIdAsync(
-            WorkspaceId workspaceId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, workspaceId, cancellationToken);
-        }
-
-        public Task<IReadOnlyCollection<Workspace>> ListAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListWorkspacesAsync(_scope, cancellationToken);
-        }
-    }
-
-    private sealed class ScopedEngineeringProjectRepository : IEngineeringProjectRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectEngineeringConfigurationRepository _repository;
-
-        public ScopedEngineeringProjectRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectEngineeringConfigurationRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public Task SaveAsync(
-            EngineeringProject project,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, project, cancellationToken);
-        }
-
-        public Task<EngineeringProject?> GetByIdAsync(
-            EngineeringProjectId projectId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, projectId, cancellationToken);
-        }
-
-        public Task<IReadOnlyCollection<EngineeringProject>> ListAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListProjectsAsync(_scope, cancellationToken);
-        }
-    }
-
-    private sealed class ScopedRecipeRepository : IRecipeRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectEngineeringConfigurationRepository _repository;
-
-        public ScopedRecipeRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectEngineeringConfigurationRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public Task SaveAsync(Recipe recipe, CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, recipe, cancellationToken);
-        }
-
-        public Task<Recipe?> GetByIdAsync(
-            RecipeId recipeId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, recipeId, cancellationToken);
-        }
-
-        public Task<IReadOnlyCollection<Recipe>> ListAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListRecipesAsync(_scope, cancellationToken);
-        }
-    }
-
-    private sealed class ScopedStationProfileRepository : IStationProfileRepository
-    {
-        private readonly ProjectApplicationWorkspaceScope _scope;
-        private readonly IProjectEngineeringConfigurationRepository _repository;
-
-        public ScopedStationProfileRepository(
-            ProjectApplicationWorkspaceScope scope,
-            IProjectEngineeringConfigurationRepository repository)
-        {
-            _scope = scope;
-            _repository = repository;
-        }
-
-        public Task SaveAsync(
-            StationProfile stationProfile,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.SaveAsync(_scope, stationProfile, cancellationToken);
-        }
-
-        public Task<StationProfile?> GetByIdAsync(
-            StationProfileId stationProfileId,
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.GetByIdAsync(_scope, stationProfileId, cancellationToken);
-        }
-
-        public Task<IReadOnlyCollection<StationProfile>> ListAsync(
-            CancellationToken cancellationToken = default)
-        {
-            return _repository.ListStationProfilesAsync(_scope, cancellationToken);
-        }
     }
 }

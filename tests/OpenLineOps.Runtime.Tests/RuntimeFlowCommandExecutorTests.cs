@@ -144,6 +144,12 @@ public sealed class RuntimeFlowCommandExecutorTests
             new RuntimeCapabilityId(RuntimeFlowCommand.Capability),
             commandName,
             payload,
-            timeout);
+            timeout,
+            new RuntimeActionId("node-wait:action:1"),
+            "Capability",
+            RuntimeFlowCommand.Capability,
+            "project.main",
+            "application.main",
+            "snapshot.release");
     }
 }

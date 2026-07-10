@@ -1,52 +1,28 @@
 using OpenLineOps.Devices.Application.Execution;
-using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Runtime.Application.Commands;
 
 namespace OpenLineOps.Devices.Infrastructure.Execution;
 
-public sealed class DeviceRuntimeCommandExecutor : IRuntimeCommandExecutor
+public sealed class DeviceRuntimeCommandExecutor
 {
-    private readonly IDeviceCommandRouteResolver _routeResolver;
     private readonly IDeviceCommandExecutor _deviceCommandExecutor;
 
-    public DeviceRuntimeCommandExecutor(
-        IDeviceCommandRouteResolver routeResolver,
-        IDeviceCommandExecutor deviceCommandExecutor)
+    public DeviceRuntimeCommandExecutor(IDeviceCommandExecutor deviceCommandExecutor)
     {
-        _routeResolver = routeResolver;
         _deviceCommandExecutor = deviceCommandExecutor;
     }
 
     public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
         RuntimeCommandExecutionContext context,
+        ProjectReleaseDeviceCommandRoute route,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
-
-        var routeRequest = new DeviceCommandRouteRequest(
-            context.SessionId.ToString(),
-            context.StepId.ToString(),
-            context.CommandId.ToString(),
-            context.NodeId.Value,
-            context.StationId.Value,
-            context.ConfigurationSnapshotId.Value,
-            new DeviceCapabilityId(context.TargetCapability.Value),
-            context.CommandName,
-            context.ProjectId,
-            context.ApplicationId,
-            context.ProjectSnapshotId);
-
-        var route = await _routeResolver
-            .ResolveAsync(routeRequest, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (route is null)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                $"No device command route found for capability '{context.TargetCapability.Value}' and command '{context.CommandName}'.");
-        }
+        ArgumentNullException.ThrowIfNull(route);
 
         var deviceRequest = new DeviceCommandExecutionRequest(
+            route.ProviderKind,
+            route.ProviderKey,
             route.DeviceInstanceId,
             route.CommandDefinitionId,
             route.CapabilityId,

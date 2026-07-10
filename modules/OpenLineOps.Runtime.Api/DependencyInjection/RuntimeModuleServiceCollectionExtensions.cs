@@ -31,8 +31,6 @@ public static class RuntimeModuleServiceCollectionExtensions
 
         var persistenceOptions = LoadPersistenceOptions(configuration);
         services.AddSingleton(persistenceOptions);
-        var commandExecutorOptions = LoadCommandExecutorOptions(configuration);
-        services.AddSingleton(commandExecutorOptions);
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
 
@@ -62,13 +60,11 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddSingleton<IRuntimeDomainEventPublisher>(serviceProvider =>
             serviceProvider.GetRequiredService<InMemoryRuntimeDomainEventPublisher>());
 
-        services.TryAddSingleton<SimulatedRuntimeCommandExecutor>();
         services.TryAddSingleton<RuntimeFlowCommandExecutor>();
+        services.TryAddSingleton<PluginRuntimeCommandExecutor>();
         services.TryAddSingleton<PythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<IRuntimeScriptExecutor, ConfigurableRuntimeScriptExecutor>();
-        services.TryAddSingleton<RuntimeAutomationPlanExpander>();
-        services.Replace(ServiceDescriptor.Singleton<IRuntimeCommandExecutor, ConfigurableRuntimeCommandExecutor>());
         services.AddSingleton<RuntimeMonitoringProjection>();
         services.AddSingleton<IRuntimeMonitoringService>(serviceProvider =>
             serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
@@ -89,16 +85,6 @@ public static class RuntimeModuleServiceCollectionExtensions
             Provider = section?["Provider"] ?? RuntimeSessionPersistenceProviders.InMemory,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-runtime.sqlite"
-        };
-    }
-
-    private static RuntimeCommandExecutorOptions LoadCommandExecutorOptions(IConfiguration? configuration)
-    {
-        var section = configuration?.GetSection(RuntimeCommandExecutorOptions.SectionName);
-
-        return new RuntimeCommandExecutorOptions
-        {
-            CommandExecutor = section?["CommandExecutor"] ?? RuntimeCommandExecutors.Simulator
         };
     }
 

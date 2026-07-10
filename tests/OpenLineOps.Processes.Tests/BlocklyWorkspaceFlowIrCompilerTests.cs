@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Processes.Domain.Definitions;
@@ -17,7 +18,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
     public void CompileProducesStaticActionsExactBlockSourcesTargetsAndDependencyLocks()
     {
         var workspace = """
-            {"blocks":{"languageVersion":0,"blocks":[{"type":"openlineops_move_axis","id":"move-1","x":0,"y":0,"fields":{"TARGET_KIND":"AutomationModule","TARGET_ID":"module.motion","CAPABILITY":"motion.axis","COMMAND":"MoveAxis","AXIS":"X","POSITION":10,"SPEED":5,"UNIT":"mm"},"next":{"block":{"type":"openlineops_run_external_test","id":"external-1","fields":{"TARGET_KIND":"System","TARGET_ID":"system.tester","CAPABILITY":"production.external-test","COMMAND":"Run","ADAPTER_ID":"adapter.main","TIMEOUT_MS":1234}}}}]}}
+            {"blocks":{"languageVersion":0,"blocks":[{"type":"openlineops_move_axis","id":"move-1","x":0,"y":0,"fields":{"TARGET_KIND":"System","TARGET_ID":"system.motion","CAPABILITY":"motion.axis","COMMAND":"MoveAxis","AXIS":"X","POSITION":10,"SPEED":5,"UNIT":"mm"},"next":{"block":{"type":"openlineops_run_external_test","id":"external-1","fields":{"TARGET_KIND":"System","TARGET_ID":"system.tester","CAPABILITY":"production.external-test","COMMAND":"Run","ADAPTER_ID":"adapter.main","TIMEOUT_MS":1234}}}}]}}
             """;
         var definition = CreatePublishedDefinition(workspace);
 
@@ -34,8 +35,8 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
         Assert.Equal("flow:action:1", move.ActionId);
         Assert.Equal("motion.axis", move.RequiredCapability);
         Assert.Equal("MoveAxis", move.CommandName);
-        Assert.Equal(FlowIrTargetReferenceKind.AutomationModule, move.Target.Kind);
-        Assert.Equal("module.motion", move.Target.Reference);
+        Assert.Equal(FlowIrTargetReferenceKind.System, move.Target.Kind);
+        Assert.Equal("system.motion", move.Target.Reference);
         Assert.Equal(30_000, move.Execution.TimeoutMilliseconds);
         Assert.Equal(FlowIrSourceElementKind.BlocklyBlock, move.Source.ElementKind);
         Assert.Equal("move-1", move.Source.ElementId);
@@ -47,8 +48,8 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
             && dependency.LockId == $"openlineops_move_axis@1#{move.Source.ContentHash}");
         using (var payload = JsonDocument.Parse(move.InputPayload!))
         {
-            Assert.Equal("AutomationModule", payload.RootElement.GetProperty("targetKind").GetString());
-            Assert.Equal("module.motion", payload.RootElement.GetProperty("targetId").GetString());
+            Assert.Equal("System", payload.RootElement.GetProperty("targetKind").GetString());
+            Assert.Equal("system.motion", payload.RootElement.GetProperty("targetId").GetString());
             Assert.Equal("X", payload.RootElement.GetProperty("axis").GetString());
             Assert.Equal(10m, payload.RootElement.GetProperty("position").GetDecimal());
         }
@@ -82,9 +83,13 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
         var first = Assert.Single(runtime.Value.Nodes, node => node.NodeId.Value == "flow");
         var second = Assert.Single(runtime.Value.Nodes, node => node.NodeId.Value == "flow:block-action:2");
         Assert.Equal("motion.axis", first.TargetCapability.Value);
-        Assert.Equal("flow:action:1", first.EffectiveActionId.Value);
+        Assert.Equal("flow:action:1", first.ActionId.Value);
+        Assert.Equal("System", first.Target.Kind);
+        Assert.Equal("system.motion", first.Target.TargetId);
         Assert.Equal("production.external-test", second.TargetCapability.Value);
-        Assert.Equal("flow:action:2", second.EffectiveActionId.Value);
+        Assert.Equal("flow:action:2", second.ActionId.Value);
+        Assert.Equal("System", second.Target.Kind);
+        Assert.Equal("system.tester", second.Target.TargetId);
         Assert.Contains(runtime.Value.Transitions, transition =>
             transition.FromNodeId.Value == "flow"
             && transition.ToNodeId.Value == "flow:block-action:2");
@@ -159,6 +164,49 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
             && assignment.GetProperty("value").GetString() == "flow");
         Assert.DoesNotContain(assignments, assignment =>
             assignment.GetProperty("key").GetString() == "timestamp_utc");
+    }
+
+    [Fact]
+    public void CanonicalRoundTripPreservesNumericActionOrderBeyondNineActions()
+    {
+        JsonObject? chain = null;
+        for (var index = 12; index >= 1; index -= 1)
+        {
+            var block = new JsonObject
+            {
+                ["type"] = "openlineops_wait",
+                ["id"] = $"wait-{index}",
+                ["fields"] = new JsonObject { ["DURATION_MS"] = index }
+            };
+            if (chain is not null)
+            {
+                block["next"] = new JsonObject { ["block"] = chain };
+            }
+
+            chain = block;
+        }
+
+        var workspace = new JsonObject
+        {
+            ["blocks"] = new JsonObject
+            {
+                ["languageVersion"] = 0,
+                ["blocks"] = new JsonArray(chain)
+            }
+        }.ToJsonString();
+        var compilation = new ProcessFlowIrCompiler().Compile(CreatePublishedDefinition(workspace));
+        Assert.True(compilation.IsSuccess, compilation.Error.Message);
+
+        var serializer = new FlowIrCanonicalSerializer();
+        var artifact = serializer.Serialize(compilation.Value.Document);
+        Assert.True(artifact.IsSuccess, artifact.Error.Message);
+        var roundTrip = serializer.Deserialize(artifact.Value.CanonicalJson);
+        Assert.True(roundTrip.IsSuccess, roundTrip.Error.Message);
+        Assert.Equal(
+            Enumerable.Range(1, 12).Select(index => $"flow:action:{index}"),
+            Assert.Single(roundTrip.Value.Nodes, node => node.Kind == FlowIrNodeKind.Blockly)
+                .Actions
+                .Select(action => action.ActionId));
     }
 
     [Fact]

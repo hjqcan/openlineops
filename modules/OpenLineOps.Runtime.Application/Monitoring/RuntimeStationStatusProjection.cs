@@ -4,7 +4,7 @@ using OpenLineOps.Runtime.Domain.Sessions;
 namespace OpenLineOps.Runtime.Application.Monitoring;
 
 public sealed record RuntimeStationStatusProjection(
-    string StationId,
+    string StationSystemId,
     RuntimeSessionId LatestSessionId,
     string ProcessDefinitionId,
     string ProcessVersionId,

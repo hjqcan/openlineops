@@ -30,9 +30,9 @@ builder.Services
 builder.Services.AddOpenLineOpsProjectsModule();
 builder.Services.AddOpenLineOpsTopologyModule();
 builder.Services.AddOpenLineOpsRuntimeModule(builder.Configuration);
-builder.Services.AddOpenLineOpsProcessesModule(builder.Configuration);
+builder.Services.AddOpenLineOpsProcessesModule();
 builder.Services.AddOpenLineOpsProductionModule();
-builder.Services.AddOpenLineOpsEngineeringModule(builder.Configuration);
+builder.Services.AddOpenLineOpsEngineeringModule();
 builder.Services.AddOpenLineOpsDevicesModule(builder.Configuration);
 builder.Services.AddOpenLineOpsOperationsModule(builder.Configuration);
 builder.Services.AddOpenLineOpsPluginsModule(builder.Configuration);

@@ -1,6 +1,7 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Engineering.Application.Persistence;
+using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Processes.Application.Runtime;
 
 namespace OpenLineOps.Engineering.Infrastructure.Processes;
@@ -63,11 +64,21 @@ public sealed class ProjectEngineeringRuntimeConfigurationSnapshotResolver :
                 $"Configuration snapshot {configurationSnapshotId} must be published before runtime can start."));
         }
 
+        var stationProfile = await _repository
+            .GetByIdAsync(scope, new StationProfileId(snapshot.StationProfileId.Value), cancellationToken)
+            .ConfigureAwait(false);
+        if (stationProfile is null)
+        {
+            return Result.Failure<RuntimeConfigurationSnapshotDetails>(ApplicationError.NotFound(
+                "Engineering.StationProfileNotFound",
+                $"Station profile {snapshot.StationProfileId} was not found in application {scope.ApplicationId}."));
+        }
+
         return Result.Success(new RuntimeConfigurationSnapshotDetails(
             snapshot.Id.Value,
             snapshot.ProcessDefinitionId.Value,
             snapshot.ProcessVersionId.Value,
             snapshot.RecipeVersionId.Value,
-            snapshot.StationProfileId.Value));
+            stationProfile.StationSystemId));
     }
 }

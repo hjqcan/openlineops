@@ -6,7 +6,7 @@ namespace OpenLineOps.Runtime.Application.Monitoring;
 public sealed record RuntimeAlarmProjection(
     RuntimeIncidentId AlarmId,
     RuntimeSessionId SessionId,
-    string StationId,
+    string StationSystemId,
     RuntimeIncidentSeverity Severity,
     string Code,
     string Message,

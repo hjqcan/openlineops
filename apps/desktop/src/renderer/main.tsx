@@ -23,8 +23,7 @@ import {
   RefreshCw,
   Settings,
   Square,
-  X,
-  Zap
+  X
 } from 'lucide-react';
 import type { BackendStatus, DesktopConfig } from '../shared/desktop-api';
 import type {
@@ -32,7 +31,6 @@ import type {
   PlatformResponse,
   PublishedProjectSnapshotResponse,
   RuntimeAlarm,
-  RuntimeSessionRunResponse,
   RuntimeStationStatus,
   RuntimeTimelineEntry,
   StartedProjectSnapshotRuntimeSessionResponse,
@@ -48,8 +46,7 @@ import {
   getStationStatuses,
   getTimeline,
   getTraceRecords,
-  startProjectSnapshotRuntimeSession,
-  startDemoRuntimeSession
+  startProjectSnapshotRuntimeSession
 } from './api';
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
@@ -57,6 +54,7 @@ import { PluginsWorkbench } from './plugins-workbench';
 import { ProjectsWorkbench } from './projects-workbench';
 import { TraceWorkbench } from './trace-workbench';
 import './styles.css';
+import './topology.css';
 
 const ProcessWorkbench = React.lazy(async () => {
   const module = await import('./process-workbench');
@@ -68,8 +66,14 @@ const ProductionWorkbench = React.lazy(async () => {
   return { default: module.ProductionWorkbench };
 });
 
+const TopologyDesigner = React.lazy(async () => {
+  const module = await import('./topology-designer');
+  return { default: module.TopologyDesigner };
+});
+
 const navItems = [
   { id: 'projects', label: 'Explorer', icon: FolderKanban },
+  { id: 'topology', label: '2D Layout', icon: LayoutDashboard },
   { id: 'production', label: 'Line Designer', icon: Factory },
   { id: 'processes', label: 'Flow Designer', icon: Blocks },
   { id: 'engineering', label: 'Configuration', icon: MonitorCog },
@@ -100,7 +104,6 @@ function App(): React.ReactElement {
   const [timeline, setTimeline] = useState<RuntimeTimelineEntry[]>([]);
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
-  const [lastRun, setLastRun] = useState<RuntimeSessionRunResponse | null>(null);
   const [lastProjectRun, setLastProjectRun] =
     useState<StartedProjectSnapshotRuntimeSessionResponse | null>(null);
   const [activeWorkspace, setActiveWorkspace] = useState<AutomationProjectWorkspaceResponse | null>(null);
@@ -159,12 +162,12 @@ function App(): React.ReactElement {
       setAlarms(alarmRows);
       setTraceRows(traceResponse?.items ?? []);
 
-      const selectedSessionId = lastRun?.sessionId ?? stationRows[0]?.latestSessionId;
+      const selectedSessionId = lastProjectRun?.sessionId ?? stationRows[0]?.latestSessionId;
       if (selectedSessionId) {
         setTimeline(await getTimeline(selectedSessionId));
       }
     }
-  }, [lastRun?.sessionId]);
+  }, [lastProjectRun?.sessionId]);
 
   useEffect(() => {
     refresh().catch(error => setMessage(`Refresh failed: ${String(error)}`));
@@ -276,21 +279,6 @@ function App(): React.ReactElement {
     }
   }, []);
 
-  const runSimulation = useCallback(async () => {
-    setBusy(true);
-    const seed = Date.now().toString(36);
-    try {
-      const result = await startDemoRuntimeSession(seed);
-      setLastRun(result);
-      setMessage(result ? `Simulated session ${result.status}` : 'Simulation request returned no body');
-      await refresh();
-    } catch (error) {
-      setMessage(`Simulation failed: ${String(error)}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [refresh]);
-
   const acknowledge = useCallback(async (alarmId: string) => {
     const alarm = await acknowledgeAlarm(alarmId, 'desktop-operator');
     if (alarm) {
@@ -323,7 +311,7 @@ function App(): React.ReactElement {
     }
 
     setWorkspaceMode(mode);
-    setActiveNav(mode === 'run' ? 'dashboard' : activeNav === 'dashboard' ? 'projects' : activeNav);
+    setActiveNav(mode === 'run' ? 'topology' : activeNav === 'dashboard' ? 'projects' : activeNav);
   }, [activeNav, activeWorkspace]);
 
   const runActiveProject = useCallback(async () => {
@@ -365,7 +353,7 @@ function App(): React.ReactElement {
 
       setLastProjectRun(response.body);
       setWorkspaceMode('run');
-      setActiveNav('dashboard');
+      setActiveNav('topology');
       setMessage(`Project run ${response.body.status}: ${response.body.sessionId}`);
       await refresh();
     } catch (error) {
@@ -387,6 +375,23 @@ function App(): React.ReactElement {
   }, []);
 
   const visiblePanel = useMemo(() => {
+    if (activeNav === 'topology') {
+      return (
+        <React.Suspense fallback={<WorkbenchLoading label="2D layout" />}>
+          <TopologyDesigner
+            activeWorkspace={activeWorkspace}
+            activeApplicationId={activeApplication?.applicationId ?? null}
+            isBackendHealthy={backendStatus?.health === 'Healthy'}
+            workspaceMode={workspaceMode}
+            runtimeConnected={hubState === 'Connected'}
+            stations={stations}
+            onWorkspaceChanged={setActiveWorkspace}
+            onMessage={setMessage}
+          />
+        </React.Suspense>
+      );
+    }
+
     if (activeNav === 'dashboard') {
       return (
         <DashboardView
@@ -480,7 +485,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, message, selectApplication, selectWorkspace, stations, timeline, traceRows]);
+  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, timeline, traceRows, workspaceMode]);
 
   return (
     <main
@@ -582,7 +587,11 @@ function App(): React.ReactElement {
                 key={item.id}
                 onClick={() => {
                   setActiveNav(item.id);
-                  setWorkspaceMode(item.id === 'dashboard' ? 'run' : 'edit');
+                  setWorkspaceMode(current => item.id === 'dashboard'
+                    ? 'run'
+                    : item.id === 'topology'
+                      ? current
+                      : 'edit');
                 }}
                 title={item.label}
                 disabled={disabled}
@@ -607,7 +616,11 @@ function App(): React.ReactElement {
           activeNav={activeNav}
           onNavigate={nav => {
             setActiveNav(nav);
-            setWorkspaceMode(nav === 'dashboard' ? 'run' : 'edit');
+            setWorkspaceMode(current => nav === 'dashboard'
+              ? 'run'
+              : nav === 'topology'
+                ? current
+                : 'edit');
           }}
           onSelectApplication={selectApplication}
           onClose={closeWorkspace}
@@ -621,6 +634,8 @@ function App(): React.ReactElement {
           <div className="ide-editor-tab active">
             {activeNav === 'processes'
               ? <Blocks size={14} />
+              : activeNav === 'topology'
+                ? <LayoutDashboard size={14} />
               : activeNav === 'production'
                 ? <Factory size={14} />
                 : activeNav === 'dashboard'
@@ -638,18 +653,7 @@ function App(): React.ReactElement {
           </div>
           {activeNav === 'dashboard' ? (
             <div className="ide-editor-toolbar-actions">
-              <button
-                type="button"
-                className="button"
-                onClick={runSimulation}
-                disabled={busy || backendStatus?.health !== 'Healthy'}
-                title="Run simulated station session"
-                data-testid="run-simulation"
-              >
-                <Zap size={15} />
-                Run Simulation
-              </button>
-              <span>Latest: {lastProjectRun?.sessionId ?? lastRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}</span>
+              <span>Latest: {lastProjectRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}</span>
             </div>
           ) : null}
             </div>
@@ -666,8 +670,8 @@ function App(): React.ReactElement {
           </div>
           {workspaceMode === 'run' ? (
             <div className="ide-runtime-summary">
-              <InfoCell label="Session" value={lastProjectRun?.sessionId ?? lastRun?.sessionId ?? 'waiting'} />
-              <InfoCell label="Status" value={lastProjectRun?.status ?? lastRun?.status ?? 'Idle'} />
+              <InfoCell label="Session" value={lastProjectRun?.sessionId ?? 'waiting'} />
+              <InfoCell label="Status" value={lastProjectRun?.status ?? 'Idle'} />
               <InfoCell label="Timeline" value={`${timeline.length} events`} />
               <InfoCell label="Alarms" value={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
             </div>
@@ -717,7 +721,7 @@ function ProjectExplorer({
     detail: string;
     icon: React.ComponentType<{ size?: number }>;
   }> = [
-    { nav: 'projects', label: 'Systems & Layout', detail: application?.topologyId ?? 'not configured', icon: LayoutDashboard },
+    { nav: 'topology', label: 'Systems & Layout', detail: application?.topologyId ?? 'not configured', icon: LayoutDashboard },
     { nav: 'production', label: 'Production Lines', detail: 'DUT · workstations · stages', icon: Factory },
     { nav: 'processes', label: 'Flows & Scripts', detail: `${application?.processDefinitionIds.length ?? 0} linked`, icon: Blocks },
     { nav: 'engineering', label: 'Configuration', detail: 'recipes · stations', icon: MonitorCog },
@@ -1004,6 +1008,7 @@ function WorkbenchLoading({ label }: { label: string }): React.ReactElement {
 const secondaryCopy: Record<NavId, string> = {
   dashboard: '',
   projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
+  topology: 'The same semantic 2D layout is used for engineering and live production monitoring.',
   production: 'Production lines compose DUT models, topology-bound workstations, ordered stages and external test adapters.',
   engineering: 'Workspace and project selection will use backend engineering contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',

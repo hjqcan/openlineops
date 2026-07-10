@@ -14,10 +14,11 @@ public sealed record SiteLayoutElementDetails(
     string Kind,
     string TargetKind,
     string TargetId,
+    string? ParentElementId,
     double X,
     double Y,
     double Width,
     double Height,
     double RotationDegrees,
-    string LayerId,
-    string Label);
+    int ZIndex,
+    IReadOnlyDictionary<string, string> Style);

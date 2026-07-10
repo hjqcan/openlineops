@@ -123,8 +123,7 @@ public sealed class ProductionLineDefinitionDomainTests
         return WorkstationDefinition.Create(
             new WorkstationId("workstation.eol"),
             "EOL",
-            "station.eol",
-            "system.tester");
+            "station.eol");
     }
 
     internal static ProcessStage Stage(

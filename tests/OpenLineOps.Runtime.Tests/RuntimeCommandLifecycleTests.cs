@@ -2,6 +2,7 @@ using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
+using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -130,7 +131,9 @@ public sealed class RuntimeCommandLifecycleTests
             RuntimeStepId.New(),
             new RuntimeNodeId("node-scan-barcode"),
             "Scan barcode",
-            StartedAtUtc.AddSeconds(1));
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("node-scan-barcode:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.scanner"));
 
         return session.CreateCommand(
             RuntimeCommandId.New(),
@@ -150,7 +153,8 @@ public sealed class RuntimeCommandLifecycleTests
             new ProcessVersionId("process-packaging@1.0.0"),
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RecipeSnapshotId("recipe-20260629-001"),
-            StartedAtUtc.AddMinutes(-1));
+            StartedAtUtc.AddMinutes(-1),
+            RuntimeTestReleaseIdentity.TraceMetadata());
 
         session.Start(StartedAtUtc);
 

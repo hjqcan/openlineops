@@ -30,7 +30,6 @@ import {
   openAutomationProjectWorkspace,
   saveAutomationProjectManifest
 } from './api';
-import { TopologyDesigner } from './topology-designer';
 
 interface ProjectsWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
@@ -104,6 +103,10 @@ export function ProjectsWorkbench({
 
   const activeApplications = activeWorkspace?.project.applications ?? [];
   const activeSnapshots = activeWorkspace?.project.snapshots ?? [];
+  const selectedApplication = activeApplications.find(
+    application => application.applicationId === activeApplicationId)
+    ?? activeApplications[0]
+    ?? null;
   const canCallBackend = isBackendHealthy && !busy;
   const manifestRows = useMemo(
     () => activeWorkspace
@@ -496,15 +499,10 @@ export function ProjectsWorkbench({
               </div>
               <ProjectSnapshots snapshots={activeSnapshots} />
             </aside>
-            <section className="project-overview-designer">
-              <TopologyDesigner
-                activeWorkspace={activeWorkspace}
-                activeApplicationId={activeApplicationId}
-                isBackendHealthy={isBackendHealthy}
-                onWorkspaceChanged={onWorkspaceChanged}
-                onMessage={onMessage}
-              />
-            </section>
+            <ApplicationWorkspaceOverview
+              application={selectedApplication}
+              snapshots={activeSnapshots.filter(snapshot => snapshot.applicationId === selectedApplication?.applicationId)}
+            />
           </div>
         </div>
       </section>
@@ -803,6 +801,33 @@ export function ProjectsWorkbench({
             </footer>
           </dialog>
       ) : null}
+    </section>
+  );
+}
+
+function ApplicationWorkspaceOverview({
+  application,
+  snapshots
+}: {
+  application: ProjectApplicationResponse | null;
+  snapshots: PublishedProjectSnapshotResponse[];
+}): React.ReactElement {
+  return (
+    <section className="project-application-overview">
+      <header>
+        <div><Boxes size={17} /><span>APPLICATION WORKSPACE</span></div>
+        <strong>{application?.displayName ?? 'No application selected'}</strong>
+        <p>Each Application is a portable automation unit. Its systems, layout, flows, scripts, and configuration remain inside its own folder.</p>
+      </header>
+      {application ? (
+        <div className="project-application-resource-grid">
+          <article><span>Application ID</span><strong>{application.applicationId}</strong><small>Independent composition boundary</small></article>
+          <article><span>Application file</span><strong>{application.projectFilePath ?? 'Not persisted'}</strong><small>Copy the folder to reuse it in another project</small></article>
+          <article><span>Systems & Layout</span><strong>{application.topologyId ?? 'Not configured'}</strong><small>Open 2D Layout from the Explorer</small></article>
+          <article><span>Flows</span><strong>{application.processDefinitionIds.length}</strong><small>Application-local process definitions</small></article>
+          <article><span>Published snapshots</span><strong>{snapshots.length}</strong><small>Immutable runtime release units</small></article>
+        </div>
+      ) : <div className="projects-empty">Add or import an Application to begin.</div>}
     </section>
   );
 }

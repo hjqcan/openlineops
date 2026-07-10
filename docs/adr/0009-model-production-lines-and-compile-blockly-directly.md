@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-07-10
+- Supersedes: [ADR 0007](0007-make-automation-project-workspace-primary-product-shell.md)
+- Topology identity portion superseded by: [ADR 0010](0010-make-system-canonical-and-layout-hierarchical.md)
 
 ## Context
 
@@ -16,11 +18,11 @@ Introduce `OpenLineOps.Production` as an independent bounded context with Domain
 A `ProductionLineDefinition` is an Application-owned portable resource stored at `production/lines/<line-id>/line.json`. It contains:
 
 - one DUT model and runtime identity input key;
-- workstations that reference existing topology Station nodes and Automation Modules;
+- workstations that reference one canonical Station System id;
 - contiguous ordered stages that reference published executable flows;
 - external test program adapters with Application-relative executable or exact provider binding, arguments, DUT input mappings, result mappings, and timeout.
 
-External test execution is never a side channel. Its stage flow must compile to exactly one matching device-command action targeted at the workstation module or system. The command then uses the same runtime command, monitoring, trace, and release dependency lifecycle as authored automation.
+External test execution is never a side channel. Its stage flow must compile to exactly one matching device-command action targeted at the workstation Station System. The command then uses the same runtime command, monitoring, trace, and release dependency lifecycle as authored automation.
 
 Make `Blockly` and `PythonScript` separate process node kinds. A Blockly node stores only the current Blockly workspace. A Python node stores only Python source. Remove script-editor modes, generated-Python persistence, legacy Python block templates, and all compatibility readers.
 

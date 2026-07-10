@@ -11,4 +11,6 @@ public sealed record RuntimeCommandResponse(
     DateTimeOffset? CompletedAtUtc,
     string? ResultPayload,
     string? FailureReason,
-    string ActionId);
+    string ActionId,
+    string TargetKind,
+    string TargetId);

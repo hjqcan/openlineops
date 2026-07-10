@@ -4,8 +4,7 @@ public sealed record AutomationTopologyDetails(
     string TopologyId,
     string DisplayName,
     DateTimeOffset CreatedAtUtc,
-    IReadOnlyCollection<EquipmentNodeDetails> Nodes,
-    IReadOnlyCollection<AutomationModuleDetails> Modules,
+    IReadOnlyCollection<AutomationSystemDetails> Systems,
     IReadOnlyCollection<CapabilityContractDetails> Capabilities,
     IReadOnlyCollection<DriverBindingDetails> DriverBindings,
     IReadOnlyCollection<SlotGroupDetails> SlotGroups,
@@ -14,23 +13,19 @@ public sealed record AutomationTopologyDetails(
 public sealed record AutomationTopologySummary(
     string TopologyId,
     string DisplayName,
-    int NodeCount,
-    int ModuleCount,
+    int SystemCount,
+    int StationCount,
     int SlotCount);
 
-public sealed record EquipmentNodeDetails(
-    string NodeId,
-    string? ParentNodeId,
+public sealed record AutomationSystemDetails(
+    string SystemId,
+    string? ParentSystemId,
     string Kind,
-    string DisplayName);
-
-public sealed record AutomationModuleDetails(
-    string ModuleId,
-    string NodeId,
-    string ModuleKind,
+    string SystemType,
     string DisplayName,
     IReadOnlyCollection<string> RequiredCapabilityIds,
-    IReadOnlyCollection<string> ProvidedCapabilityIds);
+    IReadOnlyCollection<string> ProvidedCapabilityIds,
+    IReadOnlyDictionary<string, string> Metadata);
 
 public sealed record CapabilityContractDetails(
     string CapabilityId,
@@ -49,7 +44,7 @@ public sealed record DriverBindingDetails(
 
 public sealed record SlotGroupDetails(
     string SlotGroupId,
-    string ParentNodeId,
+    string ParentSystemId,
     string DisplayName,
     string Kind,
     int Capacity,
@@ -57,7 +52,8 @@ public sealed record SlotGroupDetails(
 
 public sealed record SlotDefinitionDetails(
     string SlotId,
-    string ParentNodeId,
+    string SlotGroupId,
+    string ParentSystemId,
     string Address,
     string DisplayName,
     string MaterialKind,

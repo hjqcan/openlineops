@@ -1,5 +1,8 @@
+using System.Text.Json.Serialization;
+
 namespace OpenLineOps.Production.Api.Models;
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record SaveProductionLineRequest(
     string? LineDefinitionId,
     string? DisplayName,
@@ -9,14 +12,16 @@ public sealed record SaveProductionLineRequest(
     IReadOnlyCollection<ProcessStageRequest?>? Stages,
     IReadOnlyCollection<ExternalTestProgramAdapterRequest?>? ExternalTestProgramAdapters);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record DutModelRequest(string? DutModelId, string? ModelCode, string? IdentityInputKey);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record WorkstationRequest(
     string? WorkstationId,
     string? DisplayName,
-    string? TopologyStationNodeId,
-    string? TopologySystemModuleId);
+    string? StationSystemId);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ProcessStageRequest(
     string? StageId,
     int? Sequence,
@@ -25,6 +30,7 @@ public sealed record ProcessStageRequest(
     string? FlowDefinitionId,
     string? ExternalTestProgramAdapterId);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalTestProgramAdapterRequest(
     string? AdapterId,
     string? DisplayName,
@@ -37,8 +43,10 @@ public sealed record ExternalTestProgramAdapterRequest(
     IReadOnlyCollection<ExternalTestProgramResultMappingRequest?>? ResultMappings,
     long? TimeoutMilliseconds);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalTestProgramInputMappingRequest(string? Source, string? Target);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalTestProgramResultMappingRequest(string? SourcePath, string? TargetKey);
 
 public sealed record ProductionLineResponse(
@@ -65,8 +73,7 @@ public sealed record DutModelResponse(string DutModelId, string ModelCode, strin
 public sealed record WorkstationResponse(
     string WorkstationId,
     string DisplayName,
-    string TopologyStationNodeId,
-    string TopologySystemModuleId);
+    string StationSystemId);
 
 public sealed record ProcessStageResponse(
     string StageId,

@@ -78,8 +78,8 @@ export function ProductionWorkbench({
   const publishedFlows = useMemo(
     () => flows.filter(flow => flow.status === 'Published'),
     [flows]);
-  const stationNodes = useMemo(
-    () => topology?.nodes.filter(node => node.kind === 'Station') ?? [],
+  const stationSystems = useMemo(
+    () => topology?.systems.filter(system => system.kind === 'Station') ?? [],
     [topology]);
 
   const refresh = useCallback(async () => {
@@ -175,19 +175,17 @@ export function ProductionWorkbench({
   const addWorkstation = useCallback(() => {
     setDraft(current => {
       const index = current.workstations.length + 1;
-      const station = stationNodes[index - 1] ?? stationNodes[0];
-      const module = topology?.modules.find(candidate => candidate.nodeId === station?.nodeId);
+      const station = stationSystems[index - 1] ?? stationSystems[0];
       return {
         ...current,
         workstations: [...current.workstations, {
           workstationId: `workstation-${index}`,
           displayName: station?.displayName ?? `Workstation ${index}`,
-          topologyStationNodeId: station?.nodeId ?? '',
-          topologySystemModuleId: module?.moduleId ?? ''
+          stationSystemId: station?.systemId ?? ''
         }]
       };
     });
-  }, [stationNodes, topology?.modules]);
+  }, [stationSystems]);
 
   const addStage = useCallback(() => {
     setDraft(current => {
@@ -526,8 +524,7 @@ function WorkstationCard({
   onChange(next: ProductionWorkstationRequest): void;
   onRemove(): void;
 }): React.ReactElement {
-  const stationNodes = topology?.nodes.filter(node => node.kind === 'Station') ?? [];
-  const modules = topology?.modules.filter(module => module.nodeId === workstation.topologyStationNodeId) ?? [];
+  const stationSystems = topology?.systems.filter(system => system.kind === 'Station') ?? [];
   return (
     <article className="production-workstation-card" data-testid={`production-workstation-${index}`}>
       <div className="production-card-number">W{String(index + 1).padStart(2, '0')}</div>
@@ -540,27 +537,15 @@ function WorkstationCard({
       <Field label="Display Name">
         <input value={workstation.displayName} onChange={event => onChange({ ...workstation, displayName: event.target.value })} />
       </Field>
-      <Field label="Station Node">
+      <Field label="Station System">
         <select
-          value={workstation.topologyStationNodeId}
-          onChange={event => {
-            const nextStationId = event.target.value;
-            const firstModule = topology?.modules.find(module => module.nodeId === nextStationId);
-            onChange({
-              ...workstation,
-              topologyStationNodeId: nextStationId,
-              topologySystemModuleId: firstModule?.moduleId ?? ''
-            });
-          }}
+          value={workstation.stationSystemId}
+          onChange={event => onChange({ ...workstation, stationSystemId: event.target.value })}
         >
           <option value="">Select Station</option>
-          {stationNodes.map(node => <option key={node.nodeId} value={node.nodeId}>{node.displayName}</option>)}
-        </select>
-      </Field>
-      <Field label="System Module">
-        <select value={workstation.topologySystemModuleId} onChange={event => onChange({ ...workstation, topologySystemModuleId: event.target.value })}>
-          <option value="">Select Module</option>
-          {modules.map(module => <option key={module.moduleId} value={module.moduleId}>{module.displayName} · {module.moduleKind}</option>)}
+          {stationSystems.map(system => (
+            <option key={system.systemId} value={system.systemId}>{system.displayName} · {system.systemType}</option>
+          ))}
         </select>
       </Field>
     </article>
@@ -800,13 +785,11 @@ function createEmptyDraft(
   publishedFlows: ProcessDefinitionSummary[]
 ): ProductionLineDraft {
   const seed = Date.now().toString(36);
-  const station = topology?.nodes.find(node => node.kind === 'Station');
-  const module = topology?.modules.find(candidate => candidate.nodeId === station?.nodeId);
+  const station = topology?.systems.find(system => system.kind === 'Station');
   const workstation: ProductionWorkstationRequest = {
     workstationId: 'workstation-1',
     displayName: station?.displayName ?? 'Workstation 1',
-    topologyStationNodeId: station?.nodeId ?? '',
-    topologySystemModuleId: module?.moduleId ?? ''
+    stationSystemId: station?.systemId ?? ''
   };
 
   return {
@@ -901,8 +884,7 @@ function toRequest(draft: ProductionLineDraft): SaveProductionLineRequest {
     workstations: draft.workstations.map(workstation => ({
       workstationId: workstation.workstationId.trim(),
       displayName: workstation.displayName.trim(),
-      topologyStationNodeId: workstation.topologyStationNodeId,
-      topologySystemModuleId: workstation.topologySystemModuleId
+      stationSystemId: workstation.stationSystemId
     })),
     stages: resequence(draft.stages).map(stage => ({ ...stage })),
     externalTestProgramAdapters: (draft.externalTestProgramAdapters as ExternalAdapterDraft[]).map(adapter => ({

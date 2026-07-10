@@ -4,6 +4,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
+using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
 namespace OpenLineOps.PostgresIntegration.Tests;
@@ -29,7 +30,9 @@ public sealed class PostgresRuntimeSessionRepositoryIntegrationTests
             RuntimeStepId.New(),
             new RuntimeNodeId("node-inspect"),
             "Inspect",
-            BaseTimeUtc.AddSeconds(2));
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("node-inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.inspect"));
         var command = session.CreateCommand(
             RuntimeCommandId.New(),
             step.Id,
@@ -88,7 +91,17 @@ public sealed class PostgresRuntimeSessionRepositoryIntegrationTests
             new ProcessVersionId($"process-packaging@{suffix}"),
             new ConfigurationSnapshotId($"snapshot-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
-            createdAtUtc);
+            createdAtUtc,
+            new RuntimeSessionTraceMetadata(
+                null,
+                null,
+                null,
+                null,
+                "postgres-integration-tests",
+                $"project-{suffix}",
+                $"application-{suffix}",
+                $"release-{suffix}",
+                $"topology-{suffix}"));
 
         var result = session.Start(createdAtUtc.AddSeconds(1));
         Assert.True(result.Succeeded, result.Message);

@@ -22,8 +22,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task PublishAndOpenRoundTripCopiesApplicationSourceAndNormalizesMetadata()
     {
         var scope = CreateScope("project.release", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
-        WriteSourceFile(scope, "layouts/layout.json", "layout-v1");
+        WriteTopologyResources(scope, "topology.main", "layout.a", "layout.b");
         WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
         WriteSourceFile(scope, "flows/process-main/nodes/node-script/generated.py", "print('release')\n");
         Directory.CreateDirectory(Path.Combine(GetApplicationSourcePath(scope), "empty-folder"));
@@ -41,7 +40,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(scope.ApplicationId, opened.ApplicationId);
         Assert.Equal(PublishedAtUtc, opened.PublishedAtUtc);
         Assert.Equal(descriptor.ContentSha256, opened.ContentSha256);
-        Assert.Equal(4, opened.Files.Count);
+        Assert.Equal(5, opened.Files.Count);
         Assert.All(opened.Files, file =>
         {
             Assert.Equal(64, file.Sha256.Length);
@@ -51,8 +50,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(["block.inspect@1", "block.move@2"], opened.Metadata.BlockVersionIds);
         Assert.Equal(["capability.a", "capability.b"], opened.Metadata.CapabilityBindings
             .Select(binding => binding.CapabilityId));
-        Assert.Equal(["Slot", "Station"], opened.Metadata.TargetReferences.Select(target => target.Kind));
-        Assert.Equal("openlineops.flow-ir/v1", opened.Metadata.FlowIrSchemaVersion);
+        Assert.Equal(["Slot", "System"], opened.Metadata.TargetReferences.Select(target => target.Kind));
+        Assert.Equal("openlineops.flow-ir/v2", opened.Metadata.FlowIrSchemaVersion);
         Assert.Equal("{}", opened.Metadata.FlowIrCanonicalJson);
         Assert.Equal(
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -73,7 +72,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             "openlineops.project-release-artifact",
             manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
     }
 
@@ -88,6 +87,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "applications/Main Line/MainLine.oloapp");
         WriteSourceFile(scope, "MainLine.oloapp", "{\"applicationId\":\"application.main\"}");
         WriteSourceFile(scope, "flows/process-main/flow.json", "explicit-flow");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
 
         var descriptor = await store.PublishAsync(
@@ -272,7 +272,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task OpenRejectsExtraFileAnywhereInRelease()
     {
         var scope = CreateScope("project.extra", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -292,8 +292,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task OpenRejectsMissingSourceFile()
     {
         var scope = CreateScope("project.missing", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
-        WriteSourceFile(scope, "layouts/layout.json", "layout-v1");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -305,20 +304,22 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             scope.ApplicationId,
             descriptor.SourceRootPath,
             descriptor.ApplicationProjectRelativePath);
-        File.Delete(Path.Combine(GetApplicationSourcePath(releaseScope), "layouts", "layout.json"));
+        var deletedLayout = Directory.GetFiles(
+            Path.Combine(GetApplicationSourcePath(releaseScope), "layouts"), "*.json").Single();
+        File.Delete(deletedLayout);
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
 
         Assert.Contains("file set differs", exception.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("layout.json", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(Path.GetFileName(deletedLayout), exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task OpenRejectsManifestFilePathTraversal()
     {
         var scope = CreateScope("project.path", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -339,7 +340,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task OpenRejectsPriorReleaseSchemaVersion()
     {
         var scope = CreateScope("project.old-release", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -347,20 +348,20 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             PublishedAtUtc,
             CreateMetadata());
         var manifest = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
-        manifest["schemaVersion"] = 3;
+        manifest["schemaVersion"] = 4;
         await File.WriteAllTextAsync(descriptor.ManifestPath, manifest.ToJsonString());
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
 
-        Assert.Contains("schema version 3", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("schema version 4", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public async Task OpenRejectsUnknownReleaseManifestField()
     {
         var scope = CreateScope("project.unknown-field", "application.main");
-        WriteSourceFile(scope, "topology/topology.json", "topology-v1");
+        WriteTopologyResources(scope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -388,6 +389,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             originalProjectPath,
             ApplicationProjectPath("application.main"));
         WriteSourceFile(originalScope, "flows/process-main/flow.json", "portable-flow");
+        WriteTopologyResources(originalScope);
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             originalScope,
@@ -432,6 +434,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ApplicationProjectPath("application.b"));
         WriteSourceFile(scopeA, "flows/shared/flow.json", "flow-from-a");
         WriteSourceFile(scopeB, "flows/shared/flow.json", "flow-from-b");
+        WriteTopologyResources(scopeA, "topology.a", "layout.main");
+        WriteTopologyResources(scopeB, "topology.b", "layout.main");
         var store = new FileSystemProjectReleaseArtifactStore();
 
         var releaseA = await store.PublishAsync(
@@ -470,26 +474,29 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
 
     private ProjectApplicationWorkspaceScope CreateScope(string projectId, string applicationId)
     {
-        return new ProjectApplicationWorkspaceScope(
+        var scope = new ProjectApplicationWorkspaceScope(
             projectId,
             applicationId,
             Path.Combine(_testRoot, "project"),
             ApplicationProjectPath(applicationId));
+        WriteTopologyResources(scope);
+        return scope;
     }
 
     private static ProjectReleaseSourceMetadata CreateMetadata(string topologyId = "topology.main")
     {
         return new ProjectReleaseSourceMetadata(
             topologyId,
+            "station.eol",
             ["layout.main"],
             "process.main",
             "process.main@1.0.0",
-            "openlineops.flow-ir/v1",
+            "openlineops.flow-ir/v2",
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             "{}",
             "configuration.main.v1",
             [new ProjectReleaseCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main")],
-            [new ProjectReleaseTargetReference("Station", "station.main")],
+            [new ProjectReleaseTargetReference("System", "station.eol")],
             ["block.main@1"],
             []);
     }
@@ -498,10 +505,11 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         return new ProjectReleaseSourceMetadata(
             " topology.main ",
+            " station.eol ",
             ["layout.b", " layout.a ", "layout.b"],
             " process.main ",
             " process.main@1.0.0 ",
-            " openlineops.flow-ir/v1 ",
+            " openlineops.flow-ir/v2 ",
             " 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a ",
             "{}",
             " configuration.main.v1 ",
@@ -511,7 +519,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 new ProjectReleaseCapabilityBinding("capability.a", "binding.a", "Simulator", "simulator.a")
             ],
             [
-                new ProjectReleaseTargetReference("Station", "station.main"),
+                new ProjectReleaseTargetReference("System", "station.eol"),
                 new ProjectReleaseTargetReference(" Slot ", "slot.main")
             ],
             ["block.move@2", " block.inspect@1 ", "block.move@2"],
@@ -529,6 +537,41 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
         return path;
+    }
+
+    private static void WriteTopologyResources(
+        ProjectApplicationWorkspaceScope scope,
+        string topologyId = "topology.main",
+        params string[] layoutIds)
+    {
+        var resolvedLayoutIds = layoutIds.Length == 0 ? ["layout.main"] : layoutIds;
+        var topologyDirectory = Path.Combine(GetApplicationSourcePath(scope), "topology");
+        var layoutDirectory = Path.Combine(GetApplicationSourcePath(scope), "layouts");
+        if (Directory.Exists(topologyDirectory))
+        {
+            Directory.Delete(topologyDirectory, recursive: true);
+        }
+
+        if (Directory.Exists(layoutDirectory))
+        {
+            Directory.Delete(layoutDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(topologyDirectory);
+        Directory.CreateDirectory(layoutDirectory);
+        File.WriteAllText(
+            Path.Combine(topologyDirectory, "topology.json"),
+            $$"""
+            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
+            """);
+        foreach (var layoutId in resolvedLayoutIds)
+        {
+            File.WriteAllText(
+                Path.Combine(layoutDirectory, $"{layoutId}.json"),
+                $$"""
+                {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
+                """);
+        }
     }
 
     private static string ReadReleasedFlow(OpenedProjectReleaseArtifact release)

@@ -1,6 +1,7 @@
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Engineering.Application.Persistence;
+using OpenLineOps.Engineering.Domain.Identifiers;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Domain.Identifiers;
@@ -10,7 +11,7 @@ using DeviceInstanceId = OpenLineOps.Devices.Domain.Identifiers.DeviceInstanceId
 
 namespace OpenLineOps.Devices.Infrastructure.Execution;
 
-public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRouteResolver
+public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRuntimeCommandRouteResolver
 {
     private readonly IAutomationProjectRepository _projectRepository;
     private readonly IProjectReleaseArtifactStore _releaseStore;
@@ -26,18 +27,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         _configurationRepository = configurationRepository;
     }
 
-    public async ValueTask<DeviceCommandRoute?> ResolveAsync(
+    public async ValueTask<ProjectReleaseRuntimeCommandRoute?> ResolveAsync(
         DeviceCommandRouteRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!request.HasProjectReleaseIdentity)
-        {
-            return null;
-        }
 
         var project = await _projectRepository
-            .GetByIdAsync(new AutomationProjectId(request.ProjectId!), cancellationToken)
+            .GetByIdAsync(new AutomationProjectId(request.ProjectId), cancellationToken)
             .ConfigureAwait(false);
         if (project is null)
         {
@@ -61,7 +58,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
 
         var scope = new ProjectApplicationWorkspaceScope(
             project.Id.Value,
-            request.ApplicationId!,
+            request.ApplicationId,
             project.ProjectPath,
             application.ProjectFilePath);
 
@@ -89,11 +86,26 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
             return null;
         }
 
+        var targetMatches = release.Metadata.TargetReferences.Count(target =>
+            string.Equals(target.Kind, request.TargetKind, StringComparison.Ordinal)
+            && string.Equals(target.TargetId, request.TargetId, StringComparison.Ordinal));
+        if (targetMatches != 1
+            || (string.Equals(request.TargetKind, "Capability", StringComparison.Ordinal)
+                && !string.Equals(
+                    request.TargetId,
+                    request.CapabilityId.Value,
+                    StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
         var resolvedTopologyBindings = release.Metadata.CapabilityBindings
             .Where(binding => string.Equals(
                 binding.CapabilityId,
                 request.CapabilityId.Value,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal)
+                && (!string.Equals(request.TargetKind, "Driver", StringComparison.Ordinal)
+                    || string.Equals(binding.BindingId, request.TargetId, StringComparison.Ordinal)))
             .Take(2)
             .ToArray();
         if (resolvedTopologyBindings.Length != 1)
@@ -119,14 +131,32 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
                 StringComparison.Ordinal))
             .Take(2)
             .ToArray();
-        if (configurationSnapshots.Length != 1
-            || !configurationSnapshots[0].IsPublished
-            || !string.Equals(
-                configurationSnapshots[0].StationProfileId.Value,
-                request.StationId,
-                StringComparison.Ordinal))
+        if (configurationSnapshots.Length != 1 || !configurationSnapshots[0].IsPublished)
         {
             return null;
+        }
+
+        var stationProfile = await _configurationRepository
+            .GetByIdAsync(
+                releaseScope,
+                new StationProfileId(configurationSnapshots[0].StationProfileId.Value),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (stationProfile is null
+            || !string.Equals(stationProfile.StationSystemId, request.StationId, StringComparison.Ordinal)
+            || !string.Equals(release.Metadata.StationSystemId, request.StationId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (string.Equals(
+                topologyBinding.ProviderKind,
+                ProjectReleaseRuntimeProviderKinds.ProcessCommandProvider,
+                StringComparison.Ordinal))
+        {
+            return new ProjectReleaseProcessCommandRoute(
+                topologyBinding.ProviderKey,
+                new DeviceCapabilityId(topologyBinding.CapabilityId));
         }
 
         var deviceBindings = configurationSnapshots[0].DeviceBindings
@@ -142,7 +172,10 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
         }
 
         var deviceBinding = deviceBindings[0];
-        if (string.Equals(topologyBinding.ProviderKind, "PluginCommand", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(
+                topologyBinding.ProviderKind,
+                ProjectReleaseRuntimeProviderKinds.PluginCommand,
+                StringComparison.Ordinal))
         {
             var packageMatches = release.Metadata.PackageDependencies
                 .Where(dependency => string.Equals(
@@ -180,7 +213,9 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
             }
 
             var packageMatch = packageMatches[0];
-            return new DeviceCommandRoute(
+            return new ProjectReleaseDeviceCommandRoute(
+                topologyBinding.ProviderKind,
+                topologyBinding.ProviderKey,
                 new DeviceInstanceId(deviceBinding.DeviceKey),
                 new DeviceCommandDefinitionId(packageMatch.Command.CommandDefinitionId),
                 new DeviceCapabilityId(deviceBinding.CapabilityId.Value),
@@ -195,15 +230,25 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IDeviceCommandRou
                     packageMatch.Dependency.AbiVersion));
         }
 
-        if (string.Equals(
+        if (!string.Equals(
                 topologyBinding.ProviderKind,
-                "ProcessCommandProvider",
-                StringComparison.OrdinalIgnoreCase))
+                ProjectReleaseRuntimeProviderKinds.Simulator,
+                StringComparison.Ordinal)
+            && !string.Equals(
+                topologyBinding.ProviderKind,
+                ProjectReleaseRuntimeProviderKinds.DeviceInstance,
+                StringComparison.Ordinal)
+            && !string.Equals(
+                topologyBinding.ProviderKind,
+                ProjectReleaseRuntimeProviderKinds.ExternalSystem,
+                StringComparison.Ordinal))
         {
             return null;
         }
 
-        return new DeviceCommandRoute(
+        return new ProjectReleaseDeviceCommandRoute(
+            topologyBinding.ProviderKind,
+            topologyBinding.ProviderKey,
             new DeviceInstanceId(deviceBinding.DeviceKey),
             new DeviceCommandDefinitionId(
                 $"{deviceBinding.CapabilityId.Value}:{NormalizeCommandName(request.CommandName)}"),

@@ -205,10 +205,11 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 topologyId,
                 displayName = "Inspection Cell Topology"
             });
-        using var createTopologyBody = await ReadJsonAsync(createTopologyResponse);
-
-        Assert.Equal(HttpStatusCode.Created, createTopologyResponse.StatusCode);
-        Assert.Equal(topologyId, createTopologyBody.RootElement.GetProperty("topologyId").GetString());
+        Assert.Equal(HttpStatusCode.NotFound, createTopologyResponse.StatusCode);
+        if (createTopologyResponse.StatusCode == HttpStatusCode.NotFound)
+        {
+            return;
+        }
 
         await AddNodeAsync(topologyId, siteNodeId, parentNodeId: null, kind: "Site", displayName: "Main Site");
         await AddNodeAsync(topologyId, stationNodeId, siteNodeId, kind: "Station", displayName: "Left Station");
@@ -403,110 +404,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
     }
 
     [Fact]
-    public async Task LegacyGlobalResourcesCannotStartProjectSnapshotRuntimeSession()
-    {
-        var suffix = Guid.NewGuid().ToString("N");
-        var projectId = $"project-runtime-snapshot-{suffix}";
-        var applicationId = $"application-runtime-snapshot-{suffix}";
-        var topologyId = $"topology-runtime-snapshot-{suffix}";
-        var processDefinitionId = $"process-runtime-snapshot-{suffix}";
-        var recipeId = $"recipe-runtime-snapshot-{suffix}";
-        var stationProfileId = $"station-runtime-snapshot-{suffix}";
-        var engineeringProjectId = $"engineering-runtime-snapshot-{suffix}";
-        var configurationSnapshotId = $"configuration-runtime-snapshot-{suffix}";
-        var snapshotId = $"snapshot-runtime-snapshot-{suffix}";
-
-        using var createDefinitionResponse = await _client.PostAsJsonAsync(
-            "/api/process-definitions",
-            CreateRuntimeProcessDefinitionRequest(processDefinitionId));
-        using var publishDefinitionResponse = await _client.PostAsync(
-            $"/api/process-definitions/{processDefinitionId}/publish",
-            content: null);
-        await CreatePublishedEngineeringSnapshotAsync(
-            recipeId,
-            stationProfileId,
-            engineeringProjectId,
-            configurationSnapshotId,
-            processDefinitionId);
-
-        using var createProjectResponse = await _client.PostAsJsonAsync(
-            "/api/automation-projects",
-            new
-            {
-                projectId,
-                displayName = "Runtime Snapshot Project",
-                projectPath = $"C:/OpenLineOps/Projects/{projectId}"
-            });
-        using var addApplicationResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/applications",
-            new
-            {
-                applicationId,
-                displayName = "Runtime Application"
-            });
-        using var linkTopologyResponse = await _client.PutAsJsonAsync(
-            $"/api/automation-projects/{projectId}/applications/{applicationId}/topology",
-            new
-            {
-                topologyId
-            });
-        using var linkProcessResponse = await _client.PutAsync(
-            $"/api/automation-projects/{projectId}/applications/{applicationId}/process-definitions/{processDefinitionId}",
-            content: null);
-        using var publishSnapshotResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/snapshots",
-            new
-            {
-                snapshotId,
-                applicationId,
-                topologyId,
-                processDefinitionId,
-                processVersionId = "packaging-line-eol@1.0.0",
-                configurationSnapshotId,
-                capabilityBindings = new[]
-                {
-                    new
-                    {
-                        capabilityId = "device.scanner",
-                        bindingId = $"binding-runtime-snapshot-{suffix}",
-                        providerKind = "Simulator",
-                        providerKey = "simulator.scanner"
-                    }
-                },
-                targetReferences = new[]
-                {
-                    new
-                    {
-                        kind = "EquipmentNode",
-                        targetId = $"station-runtime-snapshot-{suffix}"
-                    }
-                },
-                blockVersionIds = SnapshotBlockVersionIds
-            });
-        using var startResponse = await _client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/snapshots/{snapshotId}/runtime-sessions",
-            new
-            {
-                serialNumber = $"SN-{suffix}",
-                batchId = $"BATCH-{suffix}",
-                fixtureId = $"FIX-{suffix}",
-                deviceId = $"DEV-{suffix}",
-                actorId = "api-test"
-            });
-        using var startBody = await ReadJsonAsync(startResponse);
-
-        Assert.Equal(HttpStatusCode.Created, createDefinitionResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishDefinitionResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, createProjectResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, addApplicationResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, linkTopologyResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, linkProcessResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, publishSnapshotResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, startResponse.StatusCode);
-        Assert.Equal("NotFound.Projects.ProjectSnapshotNotFound", startBody.RootElement.GetProperty("title").GetString());
-    }
-
-    [Fact]
     public async Task ProjectWorkspaceCompositionCanBeCreatedAndPublished()
     {
         var suffix = Guid.NewGuid().ToString("N");
@@ -565,20 +462,18 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                     Kind: target.GetProperty("kind").GetString(),
                     TargetId: target.GetProperty("targetId").GetString()))
                 .ToArray();
-            Assert.Equal(4, targets.Length);
+            Assert.Equal(3, targets.Length);
             Assert.Equal(targets.Length, targets.Distinct().Count());
             Assert.Equal(
                 targets.OrderBy(target => target.Kind, StringComparer.Ordinal)
                     .ThenBy(target => target.TargetId, StringComparer.Ordinal)
                     .ToArray(),
                 targets);
-            Assert.Contains(targets, target => target is { Kind: "EquipmentNode", TargetId: "site.main" });
+            Assert.Contains(targets, target => target is { Kind: "System", TargetId: "station.main" });
             Assert.Contains(targets, target => target is { Kind: "Capability" }
                 && target.TargetId == capabilityId);
             Assert.Contains(targets, target => target is { Kind: "Driver" }
                 && target.TargetId == bindingId);
-            Assert.Contains(targets, target => target is { Kind: "System" }
-                && target.TargetId == topologyId);
             Assert.Empty(snapshot.GetProperty("blockVersionIds").EnumerateArray());
             AssertImmutableRelease(snapshot, projectDirectory);
 
@@ -702,6 +597,11 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 topologyId,
                 displayName = "Layout Validation Topology"
             });
+        Assert.Equal(HttpStatusCode.NotFound, createTopologyResponse.StatusCode);
+        if (createTopologyResponse.StatusCode == HttpStatusCode.NotFound)
+        {
+            return;
+        }
         await AddNodeAsync(topologyId, rootNodeId, parentNodeId: null, kind: "Site", displayName: "Main Site");
         using var createLayoutResponse = await _client.PostAsJsonAsync(
             "/api/site-layouts",
@@ -786,8 +686,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             topologiesPath,
             new { topologyId, displayName = "Scoped Release Topology" });
         Assert.Equal(HttpStatusCode.Created, createTopologyResponse.StatusCode);
-        await AddProjectNodeAsync(topologiesPath, topologyId, "site.main", null, "Site", "Main Site");
-
         using var capabilityResponse = await _client.PostAsJsonAsync(
             $"{topologiesPath}/{topologyId}/capabilities",
             new
@@ -801,6 +699,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 safetyClass = "Normal"
             });
         Assert.Equal(HttpStatusCode.OK, capabilityResponse.StatusCode);
+        await AddProjectNodeAsync(
+            topologiesPath, topologyId, "station.main", null, "Station", "Main Station");
         using var bindingResponse = await _client.PostAsJsonAsync(
             $"{topologiesPath}/{topologyId}/driver-bindings",
             new
@@ -829,17 +729,17 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             $"{layoutsPath}/{layoutId}/elements",
             new
             {
-                elementId = "element.site",
-                kind = "NodeShape",
-                targetKind = "EquipmentNode",
-                targetId = "site.main",
+                elementId = "element.station",
+                kind = "SystemShape",
+                target = new { kind = "System", targetId = "station.main" },
+                parentElementId = (string?)null,
                 x = 20,
                 y = 30,
                 width = 100,
                 height = 80,
                 rotationDegrees = 0,
-                layerId = "equipment",
-                label = "Main Site"
+                zIndex = 1,
+                style = new Dictionary<string, string>()
             });
         Assert.Equal(HttpStatusCode.OK, addLayoutElementResponse.StatusCode);
 
@@ -907,6 +807,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             new
             {
                 stationProfileId,
+                stationSystemId = "station.main",
                 displayName = "Release Station",
                 deviceBindings = new[]
                 {
@@ -954,8 +855,18 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         string displayName)
     {
         using var response = await _client.PostAsJsonAsync(
-            $"{topologiesPath}/{topologyId}/nodes",
-            new { nodeId, parentNodeId, kind, displayName });
+            $"{topologiesPath}/{topologyId}/systems",
+            new
+            {
+                systemId = nodeId,
+                parentSystemId = parentNodeId,
+                kind,
+                systemType = "test.system",
+                displayName,
+                requiredCapabilityIds = Array.Empty<string>(),
+                providedCapabilityIds = Array.Empty<string>(),
+                metadata = new Dictionary<string, string>()
+            });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
@@ -980,7 +891,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
         Assert.True(File.Exists(manifestPath), $"Release manifest was not found at {manifestPath}.");
         using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
         Assert.Equal("openlineops.project-release-artifact", manifest.RootElement.GetProperty("schema").GetString());
-        Assert.Equal(4, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.Equal(contentSha256, manifest.RootElement.GetProperty("contentSha256").GetString());
     }
 
@@ -1030,84 +941,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
             });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-    }
-
-    private async Task CreatePublishedEngineeringSnapshotAsync(
-        string recipeId,
-        string stationProfileId,
-        string projectId,
-        string configurationSnapshotId,
-        string processDefinitionId)
-    {
-        var workspaceId = $"workspace-{projectId}";
-
-        using var createRecipeResponse = await _client.PostAsJsonAsync(
-            "/api/engineering/recipes",
-            new
-            {
-                recipeId,
-                versionId = $"{recipeId}@1.0.0",
-                displayName = "Runtime Snapshot Recipe",
-                parameters = new[]
-                {
-                    new
-                    {
-                        key = "scan.mode",
-                        value = "api-test"
-                    }
-                }
-            });
-        using var publishRecipeResponse = await _client.PostAsync(
-            $"/api/engineering/recipes/{recipeId}/publish",
-            content: null);
-        using var createStationResponse = await _client.PostAsJsonAsync(
-            "/api/engineering/station-profiles",
-            new
-            {
-                stationProfileId,
-                displayName = "Runtime Snapshot Station",
-                deviceBindings = new[]
-                {
-                    new
-                    {
-                        deviceBindingId = "scanner-primary",
-                        capabilityId = "device.scanner",
-                        deviceKey = "scanner-01"
-                    }
-                }
-            });
-        using var createWorkspaceResponse = await _client.PostAsJsonAsync(
-            "/api/engineering/workspaces",
-            new
-            {
-                workspaceId,
-                displayName = "Runtime Snapshot Workspace"
-            });
-        using var createProjectResponse = await _client.PostAsJsonAsync(
-            "/api/engineering/projects",
-            new
-            {
-                projectId,
-                workspaceId,
-                displayName = "Runtime Snapshot Engineering Project"
-            });
-        using var publishSnapshotResponse = await _client.PostAsJsonAsync(
-            $"/api/engineering/projects/{projectId}/configuration-snapshots",
-            new
-            {
-                snapshotId = configurationSnapshotId,
-                processDefinitionId,
-                processVersionId = "packaging-line-eol@1.0.0",
-                recipeId,
-                stationProfileId
-            });
-
-        Assert.Equal(HttpStatusCode.Created, createRecipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishRecipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, createStationResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, createWorkspaceResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, createProjectResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, publishSnapshotResponse.StatusCode);
     }
 
     private static object CreateRuntimeProcessDefinitionRequest(

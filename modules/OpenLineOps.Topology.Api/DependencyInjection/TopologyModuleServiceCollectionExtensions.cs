@@ -4,7 +4,6 @@ using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Topology.Api.Time;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.ProjectWorkspaces;
-using OpenLineOps.Topology.Application.Topologies;
 using OpenLineOps.Topology.Infrastructure.Persistence;
 
 namespace OpenLineOps.Topology.Api.DependencyInjection;
@@ -15,15 +14,8 @@ public static class TopologyModuleServiceCollectionExtensions
     {
         services.TryAddSingleton<IClock, SystemClock>();
 
-        services.AddSingleton<InMemoryAutomationTopologyRepository>();
-        services.AddSingleton<IAutomationTopologyRepository>(serviceProvider =>
-            serviceProvider.GetRequiredService<InMemoryAutomationTopologyRepository>());
-        services.AddSingleton<InMemorySiteLayoutRepository>();
-        services.AddSingleton<ISiteLayoutRepository>(serviceProvider =>
-            serviceProvider.GetRequiredService<InMemorySiteLayoutRepository>());
         services.TryAddSingleton<IProjectAutomationTopologyRepository, FileSystemProjectAutomationTopologyRepository>();
         services.TryAddSingleton<IProjectSiteLayoutRepository, FileSystemProjectSiteLayoutRepository>();
-        services.AddScoped<IAutomationTopologyService, AutomationTopologyService>();
         services.AddScoped<IProjectAutomationTopologyService, ProjectAutomationTopologyService>();
 
         return services;

@@ -122,9 +122,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 
         EnsureUnique(_workstations.Select(workstation => workstation.Id.Value), "workstation ids");
         EnsureUnique(
-            _workstations.Select(workstation =>
-                $"{workstation.TopologyStationNodeId}\u001f{workstation.TopologySystemModuleId}"),
-            "workstation topology station/system bindings");
+            _workstations.Select(workstation => workstation.StationSystemId),
+            "workstation station system bindings");
         EnsureUnique(_stages.Select(stage => stage.Id.Value), "stage ids");
         if (_stages.Select(stage => stage.Sequence).Distinct().Count() != _stages.Count)
         {
