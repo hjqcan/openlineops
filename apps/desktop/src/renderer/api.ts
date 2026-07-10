@@ -348,6 +348,12 @@ function projectApplicationPath(scope: ProjectApplicationApiScope): string {
   return `/api/automation-projects/${encodeURIComponent(scope.projectId)}/applications/${encodeURIComponent(scope.applicationId)}`;
 }
 
+function engineeringPath(scope?: ProjectApplicationApiScope): string {
+  return scope
+    ? `${projectApplicationPath(scope)}/engineering`
+    : '/api/engineering';
+}
+
 export async function getStationStatuses(): Promise<RuntimeStationStatus[]> {
   const response = await desktop.apiRequest<RuntimeStationStatusesResponse>(
     '/api/runtime/monitoring/stations');
@@ -405,72 +411,91 @@ export async function acknowledgeAlarm(alarmId: string, acknowledgedBy: string):
   return response.body;
 }
 
-export async function listWorkspaces(): Promise<WorkspaceResponse[]> {
-  const response = await desktop.apiRequest<WorkspaceResponse[]>('/api/engineering/workspaces');
+export async function listWorkspaces(
+  scope?: ProjectApplicationApiScope
+): Promise<WorkspaceResponse[]> {
+  const response = await desktop.apiRequest<WorkspaceResponse[]>(
+    `${engineeringPath(scope)}/workspaces`);
   return response.body ?? [];
 }
 
 export async function createWorkspace(
-  request: CreateWorkspaceRequest
+  request: CreateWorkspaceRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<WorkspaceResponse>> {
   return desktop.apiRequest<WorkspaceResponse>(
-    '/api/engineering/workspaces',
+    `${engineeringPath(scope)}/workspaces`,
     {
       method: 'POST',
       body: request
     });
 }
 
-export async function listEngineeringProjects(): Promise<EngineeringProjectResponse[]> {
-  const response = await desktop.apiRequest<EngineeringProjectResponse[]>('/api/engineering/projects');
+export async function listEngineeringProjects(
+  scope?: ProjectApplicationApiScope
+): Promise<EngineeringProjectResponse[]> {
+  const response = await desktop.apiRequest<EngineeringProjectResponse[]>(
+    `${engineeringPath(scope)}/projects`);
   return response.body ?? [];
 }
 
 export async function createEngineeringProject(
-  request: CreateEngineeringProjectRequest
+  request: CreateEngineeringProjectRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<EngineeringProjectResponse>> {
   return desktop.apiRequest<EngineeringProjectResponse>(
-    '/api/engineering/projects',
+    `${engineeringPath(scope)}/projects`,
     {
       method: 'POST',
       body: request
     });
 }
 
-export async function listRecipes(): Promise<RecipeResponse[]> {
-  const response = await desktop.apiRequest<RecipeResponse[]>('/api/engineering/recipes');
+export async function listRecipes(
+  scope?: ProjectApplicationApiScope
+): Promise<RecipeResponse[]> {
+  const response = await desktop.apiRequest<RecipeResponse[]>(
+    `${engineeringPath(scope)}/recipes`);
   return response.body ?? [];
 }
 
 export async function createRecipe(
-  request: CreateRecipeRequest
+  request: CreateRecipeRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<RecipeResponse>> {
   return desktop.apiRequest<RecipeResponse>(
-    '/api/engineering/recipes',
+    `${engineeringPath(scope)}/recipes`,
     {
       method: 'POST',
       body: request
     });
 }
 
-export async function publishRecipe(recipeId: string): Promise<ApiResponse<RecipeResponse>> {
+export async function publishRecipe(
+  recipeId: string,
+  scope?: ProjectApplicationApiScope
+): Promise<ApiResponse<RecipeResponse>> {
   return desktop.apiRequest<RecipeResponse>(
-    `/api/engineering/recipes/${encodeURIComponent(recipeId)}/publish`,
+    `${engineeringPath(scope)}/recipes/${encodeURIComponent(recipeId)}/publish`,
     {
       method: 'POST'
     });
 }
 
-export async function listStationProfiles(): Promise<StationProfileResponse[]> {
-  const response = await desktop.apiRequest<StationProfileResponse[]>('/api/engineering/station-profiles');
+export async function listStationProfiles(
+  scope?: ProjectApplicationApiScope
+): Promise<StationProfileResponse[]> {
+  const response = await desktop.apiRequest<StationProfileResponse[]>(
+    `${engineeringPath(scope)}/station-profiles`);
   return response.body ?? [];
 }
 
 export async function createStationProfile(
-  request: CreateStationProfileRequest
+  request: CreateStationProfileRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<StationProfileResponse>> {
   return desktop.apiRequest<StationProfileResponse>(
-    '/api/engineering/station-profiles',
+    `${engineeringPath(scope)}/station-profiles`,
     {
       method: 'POST',
       body: request
@@ -479,10 +504,11 @@ export async function createStationProfile(
 
 export async function publishConfigurationSnapshot(
   projectId: string,
-  request: PublishConfigurationSnapshotRequest
+  request: PublishConfigurationSnapshotRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<EngineeringProjectResponse>> {
   return desktop.apiRequest<EngineeringProjectResponse>(
-    `/api/engineering/projects/${encodeURIComponent(projectId)}/configuration-snapshots`,
+    `${engineeringPath(scope)}/projects/${encodeURIComponent(projectId)}/configuration-snapshots`,
     {
       method: 'POST',
       body: request
@@ -604,24 +630,29 @@ export async function listProcessDefinitions(
   return response.body ?? [];
 }
 
-export async function listProcessBlocklyBlocks(): Promise<ProcessBlocklyBlockDefinition[]> {
-  const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>('/api/process-blocks');
+export async function listProcessBlocklyBlocks(
+  scope?: ProjectApplicationApiScope
+): Promise<ProcessBlocklyBlockDefinition[]> {
+  const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
+    processBlockCollectionPath(scope));
   return response.body ?? [];
 }
 
 export async function listProcessBlocklyBlockVersions(
-  blockType: string
+  blockType: string,
+  scope?: ProjectApplicationApiScope
 ): Promise<ProcessBlocklyBlockDefinition[]> {
   const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
-    `/api/process-blocks/${encodeURIComponent(blockType)}/versions`);
+    `${processBlockCollectionPath(scope)}/${encodeURIComponent(blockType)}/versions`);
   return response.body ?? [];
 }
 
 export async function registerProcessBlocklyBlock(
-  request: RegisterProcessBlocklyBlockDefinitionRequest
+  request: RegisterProcessBlocklyBlockDefinitionRequest,
+  scope?: ProjectApplicationApiScope
 ): Promise<ApiResponse<ProcessBlocklyBlockDefinition>> {
   return desktop.apiRequest<ProcessBlocklyBlockDefinition>(
-    '/api/process-blocks',
+    processBlockCollectionPath(scope),
     {
       method: 'POST',
       body: request
@@ -685,6 +716,12 @@ function processCollectionPath(scope?: ProjectApplicationApiScope): string {
   return scope
     ? `${projectApplicationPath(scope)}/processes`
     : '/api/process-definitions';
+}
+
+function processBlockCollectionPath(scope?: ProjectApplicationApiScope): string {
+  return scope
+    ? `${projectApplicationPath(scope)}/process-blocks`
+    : '/api/process-blocks';
 }
 
 export async function startProcessRuntimeSession(

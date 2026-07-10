@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
+using OpenLineOps.Engineering.Application.ProjectWorkspaces;
 using OpenLineOps.Engineering.Infrastructure.Persistence;
 using OpenLineOps.Engineering.Infrastructure.Processes;
 using OpenLineOps.Engineering.Infrastructure.Time;
@@ -68,8 +69,15 @@ public static class EngineeringModuleServiceCollectionExtensions
                 $"Unsupported engineering persistence provider '{persistenceOptions.Provider}'.");
         }
 
+        services.TryAddSingleton<
+            IProjectEngineeringConfigurationRepository,
+            FileSystemProjectEngineeringConfigurationRepository>();
         services.AddScoped<IEngineeringConfigurationService, EngineeringConfigurationService>();
+        services.AddScoped<IProjectEngineeringConfigurationService, ProjectEngineeringConfigurationService>();
         services.AddScoped<IRuntimeConfigurationSnapshotResolver, EngineeringRuntimeConfigurationSnapshotResolver>();
+        services.AddScoped<
+            IProjectRuntimeConfigurationSnapshotResolver,
+            ProjectEngineeringRuntimeConfigurationSnapshotResolver>();
 
         return services;
     }

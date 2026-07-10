@@ -79,12 +79,16 @@ async function main() {
     'artifacts',
     'desktop-smoke-projects',
     `project-${Date.now().toString(36)}`);
-  await clickByTestId('nav-projects');
   await waitForExpression(
     '(() => document.body.innerText.includes("Automation Projects")'
     + ' && Boolean(document.querySelector("[data-testid=\\"project-workspace-panel\\"]")))()',
     30000,
     'projects workbench to render');
+  await clickByTestId('start-create-project');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"project-path-input\\"]")))()',
+    15000,
+    'new project dialog to render');
   await setInputByTestId('project-path-input', smokeProjectPath);
   await clickByTestId('create-project-workspace');
   await waitForExpression(
@@ -100,6 +104,15 @@ async function main() {
     30000,
     'automation project manifest to save from desktop');
   await clickByTestId('switch-project-workspace');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
+    15000,
+    'start center to render for project reopen');
+  await clickByTestId('start-open-project-by-path');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"open-project-path-input\\"]")))()',
+    15000,
+    'open project path dialog to render');
   await setInputByTestId('open-project-path-input', smokeProjectPath);
   await clickByTestId('open-project-workspace');
   await waitForExpression(
@@ -124,6 +137,15 @@ async function main() {
     30000,
     'site layout geometry to be edited and saved');
   await clickByTestId('switch-project-workspace');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")))()',
+    15000,
+    'start center to render after layout edit');
+  await clickByTestId('start-open-project-by-path');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"open-project-path-input\\"]")))()',
+    15000,
+    'open project path dialog to render after layout edit');
   await setInputByTestId('open-project-path-input', smokeProjectPath);
   await clickByTestId('open-project-workspace');
   await waitForExpression(
@@ -569,6 +591,12 @@ async function getAutomationProjectByPath(projectPath) {
 }
 
 async function createPublishedEngineeringSnapshot(definition) {
+  if (!activeProjectApplicationScope) {
+    throw new Error('Active project application scope was not captured.');
+  }
+
+  const engineeringBasePath = `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
+    + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/engineering`;
   const suffix = Date.now().toString(36);
   const recipeId = `recipe-desktop-process-${suffix}`;
   const stationProfileId = `station-desktop-process-${suffix}`;
@@ -577,7 +605,7 @@ async function createPublishedEngineeringSnapshot(definition) {
   const configurationSnapshotId = `snapshot-desktop-process-${suffix}`;
 
   await expectApiStatus(
-    '/api/engineering/recipes',
+    `${engineeringBasePath}/recipes`,
     {
       method: 'POST',
       body: {
@@ -595,12 +623,12 @@ async function createPublishedEngineeringSnapshot(definition) {
     201,
     'create runtime recipe');
   await expectApiStatus(
-    `/api/engineering/recipes/${recipeId}/publish`,
+    `${engineeringBasePath}/recipes/${recipeId}/publish`,
     { method: 'POST' },
     200,
     'publish runtime recipe');
   await expectApiStatus(
-    '/api/engineering/station-profiles',
+    `${engineeringBasePath}/station-profiles`,
     {
       method: 'POST',
       body: {
@@ -618,7 +646,7 @@ async function createPublishedEngineeringSnapshot(definition) {
     201,
     'create runtime station profile');
   await expectApiStatus(
-    '/api/engineering/workspaces',
+    `${engineeringBasePath}/workspaces`,
     {
       method: 'POST',
       body: {
@@ -629,7 +657,7 @@ async function createPublishedEngineeringSnapshot(definition) {
     201,
     'create runtime workspace');
   await expectApiStatus(
-    '/api/engineering/projects',
+    `${engineeringBasePath}/projects`,
     {
       method: 'POST',
       body: {
@@ -641,7 +669,7 @@ async function createPublishedEngineeringSnapshot(definition) {
     201,
     'create runtime project');
   await expectApiStatus(
-    `/api/engineering/projects/${projectId}/configuration-snapshots`,
+    `${engineeringBasePath}/projects/${projectId}/configuration-snapshots`,
     {
       method: 'POST',
       body: {

@@ -58,8 +58,12 @@ public static class ProcessesModuleServiceCollectionExtensions
         services.TryAddSingleton<IProcessBlocklyBlockCatalog, ProcessBlocklyBlockCatalog>();
         services.TryAddSingleton<IProcessScriptDefinitionValidator, PythonScriptDefinitionValidator>();
         services.TryAddSingleton<IProjectProcessDefinitionRepository, FileSystemProjectProcessDefinitionRepository>();
+        services.TryAddSingleton<
+            IProjectProcessBlocklyBlockDefinitionRepository,
+            FileSystemProjectProcessBlocklyBlockDefinitionRepository>();
         services.AddScoped<IProcessDefinitionService, ProcessDefinitionService>();
         services.AddScoped<IProjectProcessDefinitionService, ProjectProcessDefinitionService>();
+        services.AddScoped<IProjectProcessBlocklyBlockCatalog, ProjectProcessBlocklyBlockCatalog>();
         services.AddScoped<IProcessRuntimeSessionLauncher, ProcessRuntimeSessionLauncher>();
         services.AddScoped<IProjectProcessRuntimeSessionLauncher, ProjectProcessRuntimeSessionLauncher>();
 

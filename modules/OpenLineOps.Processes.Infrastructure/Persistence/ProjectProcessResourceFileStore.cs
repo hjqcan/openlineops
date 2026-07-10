@@ -25,6 +25,15 @@ internal static class ProjectProcessResourceFileStore
         await SaveAtomicAsync(path, bytes, overwrite: true, cancellationToken).ConfigureAwait(false);
     }
 
+    public static async ValueTask SaveNewJsonAsync<T>(
+        string path,
+        T document,
+        CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
+        await SaveAtomicAsync(path, bytes, overwrite: false, cancellationToken).ConfigureAwait(false);
+    }
+
     public static async ValueTask<T?> LoadJsonAsync<T>(
         string path,
         CancellationToken cancellationToken)

@@ -493,27 +493,30 @@ function App(): React.ReactElement {
           ) : null}
         </div>
 
-        <div className="ide-mode-switch" role="group" aria-label="Workspace mode">
-          <button
-            type="button"
-            className={workspaceMode === 'edit' ? 'active' : ''}
-            onClick={() => changeWorkspaceMode('edit')}
-            data-testid="mode-edit"
-          >
-            <Code2 size={14} />
-            Edit
-          </button>
-          <button
-            type="button"
-            className={workspaceMode === 'run' ? 'active' : ''}
-            onClick={() => changeWorkspaceMode('run')}
-            disabled={!activeWorkspace}
-            data-testid="mode-run"
-          >
-            <Play size={14} />
-            Run
-          </button>
-        </div>
+        {activeWorkspace ? (
+          <div className="ide-mode-switch" role="group" aria-label="Workspace mode">
+            <button
+              type="button"
+              className={workspaceMode === 'edit' ? 'active' : ''}
+              onClick={() => changeWorkspaceMode('edit')}
+              data-testid="mode-edit"
+            >
+              <Code2 size={14} />
+              Edit
+            </button>
+            <button
+              type="button"
+              className={workspaceMode === 'run' ? 'active' : ''}
+              onClick={() => changeWorkspaceMode('run')}
+              data-testid="mode-run"
+            >
+              <Play size={14} />
+              Run
+            </button>
+          </div>
+        ) : (
+          <div className="ide-start-title">AUTOMATION LINE STUDIO</div>
+        )}
 
         <div className="ide-title-actions">
           <span className={`ide-health-dot ${backendStatus?.health === 'Healthy' ? 'good' : 'warn'}`} />
@@ -544,7 +547,8 @@ function App(): React.ReactElement {
         </div>
       </header>
 
-      <aside className="ide-activity-bar" aria-label="Primary tools">
+      {activeWorkspace ? (
+        <aside className="ide-activity-bar" aria-label="Primary tools">
         <div className="brand-mark" title="OpenLineOps Automation IDE">OL</div>
         <nav className="nav-list">
           {navItems.map(item => {
@@ -572,7 +576,8 @@ function App(): React.ReactElement {
         <div className="rail-footer">
           <StatusPill label={hubState} tone={hubState === 'Connected' ? 'good' : 'warn'} />
         </div>
-      </aside>
+        </aside>
+      ) : null}
 
       {activeWorkspace ? (
         <ProjectExplorer
@@ -588,16 +593,18 @@ function App(): React.ReactElement {
         />
       ) : null}
 
-      <section className="ide-editor-area">
-        <div className="ide-editor-tabs">
+      <section className={activeWorkspace ? 'ide-editor-area' : 'ide-editor-area start-center-mode'}>
+        {activeWorkspace ? (
+          <>
+            <div className="ide-editor-tabs">
           <div className="ide-editor-tab active">
             {activeNav === 'processes' ? <Blocks size={14} /> : activeNav === 'dashboard' ? <Play size={14} /> : <FileSearch size={14} />}
             <span>{activeTitle}</span>
             {activeWorkspace ? <small>{activeWorkspace.project.projectId}</small> : null}
           </div>
-        </div>
+            </div>
 
-        <div className="ide-editor-toolbar">
+            <div className="ide-editor-toolbar">
           <div>
             <strong>{activeTitle}</strong>
             <span>{message}</span>
@@ -618,13 +625,13 @@ function App(): React.ReactElement {
               <span>Latest: {lastProjectRun?.sessionId ?? lastRun?.sessionId ?? latestStation?.latestSessionId ?? 'none'}</span>
             </div>
           ) : null}
-        </div>
+            </div>
 
-        <div className="ide-editor-surface">
-          {visiblePanel}
-        </div>
+            <div className="ide-editor-surface">
+              {visiblePanel}
+            </div>
 
-        <div className={`ide-bottom-panel ${workspaceMode === 'run' ? 'expanded' : ''}`}>
+            <div className={`ide-bottom-panel ${workspaceMode === 'run' ? 'expanded' : ''}`}>
           <div className="ide-bottom-panel-title">
             <PanelBottom size={14} />
             <strong>{workspaceMode === 'run' ? 'Runtime Output' : 'Problems · Output · Terminal'}</strong>
@@ -638,7 +645,11 @@ function App(): React.ReactElement {
               <InfoCell label="Alarms" value={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
             </div>
           ) : null}
-        </div>
+            </div>
+          </>
+        ) : (
+          <div className="ide-start-surface">{visiblePanel}</div>
+        )}
       </section>
 
       <footer className="ide-statusbar">

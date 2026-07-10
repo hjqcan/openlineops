@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Factory,
@@ -47,10 +47,6 @@ interface EngineeringResources {
 }
 
 interface EngineeringDraft {
-  workspaceId: string;
-  workspaceName: string;
-  projectId: string;
-  projectName: string;
   recipeId: string;
   recipeVersionId: string;
   recipeName: string;
@@ -78,21 +74,43 @@ export function EngineeringWorkbench({
   isBackendHealthy,
   onMessage
 }: EngineeringWorkbenchProps): React.ReactElement {
+  const activeApplication = useMemo(
+    () => activeWorkspace?.project.applications.find(
+      candidate => candidate.applicationId === activeApplicationId)
+      ?? activeWorkspace?.project.applications[0]
+      ?? null,
+    [activeApplicationId, activeWorkspace?.project.applications]);
+  const activeProjectId = activeWorkspace?.project.projectId ?? null;
+  const effectiveApplicationId = activeApplication?.applicationId ?? null;
+  const projectApplicationApiScope = useMemo(
+    () => activeProjectId && effectiveApplicationId
+      ? {
+        projectId: activeProjectId,
+        applicationId: effectiveApplicationId
+      }
+      : undefined,
+    [activeProjectId, effectiveApplicationId]);
+  const engineeringScopeKey = activeProjectId && effectiveApplicationId
+    ? `${activeProjectId}\u0000${effectiveApplicationId}`
+    : null;
+  const engineeringIdentity = useMemo(
+    () => effectiveApplicationId
+      ? {
+        workspaceId: `${effectiveApplicationId}.workspace`,
+        workspaceName: `${activeApplication?.displayName ?? effectiveApplicationId} Workspace`,
+        projectId: `${effectiveApplicationId}.configuration`,
+        projectName: `${activeApplication?.displayName ?? effectiveApplicationId} Configuration`
+      }
+      : null,
+    [activeApplication?.displayName, effectiveApplicationId]);
+  const scopeKeyRef = useRef(engineeringScopeKey);
+  scopeKeyRef.current = engineeringScopeKey;
+
   const [resources, setResources] = useState<EngineeringResources>(emptyResources);
-  const [draft, setDraft] = useState<EngineeringDraft>(() => createEngineeringDraft());
+  const [draft, setDraft] = useState<EngineeringDraft>(
+    () => createEngineeringDraft(undefined, effectiveApplicationId));
   const [createdProject, setCreatedProject] = useState<EngineeringProjectResponse | null>(null);
   const [busy, setBusy] = useState(false);
-  const projectApplicationApiScope = useMemo(() => {
-    const application = activeWorkspace?.project.applications.find(
-      candidate => candidate.applicationId === activeApplicationId)
-      ?? activeWorkspace?.project.applications[0];
-    return activeWorkspace && application
-      ? {
-        projectId: activeWorkspace.project.projectId,
-        applicationId: application.applicationId
-      }
-      : undefined;
-  }, [activeApplicationId, activeWorkspace]);
 
   const publishedProcesses = useMemo(
     () => resources.processDefinitions.filter(definition => definition.status === 'Published'),
@@ -102,20 +120,33 @@ export function EngineeringWorkbench({
       ?? publishedProcesses[0]
       ?? null,
     [draft.processDefinitionId, publishedProcesses]);
-  const canPublishSnapshot = isBackendHealthy && !busy && selectedProcess !== null;
+  const configurationProject = useMemo(
+    () => engineeringIdentity
+      ? resources.projects.find(project => project.projectId === engineeringIdentity.projectId) ?? null
+      : null,
+    [engineeringIdentity, resources.projects]);
+  const configurationSnapshots = configurationProject?.snapshots ?? [];
+  const canPublishSnapshot = isBackendHealthy
+    && !busy
+    && engineeringIdentity !== null
+    && selectedProcess !== null;
 
   const loadResources = useCallback(async () => {
-    if (!isBackendHealthy) {
+    if (!isBackendHealthy || !projectApplicationApiScope || !engineeringIdentity) {
       return;
     }
 
+    const requestedScopeKey = engineeringScopeKey;
     const [workspaces, projects, recipes, stations, processDefinitions] = await Promise.all([
-      listWorkspaces(),
-      listEngineeringProjects(),
-      listRecipes(),
-      listStationProfiles(),
+      listWorkspaces(projectApplicationApiScope),
+      listEngineeringProjects(projectApplicationApiScope),
+      listRecipes(projectApplicationApiScope),
+      listStationProfiles(projectApplicationApiScope),
       listProcessDefinitions(projectApplicationApiScope)
     ]);
+    if (scopeKeyRef.current !== requestedScopeKey) {
+      return;
+    }
 
     setResources({
       workspaces,
@@ -124,27 +155,47 @@ export function EngineeringWorkbench({
       stations,
       processDefinitions
     });
+    setCreatedProject(
+      projects.find(project => project.projectId === engineeringIdentity.projectId) ?? null);
 
-    const firstPublishedProcess = processDefinitions.find(definition => definition.status === 'Published');
-    if (firstPublishedProcess) {
-      setDraft(current => current.processDefinitionId
-        ? current
-        : {
-          ...current,
-          processDefinitionId: firstPublishedProcess.processDefinitionId,
-          processVersionId: firstPublishedProcess.versionId
-        });
-    }
-  }, [isBackendHealthy, projectApplicationApiScope]);
+    const publishedDefinitions = processDefinitions.filter(
+      definition => definition.status === 'Published');
+    setDraft(current => {
+      const process = publishedDefinitions.find(
+        definition => definition.processDefinitionId === current.processDefinitionId)
+        ?? publishedDefinitions[0]
+        ?? null;
+      return {
+        ...current,
+        processDefinitionId: process?.processDefinitionId ?? '',
+        processVersionId: process?.versionId ?? ''
+      };
+    });
+  }, [engineeringIdentity, engineeringScopeKey, isBackendHealthy, projectApplicationApiScope]);
 
   useEffect(() => {
-    loadResources().catch(error => onMessage(`Engineering load failed: ${String(error)}`));
-  }, [loadResources, onMessage]);
+    setResources(emptyResources);
+    setDraft(createEngineeringDraft(undefined, effectiveApplicationId));
+    setCreatedProject(null);
+    setBusy(false);
+  }, [engineeringScopeKey]);
+
+  useEffect(() => {
+    let isCurrent = true;
+    loadResources().catch(error => {
+      if (isCurrent && scopeKeyRef.current === engineeringScopeKey) {
+        onMessage(`Engineering load failed: ${String(error)}`);
+      }
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [engineeringScopeKey, loadResources, onMessage]);
 
   const resetDraft = useCallback(() => {
-    setDraft(createEngineeringDraft(selectedProcess ?? undefined));
-    setCreatedProject(null);
-  }, [selectedProcess]);
+    setDraft(createEngineeringDraft(selectedProcess ?? undefined, effectiveApplicationId));
+  }, [effectiveApplicationId, selectedProcess]);
 
   const createRuntimeSnapshot = useCallback(async () => {
     const process = selectedProcess;
@@ -152,74 +203,116 @@ export function EngineeringWorkbench({
       onMessage('Publish a process definition before creating an engineering snapshot');
       return;
     }
+    if (!engineeringIdentity || !projectApplicationApiScope) {
+      onMessage('Open a project Application before creating a configuration snapshot');
+      return;
+    }
 
+    const requestedScopeKey = engineeringScopeKey;
+    const isCurrentScope = () => scopeKeyRef.current === requestedScopeKey;
     setBusy(true);
-    setCreatedProject(null);
     try {
-      const workspace = await createWorkspace({
-        workspaceId: draft.workspaceId,
-        displayName: draft.workspaceName
-      });
-      if (!workspace.ok) {
-        onMessage(`Workspace create failed: ${workspace.status} ${workspace.text}`);
-        return;
+      const hasWorkspace = resources.workspaces.some(
+        workspace => workspace.workspaceId === engineeringIdentity.workspaceId);
+      if (!hasWorkspace) {
+        const workspace = await createWorkspace({
+          workspaceId: engineeringIdentity.workspaceId,
+          displayName: engineeringIdentity.workspaceName
+        }, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          return;
+        }
+        if (!workspace.ok) {
+          onMessage(`Workspace create failed: ${workspace.status} ${workspace.text}`);
+          return;
+        }
       }
 
-      const project = await createEngineeringProject({
-        projectId: draft.projectId,
-        workspaceId: draft.workspaceId,
-        displayName: draft.projectName
-      });
-      if (!project.ok) {
-        onMessage(`Project create failed: ${project.status} ${project.text}`);
-        return;
+      const hasProject = resources.projects.some(
+        project => project.projectId === engineeringIdentity.projectId);
+      if (!hasProject) {
+        const project = await createEngineeringProject({
+          projectId: engineeringIdentity.projectId,
+          workspaceId: engineeringIdentity.workspaceId,
+          displayName: engineeringIdentity.projectName
+        }, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          return;
+        }
+        if (!project.ok) {
+          onMessage(`Configuration project create failed: ${project.status} ${project.text}`);
+          return;
+        }
       }
 
-      const recipe = await createRecipe({
-        recipeId: draft.recipeId,
-        versionId: draft.recipeVersionId,
-        displayName: draft.recipeName,
-        parameters: [
-          {
-            key: 'inspection.mode',
-            value: 'desktop-engineering'
-          }
-        ]
-      });
-      if (!recipe.ok) {
-        onMessage(`Recipe create failed: ${recipe.status} ${recipe.text}`);
-        return;
+      const existingRecipe = resources.recipes.find(recipe => recipe.recipeId === draft.recipeId);
+      let recipeStatus = existingRecipe?.status ?? null;
+      if (!existingRecipe) {
+        const recipe = await createRecipe({
+          recipeId: draft.recipeId,
+          versionId: draft.recipeVersionId,
+          displayName: draft.recipeName,
+          parameters: [
+            {
+              key: 'inspection.mode',
+              value: 'desktop-engineering'
+            }
+          ]
+        }, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          return;
+        }
+        if (!recipe.ok || !recipe.body) {
+          onMessage(`Recipe create failed: ${recipe.status} ${recipe.text}`);
+          return;
+        }
+        recipeStatus = recipe.body.status;
       }
 
-      const publishedRecipe = await publishRecipe(draft.recipeId);
-      if (!publishedRecipe.ok) {
-        onMessage(`Recipe publish failed: ${publishedRecipe.status} ${publishedRecipe.text}`);
-        return;
+      if (recipeStatus !== 'Published') {
+        const publishedRecipe = await publishRecipe(draft.recipeId, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          return;
+        }
+        if (!publishedRecipe.ok) {
+          onMessage(`Recipe publish failed: ${publishedRecipe.status} ${publishedRecipe.text}`);
+          return;
+        }
       }
 
-      const station = await createStationProfile({
-        stationProfileId: draft.stationProfileId,
-        displayName: draft.stationName,
-        deviceBindings: [
-          {
-            deviceBindingId: draft.deviceBindingId,
-            capabilityId: draft.capabilityId,
-            deviceKey: draft.deviceKey
-          }
-        ]
-      });
-      if (!station.ok) {
-        onMessage(`Station create failed: ${station.status} ${station.text}`);
-        return;
+      const hasStation = resources.stations.some(
+        station => station.stationProfileId === draft.stationProfileId);
+      if (!hasStation) {
+        const station = await createStationProfile({
+          stationProfileId: draft.stationProfileId,
+          displayName: draft.stationName,
+          deviceBindings: [
+            {
+              deviceBindingId: draft.deviceBindingId,
+              capabilityId: draft.capabilityId,
+              deviceKey: draft.deviceKey
+            }
+          ]
+        }, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          return;
+        }
+        if (!station.ok) {
+          onMessage(`Station create failed: ${station.status} ${station.text}`);
+          return;
+        }
       }
 
-      const snapshot = await publishConfigurationSnapshot(draft.projectId, {
+      const snapshot = await publishConfigurationSnapshot(engineeringIdentity.projectId, {
         snapshotId: draft.snapshotId,
         processDefinitionId: process.processDefinitionId,
         processVersionId: process.versionId,
         recipeId: draft.recipeId,
         stationProfileId: draft.stationProfileId
-      });
+      }, projectApplicationApiScope);
+      if (!isCurrentScope()) {
+        return;
+      }
       if (!snapshot.ok || !snapshot.body) {
         onMessage(`Snapshot publish failed: ${snapshot.status} ${snapshot.text}`);
         return;
@@ -229,9 +322,23 @@ export function EngineeringWorkbench({
       onMessage(`Snapshot published ${draft.snapshotId}`);
       await loadResources();
     } finally {
-      setBusy(false);
+      if (isCurrentScope()) {
+        setBusy(false);
+      }
     }
-  }, [draft, loadResources, onMessage, selectedProcess]);
+  }, [
+    draft,
+    engineeringIdentity,
+    engineeringScopeKey,
+    loadResources,
+    onMessage,
+    projectApplicationApiScope,
+    resources.projects,
+    resources.recipes,
+    resources.stations,
+    resources.workspaces,
+    selectedProcess
+  ]);
 
   return (
     <section className="engineering-workbench">
@@ -241,17 +348,27 @@ export function EngineeringWorkbench({
             <Factory size={17} />
             <h2>Engineering Configuration</h2>
           </div>
-          <span>{resources.projects.length} projects</span>
+          <span>{activeApplication?.displayName ?? 'No application selected'}</span>
         </div>
 
         <div className="engineering-toolbar">
-          <button type="button" className="button ghost" onClick={loadResources} disabled={!isBackendHealthy || busy}>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={loadResources}
+            disabled={!isBackendHealthy || !engineeringIdentity || busy}
+          >
             <RefreshCw size={15} />
             Refresh
           </button>
-          <button type="button" className="button ghost" onClick={resetDraft} disabled={busy}>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={resetDraft}
+            disabled={!engineeringIdentity || busy}
+          >
             <SlidersHorizontal size={15} />
-            New Seed
+            Reset Fields
           </button>
           <button
             type="button"
@@ -267,31 +384,28 @@ export function EngineeringWorkbench({
 
         <div className="engineering-layout">
           <div className="engineering-form">
-            <FieldGroup title="Workspace">
-              <TextField
-                label="Workspace ID"
-                value={draft.workspaceId}
-                onChange={value => setDraft(current => ({ ...current, workspaceId: value }))}
-              />
-              <TextField
-                label="Display Name"
-                value={draft.workspaceName}
-                onChange={value => setDraft(current => ({ ...current, workspaceName: value }))}
-              />
-            </FieldGroup>
-
-            <FieldGroup title="Project">
-              <TextField
-                label="Project ID"
-                value={draft.projectId}
-                onChange={value => setDraft(current => ({ ...current, projectId: value }))}
-              />
-              <TextField
-                label="Display Name"
-                value={draft.projectName}
-                onChange={value => setDraft(current => ({ ...current, projectName: value }))}
-              />
-            </FieldGroup>
+            <div className="engineering-application-context" data-testid="engineering-application-context">
+              <div>
+                <FolderTree size={16} />
+                <span>Current Application</span>
+                <strong>{activeApplication?.displayName ?? 'Open an Application to continue'}</strong>
+              </div>
+              <dl>
+                <div>
+                  <dt>Application</dt>
+                  <dd>{effectiveApplicationId ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>Workspace</dt>
+                  <dd>{engineeringIdentity?.workspaceId ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>Configuration</dt>
+                  <dd>{engineeringIdentity?.projectId ?? '—'}</dd>
+                </div>
+              </dl>
+              <small>Workspace and configuration IDs are managed by the Application.</small>
+            </div>
 
             <FieldGroup title="Recipe">
               <TextField
@@ -315,11 +429,21 @@ export function EngineeringWorkbench({
               />
             </FieldGroup>
 
-            <FieldGroup title="Station">
+            <FieldGroup title="Station Profile">
               <TextField
                 label="Station Profile ID"
                 value={draft.stationProfileId}
                 onChange={value => setDraft(current => ({ ...current, stationProfileId: value }))}
+              />
+              <TextField
+                label="Display Name"
+                value={draft.stationName}
+                onChange={value => setDraft(current => ({ ...current, stationName: value }))}
+              />
+              <TextField
+                label="Device Binding ID"
+                value={draft.deviceBindingId}
+                onChange={value => setDraft(current => ({ ...current, deviceBindingId: value }))}
               />
               <TextField
                 label="Capability"
@@ -333,7 +457,7 @@ export function EngineeringWorkbench({
               />
             </FieldGroup>
 
-            <FieldGroup title="Snapshot">
+            <FieldGroup title="Configuration Snapshot">
               <label>
                 <span>Published Process</span>
                 <select
@@ -373,27 +497,7 @@ export function EngineeringWorkbench({
 
           <div className="engineering-summary">
             <ResourceColumn
-              icon={FolderTree}
-              title="Workspaces"
-              count={resources.workspaces.length}
-              rows={resources.workspaces.map(workspace => ({
-                id: workspace.workspaceId,
-                title: workspace.displayName,
-                meta: formatDate(workspace.createdAtUtc)
-              }))}
-            />
-            <ResourceColumn
               icon={Layers3}
-              title="Projects"
-              count={resources.projects.length}
-              rows={resources.projects.map(project => ({
-                id: project.projectId,
-                title: project.displayName,
-                meta: project.activeSnapshotId ?? 'no active snapshot'
-              }))}
-            />
-            <ResourceColumn
-              icon={SlidersHorizontal}
               title="Recipes"
               count={resources.recipes.length}
               rows={resources.recipes.map(recipe => ({
@@ -404,12 +508,22 @@ export function EngineeringWorkbench({
             />
             <ResourceColumn
               icon={Factory}
-              title="Stations"
+              title="Station Profiles"
               count={resources.stations.length}
               rows={resources.stations.map(station => ({
                 id: station.stationProfileId,
                 title: station.displayName,
                 meta: `${station.deviceBindings.length} bindings`
+              }))}
+            />
+            <ResourceColumn
+              icon={GitBranch}
+              title="Configuration Snapshots"
+              count={configurationSnapshots.length}
+              rows={configurationSnapshots.map(snapshot => ({
+                id: snapshot.snapshotId,
+                title: snapshot.processDefinitionId,
+                meta: `${snapshot.status} / ${formatDate(snapshot.publishedAtUtc)}`
               }))}
             />
           </div>
@@ -420,7 +534,7 @@ export function EngineeringWorkbench({
         <div className="panel-title">
           <div>
             <GitBranch size={17} />
-            <h2>Snapshot Result</h2>
+            <h2>Active Snapshot</h2>
           </div>
           <span>{createdProject?.activeSnapshotId ?? 'waiting'}</span>
         </div>
@@ -428,7 +542,9 @@ export function EngineeringWorkbench({
           <SnapshotResult project={createdProject} />
         ) : (
           <div className="engineering-empty">
-            <p>Select a published process and publish a configuration snapshot.</p>
+            <p>{engineeringIdentity
+              ? 'Select a published process and publish a configuration snapshot.'
+              : 'Open a project Application to configure engineering resources.'}</p>
           </div>
         )}
       </div>
@@ -540,23 +656,24 @@ function SnapshotResult({ project }: { project: EngineeringProjectResponse }): R
   );
 }
 
-function createEngineeringDraft(process?: ProcessDefinitionSummary): EngineeringDraft {
+function createEngineeringDraft(
+  process?: ProcessDefinitionSummary,
+  applicationId?: string | null
+): EngineeringDraft {
   const seed = Date.now().toString(36);
+  const prefix = (applicationId || 'application').replace(/[^a-zA-Z0-9_-]/g, '-');
+  const recipeId = `${prefix}-recipe-${seed}`;
 
   return {
-    workspaceId: `workspace-desktop-${seed}`,
-    workspaceName: 'Desktop Engineering Workspace',
-    projectId: `project-desktop-${seed}`,
-    projectName: 'Desktop Runtime Project',
-    recipeId: `recipe-desktop-${seed}`,
-    recipeVersionId: `recipe-desktop-${seed}@1.0.0`,
-    recipeName: 'Desktop Runtime Recipe',
-    stationProfileId: `station-desktop-${seed}`,
-    stationName: 'Desktop Runtime Station',
+    recipeId,
+    recipeVersionId: `${recipeId}@1.0.0`,
+    recipeName: 'Application Runtime Recipe',
+    stationProfileId: `${prefix}-station-${seed}`,
+    stationName: 'Application Runtime Station',
     deviceBindingId: 'loopback-primary',
     capabilityId: 'device.loopback',
     deviceKey: 'loopback-01',
-    snapshotId: `snapshot-desktop-${seed}`,
+    snapshotId: `${prefix}-snapshot-${seed}`,
     processDefinitionId: process?.processDefinitionId ?? '',
     processVersionId: process?.versionId ?? ''
   };

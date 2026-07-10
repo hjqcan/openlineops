@@ -394,6 +394,8 @@ export function ProcessWorkbench({
   const editorScopeKey = activeWorkspace && activeApplication
     ? `${activeWorkspace.project.projectId}\u0000${activeApplication.applicationId}`
     : null;
+  const blockScopeKeyRef = useRef(editorScopeKey);
+  blockScopeKeyRef.current = editorScopeKey;
   const isLoadedDefinitionReadOnly = editingDefinitionId !== null
     && loadedDefinitionStatus !== 'Draft';
   const selectedNode = useMemo(
@@ -430,14 +432,19 @@ export function ProcessWorkbench({
   }, [isBackendHealthy, projectApplicationApiScope]);
 
   const loadBlocklyBlocks = useCallback(async () => {
+    const requestedScopeKey = editorScopeKey;
     if (!isBackendHealthy) {
-      setBlockCatalog(fallbackBlocklyBlockCatalog);
+      if (blockScopeKeyRef.current === requestedScopeKey) {
+        setBlockCatalog(fallbackBlocklyBlockCatalog);
+      }
       return;
     }
 
-    const rows = await listProcessBlocklyBlocks();
-    setBlockCatalog(rows.length > 0 ? rows : fallbackBlocklyBlockCatalog);
-  }, [isBackendHealthy]);
+    const rows = await listProcessBlocklyBlocks(projectApplicationApiScope);
+    if (blockScopeKeyRef.current === requestedScopeKey) {
+      setBlockCatalog(rows.length > 0 ? rows : fallbackBlocklyBlockCatalog);
+    }
+  }, [editorScopeKey, isBackendHealthy, projectApplicationApiScope]);
 
   const loadProjectTopology = useCallback(async () => {
     if (!isBackendHealthy || !activeApplication?.topologyId) {
@@ -459,12 +466,25 @@ export function ProcessWorkbench({
     setLoadedDefinitionStatus(null);
     setValidationReport(null);
     setDraft(createDraft());
+    setBlockCatalog(fallbackBlocklyBlockCatalog);
+    setSelectedBlockHistoryType('');
+    setBlockHistory([]);
+    setBlockHistoryBusy(false);
     setLastStartedSession(null);
     setLastProjectSnapshot(null);
   }, [editorScopeKey]);
 
   useEffect(() => {
-    loadBlocklyBlocks().catch(error => onMessage(`Blockly block list failed: ${String(error)}`));
+    let isCurrent = true;
+    loadBlocklyBlocks().catch(error => {
+      if (isCurrent) {
+        onMessage(`Blockly block list failed: ${String(error)}`);
+      }
+    });
+
+    return () => {
+      isCurrent = false;
+    };
   }, [loadBlocklyBlocks, onMessage]);
 
   useEffect(() => {
@@ -486,24 +506,26 @@ export function ProcessWorkbench({
   useEffect(() => {
     if (!isBackendHealthy || !selectedBlockHistoryType) {
       setBlockHistory([]);
+      setBlockHistoryBusy(false);
       return;
     }
 
     let isCurrent = true;
+    const requestedScopeKey = editorScopeKey;
     setBlockHistoryBusy(true);
-    listProcessBlocklyBlockVersions(selectedBlockHistoryType)
+    listProcessBlocklyBlockVersions(selectedBlockHistoryType, projectApplicationApiScope)
       .then(rows => {
-        if (isCurrent) {
+        if (isCurrent && blockScopeKeyRef.current === requestedScopeKey) {
           setBlockHistory(rows);
         }
       })
       .catch(error => {
-        if (isCurrent) {
+        if (isCurrent && blockScopeKeyRef.current === requestedScopeKey) {
           onMessage(`Blockly block history failed: ${String(error)}`);
         }
       })
       .finally(() => {
-        if (isCurrent) {
+        if (isCurrent && blockScopeKeyRef.current === requestedScopeKey) {
           setBlockHistoryBusy(false);
         }
       });
@@ -511,7 +533,13 @@ export function ProcessWorkbench({
     return () => {
       isCurrent = false;
     };
-  }, [isBackendHealthy, onMessage, selectedBlockHistoryType]);
+  }, [
+    editorScopeKey,
+    isBackendHealthy,
+    onMessage,
+    projectApplicationApiScope,
+    selectedBlockHistoryType
+  ]);
 
   const mutateDraft = useCallback((updater: (current: ProcessDraft) => ProcessDraft) => {
     setDraft(updater);
@@ -864,25 +892,44 @@ export function ProcessWorkbench({
       pythonCodeTemplate: customBlockDraft.pythonCodeTemplate
     };
 
+    const requestedScopeKey = editorScopeKey;
     setBusy(true);
     try {
-      const response = await registerProcessBlocklyBlock(request);
+      const response = await registerProcessBlocklyBlock(request, projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Blockly block registration failed: ${response.status} ${response.text}`);
+        return;
+      }
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
         return;
       }
 
       setBlockCatalog(current => upsertBlocklyBlock(current, response.body!));
       await loadBlocklyBlocks();
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
+        return;
+      }
       setSelectedBlockHistoryType(response.body.blockType);
-      const versions = await listProcessBlocklyBlockVersions(response.body.blockType);
+      const versions = await listProcessBlocklyBlockVersions(
+        response.body.blockType,
+        projectApplicationApiScope);
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
+        return;
+      }
       setBlockHistory(versions);
       setCustomBlockDraft(createCustomBlocklyBlockDraft());
       onMessage(`Registered Blockly block ${response.body.blockType} v${response.body.version}`);
     } finally {
       setBusy(false);
     }
-  }, [customBlockDraft, isBackendHealthy, loadBlocklyBlocks, onMessage]);
+  }, [
+    customBlockDraft,
+    editorScopeKey,
+    isBackendHealthy,
+    loadBlocklyBlocks,
+    onMessage,
+    projectApplicationApiScope
+  ]);
 
   const restoreBlocklyBlockVersion = useCallback(async (
     block: ProcessBlocklyBlockDefinition
@@ -892,6 +939,7 @@ export function ProcessWorkbench({
       return;
     }
 
+    const requestedScopeKey = editorScopeKey;
     setBusy(true);
     try {
       const response = await registerProcessBlocklyBlock({
@@ -900,22 +948,39 @@ export function ProcessWorkbench({
         displayName: block.displayName,
         blocklyJson: block.blocklyJson,
         pythonCodeTemplate: block.pythonCodeTemplate
-      });
+      }, projectApplicationApiScope);
       if (!response.ok || !response.body) {
         onMessage(`Blockly block restore failed: ${response.status} ${response.text}`);
+        return;
+      }
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
         return;
       }
 
       setBlockCatalog(current => upsertBlocklyBlock(current, response.body!));
       await loadBlocklyBlocks();
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
+        return;
+      }
       setSelectedBlockHistoryType(response.body.blockType);
-      const versions = await listProcessBlocklyBlockVersions(response.body.blockType);
+      const versions = await listProcessBlocklyBlockVersions(
+        response.body.blockType,
+        projectApplicationApiScope);
+      if (blockScopeKeyRef.current !== requestedScopeKey) {
+        return;
+      }
       setBlockHistory(versions);
       onMessage(`Restored ${block.blockType} v${block.version} as v${response.body.version}`);
     } finally {
       setBusy(false);
     }
-  }, [isBackendHealthy, loadBlocklyBlocks, onMessage]);
+  }, [
+    editorScopeKey,
+    isBackendHealthy,
+    loadBlocklyBlocks,
+    onMessage,
+    projectApplicationApiScope
+  ]);
 
   const removeTransition = useCallback((transitionId: string) => {
     mutateDraft(current => ({

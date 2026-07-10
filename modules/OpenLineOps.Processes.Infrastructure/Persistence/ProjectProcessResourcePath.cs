@@ -33,6 +33,53 @@ internal static class ProjectProcessResourcePath
         return EnsureInsideProject(scope, Path.Combine(GetFlowDirectory(scope, processDefinitionId), "flow.json"));
     }
 
+    public static string GetCustomBlocksDirectory(ProjectApplicationWorkspaceScope scope)
+    {
+        return EnsureInsideProject(
+            scope,
+            Path.Combine(
+                scope.ProjectPath,
+                "applications",
+                $"application-{ToSafeSegment(scope.ApplicationId)}",
+                "blocks",
+                "custom"));
+    }
+
+    public static string GetCustomBlockDirectory(
+        ProjectApplicationWorkspaceScope scope,
+        string blockType)
+    {
+        return EnsureInsideProject(
+            scope,
+            Path.Combine(GetCustomBlocksDirectory(scope), $"block-{ToSafeSegment(blockType)}"));
+    }
+
+    public static string GetCustomBlockVersionsDirectory(
+        ProjectApplicationWorkspaceScope scope,
+        string blockType)
+    {
+        return EnsureInsideProject(
+            scope,
+            Path.Combine(GetCustomBlockDirectory(scope, blockType), "versions"));
+    }
+
+    public static string GetCustomBlockVersionPath(
+        ProjectApplicationWorkspaceScope scope,
+        string blockType,
+        int version)
+    {
+        if (version <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(version), "Blockly block version must be positive.");
+        }
+
+        return EnsureInsideProject(
+            scope,
+            Path.Combine(
+                GetCustomBlockVersionsDirectory(scope, blockType),
+                $"version-{version:D6}.json"));
+    }
+
     public static string GetNodeDirectory(
         ProjectApplicationWorkspaceScope scope,
         string processDefinitionId,

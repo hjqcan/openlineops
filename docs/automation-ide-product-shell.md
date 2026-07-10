@@ -241,6 +241,9 @@ project-root/
         driver-bindings.json
       blocks/
         custom/
+          block-user-inspect--<stable-hash>/
+            versions/
+              version-000001.json
   scripts/
     project_helpers.py
   configuration/

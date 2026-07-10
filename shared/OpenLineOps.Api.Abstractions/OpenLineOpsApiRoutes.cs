@@ -21,5 +21,9 @@ public static class OpenLineOpsApiRoutes
         AutomationProjects + "/{projectId}/applications/{applicationId}/layouts";
     public const string ProjectApplicationProcesses =
         AutomationProjects + "/{projectId}/applications/{applicationId}/processes";
+    public const string ProjectApplicationProcessBlocklyBlocks =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/process-blocks";
+    public const string ProjectApplicationEngineering =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/engineering";
     public const string Traceability = "api/traceability";
 }

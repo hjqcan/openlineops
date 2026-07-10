@@ -79,7 +79,7 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
         return Created($"/api/process-blocks/{response.BlockType}", response);
     }
 
-    private static RegisterApplicationBlockRequest ToApplicationRequest(
+    internal static RegisterApplicationBlockRequest ToApplicationRequest(
         RegisterApiBlockRequest request)
     {
         return new RegisterApplicationBlockRequest(
@@ -90,7 +90,7 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
             request.PythonCodeTemplate!);
     }
 
-    private static ProcessBlocklyBlockDefinitionResponse ToResponse(
+    internal static ProcessBlocklyBlockDefinitionResponse ToResponse(
         ProcessBlocklyBlockDefinitionDetails block)
     {
         return new ProcessBlocklyBlockDefinitionResponse(
@@ -120,7 +120,7 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
             statusCode: statusCode);
     }
 
-    private static Dictionary<string, string[]> Validate(RegisterApiBlockRequest? request)
+    internal static Dictionary<string, string[]> Validate(RegisterApiBlockRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 

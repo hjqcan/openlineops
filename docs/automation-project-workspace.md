@@ -225,6 +225,9 @@ but Studio uses the scoped routes:
 - `PUT /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}`
 - `GET /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}/validation`
 - `POST /api/automation-projects/{projectId}/applications/{applicationId}/processes/{processDefinitionId}/publish`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks/{blockType}/versions`
 - `POST /api/automation-projects/{projectId}/publish`
 - `GET /api/automation-projects/{projectId}/snapshots`
 
@@ -343,21 +346,22 @@ sessions from a published project snapshot instead of manually assembled ids.
 ## Current Gap
 
 The repository now has a project-first Studio shell plus durable project source
-for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, and Python.
-Every repository is keyed by the same explicit `(project, application)` scope.
-Topology and layout use versioned JSON; a process uses `flow.json` as an atomic
-commit pointer to content-addressed Blockly/Python artifacts with verified
-SHA-256 digests. The same local topology/layout/process ids are therefore valid
-in two applications.
+for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python, and
+versioned custom Blockly block definitions. Every project-source repository is
+keyed by the same explicit `(project, application)` scope. Topology and layout
+use versioned JSON; a process uses `flow.json` as an atomic commit pointer to
+content-addressed Blockly/Python artifacts with verified SHA-256 digests;
+custom blocks use immutable `version-000001.json` source files. The same local
+topology/layout/process/block ids are therefore valid in two applications.
 
 A cold-restart API test destroys the first host, moves the complete project
 folder, opens its manifest in a fresh host, and restores two isolated
 applications. Persistence tests also reject a modified Python artifact whose
 digest no longer matches `flow.json`.
 
-The remaining persistence gap is Engineering configuration, project custom
-blocks, bindings, and the immutable release publisher. Those contexts must
-adopt the same explicit scope rather than treating their current global
-databases as project source. The desktop also still needs a real editable
-layout canvas, explicit active-application selection, richer editor
-tabs/inspector state, and the separate Runner/Agent/CLI hosts.
+The remaining persistence gap is Engineering configuration, resolved runtime
+bindings/device profiles, and the immutable release publisher. Those contexts
+must adopt the same explicit scope rather than treating their current global
+databases as project source. The desktop now has explicit Application selection
+and editable 2D layout geometry; it still needs full topology CRUD, richer
+editor-tab/dirty-state handling, and the separate Runner/Agent/CLI hosts.

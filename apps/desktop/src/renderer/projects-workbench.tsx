@@ -1,16 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes,
+  ChevronRight,
+  Clock3,
   FileJson,
   Folder,
   FolderKanban,
   FolderOpen,
   FolderPlus,
   GitBranch,
-  LayoutGrid,
   RefreshCw,
   Save,
-  Workflow
+  Search,
+  X
 } from 'lucide-react';
 import { desktop } from './desktop-bridge';
 import type {
@@ -51,7 +53,31 @@ interface ApplicationDraft {
   displayName: string;
 }
 
-const recentProjectsStorageKey = 'openlineops.recentProjectPaths.v1';
+interface RecentProjectEntry {
+  projectPath: string;
+  lastOpenedAtUtc: string | null;
+  projectId?: string;
+  displayName?: string;
+  activeSnapshotId?: string | null;
+}
+
+interface StartProjectItem {
+  projectPath: string;
+  projectId: string | null;
+  displayName: string;
+  activeSnapshotId: string | null;
+  lastOpenedAtUtc: string | null;
+}
+
+interface StartProjectGroup {
+  label: string;
+  items: StartProjectItem[];
+}
+
+type StartDialog = 'new-project' | 'open-path' | null;
+
+const recentProjectsStorageKey = 'openlineops.recentProjects.v2';
+const legacyRecentProjectsStorageKey = 'openlineops.recentProjectPaths.v1';
 
 export function ProjectsWorkbench({
   activeWorkspace,
@@ -65,9 +91,12 @@ export function ProjectsWorkbench({
   const [openPath, setOpenPath] = useState('');
   const [applicationDraft, setApplicationDraft] = useState<ApplicationDraft>(() => createApplicationDraft());
   const [projects, setProjects] = useState<AutomationProjectSummaryResponse[]>([]);
-  const [recentProjects, setRecentProjects] = useState<string[]>(() => readRecentProjects());
+  const [recentProjects, setRecentProjects] = useState<RecentProjectEntry[]>(() => readRecentProjects());
   const [showStartCenter, setShowStartCenter] = useState(activeWorkspace === null);
+  const [startDialog, setStartDialog] = useState<StartDialog>(null);
+  const [projectSearch, setProjectSearch] = useState('');
   const [busy, setBusy] = useState(false);
+  const projectSearchRef = useRef<HTMLInputElement>(null);
 
   const activeApplications = activeWorkspace?.project.applications ?? [];
   const activeSnapshots = activeWorkspace?.project.snapshots ?? [];
@@ -82,6 +111,9 @@ export function ProjectsWorkbench({
       ]
       : [],
     [activeWorkspace]);
+  const startProjectGroups = useMemo(
+    () => buildStartProjectGroups(projects, recentProjects, projectSearch),
+    [projectSearch, projects, recentProjects]);
 
   const refreshProjects = useCallback(async () => {
     if (!isBackendHealthy) {
@@ -101,8 +133,32 @@ export function ProjectsWorkbench({
     }
   }, [activeWorkspace]);
 
-  const rememberProject = useCallback((projectPath: string) => {
-    const next = rememberRecentProject(projectPath);
+  useEffect(() => {
+    if (!showStartCenter) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        projectSearchRef.current?.focus();
+      } else if (event.key === 'Escape' && startDialog) {
+        setStartDialog(null);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showStartCenter, startDialog]);
+
+  const rememberProject = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
+    const next = rememberRecentProject({
+      projectPath: workspace.project.projectPath,
+      projectId: workspace.project.projectId,
+      displayName: workspace.project.displayName,
+      activeSnapshotId: workspace.project.activeSnapshotId,
+      lastOpenedAtUtc: new Date().toISOString()
+    });
     setRecentProjects(next);
   }, []);
 
@@ -123,8 +179,9 @@ export function ProjectsWorkbench({
 
       onWorkspaceChanged(response.body);
       setShowStartCenter(false);
+      setStartDialog(null);
       setOpenPath(response.body.project.projectPath);
-      rememberProject(response.body.project.projectPath);
+      rememberProject(response.body);
       onMessage(`Project created ${response.body.project.projectId}`);
       await refreshProjects();
     } finally {
@@ -149,8 +206,9 @@ export function ProjectsWorkbench({
 
       onWorkspaceChanged(response.body);
       setShowStartCenter(false);
+      setStartDialog(null);
       setOpenPath(response.body.project.projectPath);
-      rememberProject(response.body.project.projectPath);
+      rememberProject(response.body);
       onMessage(`Project opened ${response.body.project.projectId}`);
       await refreshProjects();
     } finally {
@@ -172,7 +230,7 @@ export function ProjectsWorkbench({
       }
 
       onWorkspaceChanged(response.body);
-      rememberProject(response.body.project.projectPath);
+      rememberProject(response.body);
       onMessage(`Manifest saved ${response.body.manifestPath}`);
     } finally {
       setBusy(false);
@@ -239,10 +297,22 @@ export function ProjectsWorkbench({
     }
   }, [draft.projectPath, openPath]);
 
+  const chooseAndOpenDirectory = useCallback(async () => {
+    const result = await desktop.selectDirectory({
+      title: 'Open automation project folder',
+      defaultPath: openPath || draft.projectPath,
+      buttonLabel: 'Open Project'
+    });
+    if (!result.canceled && result.path) {
+      setOpenPath(result.path);
+      await openWorkspace(result.path);
+    }
+  }, [draft.projectPath, openPath, openWorkspace]);
+
   const newSeed = useCallback(() => {
     const nextDraft = createProjectDraft();
     setDraft(nextDraft);
-    setOpenPath(nextDraft.projectPath);
+    setStartDialog('new-project');
   }, []);
 
   if (activeWorkspace && !showStartCenter) {
@@ -339,136 +409,272 @@ export function ProjectsWorkbench({
 
   return (
     <section className="projects-workbench project-start-center" data-testid="project-workspace-panel">
-      <div className="project-start-hero">
-        <span className="project-start-kicker">AUTOMATION LINE IDE</span>
-        <h2>Build the line.<br />Prove the run.</h2>
-        <p>
-          One project contains the topology, devices, flows, scripts, published
-          snapshots, and trace evidence needed to deliver an automation line.
-        </p>
-        <div className="project-start-steps">
-          <article><strong>01</strong><span>Create or open a project folder</span></article>
-          <article><strong>02</strong><span>Compose systems, slots, flows, and scripts</span></article>
-          <article><strong>03</strong><span>Publish once, run from IDE or Runner</span></article>
-        </div>
-        <div className="project-start-tags">
-          <span>Text project package</span>
-          <span>Blockly-first</span>
-          <span>Python extensible</span>
-        </div>
-      </div>
-
-      <div className="panel project-start-actions">
-        <div className="panel-title">
+      <div className="project-start-shell">
+        <header className="project-start-header">
+          <div className="project-start-product-mark">OL</div>
           <div>
-            <FolderKanban size={17} />
-            <h2>Automation Projects</h2>
+            <span>OPENLINEOPS STUDIO</span>
+            <h1>Automation Projects</h1>
+            <p>Build, validate, publish, and operate automation lines.</p>
           </div>
-          <span>{projects.length} indexed</span>
-        </div>
+          <div className={isBackendHealthy ? 'project-start-runtime healthy' : 'project-start-runtime'}>
+            <i />
+            <span>Runtime {isBackendHealthy ? 'ready' : 'offline'}</span>
+          </div>
+        </header>
 
-        <div className="projects-toolbar">
-          <button type="button" className="button ghost" onClick={refreshProjects} disabled={!canCallBackend}>
-            <RefreshCw size={15} />
-            Refresh
-          </button>
-          <button type="button" className="button ghost" onClick={newSeed} disabled={busy}>
-            <FolderPlus size={15} />
-            New Draft
-          </button>
-          {activeWorkspace ? (
-            <button type="button" className="button" onClick={() => setShowStartCenter(false)}>
-              Back to {activeWorkspace.project.displayName}
-            </button>
-          ) : null}
-        </div>
-
-        <div className="project-start-actions-body">
-          <fieldset className="projects-fieldset project-create-form">
-            <legend>New Project</legend>
-            <TextField
-              label="Project ID"
-              value={draft.projectId}
-              onChange={value => setDraft(current => ({ ...current, projectId: value }))}
-            />
-            <TextField
-              label="Display Name"
-              value={draft.displayName}
-              onChange={value => setDraft(current => ({ ...current, displayName: value }))}
-            />
-            <PathField
-              label="Project Path"
-              value={draft.projectPath}
-              testId="select-project-directory"
-              inputTestId="project-path-input"
-              onBrowse={chooseCreateDirectory}
-              onChange={value => setDraft(current => ({ ...current, projectPath: value }))}
-            />
-            <div className="project-application-fields">
-              <TextField
-                label="Default Application ID"
-                value={draft.defaultApplicationId}
-                onChange={value => setDraft(current => ({ ...current, defaultApplicationId: value }))}
-              />
-              <TextField
-                label="Default Application Name"
-                value={draft.defaultApplicationName}
-                onChange={value => setDraft(current => ({ ...current, defaultApplicationName: value }))}
-              />
-            </div>
-            <button
-              type="button"
-              className="button primary project-primary-action"
-              onClick={createWorkspace}
-              disabled={!canCallBackend}
-              data-testid="create-project-workspace"
-            >
-              <FolderPlus size={15} />
-              Create Project
-            </button>
-          </fieldset>
-
-          <div className="project-open-column">
-            <fieldset className="projects-fieldset">
-              <legend>Open Project</legend>
-              <PathField
-                label="Project Path"
-                value={openPath}
-                testId="open-project-directory"
-                inputTestId="open-project-path-input"
-                onBrowse={chooseOpenDirectory}
-                onChange={setOpenPath}
-              />
+        <div className="project-start-main">
+          <section className="project-start-recent-pane" aria-label="Recent automation projects">
+            <div className="project-start-section-heading">
+              <div>
+                <h2>Recent projects</h2>
+                <span>{startProjectGroups.reduce((count, group) => count + group.items.length, 0)} shown</span>
+              </div>
               <button
                 type="button"
-                className="button project-primary-action"
-                onClick={() => { void openWorkspace(); }}
+                className="project-start-icon-button"
+                onClick={refreshProjects}
                 disabled={!canCallBackend}
-                data-testid="open-project-workspace"
+                title="Refresh indexed projects"
               >
-                <FolderOpen size={15} />
-                Open Folder
+                <RefreshCw size={15} />
               </button>
-              <RecentProjectsList
-                recentProjects={recentProjects}
-                onOpen={path => {
-                  setOpenPath(path);
-                  void openWorkspace(path);
-                }}
-              />
-            </fieldset>
+            </div>
 
-            <ProjectResourceGrid
-              projects={projects}
-              activeWorkspace={activeWorkspace}
-              onOpen={path => {
-                setOpenPath(path);
-                void openWorkspace(path);
-              }}
-            />
-          </div>
+            <label className="project-start-search">
+              <Search size={16} />
+              <input
+                ref={projectSearchRef}
+                value={projectSearch}
+                onChange={event => setProjectSearch(event.target.value)}
+                placeholder="Search by project name, id, or path"
+                aria-label="Search recent projects"
+                data-testid="project-search"
+              />
+              {projectSearch ? (
+                <button type="button" onClick={() => setProjectSearch('')} title="Clear search">
+                  <X size={14} />
+                </button>
+              ) : <kbd>Ctrl K</kbd>}
+            </label>
+
+            <div className="project-start-projects">
+              {startProjectGroups.length === 0 ? (
+                <div className="project-start-empty">
+                  <FolderOpen size={26} />
+                  <strong>{projectSearch ? 'No matching projects' : 'No recent projects yet'}</strong>
+                  <span>{projectSearch ? 'Try a different name or path.' : 'Create a project or open an existing project folder.'}</span>
+                </div>
+              ) : startProjectGroups.map(group => (
+                <section className="project-start-group" key={group.label}>
+                  <h3>{group.label}</h3>
+                  {group.items.map(item => (
+                    <button
+                      type="button"
+                      className="project-start-project-row"
+                      key={item.projectPath}
+                      onClick={() => {
+                        setOpenPath(item.projectPath);
+                        void openWorkspace(item.projectPath);
+                      }}
+                      disabled={!canCallBackend}
+                    >
+                      <FolderKanban size={20} />
+                      <span>
+                        <strong>{item.displayName}</strong>
+                        <small>{item.projectPath}</small>
+                      </span>
+                      <span className="project-start-project-meta">
+                        {item.lastOpenedAtUtc ? <time>{formatRecentTime(item.lastOpenedAtUtc)}</time> : null}
+                        <small>{item.activeSnapshotId ? 'Published' : item.projectId ?? 'Project folder'}</small>
+                      </span>
+                      <ChevronRight size={16} />
+                    </button>
+                  ))}
+                </section>
+              ))}
+            </div>
+          </section>
+
+          <aside className="project-start-command-pane" aria-label="Start actions">
+            <div className="project-start-section-heading">
+              <div>
+                <h2>Start</h2>
+                <span>Choose what you want to do</span>
+              </div>
+            </div>
+
+            <div className="project-start-commands">
+              <button type="button" onClick={newSeed} disabled={busy} data-testid="start-create-project">
+                <FolderPlus size={20} />
+                <span>
+                  <strong>Create a new project</strong>
+                  <small>Start from an automation-line project template</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => { void chooseAndOpenDirectory(); }}
+                disabled={!canCallBackend}
+                data-testid="start-open-project-folder"
+              >
+                <FolderOpen size={20} />
+                <span>
+                  <strong>Open a project folder</strong>
+                  <small>Select a self-contained OpenLineOps project</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setStartDialog('open-path')}
+                disabled={!canCallBackend}
+                data-testid="start-open-project-by-path"
+              >
+                <Folder size={20} />
+                <span>
+                  <strong>Open using a path</strong>
+                  <small>Paste a local or mapped project directory</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
+            </div>
+
+            {activeWorkspace ? (
+              <button
+                type="button"
+                className="project-start-back-button"
+                onClick={() => setShowStartCenter(false)}
+              >
+                Back to {activeWorkspace.project.displayName}
+              </button>
+            ) : null}
+
+            <div className="project-start-context-card">
+              <Clock3 size={18} />
+              <div>
+                <strong>Project source stays portable</strong>
+                <span>Topology, layout, Blockly, Python, blocks, and configuration live with the project.</span>
+              </div>
+            </div>
+          </aside>
         </div>
+
+        <footer className="project-start-footer">
+          <span>Text project source</span>
+          <span>Blockly-first flow design</span>
+          <span>Controlled Python extension</span>
+          <b>{recentProjects.length} recent · {projects.length} indexed</b>
+        </footer>
       </div>
+
+      {startDialog ? (
+        <div className="project-start-dialog-backdrop">
+          <section
+            className="project-start-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="project-start-dialog-title"
+          >
+            <header>
+              <div>
+                <span>{startDialog === 'new-project' ? 'PROJECT TEMPLATE' : 'OPEN PROJECT'}</span>
+                <h2 id="project-start-dialog-title">
+                  {startDialog === 'new-project' ? 'Create an automation project' : 'Open a project by path'}
+                </h2>
+              </div>
+              <button type="button" onClick={() => setStartDialog(null)} title="Close">
+                <X size={17} />
+              </button>
+            </header>
+
+            {startDialog === 'new-project' ? (
+              <div className="project-start-dialog-body project-start-new-project">
+                <aside className="project-template-card selected">
+                  <FolderKanban size={24} />
+                  <strong>Automation Line Project</strong>
+                  <span>Application, topology, 2D layout, Blockly/Python flows, configuration, and release source.</span>
+                  <small>OPENLINEOPS · PROJECT FORMAT V1</small>
+                </aside>
+                <div className="project-start-dialog-form">
+                  <TextField
+                    label="Project ID"
+                    value={draft.projectId}
+                    onChange={value => setDraft(current => ({ ...current, projectId: value }))}
+                  />
+                  <TextField
+                    label="Display Name"
+                    value={draft.displayName}
+                    onChange={value => setDraft(current => ({ ...current, displayName: value }))}
+                  />
+                  <PathField
+                    label="Project Path"
+                    value={draft.projectPath}
+                    testId="select-project-directory"
+                    inputTestId="project-path-input"
+                    onBrowse={chooseCreateDirectory}
+                    onChange={value => setDraft(current => ({ ...current, projectPath: value }))}
+                  />
+                  <div className="project-application-fields">
+                    <TextField
+                      label="Default Application ID"
+                      value={draft.defaultApplicationId}
+                      onChange={value => setDraft(current => ({ ...current, defaultApplicationId: value }))}
+                    />
+                    <TextField
+                      label="Default Application Name"
+                      value={draft.defaultApplicationName}
+                      onChange={value => setDraft(current => ({ ...current, defaultApplicationName: value }))}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="project-start-dialog-body project-start-open-path">
+                <p>Open the folder that contains <code>openlineops.project.json</code>.</p>
+                <PathField
+                  label="Project Path"
+                  value={openPath}
+                  testId="open-project-directory"
+                  inputTestId="open-project-path-input"
+                  onBrowse={chooseOpenDirectory}
+                  onChange={setOpenPath}
+                />
+              </div>
+            )}
+
+            <footer>
+              <button type="button" className="button ghost" onClick={() => setStartDialog(null)}>
+                Cancel
+              </button>
+              {startDialog === 'new-project' ? (
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={createWorkspace}
+                  disabled={!canCallBackend}
+                  data-testid="create-project-workspace"
+                >
+                  <FolderPlus size={15} />
+                  Create Project
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => { void openWorkspace(); }}
+                  disabled={!canCallBackend}
+                  data-testid="open-project-workspace"
+                >
+                  <FolderOpen size={15} />
+                  Open Project
+                </button>
+              )}
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -515,97 +721,6 @@ function PathField({
         </button>
       </div>
     </label>
-  );
-}
-
-function RecentProjectsList({
-  recentProjects,
-  onOpen
-}: {
-  recentProjects: string[];
-  onOpen(projectPath: string): void;
-}): React.ReactElement {
-  return (
-    <div className="recent-projects">
-      <div>
-        <FolderOpen size={14} />
-        <strong>Recent</strong>
-      </div>
-      {recentProjects.length === 0 ? (
-        <p>No recent project paths</p>
-      ) : recentProjects.map(projectPath => (
-        <button type="button" key={projectPath} onClick={() => onOpen(projectPath)}>
-          <span>{projectPath}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ProjectResourceGrid({
-  projects,
-  activeWorkspace,
-  onOpen
-}: {
-  projects: AutomationProjectSummaryResponse[];
-  activeWorkspace: AutomationProjectWorkspaceResponse | null;
-  onOpen(projectPath: string): void;
-}): React.ReactElement {
-  return (
-    <div className="project-resource-grid">
-      <section className="project-resource-list">
-        <div>
-          <FolderKanban size={15} />
-          <strong>Indexed Projects</strong>
-          <span>{projects.length}</span>
-        </div>
-        {projects.length === 0 ? (
-          <p>No indexed projects</p>
-        ) : projects.slice(0, 8).map(project => (
-          <button
-            type="button"
-            key={project.projectId}
-            className={activeWorkspace?.project.projectId === project.projectId ? 'selected' : ''}
-            onClick={() => onOpen(project.projectPath)}
-          >
-            <strong>{project.displayName}</strong>
-            <span>{project.projectId}</span>
-            <small>{project.activeSnapshotId ?? project.projectPath}</small>
-          </button>
-        ))}
-      </section>
-
-      <section className="project-resource-list">
-        <div>
-          <Boxes size={15} />
-          <strong>Composition Targets</strong>
-          <span>{activeWorkspace ? 'open' : 'idle'}</span>
-        </div>
-        <CompositionTarget icon={LayoutGrid} title="Site Layout" value="topology projection" />
-        <CompositionTarget icon={Workflow} title="Processes" value="Blockly plus PythonScript" />
-        <CompositionTarget icon={GitBranch} title="Published Snapshot" value={activeWorkspace?.project.activeSnapshotId ?? 'none'} />
-      </section>
-    </div>
-  );
-}
-
-function CompositionTarget({
-  icon: Icon,
-  title,
-  value
-}: {
-  icon: React.ComponentType<{ size?: number }>;
-  title: string;
-  value: string;
-}): React.ReactElement {
-  return (
-    <article className="composition-target">
-      <Icon size={16} />
-      <div>
-        <strong>{title}</strong>
-        <span>{value}</span>
-      </div>
-    </article>
   );
 }
 
@@ -737,28 +852,159 @@ function toOptionalString(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function readRecentProjects(): string[] {
+function buildStartProjectGroups(
+  projects: AutomationProjectSummaryResponse[],
+  recentProjects: RecentProjectEntry[],
+  search: string
+): StartProjectGroup[] {
+  const projectsByPath = new Map(
+    projects.map(project => [normalizeProjectPath(project.projectPath), project] as const));
+  const seenPaths = new Set<string>();
+  const items: StartProjectItem[] = [];
+
+  for (const recent of recentProjects) {
+    const pathKey = normalizeProjectPath(recent.projectPath);
+    if (!pathKey || seenPaths.has(pathKey)) {
+      continue;
+    }
+
+    seenPaths.add(pathKey);
+    const project = projectsByPath.get(pathKey);
+    items.push({
+      projectPath: recent.projectPath,
+      projectId: project?.projectId ?? recent.projectId ?? null,
+      displayName: project?.displayName ?? recent.displayName ?? projectFolderName(recent.projectPath),
+      activeSnapshotId: project?.activeSnapshotId ?? recent.activeSnapshotId ?? null,
+      lastOpenedAtUtc: recent.lastOpenedAtUtc
+    });
+  }
+
+  for (const project of projects) {
+    const pathKey = normalizeProjectPath(project.projectPath);
+    if (seenPaths.has(pathKey)) {
+      continue;
+    }
+
+    seenPaths.add(pathKey);
+    items.push({
+      projectPath: project.projectPath,
+      projectId: project.projectId,
+      displayName: project.displayName,
+      activeSnapshotId: project.activeSnapshotId,
+      lastOpenedAtUtc: null
+    });
+  }
+
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const filtered = normalizedSearch
+    ? items.filter(item => [item.displayName, item.projectId ?? '', item.projectPath]
+      .some(value => value.toLocaleLowerCase().includes(normalizedSearch)))
+    : items;
+  const today: StartProjectItem[] = [];
+  const previousWeek: StartProjectItem[] = [];
+  const earlier: StartProjectItem[] = [];
+  const indexed: StartProjectItem[] = [];
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const sevenDaysAgo = todayStart - (6 * 24 * 60 * 60 * 1000);
+
+  for (const item of filtered) {
+    if (!item.lastOpenedAtUtc) {
+      indexed.push(item);
+      continue;
+    }
+
+    const openedAt = new Date(item.lastOpenedAtUtc).getTime();
+    if (!Number.isFinite(openedAt)) {
+      earlier.push(item);
+    } else if (openedAt >= todayStart) {
+      today.push(item);
+    } else if (openedAt >= sevenDaysAgo) {
+      previousWeek.push(item);
+    } else {
+      earlier.push(item);
+    }
+  }
+
+  return [
+    { label: 'Today', items: today },
+    { label: 'Previous 7 days', items: previousWeek },
+    { label: 'Earlier', items: earlier },
+    { label: 'Indexed in this session', items: indexed }
+  ].filter(group => group.items.length > 0);
+}
+
+function normalizeProjectPath(projectPath: string): string {
+  return projectPath.trim().replace(/[\\/]+$/, '').toLocaleLowerCase();
+}
+
+function projectFolderName(projectPath: string): string {
+  return projectPath
+    .trim()
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .at(-1)
+    ?? 'Automation Project';
+}
+
+function readRecentProjects(): RecentProjectEntry[] {
   try {
     const value = window.localStorage.getItem(recentProjectsStorageKey);
-    const parsed = value ? JSON.parse(value) as unknown : [];
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === 'string').slice(0, 8)
+    const parsed = value ? JSON.parse(value) as unknown : null;
+    if (value && Array.isArray(parsed)) {
+      return parsed
+        .filter((item): item is RecentProjectEntry => Boolean(
+          item
+          && typeof item === 'object'
+          && typeof (item as RecentProjectEntry).projectPath === 'string'
+          && (
+            (item as RecentProjectEntry).lastOpenedAtUtc === null
+            || typeof (item as RecentProjectEntry).lastOpenedAtUtc === 'string'
+          )
+          && (
+            (item as RecentProjectEntry).projectId === undefined
+            || typeof (item as RecentProjectEntry).projectId === 'string'
+          )
+          && (
+            (item as RecentProjectEntry).displayName === undefined
+            || typeof (item as RecentProjectEntry).displayName === 'string'
+          )
+          && (
+            (item as RecentProjectEntry).activeSnapshotId === undefined
+            || (item as RecentProjectEntry).activeSnapshotId === null
+            || typeof (item as RecentProjectEntry).activeSnapshotId === 'string'
+          )))
+        .slice(0, 12);
+    }
+  } catch {
+    // Fall through to the v1 migration path.
+  }
+
+  try {
+    const legacyValue = window.localStorage.getItem(legacyRecentProjectsStorageKey);
+    const legacy = legacyValue ? JSON.parse(legacyValue) as unknown : [];
+    return Array.isArray(legacy)
+      ? legacy
+        .filter((item): item is string => typeof item === 'string')
+        .slice(0, 12)
+        .map(projectPath => ({ projectPath, lastOpenedAtUtc: null }))
       : [];
   } catch {
     return [];
   }
 }
 
-function rememberRecentProject(projectPath: string): string[] {
-  const trimmedPath = projectPath.trim();
+function rememberRecentProject(entry: RecentProjectEntry): RecentProjectEntry[] {
+  const trimmedPath = entry.projectPath.trim();
   if (!trimmedPath) {
     return readRecentProjects();
   }
 
+  const pathKey = normalizeProjectPath(trimmedPath);
   const next = [
-    trimmedPath,
-    ...readRecentProjects().filter(item => item !== trimmedPath)
-  ].slice(0, 8);
+    { ...entry, projectPath: trimmedPath },
+    ...readRecentProjects().filter(item => normalizeProjectPath(item.projectPath) !== pathKey)
+  ].slice(0, 12);
 
   try {
     window.localStorage.setItem(recentProjectsStorageKey, JSON.stringify(next));
@@ -767,6 +1013,22 @@ function rememberRecentProject(projectPath: string): string[] {
   }
 
   return next;
+}
+
+function formatRecentTime(value: string): string {
+  const openedAt = new Date(value);
+  if (Number.isNaN(openedAt.getTime())) {
+    return 'Recently';
+  }
+
+  const now = new Date();
+  const sameDay = openedAt.getFullYear() === now.getFullYear()
+    && openedAt.getMonth() === now.getMonth()
+    && openedAt.getDate() === now.getDate();
+
+  return sameDay
+    ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(openedAt)
+    : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(openedAt);
 }
 
 function formatDate(value: string): string {

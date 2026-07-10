@@ -343,7 +343,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
             : Ok(ToResponse(result.Value));
     }
 
-    private static CreateApplicationEngineeringProjectRequest ToApplicationRequest(
+    internal static CreateApplicationEngineeringProjectRequest ToApplicationRequest(
         CreateApiEngineeringProjectRequest request)
     {
         return new CreateApplicationEngineeringProjectRequest(
@@ -352,14 +352,14 @@ public sealed class EngineeringConfigurationController : ControllerBase
             request.DisplayName!);
     }
 
-    private static CreateApplicationWorkspaceRequest ToApplicationRequest(CreateApiWorkspaceRequest request)
+    internal static CreateApplicationWorkspaceRequest ToApplicationRequest(CreateApiWorkspaceRequest request)
     {
         return new CreateApplicationWorkspaceRequest(
             request.WorkspaceId!,
             request.DisplayName!);
     }
 
-    private static CreateApplicationRecipeRequest ToApplicationRequest(CreateApiRecipeRequest request)
+    internal static CreateApplicationRecipeRequest ToApplicationRequest(CreateApiRecipeRequest request)
     {
         return new CreateApplicationRecipeRequest(
             request.RecipeId!,
@@ -372,7 +372,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
                 .ToArray());
     }
 
-    private static CreateApplicationStationProfileRequest ToApplicationRequest(
+    internal static CreateApplicationStationProfileRequest ToApplicationRequest(
         CreateApiStationProfileRequest request)
     {
         return new CreateApplicationStationProfileRequest(
@@ -386,7 +386,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
                 .ToArray());
     }
 
-    private static PublishApplicationConfigurationSnapshotRequest ToApplicationRequest(
+    internal static PublishApplicationConfigurationSnapshotRequest ToApplicationRequest(
         PublishApiConfigurationSnapshotRequest request)
     {
         return new PublishApplicationConfigurationSnapshotRequest(
@@ -397,7 +397,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
             request.StationProfileId!);
     }
 
-    private static EngineeringProjectResponse ToResponse(EngineeringProjectDetails project)
+    internal static EngineeringProjectResponse ToResponse(EngineeringProjectDetails project)
     {
         return new EngineeringProjectResponse(
             project.ProjectId,
@@ -408,7 +408,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
             project.Snapshots.Select(ToResponse).ToArray());
     }
 
-    private static WorkspaceResponse ToResponse(WorkspaceDetails workspace)
+    internal static WorkspaceResponse ToResponse(WorkspaceDetails workspace)
     {
         return new WorkspaceResponse(
             workspace.WorkspaceId,
@@ -416,7 +416,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
             workspace.CreatedAtUtc);
     }
 
-    private static ConfigurationSnapshotResponse ToResponse(ConfigurationSnapshotDetails snapshot)
+    internal static ConfigurationSnapshotResponse ToResponse(ConfigurationSnapshotDetails snapshot)
     {
         return new ConfigurationSnapshotResponse(
             snapshot.SnapshotId,
@@ -436,7 +436,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
                 .ToArray());
     }
 
-    private static RecipeResponse ToResponse(RecipeDetails recipe)
+    internal static RecipeResponse ToResponse(RecipeDetails recipe)
     {
         return new RecipeResponse(
             recipe.RecipeId,
@@ -450,7 +450,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
                 .ToArray());
     }
 
-    private static StationProfileResponse ToResponse(StationProfileDetails stationProfile)
+    internal static StationProfileResponse ToResponse(StationProfileDetails stationProfile)
     {
         return new StationProfileResponse(
             stationProfile.StationProfileId,
@@ -463,7 +463,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
                 .ToArray());
     }
 
-    private static ConfigurationSnapshotDiffResponse ToResponse(
+    internal static ConfigurationSnapshotDiffResponse ToResponse(
         ConfigurationSnapshotDiffDetails diff)
     {
         return new ConfigurationSnapshotDiffResponse(
@@ -495,7 +495,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
             statusCode: statusCode);
     }
 
-    private static Dictionary<string, string[]> Validate(CreateApiEngineeringProjectRequest? request)
+    internal static Dictionary<string, string[]> Validate(CreateApiEngineeringProjectRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -512,7 +512,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(CreateApiWorkspaceRequest? request)
+    internal static Dictionary<string, string[]> Validate(CreateApiWorkspaceRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -528,7 +528,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(CreateApiRecipeRequest? request)
+    internal static Dictionary<string, string[]> Validate(CreateApiRecipeRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -554,7 +554,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(CreateApiStationProfileRequest? request)
+    internal static Dictionary<string, string[]> Validate(CreateApiStationProfileRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
 
@@ -579,7 +579,7 @@ public sealed class EngineeringConfigurationController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(
+    internal static Dictionary<string, string[]> Validate(
         PublishApiConfigurationSnapshotRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);

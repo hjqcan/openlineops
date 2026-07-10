@@ -11,22 +11,25 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
 {
     private readonly IProjectApplicationWorkspaceScopeResolver _scopeResolver;
     private readonly IProjectProcessDefinitionRepository _projectRepository;
-    private readonly IProcessRuntimeSessionLauncher _legacyLauncher;
+    private readonly IProcessDefinitionRepository _legacyRepository;
     private readonly IRuntimeSessionRunner _sessionRunner;
-    private readonly IRuntimeConfigurationSnapshotResolver _configurationSnapshotResolver;
+    private readonly IProjectRuntimeConfigurationSnapshotResolver _projectConfigurationSnapshotResolver;
+    private readonly IRuntimeConfigurationSnapshotResolver _legacyConfigurationSnapshotResolver;
 
     public ProjectProcessRuntimeSessionLauncher(
         IProjectApplicationWorkspaceScopeResolver scopeResolver,
         IProjectProcessDefinitionRepository projectRepository,
-        IProcessRuntimeSessionLauncher legacyLauncher,
+        IProcessDefinitionRepository legacyRepository,
         IRuntimeSessionRunner sessionRunner,
-        IRuntimeConfigurationSnapshotResolver configurationSnapshotResolver)
+        IProjectRuntimeConfigurationSnapshotResolver projectConfigurationSnapshotResolver,
+        IRuntimeConfigurationSnapshotResolver legacyConfigurationSnapshotResolver)
     {
         _scopeResolver = scopeResolver;
         _projectRepository = projectRepository;
-        _legacyLauncher = legacyLauncher;
+        _legacyRepository = legacyRepository;
         _sessionRunner = sessionRunner;
-        _configurationSnapshotResolver = configurationSnapshotResolver;
+        _projectConfigurationSnapshotResolver = projectConfigurationSnapshotResolver;
+        _legacyConfigurationSnapshotResolver = legacyConfigurationSnapshotResolver;
     }
 
     public async ValueTask<Result<StartedProcessRuntimeSessionDetails>> StartAsync(
@@ -51,19 +54,20 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
             .GetByIdAsync(scope, definitionId, cancellationToken)
             .ConfigureAwait(false);
 
-        if (projectDefinition is null)
-        {
-            // Compatibility for manifests created before project-scoped process
-            // source existed. New Studio projects always take the scoped path.
-            return await _legacyLauncher
-                .StartAsync(processDefinitionId, request, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
+        // Process definitions created before project-scoped source existed can
+        // still come from the legacy repository. Snapshot resolution remains
+        // project-first in both branches so a global definition can safely run
+        // with a configuration snapshot owned by this application.
+        var definitionRepository = projectDefinition is null
+            ? _legacyRepository
+            : new ScopedProcessDefinitionRepository(scope, _projectRepository);
         var launcher = new ProcessRuntimeSessionLauncher(
-            new ScopedProcessDefinitionRepository(scope, _projectRepository),
+            definitionRepository,
             _sessionRunner,
-            _configurationSnapshotResolver);
+            new ProjectFirstRuntimeConfigurationSnapshotResolver(
+                scope,
+                _projectConfigurationSnapshotResolver,
+                _legacyConfigurationSnapshotResolver));
 
         return await launcher
             .StartAsync(processDefinitionId, request, cancellationToken)
@@ -101,6 +105,42 @@ public sealed class ProjectProcessRuntimeSessionLauncher : IProjectProcessRuntim
             CancellationToken cancellationToken = default)
         {
             return _repository.ListAsync(_scope, cancellationToken);
+        }
+    }
+
+    private sealed class ProjectFirstRuntimeConfigurationSnapshotResolver :
+        IRuntimeConfigurationSnapshotResolver
+    {
+        private readonly ProjectApplicationWorkspaceScope _scope;
+        private readonly IProjectRuntimeConfigurationSnapshotResolver _projectResolver;
+        private readonly IRuntimeConfigurationSnapshotResolver _legacyResolver;
+
+        public ProjectFirstRuntimeConfigurationSnapshotResolver(
+            ProjectApplicationWorkspaceScope scope,
+            IProjectRuntimeConfigurationSnapshotResolver projectResolver,
+            IRuntimeConfigurationSnapshotResolver legacyResolver)
+        {
+            _scope = scope;
+            _projectResolver = projectResolver;
+            _legacyResolver = legacyResolver;
+        }
+
+        public async ValueTask<Result<RuntimeConfigurationSnapshotDetails>> ResolveAsync(
+            string configurationSnapshotId,
+            CancellationToken cancellationToken = default)
+        {
+            var projectResult = await _projectResolver
+                .ResolveAsync(_scope, configurationSnapshotId, cancellationToken)
+                .ConfigureAwait(false);
+            if (projectResult.IsSuccess
+                || !projectResult.Error.Code.StartsWith("NotFound.", StringComparison.Ordinal))
+            {
+                return projectResult;
+            }
+
+            return await _legacyResolver
+                .ResolveAsync(configurationSnapshotId, cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 }
