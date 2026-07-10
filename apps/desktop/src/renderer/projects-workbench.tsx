@@ -35,6 +35,7 @@ interface ProjectsWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
   isBackendHealthy: boolean;
+  statusMessage: string;
   onActiveApplicationChanged(applicationId: string): void;
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
@@ -83,6 +84,7 @@ export function ProjectsWorkbench({
   activeWorkspace,
   activeApplicationId,
   isBackendHealthy,
+  statusMessage,
   onActiveApplicationChanged,
   onWorkspaceChanged,
   onMessage
@@ -97,6 +99,8 @@ export function ProjectsWorkbench({
   const [projectSearch, setProjectSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const projectSearchRef = useRef<HTMLInputElement>(null);
+  const startDialogRef = useRef<HTMLDialogElement>(null);
+  const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
 
   const activeApplications = activeWorkspace?.project.applications ?? [];
   const activeSnapshots = activeWorkspace?.project.snapshots ?? [];
@@ -139,17 +143,53 @@ export function ProjectsWorkbench({
     }
 
     const onKeyDown = (event: KeyboardEvent): void => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      if (!startDialog && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         projectSearchRef.current?.focus();
-      } else if (event.key === 'Escape' && startDialog) {
-        setStartDialog(null);
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [showStartCenter, startDialog]);
+
+  const openStartDialog = useCallback((dialog: Exclude<StartDialog, null>) => {
+    dialogReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setStartDialog(dialog);
+  }, []);
+
+  const closeStartDialog = useCallback(() => {
+    if (!busy) {
+      setStartDialog(null);
+    }
+  }, [busy]);
+
+  useEffect(() => {
+    const dialog = startDialogRef.current;
+    if (!startDialog || !dialog) {
+      return;
+    }
+
+    if (!dialog.open) {
+      dialog.showModal();
+    }
+    const focusFrame = window.requestAnimationFrame(() => {
+      dialog.querySelector<HTMLElement>('[data-dialog-initial-focus]')?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      if (dialog.open) {
+        dialog.close();
+      }
+      const returnTarget = dialogReturnFocusRef.current;
+      if (returnTarget?.isConnected) {
+        returnTarget.focus();
+      }
+    };
+  }, [startDialog]);
 
   const rememberProject = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
     const next = rememberRecentProject({
@@ -183,7 +223,9 @@ export function ProjectsWorkbench({
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body);
       onMessage(`Project created ${response.body.project.projectId}`);
-      await refreshProjects();
+      await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
+    } catch (error) {
+      onMessage(`Project create failed: ${String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -210,7 +252,9 @@ export function ProjectsWorkbench({
       setOpenPath(response.body.project.projectPath);
       rememberProject(response.body);
       onMessage(`Project opened ${response.body.project.projectId}`);
-      await refreshProjects();
+      await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
+    } catch (error) {
+      onMessage(`Project open failed: ${String(error)}`);
     } finally {
       setBusy(false);
     }
@@ -312,8 +356,8 @@ export function ProjectsWorkbench({
   const newSeed = useCallback(() => {
     const nextDraft = createProjectDraft();
     setDraft(nextDraft);
-    setStartDialog('new-project');
-  }, []);
+    openStartDialog('new-project');
+  }, [openStartDialog]);
 
   if (activeWorkspace && !showStartCenter) {
     return (
@@ -423,6 +467,10 @@ export function ProjectsWorkbench({
           </div>
         </header>
 
+        <div className="project-start-status" role="status" aria-live="polite">
+          {statusMessage}
+        </div>
+
         <div className="project-start-main">
           <section className="project-start-recent-pane" aria-label="Recent automation projects">
             <div className="project-start-section-heading">
@@ -433,7 +481,9 @@ export function ProjectsWorkbench({
               <button
                 type="button"
                 className="project-start-icon-button"
-                onClick={refreshProjects}
+                onClick={() => {
+                  void refreshProjects().catch(error => onMessage(`Project list failed: ${String(error)}`));
+                }}
                 disabled={!canCallBackend}
                 title="Refresh indexed projects"
               >
@@ -528,7 +578,7 @@ export function ProjectsWorkbench({
               </button>
               <button
                 type="button"
-                onClick={() => setStartDialog('open-path')}
+                onClick={() => openStartDialog('open-path')}
                 disabled={!canCallBackend}
                 data-testid="start-open-project-by-path"
               >
@@ -546,6 +596,7 @@ export function ProjectsWorkbench({
                 type="button"
                 className="project-start-back-button"
                 onClick={() => setShowStartCenter(false)}
+                disabled={busy}
               >
                 Back to {activeWorkspace.project.displayName}
               </button>
@@ -570,12 +621,15 @@ export function ProjectsWorkbench({
       </div>
 
       {startDialog ? (
-        <div className="project-start-dialog-backdrop">
-          <section
+          <dialog
+            ref={startDialogRef}
             className="project-start-dialog"
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="project-start-dialog-title"
+            aria-busy={busy}
+            onCancel={event => {
+              event.preventDefault();
+              closeStartDialog();
+            }}
           >
             <header>
               <div>
@@ -584,7 +638,7 @@ export function ProjectsWorkbench({
                   {startDialog === 'new-project' ? 'Create an automation project' : 'Open a project by path'}
                 </h2>
               </div>
-              <button type="button" onClick={() => setStartDialog(null)} title="Close">
+              <button type="button" onClick={closeStartDialog} disabled={busy} title="Close" aria-label="Close dialog">
                 <X size={17} />
               </button>
             </header>
@@ -601,6 +655,7 @@ export function ProjectsWorkbench({
                   <TextField
                     label="Project ID"
                     value={draft.projectId}
+                    initialFocus
                     onChange={value => setDraft(current => ({ ...current, projectId: value }))}
                   />
                   <TextField
@@ -636,6 +691,7 @@ export function ProjectsWorkbench({
                 <PathField
                   label="Project Path"
                   value={openPath}
+                  initialFocus
                   testId="open-project-directory"
                   inputTestId="open-project-path-input"
                   onBrowse={chooseOpenDirectory}
@@ -645,7 +701,7 @@ export function ProjectsWorkbench({
             )}
 
             <footer>
-              <button type="button" className="button ghost" onClick={() => setStartDialog(null)}>
+              <button type="button" className="button ghost" onClick={closeStartDialog} disabled={busy}>
                 Cancel
               </button>
               {startDialog === 'new-project' ? (
@@ -672,8 +728,7 @@ export function ProjectsWorkbench({
                 </button>
               )}
             </footer>
-          </section>
-        </div>
+          </dialog>
       ) : null}
     </section>
   );
@@ -682,16 +737,22 @@ export function ProjectsWorkbench({
 function TextField({
   label,
   value,
+  initialFocus = false,
   onChange
 }: {
   label: string;
   value: string;
+  initialFocus?: boolean;
   onChange(value: string): void;
 }): React.ReactElement {
   return (
     <label>
       <span>{label}</span>
-      <input value={value} onChange={event => onChange(event.target.value)} />
+      <input
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        data-dialog-initial-focus={initialFocus ? true : undefined}
+      />
     </label>
   );
 }
@@ -701,6 +762,7 @@ function PathField({
   value,
   testId,
   inputTestId,
+  initialFocus = false,
   onBrowse,
   onChange
 }: {
@@ -708,6 +770,7 @@ function PathField({
   value: string;
   testId: string;
   inputTestId: string;
+  initialFocus?: boolean;
   onBrowse(): void;
   onChange(value: string): void;
 }): React.ReactElement {
@@ -715,7 +778,12 @@ function PathField({
     <label>
       <span>{label}</span>
       <div className="path-field">
-        <input value={value} onChange={event => onChange(event.target.value)} data-testid={inputTestId} />
+        <input
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          data-testid={inputTestId}
+          data-dialog-initial-focus={initialFocus ? true : undefined}
+        />
         <button type="button" className="icon-button" onClick={onBrowse} title="Browse" data-testid={testId}>
           <Folder size={15} />
         </button>

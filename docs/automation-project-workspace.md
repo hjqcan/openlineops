@@ -228,12 +228,30 @@ but Studio uses the scoped routes:
 - `GET /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks`
 - `POST /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks`
 - `GET /api/automation-projects/{projectId}/applications/{applicationId}/process-blocks/{blockType}/versions`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/workspaces`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/workspaces`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/workspaces/{workspaceId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects/{engineeringProjectId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/recipes`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/recipes`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/recipes/{recipeId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/recipes/{recipeId}/publish`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/station-profiles`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/station-profiles`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/station-profiles/{stationProfileId}`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects/{engineeringProjectId}/configuration-snapshots`
+- `POST /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects/{engineeringProjectId}/configuration-snapshots/{snapshotId}/rollback`
+- `GET /api/automation-projects/{projectId}/applications/{applicationId}/engineering/projects/{engineeringProjectId}/configuration-snapshots/{fromSnapshotId}/diff/{toSnapshotId}`
 - `POST /api/automation-projects/{projectId}/publish`
 - `GET /api/automation-projects/{projectId}/snapshots`
 
 Desktop file operations such as choosing a folder or recent project path remain
 Electron responsibilities. The backend owns project state validation and
-publication behavior.
+publication behavior. The legacy global Engineering and process-block routes
+remain compatibility surfaces; Studio uses the nested project/application
+routes so identical resource ids in two applications do not collide.
 
 ## Electron Workbench
 
@@ -346,22 +364,30 @@ sessions from a published project snapshot instead of manually assembled ids.
 ## Current Gap
 
 The repository now has a project-first Studio shell plus durable project source
-for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python, and
-versioned custom Blockly block definitions. Every project-source repository is
-keyed by the same explicit `(project, application)` scope. Topology and layout
-use versioned JSON; a process uses `flow.json` as an atomic commit pointer to
-content-addressed Blockly/Python artifacts with verified SHA-256 digests;
-custom blocks use immutable `version-000001.json` source files. The same local
-topology/layout/process/block ids are therefore valid in two applications.
+for Topology, SiteLayout, ProcessDefinition, Blockly workspaces, Python,
+versioned custom Blockly block definitions, and Engineering configuration.
+Engineering workspaces, engineering projects and their configuration snapshots,
+recipes, and station profiles are stored under the active application's
+`configuration` directory. Every project-source repository is keyed by the
+same explicit `(project, application)` scope. Topology and layout use versioned
+JSON; a process uses `flow.json` as an atomic commit pointer to content-addressed
+Blockly/Python artifacts with verified SHA-256 digests; custom blocks use
+immutable `version-000001.json` source files; Engineering resources use
+schema-versioned JSON and atomic replacement. The same local topology, layout,
+process, block, and Engineering ids are therefore valid in two applications.
 
 A cold-restart API test destroys the first host, moves the complete project
 folder, opens its manifest in a fresh host, and restores two isolated
-applications. Persistence tests also reject a modified Python artifact whose
-digest no longer matches `flow.json`.
+applications, including their custom blocks and Engineering configuration.
+Scoped runtime launch resolves the requested configuration snapshot from the
+application-local Engineering source before using the legacy global
+compatibility store. Persistence tests also reject a modified Python artifact
+whose digest no longer matches `flow.json`.
 
-The remaining persistence gap is Engineering configuration, resolved runtime
-bindings/device profiles, and the immutable release publisher. Those contexts
-must adopt the same explicit scope rather than treating their current global
-databases as project source. The desktop now has explicit Application selection
-and editable 2D layout geometry; it still needs full topology CRUD, richer
-editor-tab/dirty-state handling, and the separate Runner/Agent/CLI hosts.
+The remaining release gap is the cross-context immutable publisher: it must
+compile versioned Flow IR and freeze resolved capability, device, provider,
+plugin, station, and secret-reference bindings instead of trusting client input.
+The separate headless Runner, Agent, and CLI hosts must then verify and execute
+that same release. The desktop now has explicit Application selection and
+editable 2D layout geometry; it still needs full topology CRUD and richer
+editor-tab/dirty-state handling.

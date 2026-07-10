@@ -724,7 +724,7 @@ textarea,
 
 .project-start-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   width: min(1120px, 100%);
   height: min(690px, 100%);
   min-height: 570px;
@@ -735,6 +735,19 @@ textarea,
   box-shadow:
     0 22px 60px rgb(24 32 37 / 18%),
     0 2px 8px rgb(24 32 37 / 8%);
+}
+
+.project-start-status {
+  min-height: 28px;
+  padding: 6px 20px;
+  overflow: hidden;
+  border-bottom: 1px solid #d5d6d0;
+  background: #f1f7f5;
+  color: #395e5a;
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-start-header {
@@ -1152,27 +1165,26 @@ textarea,
   font-weight: 700;
 }
 
-.project-start-dialog-backdrop {
-  position: absolute;
-  z-index: 50;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgb(24 31 35 / 42%);
-  backdrop-filter: blur(2px);
-}
-
 .project-start-dialog {
-  display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  width: min(820px, 100%);
-  max-height: min(640px, 100%);
+  width: min(820px, calc(100% - 48px));
+  max-height: min(640px, calc(100% - 48px));
+  margin: auto;
+  padding: 0;
   overflow: hidden;
   border: 1px solid #aeb5b1;
   border-radius: 7px;
   background: #ffffff;
   box-shadow: 0 28px 80px rgb(15 22 26 / 36%);
+}
+
+.project-start-dialog[open] {
+  display: grid;
+}
+
+.project-start-dialog::backdrop {
+  background: rgb(24 31 35 / 42%);
+  backdrop-filter: blur(2px);
 }
 
 .project-start-dialog > header,

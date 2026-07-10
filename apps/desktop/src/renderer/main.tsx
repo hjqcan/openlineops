@@ -414,6 +414,7 @@ function App(): React.ReactElement {
           activeApplicationId={activeApplication?.applicationId ?? null}
           onActiveApplicationChanged={selectApplication}
           isBackendHealthy={backendStatus?.health === 'Healthy'}
+          statusMessage={message}
           onWorkspaceChanged={selectWorkspace}
           onMessage={setMessage}
         />
@@ -459,7 +460,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, selectApplication, selectWorkspace, stations, timeline, traceRows]);
+  }, [acknowledge, activeApplication?.applicationId, activeNav, activeWorkspace, alarms, backendStatus?.health, latestStation, message, selectApplication, selectWorkspace, stations, timeline, traceRows]);
 
   return (
     <main

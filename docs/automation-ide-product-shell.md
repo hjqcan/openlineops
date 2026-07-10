@@ -230,13 +230,21 @@ project-root/
       flows/
         inspect-part--<stable-hash>/
           flow.json
-          flow.ir.json
           nodes/
             inspect--<stable-hash>/
               workspace.<sha256>.blockly.json
               generated.<sha256>.py
             report--<stable-hash>/
               source.<sha256>.py
+      configuration/
+        workspaces/
+          workspace-main--<stable-hash>.json
+        projects/
+          project-main--<stable-hash>.json
+        recipes/
+          recipe-default--<stable-hash>.json
+        station-profiles/
+          station-profile-local--<stable-hash>.json
       bindings/
         driver-bindings.json
       blocks/
@@ -246,12 +254,6 @@ project-root/
               version-000001.json
   scripts/
     project_helpers.py
-  configuration/
-    recipes/
-    station-profiles/
-    run-profiles/
-  blocks/
-    custom/
   releases/
     active-release.json
     index.json
@@ -268,6 +270,18 @@ For flow source, content-addressed Blockly and Python files are written first;
 `flow.json` is atomically replaced last and acts as the commit pointer. It
 records the artifact paths and hashes, so an interrupted save retains the prior
 complete flow and manual file tampering is detected on open.
+
+Engineering workspaces, engineering projects and their configuration snapshots,
+recipes, station profiles, and custom Blockly block histories are application-
+local source. Their repositories use the same explicit project/application
+scope as topology, layout, and flows, so moving a project folder or reusing a
+local id in another application does not redirect the resource to a global
+database. Engineering JSON is schema-versioned and atomically replaced; each
+custom block version is an immutable `version-000001.json`-style artifact.
+
+Versioned Flow IR and the resolved runtime binding table are release-publisher
+outputs, not trusted editable-source files. They remain part of the Release
+Publisher implementation phase.
 
 Physical resource keys use a readable slug plus a stable hash. User-provided
 ids are data inside the document and are never used as unchecked path segments.

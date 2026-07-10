@@ -60,8 +60,9 @@ async function main() {
   await cdp.send('Page.enable');
 
   await waitForExpression(
-    '(() => document.body?.innerText.includes("AUTOMATION LINE IDE")'
-    + ' && Boolean(document.querySelector("[data-testid=\\"automation-ide-shell\\"]"))'
+    '(() => Boolean(document.querySelector("[data-testid=\\"automation-ide-shell\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"project-workspace-panel\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"start-create-project\\"]"))'
     + ' && Boolean(window.openlineopsDesktop))()',
     30000,
     'automation IDE start center to render');
@@ -69,10 +70,6 @@ async function main() {
   await evaluate('window.__openlineopsSmokeEvents = {}');
   await clickByTestId('start-backend');
   await waitForHealthyBackend();
-  await waitForExpression(
-    '(() => document.querySelector(".rail-footer .status-pill")?.textContent?.trim() === "Connected")()',
-    30000,
-    'SignalR connection');
 
   const smokeProjectPath = path.join(
     repoRoot,
@@ -94,9 +91,14 @@ async function main() {
   await waitForExpression(
     '(() => document.body.innerText.includes("Project created project-")'
     + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Project Explorer")'
-    + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Default Application"))()',
+    + ' && document.querySelector("[data-testid=\\"project-workspace-panel\\"]")?.textContent?.includes("Default Application")'
+    + ' && document.querySelector("[data-testid=\\"save-project-manifest\\"]")?.disabled === false)()',
     30000,
     'automation project workspace to create from desktop');
+  await waitForExpression(
+    '(() => document.querySelector(".rail-footer .status-pill")?.textContent?.trim() === "Connected")()',
+    30000,
+    'SignalR connection');
   await clickByTestId('save-project-manifest');
   await waitForExpression(
     '(() => document.body.innerText.includes("Manifest saved")'
@@ -378,7 +380,7 @@ async function main() {
     'engineering workbench to render with published process selection');
   await clickByTestId('create-engineering-bundle');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Snapshot published snapshot-desktop-")'
+    '(() => document.body.innerText.includes("Snapshot published ")'
     + ' && document.querySelector("[data-testid=\\"engineering-result\\"]")?.textContent?.includes("Published"))()',
     45000,
     'engineering configuration snapshot to publish from UI');
