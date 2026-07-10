@@ -152,6 +152,14 @@ public sealed class ProcessBlocklyBlocksController : ControllerBase
             errors[nameof(request.RuntimeActionContract)] = ["RuntimeActionContract is required."];
         }
 
+        if (request.UnknownProperties is { Count: > 0 })
+        {
+            errors[nameof(request.UnknownProperties)] =
+            [
+                $"Unknown properties are not allowed: {string.Join(", ", request.UnknownProperties.Keys.Order(StringComparer.Ordinal))}."
+            ];
+        }
+
         return errors;
     }
 

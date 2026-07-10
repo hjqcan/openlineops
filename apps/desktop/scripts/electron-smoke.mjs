@@ -11,6 +11,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
 const repoRoot = path.resolve(desktopRoot, '..', '..');
 const viteCliPath = path.join(desktopRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+const smokeScreenshotDirectory = process.env.OPENLINEOPS_SMOKE_SCREENSHOT_DIR?.trim() ?? '';
 
 const childLogs = [];
 const cdpEvents = [];
@@ -267,11 +268,12 @@ async function main() {
     + ' && Boolean(document.querySelector("[data-testid=\\"blockly-workspace\\"]")))()',
     15000,
     'process workbench to render');
-  await clickByTestId('apply-project-target-module-0');
+  await clickByTestId('insert-block-openlineops_move_axis');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Project target applied X Axis"))()',
+    '(() => document.body.innerText.includes("Blockly block inserted Move Axis"))()',
     15000,
-    'project topology target to apply to the PythonScript node');
+    'target-bound Move Axis block to insert into the Blockly node');
+  await captureSmokeScreenshot('flow-designer.png');
   await clickByTestId('register-blockly-block');
   await waitForExpression(
     '(() => document.body.innerText.includes("Fixture Action")'
@@ -312,31 +314,32 @@ async function main() {
     'decision-1-to-end',
     ['decision-1-to-end'],
     'decision retry transition row to be added');
-  await setSelectByTestId(`transition-to-${retryTransitionId}`, 'normalize');
+  await setSelectByTestId(`transition-to-${retryTransitionId}`, 'automation');
   await setInputByTestId(`transition-label-${retryTransitionId}`, 'retry');
   await setSelectByTestId(`transition-loop-policy-${retryTransitionId}`, 'Counted');
   await setInputByTestId(`transition-max-traversals-${retryTransitionId}`, '2');
-  await setInputByTestId(`transition-id-${retryTransitionId}`, 'decision-1-to-normalize-retry');
+  await setInputByTestId(`transition-id-${retryTransitionId}`, 'decision-1-to-automation-retry');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"transition-loop-policy-decision-1-to-normalize-retry\\"]")?.value === "Counted"'
-    + ' && document.querySelector("[data-testid=\\"transition-max-traversals-decision-1-to-normalize-retry\\"]")?.value === "2"'
-    + ' && document.querySelector("[data-testid=\\"transition-to-decision-1-to-normalize-retry\\"]")?.value === "normalize")()',
+    '(() => document.querySelector("[data-testid=\\"transition-loop-policy-decision-1-to-automation-retry\\"]")?.value === "Counted"'
+    + ' && document.querySelector("[data-testid=\\"transition-max-traversals-decision-1-to-automation-retry\\"]")?.value === "2"'
+    + ' && document.querySelector("[data-testid=\\"transition-to-decision-1-to-automation-retry\\"]")?.value === "automation")()',
     15000,
     'transition counted loop policy to be edited');
   await clickByTestId('save-process-definition');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Saved desktop-python-"))()',
+    '(() => document.body.innerText.includes("Saved desktop-flow-"))()',
     30000,
-    'Blockly PythonScript process definition to save');
+    'Blockly process definition to save');
   const savedDefinition = await getLatestDesktopProcessDefinition();
-  const savedPythonNode = savedDefinition.nodes
-    ?.find(node => node.nodeId === 'normalize' && node.kind === 'PythonScript');
-  if (!savedPythonNode?.inputPayload?.includes('.module.axis.x')
-    || !savedPythonNode?.blocklyWorkspaceJson?.includes('.module.axis.x')) {
-    throw new Error(`Project target payload was not persisted on PythonScript node: ${JSON.stringify(savedPythonNode)}`);
+  const savedBlocklyNode = savedDefinition.nodes
+    ?.find(node => node.nodeId === 'automation' && node.kind === 'Blockly');
+  if (savedBlocklyNode?.scriptSourceCode !== null
+    || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.module.axis.x')
+    || !savedBlocklyNode?.blocklyWorkspaceJson?.includes('.motion.axis.move')) {
+    throw new Error(`Direct Blockly target binding was not persisted: ${JSON.stringify(savedBlocklyNode)}`);
   }
   const countedTransition = savedDefinition.transitions
-    ?.find(transition => transition.transitionId === 'decision-1-to-normalize-retry');
+    ?.find(transition => transition.transitionId === 'decision-1-to-automation-retry');
   if (countedTransition?.loopPolicy !== 'Counted' || countedTransition?.maxTraversals !== 2) {
     throw new Error(`Counted transition policy was not persisted: ${JSON.stringify(countedTransition)}`);
   }
@@ -356,13 +359,48 @@ async function main() {
     'updated process draft to remain selected for publication');
   await clickByTestId('publish-process-definition');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Published desktop-python-")'
+    '(() => document.body.innerText.includes("Published desktop-flow-")'
     + ' && document.body.innerText.includes("Published"))()',
     30000,
-    'Blockly PythonScript process definition to publish');
+    'direct Blockly process definition to publish');
   const publishedDefinition = await getPublishedDesktopProcessDefinition();
+  await clickByTestId('nav-production');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Line Designer")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"production-workbench\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"save-production-line\\"]")))()',
+    30000,
+    'production line designer to render');
+  await clickByTestId('new-production-line');
+  await clickByTestId('save-production-line');
+  await waitForExpression(
+    '(() => document.body.innerText.includes("Production line saved line-"))()',
+    30000,
+    'DUT, workstation, and stage production line to save');
+  await captureSmokeScreenshot('line-designer.png');
+  await assertProductionLinePersisted();
+  await clickByTestId('nav-processes');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"process-runtime-snapshot-id\\"]")))()',
+    30000,
+    'process runtime panel to restore after production line save');
+  await waitForExpression(
+    `(() => document.body.innerText.includes(${JSON.stringify(publishedDefinition.processDefinitionId)})`
+    + ' && document.querySelectorAll(".definition-row").length > 0)()',
+    30000,
+    'published process definition row to reload');
+  await clickByTestId(`process-definition-${publishedDefinition.processDefinitionId}`);
+  await waitForExpression(
+    `(() => document.querySelector("[data-testid=\\"runtime-selected-process\\"]")?.textContent?.trim()`
+    + ` === ${JSON.stringify(publishedDefinition.processDefinitionId)})()`,
+    30000,
+    'published process definition to reload after Line Designer');
   const configurationSnapshotId = await createPublishedEngineeringSnapshot(publishedDefinition);
   await setInputByTestId('process-runtime-snapshot-id', configurationSnapshotId);
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"publish-project-snapshot\\"]")?.disabled === false)()',
+    30000,
+    'project snapshot publication prerequisites to reload');
   await clickByTestId('publish-project-snapshot');
   const projectSnapshotId = await waitForExpression(
     '(() => {'
@@ -493,6 +531,22 @@ async function clickByTestId(testId) {
   })()`);
 }
 
+async function captureSmokeScreenshot(fileName) {
+  if (!smokeScreenshotDirectory) {
+    return;
+  }
+
+  const result = await cdp.send('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+    captureBeyondViewport: false
+  });
+  await fs.mkdir(smokeScreenshotDirectory, { recursive: true });
+  await fs.writeFile(
+    path.join(smokeScreenshotDirectory, fileName),
+    Buffer.from(result.data, 'base64'));
+}
+
 async function setInputByTestId(testId, value) {
   await evaluate(`(() => {
     const element = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
@@ -548,6 +602,20 @@ async function getPublishedDesktopProcessDefinition() {
   return definition;
 }
 
+async function assertProductionLinePersisted() {
+  if (!activeProjectApplicationScope) {
+    throw new Error('Active project application scope was not captured.');
+  }
+
+  const response = await apiRequest(
+    `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
+    + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/production-lines`);
+  if (response.status !== 200
+    || !response.body?.some(line => line.stageCount === 1 && line.dutModelCode === 'MAINBOARD-A')) {
+    throw new Error(`Production line was not persisted: ${response.text}`);
+  }
+}
+
 async function getLatestDesktopProcessDefinition(predicate = () => true) {
   if (!activeProjectApplicationScope) {
     throw new Error('Active project application scope was not captured.');
@@ -557,7 +625,7 @@ async function getLatestDesktopProcessDefinition(predicate = () => true) {
     + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/processes`;
   const response = await apiRequest(collectionPath);
   const definition = response.body
-    ?.filter(item => item.processDefinitionId.startsWith('desktop-python-') && predicate(item))
+    ?.filter(item => item.processDefinitionId.startsWith('desktop-flow-') && predicate(item))
     ?.sort((left, right) => left.processDefinitionId.localeCompare(right.processDefinitionId))
     ?.at(-1);
 

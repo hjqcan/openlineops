@@ -696,9 +696,10 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                         RuntimeFlowCommand.Capability,
                         StringComparison.Ordinal))
                 || topology.Modules.Any(module => string.Equals(
-                    module.ModuleId,
-                    reference,
-                    StringComparison.Ordinal)),
+                        module.ModuleId,
+                        reference,
+                        StringComparison.Ordinal)
+                    && ModuleSupportsCapability(module, capabilityId)),
             _ => false
         };
         return targetExists

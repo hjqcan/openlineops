@@ -276,20 +276,45 @@ public sealed class ProcessDefinitionService : IProcessDefinitionService
         }
 
         var nodeId = new ProcessNodeId(request.NodeId);
-        if (nodeKind == ProcessNodeKind.Blockly
-            && !string.IsNullOrWhiteSpace(request.ScriptSourceCode))
+        if (nodeKind != ProcessNodeKind.Command
+            && (!string.IsNullOrWhiteSpace(request.RequiredCapability)
+                || !string.IsNullOrWhiteSpace(request.CommandName)))
         {
             return ApplicationError.Validation(
-                "Processes.BlocklyScriptSourceForbidden",
-                $"Blockly node {request.NodeId} cannot contain Python source.");
+                "Processes.CommandMetadataForbidden",
+                $"Process node {request.NodeId} kind {nodeKind} cannot contain command metadata.");
         }
 
-        if (nodeKind == ProcessNodeKind.PythonScript
+        if (nodeKind != ProcessNodeKind.PythonScript
+            && (!string.IsNullOrWhiteSpace(request.ScriptSourceCode)
+                || !string.IsNullOrWhiteSpace(request.ScriptVersion)))
+        {
+            return ApplicationError.Validation(
+                nodeKind == ProcessNodeKind.Blockly
+                    ? "Processes.BlocklyScriptMetadataForbidden"
+                    : "Processes.PythonMetadataForbidden",
+                $"Process node {request.NodeId} kind {nodeKind} cannot contain Python source metadata.");
+        }
+
+        if (nodeKind != ProcessNodeKind.Blockly
             && !string.IsNullOrWhiteSpace(request.BlocklyWorkspaceJson))
         {
             return ApplicationError.Validation(
-                "Processes.PythonBlocklyWorkspaceForbidden",
-                $"Python script node {request.NodeId} cannot contain a Blockly workspace.");
+                nodeKind == ProcessNodeKind.PythonScript
+                    ? "Processes.PythonBlocklyWorkspaceForbidden"
+                    : "Processes.BlocklyWorkspaceForbidden",
+                $"Process node {request.NodeId} kind {nodeKind} cannot contain a Blockly workspace.");
+        }
+
+        if (nodeKind is not (ProcessNodeKind.Command
+            or ProcessNodeKind.PythonScript
+            or ProcessNodeKind.Blockly)
+            && (request.TimeoutSeconds is not null
+                || !string.IsNullOrWhiteSpace(request.InputPayload)))
+        {
+            return ApplicationError.Validation(
+                "Processes.ExecutionMetadataForbidden",
+                $"Routing node {request.NodeId} kind {nodeKind} cannot contain execution metadata.");
         }
 
         ProcessNode node = nodeKind switch

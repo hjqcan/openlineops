@@ -403,7 +403,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_move_axis",
-                  "message0": "move target %1 %2 axis %3 to %4 %5 speed %6",
+                  "message0": "move target %1 %2 capability %3 command %4 axis %5 to %6 %7 speed %8",
                   "args0": [
                     {
                       "type": "field_dropdown",
@@ -414,6 +414,16 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                       "type": "field_input",
                       "name": "TARGET_ID",
                       "text": "module.motion"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "CAPABILITY",
+                      "text": "motion.axis"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "COMMAND",
+                      "text": "MoveAxis"
                     },
                     {
                       "type": "field_dropdown",
@@ -452,7 +462,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_set_light",
-                  "message0": "set light target %1 %2 channel %3 state %4",
+                  "message0": "set light target %1 %2 capability %3 command %4 channel %5 state %6",
                   "args0": [
                     {
                       "type": "field_dropdown",
@@ -463,6 +473,16 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                       "type": "field_input",
                       "name": "TARGET_ID",
                       "text": "module.io"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "CAPABILITY",
+                      "text": "io.light"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "COMMAND",
+                      "text": "SetLight"
                     },
                     {
                       "type": "field_input",
@@ -488,7 +508,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 """
                 {
                   "type": "openlineops_rotate_motor",
-                  "message0": "rotate motor target %1 %2 motor %3 at %4 rpm for %5 ms",
+                  "message0": "rotate motor target %1 %2 capability %3 command %4 motor %5 at %6 rpm for %7 ms",
                   "args0": [
                     {
                       "type": "field_dropdown",
@@ -499,6 +519,16 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                       "type": "field_input",
                       "name": "TARGET_ID",
                       "text": "module.motor"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "CAPABILITY",
+                      "text": "motion.motor"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "COMMAND",
+                      "text": "RotateMotor"
                     },
                     {
                       "type": "field_input",

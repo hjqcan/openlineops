@@ -966,6 +966,7 @@ export function ProcessWorkbench({
               type="button"
               key={definition.processDefinitionId}
               className="definition-row"
+              data-testid={`process-definition-${definition.processDefinitionId}`}
               onClick={() => {
                 void loadExisting(definition);
               }}
@@ -1393,7 +1394,7 @@ function BlocklyWorkspaceEditor({
         return;
       }
 
-      resetTargetIdAfterKindChange(event, workspace);
+      synchronizeTargetBindingFields(event, workspace);
       const nextJson = saveWorkspaceState(workspace);
       lastAppliedJsonRef.current = nextJson;
       onChangeRef.current({
@@ -1886,7 +1887,9 @@ function RuntimeLaunchPanel({
       <div className="runtime-launch-header">
         <div>
           <strong>Published Runtime</strong>
-          <span>{isPublished ? selectedDefinition.processDefinitionId : 'Publish a graph first'}</span>
+          <span data-testid="runtime-selected-process">
+            {isPublished ? selectedDefinition.processDefinitionId : 'Publish a graph first'}
+          </span>
         </div>
         <button
           type="button"
@@ -2490,6 +2493,116 @@ function normalizeBlocklyWorkspaceJson(value: string | null): string {
   }
 }
 
+function appendBlocklyBlock(
+  workspaceJson: string,
+  definition: ProcessBlocklyBlockDefinition,
+  projectTargets: ProjectTargetOption[]
+): string {
+  const workspace = JSON.parse(workspaceJson) as unknown;
+  if (!isRecord(workspace)) {
+    throw new Error('Workspace JSON must be an object');
+  }
+
+  const blocksContainer = workspace.blocks;
+  if (!isRecord(blocksContainer)
+    || blocksContainer.languageVersion !== 0
+    || !Array.isArray(blocksContainer.blocks)) {
+    throw new Error('Workspace must use the current Blockly serialization shape');
+  }
+
+  const args = Array.isArray(definition.blocklyJson.args0)
+    ? definition.blocklyJson.args0
+    : [];
+  const fields: Record<string, string | number> = {};
+  for (const argument of args) {
+    if (!isRecord(argument) || typeof argument.name !== 'string') {
+      continue;
+    }
+
+    const defaultValue = getBlocklyArgumentDefault(argument);
+    if (defaultValue !== null) {
+      fields[argument.name] = defaultValue;
+    }
+  }
+
+  const targetKind = typeof fields.TARGET_KIND === 'string'
+    ? fields.TARGET_KIND
+    : '';
+  const defaultTarget = projectTargets.find(target => target.targetKind === targetKind);
+  if (defaultTarget) {
+    fields.TARGET_ID = defaultTarget.targetId;
+    if (Object.hasOwn(fields, 'CAPABILITY')) {
+      fields.CAPABILITY = defaultTarget.capabilityId;
+    }
+    if (Object.hasOwn(fields, 'COMMAND')) {
+      fields.COMMAND = defaultTarget.commandName;
+    }
+  }
+
+  if (blocksContainer.blocks.length > 1) {
+    throw new Error('Connect the existing Blockly stacks before inserting another action');
+  }
+
+  const blockCount = blocksContainer.blocks.length === 0
+    ? 0
+    : countSerializedBlocks(blocksContainer.blocks[0]);
+  const nextBlock = {
+    id: `${definition.blockType}-${Date.now().toString(36)}-${blockCount + 1}`,
+    type: definition.blockType,
+    x: 32 + (blockCount % 4) * 24,
+    y: 32 + blockCount * 48,
+    fields
+  };
+  if (blocksContainer.blocks.length === 0) {
+    blocksContainer.blocks.push(nextBlock);
+  } else {
+    const tail = findSerializedBlockTail(blocksContainer.blocks[0]);
+    tail.next = { block: nextBlock };
+  }
+  return JSON.stringify(workspace);
+}
+
+function countSerializedBlocks(value: unknown): number {
+  let count = 0;
+  let current: unknown = value;
+  while (isRecord(current)) {
+    count += 1;
+    current = isRecord(current.next) ? current.next.block : null;
+  }
+  return count;
+}
+
+function findSerializedBlockTail(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error('Blockly stack contains an invalid block');
+  }
+
+  let current = value;
+  while (isRecord(current.next) && isRecord(current.next.block)) {
+    current = current.next.block;
+  }
+  return current;
+}
+
+function getBlocklyArgumentDefault(argument: Record<string, unknown>): string | number | null {
+  switch (argument.type) {
+    case 'field_input':
+      return typeof argument.text === 'string' ? argument.text : '';
+    case 'field_number':
+      return typeof argument.value === 'number' ? argument.value : 0;
+    case 'field_checkbox':
+      return argument.checked === true ? 'TRUE' : 'FALSE';
+    case 'field_dropdown': {
+      const firstOption = Array.isArray(argument.options) ? argument.options[0] : null;
+      return Array.isArray(firstOption) && typeof firstOption[1] === 'string'
+        ? firstOption[1]
+        : '';
+    }
+    default:
+      return null;
+  }
+}
+
 function saveWorkspaceState(workspace: Blockly.Workspace): string {
   const state = Blockly.serialization.workspaces.save(workspace);
   return JSON.stringify(state);
@@ -2561,28 +2674,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function resetTargetIdAfterKindChange(
+function synchronizeTargetBindingFields(
   event: Blockly.Events.Abstract,
   workspace: Blockly.Workspace
 ): void {
   const change = event as Blockly.Events.BlockChange;
   if (change.type !== Blockly.Events.BLOCK_CHANGE
     || change.element !== 'field'
-    || change.name !== 'TARGET_KIND'
+    || (change.name !== 'TARGET_KIND' && change.name !== 'TARGET_ID')
     || !change.blockId) {
     return;
   }
 
   const block = workspace.getBlockById(change.blockId);
-  const targetField = block?.getField('TARGET_ID');
-  if (!block || !targetField) {
+  if (!block) {
     return;
   }
 
   const targetKind = String(block.getFieldValue('TARGET_KIND') ?? '');
-  const firstTarget = (projectTargetsByWorkspace.get(workspace) ?? [])
-    .find(target => target.targetKind === targetKind);
-  targetField.setValue(firstTarget?.targetId ?? '');
+  const targets = projectTargetsByWorkspace.get(workspace) ?? [];
+  const targetField = block.getField('TARGET_ID');
+  if (change.name === 'TARGET_KIND' && targetField) {
+    const firstTarget = targets.find(target => target.targetKind === targetKind);
+    targetField.setValue(firstTarget?.targetId ?? '');
+  }
+
+  const targetId = String(block.getFieldValue('TARGET_ID') ?? '');
+  const selectedTarget = targets.find(target =>
+    target.targetKind === targetKind && target.targetId === targetId);
+  if (!selectedTarget) {
+    return;
+  }
+
+  block.getField('CAPABILITY')?.setValue(selectedTarget.capabilityId);
+  block.getField('COMMAND')?.setValue(selectedTarget.commandName);
 }
 
 function createBlocklyToolbox(blockCatalog: ProcessBlocklyBlockDefinition[]): Blockly.utils.toolbox.ToolboxDefinition {

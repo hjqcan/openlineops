@@ -100,9 +100,39 @@ public sealed class RuntimeFlowCommandExecutorTests
         Assert.Equal("Runtime flow wait was canceled.", result.Reason);
     }
 
+    [Fact]
+    public async Task ExecuteAsyncResolvesStaticResultPatchContext()
+    {
+        var executor = new RuntimeFlowCommandExecutor();
+        var result = await executor.ExecuteAsync(CreateContext(
+            """{"assignments":[{"key":"status","value":"ok"},{"key":"node","value":{"$context":"nodeId"}}]}""",
+            TimeSpan.FromSeconds(1),
+            RuntimeFlowCommand.ResultPatchCommandName));
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        using var payload = JsonDocument.Parse(result.Payload!);
+        Assert.Equal("ok", payload.RootElement.GetProperty("status").GetString());
+        Assert.Equal("node-wait", payload.RootElement.GetProperty("node").GetString());
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"assignments\":{}}")]
+    [InlineData("{\"assignments\":[{\"value\":1}]}")]
+    public async Task ExecuteAsyncRejectsInvalidResultPatch(string payload)
+    {
+        var result = await new RuntimeFlowCommandExecutor().ExecuteAsync(CreateContext(
+            payload,
+            TimeSpan.FromSeconds(1),
+            RuntimeFlowCommand.ResultPatchCommandName));
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
+    }
+
     private static RuntimeCommandExecutionContext CreateContext(
         string? payload,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        string commandName = RuntimeFlowCommand.WaitCommandName)
     {
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
@@ -112,7 +142,7 @@ public sealed class RuntimeFlowCommandExecutorTests
             new RuntimeCommandId(Guid.Parse("00000000-0000-0000-0000-000000000003")),
             new RuntimeNodeId("node-wait"),
             new RuntimeCapabilityId(RuntimeFlowCommand.Capability),
-            RuntimeFlowCommand.WaitCommandName,
+            commandName,
             payload,
             timeout);
     }

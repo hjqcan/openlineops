@@ -20,6 +20,34 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task CreateRejectsRemovedScriptEditorModeProperty()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/process-definitions",
+            new
+            {
+                processDefinitionId = $"removed-editor-mode-{Guid.NewGuid():N}",
+                versionId = "v1",
+                displayName = "Removed Editor Mode",
+                nodes = new object[]
+                {
+                    new
+                    {
+                        nodeId = "start",
+                        kind = "Start",
+                        displayName = "Start",
+                        scriptEditorMode = "Blockly"
+                    }
+                },
+                transitions = Array.Empty<object>()
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("errors").TryGetProperty("Nodes[0].UnknownProperties", out _));
+    }
+
+    [Fact]
     public async Task CreateProcessDefinitionReturnsCreatedAndCanBeQueried()
     {
         var processDefinitionId = NewProcessDefinitionId("create-query");
@@ -46,7 +74,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
-    public async Task CreatePythonScriptProcessDefinitionDefaultsToBlocklyAndReturnsScriptTraceFields()
+    public async Task CreatePythonScriptProcessDefinitionReturnsPythonTraceFieldsOnly()
     {
         var processDefinitionId = NewProcessDefinitionId("python-script-create-query");
 
@@ -61,8 +89,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.Equal("Python", scriptNode.GetProperty("scriptLanguage").GetString());
-        Assert.Equal("Blockly", scriptNode.GetProperty("scriptEditorMode").GetString());
-        Assert.Equal("""{"blocks":{"languageVersion":0}}""", scriptNode.GetProperty("blocklyWorkspaceJson").GetString());
+        Assert.Equal(JsonValueKind.Null, scriptNode.GetProperty("blocklyWorkspaceJson").ValueKind);
         Assert.Equal("result = {'normalized': input_payload}", scriptNode.GetProperty("scriptSourceCode").GetString());
         Assert.False(string.IsNullOrWhiteSpace(scriptNode.GetProperty("scriptSourceHash").GetString()));
         Assert.Equal("7", scriptNode.GetProperty("scriptVersion").GetString());
@@ -70,15 +97,40 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
-    public async Task CreatePythonScriptProcessDefinitionRejectsInvalidEditorMode()
+    public async Task CreatePythonScriptProcessDefinitionRejectsBlocklyWorkspace()
     {
         var processDefinitionId = NewProcessDefinitionId("python-script-invalid-editor");
 
         using var response = await _client.PostAsJsonAsync(
             "/api/process-definitions",
-            CreatePythonScriptDefinitionRequest(processDefinitionId, scriptEditorMode: "VisualBlocks"));
+            CreatePythonScriptDefinitionRequest(
+                processDefinitionId,
+                blocklyWorkspaceJson: """{"blocks":{"languageVersion":0,"blocks":[]}}"""));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateBlocklyProcessDefinitionReturnsWorkspaceWithoutPythonSource()
+    {
+        var processDefinitionId = NewProcessDefinitionId("blockly-create-query");
+        const string workspace =
+            """{"blocks":{"languageVersion":0,"blocks":[{"type":"openlineops_wait","id":"wait-1","fields":{"DURATION_MS":25}}]}}""";
+
+        using var response = await _client.PostAsJsonAsync(
+            "/api/process-definitions",
+            CreateBlocklyDefinitionRequest(processDefinitionId, workspace));
+        using var body = await ReadJsonAsync(response);
+        var blocklyNode = body.RootElement
+            .GetProperty("nodes")
+            .EnumerateArray()
+            .Single(node => node.GetProperty("kind").GetString() == "Blockly");
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(workspace, blocklyNode.GetProperty("blocklyWorkspaceJson").GetString());
+        Assert.Equal(JsonValueKind.Null, blocklyNode.GetProperty("scriptLanguage").ValueKind);
+        Assert.Equal(JsonValueKind.Null, blocklyNode.GetProperty("scriptSourceCode").ValueKind);
+        Assert.Equal(15, blocklyNode.GetProperty("timeoutSeconds").GetInt32());
     }
 
     [Fact]
@@ -843,9 +895,9 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
 
     private static object CreatePythonScriptDefinitionRequest(
         string processDefinitionId,
-        string? scriptEditorMode = null,
         string scriptSourceCode = "result = {'normalized': input_payload}",
-        string? scriptInputPayload = null)
+        string? scriptInputPayload = null,
+        string? blocklyWorkspaceJson = null)
     {
         return new
         {
@@ -863,7 +915,6 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
                     commandName = (string?)null,
                     timeoutSeconds = (int?)null,
                     inputPayload = (string?)null,
-                    scriptEditorMode = (string?)null,
                     blocklyWorkspaceJson = (string?)null,
                     scriptSourceCode = (string?)null,
                     scriptVersion = (string?)null
@@ -877,8 +928,7 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
                     commandName = (string?)null,
                     timeoutSeconds = (int?)15,
                     inputPayload = scriptInputPayload,
-                    scriptEditorMode,
-                    blocklyWorkspaceJson = (string?)"""{"blocks":{"languageVersion":0}}""",
+                    blocklyWorkspaceJson,
                     scriptSourceCode = (string?)scriptSourceCode,
                     scriptVersion = (string?)"7"
                 },
@@ -891,7 +941,6 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
                     commandName = (string?)null,
                     timeoutSeconds = (int?)null,
                     inputPayload = (string?)null,
-                    scriptEditorMode = (string?)null,
                     blocklyWorkspaceJson = (string?)null,
                     scriptSourceCode = (string?)null,
                     scriptVersion = (string?)null
@@ -912,6 +961,77 @@ public sealed class ProcessDefinitionsApiTests : IClassFixture<WebApplicationFac
                     fromNodeId = "normalize",
                     toNodeId = "end",
                     label = (string?)"done"
+                }
+            }
+        };
+    }
+
+    private static object CreateBlocklyDefinitionRequest(
+        string processDefinitionId,
+        string workspaceJson)
+    {
+        return new
+        {
+            processDefinitionId,
+            versionId = "packaging-line-eol@1.0.0",
+            displayName = "Blockly Process",
+            nodes = new[]
+            {
+                new
+                {
+                    nodeId = "start",
+                    kind = "Start",
+                    displayName = "Start",
+                    requiredCapability = (string?)null,
+                    commandName = (string?)null,
+                    timeoutSeconds = (int?)null,
+                    inputPayload = (string?)null,
+                    blocklyWorkspaceJson = (string?)null,
+                    scriptSourceCode = (string?)null,
+                    scriptVersion = (string?)null
+                },
+                new
+                {
+                    nodeId = "wait",
+                    kind = "Blockly",
+                    displayName = "Wait",
+                    requiredCapability = (string?)null,
+                    commandName = (string?)null,
+                    timeoutSeconds = (int?)15,
+                    inputPayload = (string?)null,
+                    blocklyWorkspaceJson = (string?)workspaceJson,
+                    scriptSourceCode = (string?)null,
+                    scriptVersion = (string?)null
+                },
+                new
+                {
+                    nodeId = "end",
+                    kind = "End",
+                    displayName = "End",
+                    requiredCapability = (string?)null,
+                    commandName = (string?)null,
+                    timeoutSeconds = (int?)null,
+                    inputPayload = (string?)null,
+                    blocklyWorkspaceJson = (string?)null,
+                    scriptSourceCode = (string?)null,
+                    scriptVersion = (string?)null
+                }
+            },
+            transitions = new[]
+            {
+                new
+                {
+                    transitionId = "start-to-wait",
+                    fromNodeId = "start",
+                    toNodeId = "wait",
+                    label = (string?)null
+                },
+                new
+                {
+                    transitionId = "wait-to-end",
+                    fromNodeId = "wait",
+                    toNodeId = "end",
+                    label = (string?)null
                 }
             }
         };

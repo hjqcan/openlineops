@@ -16,6 +16,9 @@ internal static class BlocklyWorkspaceActionCompiler
 {
     private const int CurrentBlocklyLanguageVersion = 0;
     private const int MaximumBlocks = 1_024;
+    private const int MaximumWorkspaceUtf8Bytes = 1_048_576;
+    private const long MaximumRuntimeTimeoutMilliseconds = uint.MaxValue - 1L;
+    private const long MaximumWaitDurationMilliseconds = MaximumRuntimeTimeoutMilliseconds - 1_000L;
     private static readonly JsonSerializerOptions CompactJsonOptions = new()
     {
         WriteIndented = false
@@ -29,6 +32,14 @@ internal static class BlocklyWorkspaceActionCompiler
         if (string.IsNullOrWhiteSpace(node.BlocklyWorkspaceJson))
         {
             return Failure("Processes.FlowIrBlocklyWorkspaceMissing", node, "Blockly workspace JSON is required.");
+        }
+
+        if (Encoding.UTF8.GetByteCount(node.BlocklyWorkspaceJson) > MaximumWorkspaceUtf8Bytes)
+        {
+            return Failure(
+                "Processes.FlowIrBlocklyWorkspaceTooLarge",
+                node,
+                $"Blockly workspace cannot exceed {MaximumWorkspaceUtf8Bytes} UTF-8 bytes.");
         }
 
         JsonDocument workspace;
@@ -243,13 +254,20 @@ internal static class BlocklyWorkspaceActionCompiler
             throw new InvalidDataException($"{path}.y must be a number.");
         }
 
-        var fieldsElement = RequiredProperty(element, "fields", path, JsonValueKind.Object);
         var fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var field in fieldsElement.EnumerateObject())
+        if (element.TryGetProperty("fields", out var fieldsElement))
         {
-            if (!fields.TryAdd(field.Name, field.Value.Clone()))
+            if (fieldsElement.ValueKind != JsonValueKind.Object)
             {
-                throw new InvalidDataException($"{path}.fields contains duplicate field '{field.Name}'.");
+                throw new InvalidDataException($"{path}.fields must be an object when present.");
+            }
+
+            foreach (var field in fieldsElement.EnumerateObject())
+            {
+                if (!fields.TryAdd(field.Name, field.Value.Clone()))
+                {
+                    throw new InvalidDataException($"{path}.fields contains duplicate field '{field.Name}'.");
+                }
             }
         }
 
@@ -272,6 +290,7 @@ internal static class BlocklyWorkspaceActionCompiler
         SerializedBlocklyBlock block,
         IReadOnlyDictionary<string, RuntimeActionFieldDefinition> definitions)
     {
+        var normalizedFields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (var fieldName in block.Fields.Keys.Order(StringComparer.Ordinal))
         {
             if (!definitions.ContainsKey(fieldName))
@@ -297,9 +316,14 @@ internal static class BlocklyWorkspaceActionCompiler
             {
                 return FieldFailure(block, validationError);
             }
+
+            normalizedFields[fieldName] = definition.Type == RuntimeActionFieldType.Boolean
+                ? JsonSerializer.SerializeToElement(
+                    string.Equals(value.GetString(), "TRUE", StringComparison.Ordinal))
+                : value.Clone();
         }
 
-        return Result.Success<IReadOnlyDictionary<string, JsonElement>>(block.Fields);
+        return Result.Success<IReadOnlyDictionary<string, JsonElement>>(normalizedFields);
     }
 
     private static string? ValidateFieldValue(
@@ -344,9 +368,10 @@ internal static class BlocklyWorkspaceActionCompiler
                 numericValue = integer;
                 break;
             case RuntimeActionFieldType.Boolean:
-                if (value.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+                if (value.ValueKind != JsonValueKind.String
+                    || value.GetString() is not ("TRUE" or "FALSE"))
                 {
-                    return $"field '{fieldName}' must be a JSON boolean.";
+                    return $"field '{fieldName}' must be the current Blockly checkbox value TRUE or FALSE.";
                 }
 
                 break;
@@ -552,7 +577,11 @@ internal static class BlocklyWorkspaceActionCompiler
                 return Result.Failure<FlowIrAction>(keyResult.Error);
             }
 
-            var valueResult = ResolveExpression(assignment.Value, fields, allowContext: true);
+            var valueResult = ResolveExpression(
+                assignment.Value,
+                fields,
+                allowContext: true,
+                contextNode: node);
             if (valueResult.IsFailure)
             {
                 return Result.Failure<FlowIrAction>(valueResult.Error);
@@ -616,13 +645,15 @@ internal static class BlocklyWorkspaceActionCompiler
         IReadOnlyDictionary<string, JsonElement> fields)
     {
         var value = ResolveWholeNumber(expression, fields, "timeoutMilliseconds");
-        if (value.IsFailure || value.Value <= 0)
+        if (value.IsFailure
+            || value.Value <= 0
+            || value.Value > MaximumRuntimeTimeoutMilliseconds)
         {
             return Result.Failure<long>(value.IsFailure
                 ? value.Error
                 : ApplicationError.Validation(
                     "Processes.FlowIrBlocklyTimeoutInvalid",
-                    "Compiled timeoutMilliseconds must be greater than zero."));
+                    $"Compiled timeoutMilliseconds must be between 1 and {MaximumRuntimeTimeoutMilliseconds}."));
         }
 
         return value;
@@ -633,13 +664,15 @@ internal static class BlocklyWorkspaceActionCompiler
         IReadOnlyDictionary<string, JsonElement> fields)
     {
         var value = ResolveWholeNumber(expression, fields, "durationMilliseconds");
-        if (value.IsFailure || value.Value < 0)
+        if (value.IsFailure
+            || value.Value < 0
+            || value.Value > MaximumWaitDurationMilliseconds)
         {
             return Result.Failure<long>(value.IsFailure
                 ? value.Error
                 : ApplicationError.Validation(
                     "Processes.FlowIrBlocklyDurationInvalid",
-                    "Compiled durationMilliseconds cannot be negative."));
+                    $"Compiled durationMilliseconds must be between 0 and {MaximumWaitDurationMilliseconds}."));
         }
 
         return value;
@@ -689,7 +722,8 @@ internal static class BlocklyWorkspaceActionCompiler
     private static Result<JsonElement> ResolveExpression(
         RuntimeActionValueExpression expression,
         IReadOnlyDictionary<string, JsonElement> fields,
-        bool allowContext)
+        bool allowContext,
+        ProcessNode? contextNode = null)
     {
         switch (expression)
         {
@@ -699,16 +733,17 @@ internal static class BlocklyWorkspaceActionCompiler
                 return fields.TryGetValue(field.FieldName, out var value)
                     ? Result.Success(value.Clone())
                     : ExpressionFailure($"Field '{field.FieldName}' was not provided by the Blockly block.");
-            case RuntimeActionContextValue context when allowContext:
+            case RuntimeActionContextValue { Context: RuntimeActionContextValueKind.NodeId }
+                when allowContext && contextNode is not null:
+                return Result.Success(JsonSerializer.SerializeToElement(contextNode.Id.Value));
+            case RuntimeActionContextValue { Context: RuntimeActionContextValueKind.InputPayload }
+                when allowContext && contextNode is not null:
+                return Result.Success(JsonSerializer.SerializeToElement(contextNode.InputPayload));
+            case RuntimeActionContextValue { Context: RuntimeActionContextValueKind.TimestampUtc }
+                when allowContext:
                 return Result.Success(JsonSerializer.SerializeToElement(new Dictionary<string, string>
                 {
-                    ["$context"] = context.Context switch
-                    {
-                        RuntimeActionContextValueKind.NodeId => "nodeId",
-                        RuntimeActionContextValueKind.TimestampUtc => "timestampUtc",
-                        RuntimeActionContextValueKind.InputPayload => "inputPayload",
-                        _ => throw new InvalidOperationException($"Unsupported context {context.Context}.")
-                    }
+                    ["$context"] = "timestampUtc"
                 }));
             case RuntimeActionContextValue:
                 return ExpressionFailure("Runtime context expressions are not allowed for this static action value.");
@@ -718,7 +753,7 @@ internal static class BlocklyWorkspaceActionCompiler
                 foreach (var (name, childExpression) in objectValue.Properties
                              .OrderBy(pair => pair.Key, StringComparer.Ordinal))
                 {
-                    var child = ResolveExpression(childExpression, fields, allowContext);
+                    var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
                     if (child.IsFailure)
                     {
                         return Result.Failure<JsonElement>(child.Error);
@@ -734,7 +769,7 @@ internal static class BlocklyWorkspaceActionCompiler
                 var result = new JsonArray();
                 foreach (var childExpression in arrayValue.Items)
                 {
-                    var child = ResolveExpression(childExpression, fields, allowContext);
+                    var child = ResolveExpression(childExpression, fields, allowContext, contextNode);
                     if (child.IsFailure)
                     {
                         return Result.Failure<JsonElement>(child.Error);
@@ -752,11 +787,7 @@ internal static class BlocklyWorkspaceActionCompiler
 
     private static string WithTarget(JsonElement input, string targetKind, string targetId)
     {
-        var payload = new JsonObject
-        {
-            ["targetKind"] = targetKind,
-            ["targetId"] = targetId
-        };
+        var payload = new JsonObject();
         if (input.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in input.EnumerateObject().OrderBy(property => property.Name, StringComparer.Ordinal))
@@ -768,6 +799,9 @@ internal static class BlocklyWorkspaceActionCompiler
         {
             payload["input"] = JsonNode.Parse(input.GetRawText());
         }
+
+        payload["targetKind"] = targetKind;
+        payload["targetId"] = targetId;
 
         return payload.ToJsonString(CompactJsonOptions);
     }
@@ -792,10 +826,14 @@ internal static class BlocklyWorkspaceActionCompiler
     private static bool IsCommandIdentifier(string value)
     {
         return value.Length <= 256
-            && char.IsLetter(value[0])
-            && value.All(character => char.IsLetterOrDigit(character)
+            && IsAsciiLetter(value[0])
+            && value.All(character => IsAsciiLetter(character)
+                || character is >= '0' and <= '9'
                 || character is '_' or '.' or ':' or '-');
     }
+
+    private static bool IsAsciiLetter(char value) =>
+        value is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
 
     private static void EnsureProperties(JsonElement element, string path, params string[] allowed)
     {

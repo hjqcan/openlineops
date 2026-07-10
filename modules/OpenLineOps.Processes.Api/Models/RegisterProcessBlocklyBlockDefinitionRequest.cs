@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace OpenLineOps.Processes.Api.Models;
 
@@ -8,4 +9,8 @@ public sealed record RegisterProcessBlocklyBlockDefinitionRequest(
     string? DisplayName,
     JsonElement BlocklyJson,
     string? RuntimeActionContractSchemaVersion,
-    JsonElement RuntimeActionContract);
+    JsonElement RuntimeActionContract)
+{
+    [JsonExtensionData]
+    public IDictionary<string, JsonElement>? UnknownProperties { get; init; }
+}

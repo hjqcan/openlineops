@@ -42,6 +42,16 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
             var runtimeNodes = executableNodes
                 .SelectMany(ToRuntimeNodes)
                 .ToArray();
+            var duplicateRuntimeNodeId = runtimeNodes
+                .GroupBy(node => node.NodeId.Value, StringComparer.Ordinal)
+                .FirstOrDefault(group => group.Count() > 1)
+                ?.Key;
+            if (duplicateRuntimeNodeId is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Flow IR runtime expansion creates duplicate node id '{duplicateRuntimeNodeId}'.");
+            }
+
             var finalNodeIds = executableNodes.ToDictionary(
                 node => node.NodeId,
                 node => node.Kind == FlowIrNodeKind.Blockly && node.Actions.Length > 1

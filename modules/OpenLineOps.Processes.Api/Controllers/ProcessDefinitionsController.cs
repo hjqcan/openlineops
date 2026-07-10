@@ -340,6 +340,13 @@ public sealed class ProcessDefinitionsController : ControllerBase
             AddRequired(errors, $"{prefix}.{nameof(node.NodeId)}", node.NodeId);
             AddRequired(errors, $"{prefix}.{nameof(node.Kind)}", node.Kind);
             AddRequired(errors, $"{prefix}.{nameof(node.DisplayName)}", node.DisplayName);
+            if (node.UnknownProperties is { Count: > 0 })
+            {
+                errors[$"{prefix}.UnknownProperties"] =
+                [
+                    $"Unknown properties are not allowed: {string.Join(", ", node.UnknownProperties.Keys.Order(StringComparer.Ordinal))}."
+                ];
+            }
             index++;
         }
     }

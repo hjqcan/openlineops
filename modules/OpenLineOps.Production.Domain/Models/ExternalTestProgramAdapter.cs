@@ -89,21 +89,23 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
         _argumentTemplates = argumentTemplates
             .Select(argument => ProductionIdGuard.NotBlank(argument, nameof(argumentTemplates)))
             .ToList();
-        _inputMappings = inputMappings
-            .OrderBy(mapping => mapping?.Target, StringComparer.Ordinal)
-            .ThenBy(mapping => mapping?.Source, StringComparer.Ordinal)
-            .ToList();
-        _resultMappings = resultMappings
-            .OrderBy(mapping => mapping?.TargetKey, StringComparer.Ordinal)
-            .ThenBy(mapping => mapping?.SourcePath, StringComparer.Ordinal)
-            .ToList();
-        if (_inputMappings.Any(static mapping => mapping is null)
-            || _resultMappings.Any(static mapping => mapping is null))
+        var inputMappingItems = inputMappings.ToList();
+        var resultMappingItems = resultMappings.ToList();
+        if (inputMappingItems.Any(static mapping => mapping is null)
+            || resultMappingItems.Any(static mapping => mapping is null))
         {
             throw new ArgumentException(
                 "External test program mappings cannot contain null items.");
         }
 
+        _inputMappings = inputMappingItems
+            .OrderBy(mapping => mapping.Target, StringComparer.Ordinal)
+            .ThenBy(mapping => mapping.Source, StringComparer.Ordinal)
+            .ToList();
+        _resultMappings = resultMappingItems
+            .OrderBy(mapping => mapping.TargetKey, StringComparer.Ordinal)
+            .ThenBy(mapping => mapping.SourcePath, StringComparer.Ordinal)
+            .ToList();
         EnsureMappingsAreValid(_inputMappings, _resultMappings);
         Timeout = timeout;
     }

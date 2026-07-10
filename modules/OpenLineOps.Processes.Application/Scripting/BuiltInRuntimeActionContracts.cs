@@ -28,6 +28,8 @@ internal static class BuiltInRuntimeActionContracts
             {
                 ["TARGET_KIND"] = TargetKindField(),
                 ["TARGET_ID"] = TargetIdField(),
+                ["CAPABILITY"] = TextField(maxLength: 256),
+                ["COMMAND"] = TextField(maxLength: 256),
                 ["AXIS"] = TextField(["X", "Y", "Z"], maxLength: 16),
                 ["POSITION"] = NumberField(),
                 ["SPEED"] = NumberField(minimum: 0),
@@ -36,8 +38,8 @@ internal static class BuiltInRuntimeActionContracts
             new RuntimeDeviceCommandEmit(
                 Field("TARGET_KIND"),
                 Field("TARGET_ID"),
-                Literal("motion.axis"),
-                Literal("MoveAxis"),
+                Field("CAPABILITY"),
+                Field("COMMAND"),
                 Object(
                     ("axis", Field("AXIS")),
                     ("position", Field("POSITION")),
@@ -54,14 +56,16 @@ internal static class BuiltInRuntimeActionContracts
             {
                 ["TARGET_KIND"] = TargetKindField(),
                 ["TARGET_ID"] = TargetIdField(),
+                ["CAPABILITY"] = TextField(maxLength: 256),
+                ["COMMAND"] = TextField(maxLength: 256),
                 ["CHANNEL"] = TextField(maxLength: 256),
                 ["STATE"] = TextField(["On", "Off"], maxLength: 16)
             },
             new RuntimeDeviceCommandEmit(
                 Field("TARGET_KIND"),
                 Field("TARGET_ID"),
-                Literal("io.light"),
-                Literal("SetLight"),
+                Field("CAPABILITY"),
+                Field("COMMAND"),
                 Object(
                     ("channel", Field("CHANNEL")),
                     ("state", Field("STATE"))),
@@ -76,6 +80,8 @@ internal static class BuiltInRuntimeActionContracts
             {
                 ["TARGET_KIND"] = TargetKindField(),
                 ["TARGET_ID"] = TargetIdField(),
+                ["CAPABILITY"] = TextField(maxLength: 256),
+                ["COMMAND"] = TextField(maxLength: 256),
                 ["DURATION_MS"] = IntegerField(minimum: 0),
                 ["MOTOR"] = TextField(maxLength: 256),
                 ["RPM"] = NumberField()
@@ -83,8 +89,8 @@ internal static class BuiltInRuntimeActionContracts
             new RuntimeDeviceCommandEmit(
                 Field("TARGET_KIND"),
                 Field("TARGET_ID"),
-                Literal("motion.motor"),
-                Literal("RotateMotor"),
+                Field("CAPABILITY"),
+                Field("COMMAND"),
                 Object(
                     ("duration_ms", Field("DURATION_MS")),
                     ("motor", Field("MOTOR")),

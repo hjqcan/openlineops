@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.Processes.Application.Scripting;
 
 namespace OpenLineOps.Processes.Tests;
@@ -43,6 +44,30 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
         Assert.Equal(
             firstResult.Value.Sha256,
             _serializer.Serialize(roundTrip.Value).Value.Sha256);
+    }
+
+    [Fact]
+    public void ParseAcceptsNonCanonicalPropertyOrderWhileDeserializeRemainsStrict()
+    {
+        var artifact = _serializer.Serialize(CreateCommandContract(reverseInsertionOrder: false));
+        Assert.True(artifact.IsSuccess, artifact.Error.Message);
+        var canonical = JsonNode.Parse(artifact.Value.CanonicalJson)!.AsObject();
+        var reordered = new JsonObject
+        {
+            ["emit"] = canonical["emit"]!.DeepClone(),
+            ["fields"] = canonical["fields"]!.DeepClone(),
+            ["actionType"] = canonical["actionType"]!.DeepClone(),
+            ["schemaVersion"] = canonical["schemaVersion"]!.DeepClone()
+        }.ToJsonString();
+
+        var parsed = _serializer.Parse(reordered);
+        var strict = _serializer.Deserialize(reordered);
+
+        Assert.True(parsed.IsSuccess, parsed.Error.Message);
+        Assert.True(strict.IsFailure);
+        Assert.Equal(
+            artifact.Value.Sha256,
+            _serializer.Serialize(parsed.Value).Value.Sha256);
     }
 
     [Theory]
@@ -199,6 +224,11 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
         var fields = reverseInsertionOrder
             ? new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
+                ["TARGET_ID"] = new(RuntimeActionFieldType.TargetReference, Required: true),
+                ["TARGET_KIND"] = new(
+                    RuntimeActionFieldType.Text,
+                    Required: true,
+                    AllowedValues: RuntimeActionTargetKinds.All),
                 ["POSITION"] = new(RuntimeActionFieldType.Number, Required: true),
                 ["AXIS"] = new(
                     RuntimeActionFieldType.Text,
@@ -207,6 +237,11 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             }
             : new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
+                ["TARGET_KIND"] = new(
+                    RuntimeActionFieldType.Text,
+                    Required: true,
+                    AllowedValues: RuntimeActionTargetKinds.All),
+                ["TARGET_ID"] = new(RuntimeActionFieldType.TargetReference, Required: true),
                 ["AXIS"] = new(
                     RuntimeActionFieldType.Text,
                     Required: true,
@@ -230,8 +265,8 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             "motion.axis.move",
             fields,
             new RuntimeDeviceCommandEmit(
-                Literal(RuntimeActionTargetKinds.Capability),
-                Literal("motion.axis"),
+                Field("TARGET_KIND"),
+                Field("TARGET_ID"),
                 Literal("motion.axis"),
                 Literal("MoveAxis"),
                 new RuntimeActionObjectValue(input),

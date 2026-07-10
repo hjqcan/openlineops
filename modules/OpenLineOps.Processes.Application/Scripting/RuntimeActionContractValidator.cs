@@ -144,6 +144,22 @@ public static partial class RuntimeActionContractValidator
         RuntimeDeviceCommandEmit command,
         IReadOnlyDictionary<string, RuntimeActionFieldDefinition> fields)
     {
+        if (command.TargetKind is not RuntimeActionFieldValue { FieldName: "TARGET_KIND" }
+            || !fields.TryGetValue("TARGET_KIND", out var targetKindField)
+            || targetKindField.Type != RuntimeActionFieldType.Text
+            || !targetKindField.Required)
+        {
+            return "Device command targetKind must bind the required TARGET_KIND text field.";
+        }
+
+        if (command.TargetId is not RuntimeActionFieldValue { FieldName: "TARGET_ID" }
+            || !fields.TryGetValue("TARGET_ID", out var targetIdField)
+            || targetIdField.Type != RuntimeActionFieldType.TargetReference
+            || !targetIdField.Required)
+        {
+            return "Device command targetId must bind the required TARGET_ID targetReference field.";
+        }
+
         var capabilityError = ValidateExpression(command.Capability, fields, "emit.capability", depth: 0);
         if (capabilityError is not null)
         {

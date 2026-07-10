@@ -91,12 +91,6 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         {
             Nodes = document.Nodes
                 .OrderBy(node => node.NodeId, StringComparer.Ordinal)
-                .Select(node => node with
-                {
-                    Actions = node.Actions
-                        .OrderBy(action => action.ActionId, StringComparer.Ordinal)
-                        .ToImmutableArray()
-                })
                 .ToImmutableArray(),
             Transitions = document.Transitions
                 .OrderBy(transition => transition.TransitionId, StringComparer.Ordinal)

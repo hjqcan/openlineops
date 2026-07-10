@@ -207,33 +207,51 @@ public sealed class ProcessBlocklyBlocksApiTests : IClassFixture<WebApplicationF
             body.RootElement.GetProperty("title").GetString());
     }
 
+    [Fact]
+    public async Task RegisterRejectsRemovedPythonTemplateProperty()
+    {
+        var blockType = $"removed_python_template_{Guid.NewGuid():N}";
+        var contract = CreateFixtureContract(includeClamp: false);
+        using var response = await _client.PostAsJsonAsync(
+            "/api/process-blocks",
+            new
+            {
+                blockType,
+                category = "Fixture",
+                displayName = "Removed Python Template",
+                blocklyJson = new
+                {
+                    type = blockType,
+                    message0 = "removed",
+                    previousStatement = (string?)null,
+                    nextStatement = (string?)null
+                },
+                runtimeActionContractSchemaVersion = contract.SchemaVersion,
+                runtimeActionContract = contract.Contract,
+                pythonCodeTemplate = "removed"
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using var body = await ReadJsonAsync(response);
+        Assert.True(body.RootElement.GetProperty("errors").TryGetProperty("UnknownProperties", out _));
+    }
+
     private static ContractPayload CreateFixtureContract(bool includeClamp)
     {
         var fields = new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal);
-        var input = new Dictionary<string, RuntimeActionValueExpression>(StringComparer.Ordinal)
-        {
-            ["state"] = Literal("closed")
-        };
         if (includeClamp)
         {
             fields["CLAMP"] = new RuntimeActionFieldDefinition(
                 RuntimeActionFieldType.Text,
                 Required: true,
                 MaxLength: 128);
-            input["clamp"] = new RuntimeActionFieldValue("CLAMP");
         }
 
         var contract = new RuntimeActionContract(
             RuntimeActionContractSchemaVersions.V1,
             "fixture.clamp.set",
             fields,
-            new RuntimeDeviceCommandEmit(
-                Literal(RuntimeActionTargetKinds.Capability),
-                Literal("fixture.clamp"),
-                Literal("fixture.clamp"),
-                Literal("SetState"),
-                new RuntimeActionObjectValue(input),
-                Literal(30_000)));
+            new RuntimeDelayEmit(Literal(1)));
         var artifact = new RuntimeActionContractCanonicalSerializer().Serialize(contract);
         Assert.True(artifact.IsSuccess, artifact.Error.Message);
         return new ContractPayload(
