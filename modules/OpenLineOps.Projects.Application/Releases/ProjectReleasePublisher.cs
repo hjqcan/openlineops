@@ -294,12 +294,16 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 "Resolved release source does not contain a site layout.");
         }
 
-        if (metadata.ProductionLine.Workstations is null
-            || metadata.ProductionLine.Workstations.Count == 0
-            || metadata.ProductionLine.Stages is null
-            || metadata.ProductionLine.Stages.Count == 0
+        if (metadata.ProductionLine.Operations is null
+            || metadata.ProductionLine.Operations.Count == 0
+            || metadata.ProductionLine.Transitions is null
             || metadata.ProductionLine.ExternalTestProgramAdapters is null
-            || metadata.ProductionLine.DutModel is null)
+            || metadata.ProductionLine.ProductModel is null
+            || string.IsNullOrWhiteSpace(metadata.ProductionLine.EntryOperationId)
+            || metadata.ProductionLine.Operations.All(operation => !string.Equals(
+                operation.OperationId,
+                metadata.ProductionLine.EntryOperationId,
+                StringComparison.Ordinal)))
         {
             return ApplicationError.Conflict(
                 "Projects.ReleaseProductionLineInvalid",
@@ -320,18 +324,19 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 "Resolved release source does not contain a runtime target.");
         }
 
-        if (metadata.ProductionLine.Stages.Any(stage =>
-                string.IsNullOrWhiteSpace(stage.FlowDefinitionId)
-                || string.IsNullOrWhiteSpace(stage.FlowVersionId)
-                || string.IsNullOrWhiteSpace(stage.ConfigurationSnapshotId)
-                || string.IsNullOrWhiteSpace(stage.FlowIrSchemaVersion)
-                || string.IsNullOrWhiteSpace(stage.FlowIrCanonicalJson)
-                || !IsSha256(stage.FlowIrSha256)
-                || stage.BlockVersionIds is null))
+        if (metadata.ProductionLine.Operations.Any(operation =>
+                string.IsNullOrWhiteSpace(operation.StationSystemId)
+                || string.IsNullOrWhiteSpace(operation.FlowDefinitionId)
+                || string.IsNullOrWhiteSpace(operation.FlowVersionId)
+                || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId)
+                || string.IsNullOrWhiteSpace(operation.FlowIrSchema)
+                || string.IsNullOrWhiteSpace(operation.FlowIrCanonicalJson)
+                || !IsSha256(operation.FlowIrSha256)
+                || operation.BlockVersionIds is null))
         {
             return ApplicationError.Conflict(
-                "Projects.ReleaseProductionStageInvalid",
-                "Every resolved Production stage must contain its configuration, Flow identity, canonical Flow IR, SHA-256, and block locks.");
+                "Projects.ReleaseProductionOperationInvalid",
+                "Every resolved Production operation must contain its Station, configuration, Flow identity, canonical Flow IR, SHA-256, and block locks.");
         }
 
         if (metadata.BlockVersionIds is null)

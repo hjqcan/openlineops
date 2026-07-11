@@ -123,7 +123,7 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
                             new[] { "System", RuntimeActionTargetKinds.System },
                             new[] { "Slot group", RuntimeActionTargetKinds.SlotGroup },
                             new[] { "Slot", RuntimeActionTargetKinds.Slot },
-                            new[] { "DUT", RuntimeActionTargetKinds.Dut },
+                            new[] { "Production Unit", RuntimeActionTargetKinds.ProductionUnit },
                             new[] { "Capability", RuntimeActionTargetKinds.Capability },
                             new[] { "Driver", RuntimeActionTargetKinds.Driver }
                         }
@@ -205,7 +205,7 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
     private static RuntimeActionContract CreateContract(GeneratedPluginCommand command)
     {
         return new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             $"plugin.{command.KindLabel}.command",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {

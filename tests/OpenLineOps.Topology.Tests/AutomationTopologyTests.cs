@@ -46,7 +46,7 @@ public sealed class AutomationTopologyTests
             group.Id,
             station.Id,
             "1",
-            "DUT 1")).Succeeded);
+            "Production Unit 1")).Succeeded);
 
         Assert.Single(topology.Systems);
         Assert.Single(topology.SlotGroups);
@@ -253,7 +253,7 @@ public sealed class AutomationTopologyTests
             group.Id,
             station.Id,
             "A1",
-            "DUT")).Succeeded);
+            "Production Unit")).Succeeded);
 
         Assert.True(topology.UpdateSystem(
             child.Id,

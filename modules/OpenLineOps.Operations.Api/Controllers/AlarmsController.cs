@@ -8,7 +8,7 @@ using OpenLineOps.Operations.Application.Contract.Services;
 namespace OpenLineOps.Operations.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.OperationsV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Operations)]
 [Route(OpenLineOpsApiRoutes.OperationsAlarms)]
 public sealed class AlarmsController(IAlarmAppService appService)
     : ControllerBase

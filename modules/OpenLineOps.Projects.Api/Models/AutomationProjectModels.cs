@@ -35,11 +35,13 @@ public sealed record PublishProjectSnapshotRequest(
     string? ProductionLineDefinitionId);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record StartProjectSnapshotProductionRunRequest(
+public sealed record SubmitProjectSnapshotProductionRunRequest(
     Guid? ProductionRunId,
-    string? DutIdentityValue,
+    string? ProductionUnitIdentityValue,
     string? ActorId,
-    string? BatchId = null,
+    string? LotId = null,
+    string? CarrierId = null,
+    string? SlotId = null,
     string? FixtureId = null,
     string? DeviceId = null);
 
@@ -137,21 +139,23 @@ public sealed record ProjectTargetReferenceResponse(
     string Kind,
     string TargetId);
 
-public sealed record StartedProjectSnapshotProductionRunResponse(
+public sealed record SubmittedProjectSnapshotProductionRunResponse(
     string SnapshotId,
     string ProjectId,
     string ApplicationId,
     string TopologyId,
     string ProductionLineDefinitionId,
     Guid ProductionRunId,
-    string DutModelId,
-    string DutIdentityInputKey,
-    string DutIdentityValue,
+    string ProductModelId,
+    string ProductionUnitIdentityInputKey,
+    string ProductionUnitIdentityValue,
     string ActorId,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
-    string Status,
+    string? LotId,
+    string? CarrierId,
+    string ExecutionStatus,
+    string Judgement,
+    string Disposition,
+    string ControlState,
     bool IsTerminal,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset LastTransitionAtUtc,
@@ -159,22 +163,21 @@ public sealed record StartedProjectSnapshotProductionRunResponse(
     DateTimeOffset? CompletedAtUtc,
     string? FailureCode,
     string? FailureReason,
-    int CompletedStageCount,
-    int CompletedStepCount,
-    int CommandCount,
-    int IncidentCount,
-    IReadOnlyCollection<ProductionStageRunResponse> Stages);
+    IReadOnlyCollection<ProductionOperationRunResponse> Operations,
+    IReadOnlyCollection<ProductionRouteDecisionResponse> RouteDecisions);
 
-public sealed record ProductionStageRunResponse(
-    string StageId,
-    int Sequence,
-    string WorkstationId,
+public sealed record ProductionOperationRunResponse(
+    string OperationId,
+    string OperationRunId,
+    int Attempt,
     string StationSystemId,
+    string RuntimeStationId,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
     string RecipeSnapshotId,
-    string Status,
+    string ExecutionStatus,
+    string Judgement,
     Guid? RuntimeSessionId,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
@@ -183,3 +186,11 @@ public sealed record ProductionStageRunResponse(
     int CompletedStepCount,
     int CommandCount,
     int IncidentCount);
+
+public sealed record ProductionRouteDecisionResponse(
+    string SourceOperationRunId,
+    string TransitionId,
+    string TargetOperationId,
+    string SourceJudgement,
+    int Traversal,
+    DateTimeOffset DecidedAtUtc);

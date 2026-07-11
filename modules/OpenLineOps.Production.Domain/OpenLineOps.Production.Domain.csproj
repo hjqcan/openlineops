@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../shared/OpenLineOps.Domain.Abstractions/OpenLineOps.Domain.Abstractions.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Runtime.Contracts/OpenLineOps.Runtime.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

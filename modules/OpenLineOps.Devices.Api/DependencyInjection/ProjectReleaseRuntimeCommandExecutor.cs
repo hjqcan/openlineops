@@ -1,4 +1,5 @@
 using OpenLineOps.Devices.Application.Execution;
+using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
@@ -13,19 +14,22 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
     private readonly PluginRuntimeCommandExecutor _processPluginExecutor;
     private readonly RuntimeFlowCommandExecutor _flowExecutor;
     private readonly IRuntimeScriptExecutor _scriptExecutor;
+    private readonly IExternalProgramHost _externalProgramHost;
 
     public ProjectReleaseRuntimeCommandExecutor(
         IProjectReleaseRuntimeCommandRouteResolver routeResolver,
         DeviceRuntimeCommandExecutor deviceExecutor,
         PluginRuntimeCommandExecutor processPluginExecutor,
         RuntimeFlowCommandExecutor flowExecutor,
-        IRuntimeScriptExecutor scriptExecutor)
+        IRuntimeScriptExecutor scriptExecutor,
+        IExternalProgramHost externalProgramHost)
     {
         _routeResolver = routeResolver;
         _deviceExecutor = deviceExecutor;
         _processPluginExecutor = processPluginExecutor;
         _flowExecutor = flowExecutor;
         _scriptExecutor = scriptExecutor;
+        _externalProgramHost = externalProgramHost;
     }
 
     public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
@@ -55,16 +59,19 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                     context.SessionId.ToString(),
                     context.ProductionRunId.ToString(),
                     context.ProductionLineDefinitionId,
-                    context.ProductionStageId,
-                    context.StageSequence,
-                    context.WorkstationId,
-                    context.DutIdentity.ModelId,
-                    context.DutIdentity.InputKey,
-                    context.DutIdentity.Value,
+                    context.OperationId,
+                    context.OperationAttempt,
+                    context.ProductionUnitIdentity.ModelId,
+                    context.ProductionUnitIdentity.InputKey,
+                    context.ProductionUnitIdentity.Value,
+                    context.LotId,
+                    context.CarrierId,
+                    context.FixtureId,
+                    context.DeviceId,
                     context.StepId.ToString(),
                     context.CommandId.ToString(),
                     context.NodeId.Value,
-                    context.StationId.Value,
+                    context.StationSystemId,
                     context.ConfigurationSnapshotId.Value,
                     new OpenLineOps.Devices.Domain.Identifiers.DeviceCapabilityId(
                         context.TargetCapability.Value),
@@ -86,6 +93,7 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                         context,
                         externalTestRoute,
                         ExecuteExternalTestProviderAsync,
+                        _externalProgramHost,
                         cancellationToken)
                     .ConfigureAwait(false),
             ProjectReleaseProcessCommandRoute =>

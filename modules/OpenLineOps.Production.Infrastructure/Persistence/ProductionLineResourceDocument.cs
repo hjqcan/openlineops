@@ -9,9 +9,10 @@ internal sealed record ProductionLineResourceDocument(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    DutModelDocument DutModel,
-    WorkstationDocument[] Workstations,
-    ProcessStageDocument[] Stages,
+    ProductModelDocument ProductModel,
+    string EntryOperationId,
+    OperationDefinitionDocument[] Operations,
+    RouteTransitionDocument[] Transitions,
     ExternalTestProgramAdapterDocument[] ExternalTestProgramAdapters,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc)
@@ -21,24 +22,29 @@ internal sealed record ProductionLineResourceDocument(
     public const string Kind = "OpenLineOps.ProductionLine";
 }
 
-internal sealed record DutModelDocument(
-    string DutModelId,
+internal sealed record ProductModelDocument(
+    string ProductModelId,
     string ModelCode,
     string IdentityInputKey);
 
-internal sealed record WorkstationDocument(
-    string WorkstationId,
+internal sealed record OperationDefinitionDocument(
+    string OperationId,
     string DisplayName,
-    string StationSystemId);
-
-internal sealed record ProcessStageDocument(
-    string StageId,
-    int Sequence,
-    string DisplayName,
-    string WorkstationId,
+    string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId,
-    string? ExternalTestProgramAdapterId);
+    string ConfigurationSnapshotId);
+
+internal sealed record RouteTransitionDocument(
+    string TransitionId,
+    string SourceOperationId,
+    string TargetOperationId,
+    string Kind,
+    string? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    string? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 internal sealed record ExternalTestProgramAdapterDocument(
     string AdapterId,

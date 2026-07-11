@@ -8,21 +8,22 @@ public sealed record TraceRecordDetails(
     string ProjectSnapshotId,
     string TopologyId,
     string ProductionLineDefinitionId,
-    string DutModelId,
-    string DutIdentityInputKey,
-    string DutIdentityValue,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
+    string ProductModelId,
+    string ProductionUnitIdentityInputKey,
+    string ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string ActorId,
-    string RunStatus,
+    string ExecutionStatus,
     string Judgement,
+    string Disposition,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
     string? FailureReason,
-    IReadOnlyCollection<TraceStageExecutionDetails> Stages,
+    IReadOnlyCollection<TraceOperationExecutionDetails> Operations,
+    IReadOnlyCollection<TraceRouteDecisionDetails> RouteDecisions,
     IReadOnlyCollection<AuditEntryDetails> AuditEntries);
 
 public sealed record TraceRecordSummary(
@@ -33,27 +34,29 @@ public sealed record TraceRecordSummary(
     string ProjectSnapshotId,
     string TopologyId,
     string ProductionLineDefinitionId,
-    string DutModelId,
-    string DutIdentityInputKey,
-    string DutIdentityValue,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
+    string ProductModelId,
+    string ProductionUnitIdentityInputKey,
+    string ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string ActorId,
-    string RunStatus,
+    string ExecutionStatus,
     string Judgement,
+    string Disposition,
     DateTimeOffset CompletedAtUtc,
-    int StageCount,
-    int FailedStageCount,
+    int OperationCount,
+    int FailedOperationCount,
     int CommandCount,
     int MeasurementCount,
     int ArtifactCount,
-    int IncidentCount);
+    int IncidentCount,
+    int RouteDecisionCount);
 
-public sealed record TraceStageExecutionDetails(
-    string StageId,
-    int Sequence,
-    string WorkstationId,
+public sealed record TraceOperationExecutionDetails(
+    string OperationRunId,
+    string OperationId,
+    int Attempt,
+    string StationSystemId,
     string StationId,
     string ProcessDefinitionId,
     string ProcessVersionId,
@@ -61,7 +64,8 @@ public sealed record TraceStageExecutionDetails(
     string RecipeSnapshotId,
     Guid? RuntimeSessionId,
     string? RuntimeSessionStatus,
-    string Status,
+    string ExecutionStatus,
+    string Judgement,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
@@ -72,7 +76,24 @@ public sealed record TraceStageExecutionDetails(
     IReadOnlyCollection<TraceCommandDetails> Commands,
     IReadOnlyCollection<MeasurementRecordDetails> Measurements,
     IReadOnlyCollection<ArtifactRecordDetails> Artifacts,
-    IReadOnlyCollection<TraceIncidentDetails> Incidents);
+    IReadOnlyCollection<TraceIncidentDetails> Incidents,
+    IReadOnlyCollection<TraceOperationOutputDetails> Outputs,
+    IReadOnlyCollection<TraceResourceFencingTokenDetails> FencingTokens);
+
+public sealed record TraceRouteDecisionDetails(
+    string SourceOperationRunId,
+    string TransitionId,
+    string TargetOperationId,
+    string SourceJudgement,
+    int Traversal,
+    DateTimeOffset DecidedAtUtc);
+
+public sealed record TraceOperationOutputDetails(string Key, string ValueKind, string CanonicalJson);
+
+public sealed record TraceResourceFencingTokenDetails(
+    string ResourceKind,
+    string ResourceId,
+    long FencingToken);
 
 public sealed record TraceCommandDetails(
     Guid RuntimeCommandId,
@@ -83,7 +104,7 @@ public sealed record TraceCommandDetails(
     string TargetCapabilityId,
     string CommandName,
     string Status,
-    string? SemanticOutcome,
+    string? ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,

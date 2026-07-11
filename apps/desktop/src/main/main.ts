@@ -91,6 +91,12 @@ function createBackendLaunchConfig(): BackendLaunchConfig {
       OpenLineOps__Runtime__Persistence__DatabasePath: path.join(
         dataDirectory,
         'openlineops-runtime.sqlite'),
+      OpenLineOps__Runtime__Coordination__Provider: 'Sqlite',
+      OpenLineOps__Runtime__Coordination__SqliteDatabasePath: path.join(
+        dataDirectory,
+        'openlineops-production-coordination.sqlite'),
+      OpenLineOps__Runtime__AgentTransport__Provider: 'Disabled',
+      OpenLineOps__Runtime__StationExecution__Provider: 'InProcess',
       OpenLineOps__Traceability__Persistence__DatabasePath: path.join(
         dataDirectory,
         'openlineops-traceability.sqlite'),

@@ -103,7 +103,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
     private static ApplicationError? Validate(FlowIrDocument document)
     {
-        if (!string.Equals(document.SchemaVersion, FlowIrSchemaVersions.V1, StringComparison.Ordinal))
+        if (!string.Equals(document.SchemaVersion, FlowIrSchema.Current, StringComparison.Ordinal))
         {
             return Invalid($"Schema version '{document.SchemaVersion}' is not supported.");
         }
@@ -139,7 +139,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 || dependency.Version <= 0
                 || !string.Equals(
                     dependency.ContractSchemaVersion,
-                    RuntimeActionContractSchemaVersions.V1,
+                    RuntimeActionContractSchema.Current,
                     StringComparison.Ordinal)
                 || !IsSha256(dependency.ContractSha256))
             {
@@ -677,7 +677,7 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         FlowIrTargetReferenceKind.System => "system",
         FlowIrTargetReferenceKind.SlotGroup => "slotGroup",
         FlowIrTargetReferenceKind.Slot => "slot",
-        FlowIrTargetReferenceKind.Dut => "dut",
+        FlowIrTargetReferenceKind.ProductionUnit => "productionUnit",
         FlowIrTargetReferenceKind.Capability => "capability",
         FlowIrTargetReferenceKind.Driver => "driver",
         _ => throw new InvalidOperationException($"Unsupported Flow IR target kind {value}.")

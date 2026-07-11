@@ -7,7 +7,7 @@ using OpenLineOps.Runtime.Contracts;
 namespace OpenLineOps.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.PlatformV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Platform)]
 [Route(OpenLineOpsApiRoutes.Platform)]
 public sealed class PlatformController : ControllerBase
 {

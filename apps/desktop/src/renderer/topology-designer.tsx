@@ -22,9 +22,10 @@ import type {
   AutomationProjectWorkspaceResponse,
   AutomationSystemResponse,
   AutomationTopologyResponse,
+  ProductionLineRuntimeStateResponse,
+  ProductionOperationRunReadModel,
+  ProductionRunReadModel,
   ProjectApplicationResponse,
-  RuntimeStationStatus,
-  RuntimeTargetStatus,
   SiteLayoutElementResponse,
   SiteLayoutResponse,
   UpdateSiteLayoutElementGeometryRequest
@@ -54,6 +55,28 @@ type CanvasMode = 'edit' | 'monitor';
 type TopologyDimension = '2d' | '3d';
 type PaletteItemKind = 'Station' | 'System' | 'Group' | 'Slot';
 type OperationalState = 'Idle' | 'Running' | 'Completed' | 'Failed' | 'Offline';
+type RuntimeSlotState = 'Available' | 'Reserved' | 'Occupied' | 'Running' | 'Blocked' | 'Offline';
+
+interface TopologyRuntimeStatus {
+  operationalState: OperationalState;
+  products: string[];
+  queueCount: number;
+  operationIds: string[];
+  slotState?: RuntimeSlotState;
+}
+
+interface TopologySlotRuntimeStatus extends TopologyRuntimeStatus {
+  slotId: string;
+  stationSystemId: string;
+  slotState: RuntimeSlotState;
+  fencingToken: number | null;
+}
+
+interface TopologyRuntimeView {
+  stationStatuses: Map<string, TopologyRuntimeStatus>;
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
+  slots: TopologySlotRuntimeStatus[];
+}
 
 interface TopologyCamera {
   yawDegrees: number;
@@ -65,12 +88,10 @@ interface TopologyDesignerProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
   projectSnapshotId: string | null;
-  activeProductionRunId: string | null;
   isBackendHealthy: boolean;
   workspaceMode: WorkspaceMode;
-  runtimeConnected: boolean;
-  stations: RuntimeStationStatus[];
-  targetStatuses: RuntimeTargetStatus[];
+  projectionConnected: boolean;
+  runtimeProjection: ProductionLineRuntimeStateResponse | null;
   onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
   onMessage(message: string): void;
 }
@@ -140,7 +161,7 @@ const slotGroupKinds = [
 ];
 
 const slotMaterialKinds = [
-  'Dut',
+  'ProductionUnit',
   'Carrier',
   'FixturePosition',
   'TrayPosition',
@@ -156,7 +177,7 @@ const paletteItems: Array<{
   { kind: 'Station', label: 'Station', detail: 'Runnable System boundary', icon: Factory },
   { kind: 'System', label: 'System', detail: 'Station component or tester', icon: Cuboid },
   { kind: 'Group', label: 'Slot Group', detail: 'Fixture or carrier region', icon: Grid2X2 },
-  { kind: 'Slot', label: 'DUT Slot', detail: 'Observable work position', icon: CircleDot }
+  { kind: 'Slot', label: 'Production Unit Slot', detail: 'Observable work position', icon: CircleDot }
 ];
 
 const statusLegend: Array<{ state: OperationalState; label: string }> = [
@@ -181,12 +202,10 @@ export function TopologyDesigner({
   activeWorkspace,
   activeApplicationId,
   projectSnapshotId,
-  activeProductionRunId,
   isBackendHealthy,
   workspaceMode,
-  runtimeConnected,
-  stations,
-  targetStatuses,
+  projectionConnected,
+  runtimeProjection,
   onWorkspaceChanged,
   onMessage
 }: TopologyDesignerProps): React.ReactElement {
@@ -217,37 +236,13 @@ export function TopologyDesigner({
   const selectedElement = useMemo(
     () => layout?.elements.find(element => element.elementId === selectedElementId) ?? null,
     [layout, selectedElementId]);
-  const stationStatuses = useMemo(() => {
-    if (effectiveMode !== 'monitor' || !activeProductionRunId) {
-      return new Map<string, RuntimeStationStatus>();
-    }
-
-    return new Map(stations
-      .filter(status => status.productionRunId === activeProductionRunId)
-      .sort((left, right) => left.lastTransitionAtUtc.localeCompare(right.lastTransitionAtUtc)
-        || left.stageSequence - right.stageSequence)
-      .map(status => [status.stationSystemId, status]));
-  }, [activeProductionRunId, effectiveMode, stations]);
-  const targetStatusByKey = useMemo(() => {
-    if (effectiveMode !== 'monitor' || !activeProductionRunId) {
-      return new Map<string, RuntimeTargetStatus>();
-    }
-
-    return new Map(targetStatuses
-      .filter(status => {
-        const stationStatus = stationStatuses.get(status.stationSystemId);
-        return status.productionRunId === activeProductionRunId
-          && stationStatus !== undefined
-          && status.productionLineDefinitionId === stationStatus.productionLineDefinitionId
-          && status.stageId === stationStatus.stageId
-          && status.stageSequence === stationStatus.stageSequence
-          && status.workstationId === stationStatus.workstationId;
-      })
-      .map(status => [
-        runtimeTargetStatusKey(status.stationSystemId, status.targetKind, status.targetId),
-        status
-      ]));
-  }, [activeProductionRunId, effectiveMode, stationStatuses, targetStatuses]);
+  const runtimeView = useMemo(
+    () => effectiveMode === 'monitor'
+      ? buildTopologyRuntimeView(topology, runtimeProjection)
+      : emptyTopologyRuntimeView(),
+    [effectiveMode, runtimeProjection, topology]);
+  const stationStatuses = runtimeView.stationStatuses;
+  const targetStatusByKey = runtimeView.targetStatusByKey;
   const runtimeMonitorLabel = useMemo(() => {
     if (effectiveMode !== 'monitor') {
       return null;
@@ -257,10 +252,11 @@ export function TopologyDesigner({
       topology?.systems
         .filter(system => system.kind === 'Station')
         .map(system => system.systemId) ?? []);
-    const scopedStatuses = [...stationStatuses.values()].filter(status =>
-      stationSystemIds.has(status.stationSystemId));
-    return describeRuntimeMonitorState(scopedStatuses);
-  }, [effectiveMode, stationStatuses, topology?.systems]);
+    const scopedStatuses = [...stationSystemIds]
+      .map(stationSystemId => stationStatuses.get(stationSystemId))
+      .filter((status): status is TopologyRuntimeStatus => status !== undefined);
+    return describeRuntimeMonitorState(scopedStatuses, runtimeProjection?.activeRunCount ?? 0);
+  }, [effectiveMode, runtimeProjection?.activeRunCount, stationStatuses, topology?.systems]);
 
   const refresh = useCallback(async () => {
     if (!activeApplication || !apiScope) {
@@ -561,7 +557,7 @@ export function TopologyDesigner({
 
       const groupElement = resolveGroupElement(selection, layout);
       if (!groupElement) {
-        throw new Error('Select a Slot Group before adding a DUT Slot.');
+        throw new Error('Select a Slot Group before adding a Production Unit Slot.');
       }
       const group = topology.slotGroups.find(candidate => candidate.slotGroupId === groupElement.target.targetId);
       if (!group) {
@@ -579,7 +575,7 @@ export function TopologyDesigner({
           parentSystemId: group.parentSystemId,
           address: `S${sequence}`,
           displayName: `Slot ${sequence}`,
-          materialKind: 'Dut',
+          materialKind: 'ProductionUnit',
           isEnabled: true
         }, apiScope),
         `Add Slot ${slotId}`);
@@ -599,14 +595,14 @@ export function TopologyDesigner({
         groupElement.elementId,
         slotGeometry,
         30,
-        { appearance: 'dut-slot' });
+        { appearance: 'production-unit-slot' });
       const nextLayout = await requireBody(
         addSiteLayoutElement(layout.layoutId, element, apiScope),
         `Place Slot ${slotId}`);
       setTopology(nextTopology);
       setLayout(nextLayout);
       setSelectedElementId(element.elementId);
-      onMessage(`DUT Slot added ${slotId}`);
+      onMessage(`Production Unit Slot added ${slotId}`);
     } catch (error) {
       onMessage(String(error));
     } finally {
@@ -891,7 +887,7 @@ export function TopologyDesigner({
                     topology={topology}
                     stationStatuses={stationStatuses}
                     targetStatusByKey={targetStatusByKey}
-                    runtimeConnected={runtimeConnected}
+                    runtimeConnected={projectionConnected}
                     selectedElementId={selectedElementId}
                     editable={editable}
                     onSelect={setSelectedElementId}
@@ -913,7 +909,7 @@ export function TopologyDesigner({
                   topology={topology}
                   stationStatuses={stationStatuses}
                   targetStatusByKey={targetStatusByKey}
-                  runtimeConnected={runtimeConnected}
+                  runtimeConnected={projectionConnected}
                   selectedElementId={selectedElementId}
                   editable={editable}
                   camera={camera}
@@ -940,6 +936,14 @@ export function TopologyDesigner({
                 </button>
               </div>
             )}
+            {effectiveMode === 'monitor' && topology ? (
+              <TopologyLiveOverlay
+                topology={topology}
+                lineState={runtimeProjection}
+                runtimeView={runtimeView}
+                connected={projectionConnected}
+              />
+            ) : null}
           </div>
 
           <footer className="topology-canvas-footer">
@@ -954,7 +958,7 @@ export function TopologyDesigner({
           selectedElement={selectedElement}
           stationStatuses={stationStatuses}
           targetStatusByKey={targetStatusByKey}
-          runtimeConnected={runtimeConnected}
+          runtimeConnected={projectionConnected}
           editable={editable}
           deleteConfirming={deleteConfirmElementId === selectedElement?.elementId}
           onSelect={setSelectedElementId}
@@ -1048,8 +1052,8 @@ function SemanticTopology3D({
 }: {
   layout: SiteLayoutResponse;
   topology: AutomationTopologyResponse;
-  stationStatuses: Map<string, RuntimeStationStatus>;
-  targetStatusByKey: Map<string, RuntimeTargetStatus>;
+  stationStatuses: Map<string, TopologyRuntimeStatus>;
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
   runtimeConnected: boolean;
   selectedElementId: string | null;
   editable: boolean;
@@ -1502,8 +1506,8 @@ function TopologyElementTree({
 }: {
   layout: SiteLayoutResponse;
   topology: AutomationTopologyResponse;
-  stationStatuses: Map<string, RuntimeStationStatus>;
-  targetStatusByKey: Map<string, RuntimeTargetStatus>;
+  stationStatuses: Map<string, TopologyRuntimeStatus>;
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
   runtimeConnected: boolean;
   selectedElementId: string | null;
   editable: boolean;
@@ -1786,8 +1790,8 @@ function InspectorPanel({
   layout: SiteLayoutResponse | null;
   topology: AutomationTopologyResponse | null;
   selectedElement: SiteLayoutElementResponse | null;
-  stationStatuses: Map<string, RuntimeStationStatus>;
-  targetStatusByKey: Map<string, RuntimeTargetStatus>;
+  stationStatuses: Map<string, TopologyRuntimeStatus>;
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
@@ -1853,8 +1857,8 @@ function GeometryProperties({
   layout: SiteLayoutResponse | null;
   topology: AutomationTopologyResponse | null;
   element: SiteLayoutElementResponse | null;
-  stationStatuses: Map<string, RuntimeStationStatus>;
-  targetStatusByKey: Map<string, RuntimeTargetStatus>;
+  stationStatuses: Map<string, TopologyRuntimeStatus>;
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
@@ -2136,8 +2140,8 @@ function HierarchyTree({
 function flattenTopology3DElements(
   layout: SiteLayoutResponse,
   topology: AutomationTopologyResponse,
-  stationStatuses: Map<string, RuntimeStationStatus>,
-  targetStatusByKey: Map<string, RuntimeTargetStatus>,
+  stationStatuses: Map<string, TopologyRuntimeStatus>,
+  targetStatusByKey: Map<string, TopologyRuntimeStatus>,
   runtimeConnected: boolean
 ): Topology3DRenderElement[] {
   const childrenByParent = new Map<string | null, SiteLayoutElementResponse[]>();
@@ -2437,6 +2441,77 @@ function resolveGroupElement(
   return null;
 }
 
+function TopologyLiveOverlay({
+  topology,
+  lineState,
+  runtimeView,
+  connected
+}: {
+  topology: AutomationTopologyResponse;
+  lineState: ProductionLineRuntimeStateResponse | null;
+  runtimeView: TopologyRuntimeView;
+  connected: boolean;
+}): React.ReactElement {
+  const stationNameById = new Map(topology.systems
+    .filter(system => system.kind === 'Station')
+    .map(system => [system.systemId, system.displayName]));
+  return (
+    <aside className={`topology-live-overlay ${connected ? 'connected' : 'stale'}`} data-testid="topology-live-projection">
+      <header>
+        <div><CircleDot size={13} /><strong>LIVE WIP</strong></div>
+        <span>{connected ? 'CONNECTED' : 'STALE'} · {lineState?.activeRunCount ?? 0}</span>
+      </header>
+      <div className="topology-live-scroll">
+        <section>
+          <h3>ACTIVE PRODUCTS</h3>
+          {(lineState?.activeRuns ?? []).map(run => {
+            const activeOperations = run.operations.filter(operation => operation.executionStatus === 'Running');
+            const locatedOperations = activeOperations.length > 0
+              ? activeOperations
+              : run.operations.filter(operation => operation.executionStatus === 'Pending').slice(0, 1);
+            return (
+              <div className="topology-live-product" key={run.productionRunId}>
+                <i className={`status-${run.executionStatus.toLowerCase()}`} />
+                <span>
+                  <strong>{run.productionUnitIdentity.value}</strong>
+                  <small>{locatedOperations.map(operation => (
+                    `${stationNameById.get(operation.stationSystemId) ?? operation.stationSystemId} / ${operation.operationId}`
+                  )).join(' + ') || run.entryOperationId}</small>
+                </span>
+                <em>{run.controlState}</em>
+              </div>
+            );
+          })}
+          {(lineState?.activeRuns.length ?? 0) === 0 ? <p>No active products</p> : null}
+        </section>
+
+        <section>
+          <h3>STATIONS & QUEUES</h3>
+          {[...runtimeView.stationStatuses.entries()].map(([stationSystemId, status]) => (
+            <div className="topology-live-station" key={stationSystemId}>
+              <i className={`status-${status.operationalState.toLowerCase()}`} />
+              <span><strong>{stationNameById.get(stationSystemId) ?? stationSystemId}</strong><small>{status.products.length} located · {status.queueCount} queued</small></span>
+              <em>{status.operationalState}</em>
+            </div>
+          ))}
+        </section>
+
+        <section>
+          <h3>SLOT OCCUPANCY</h3>
+          {runtimeView.slots.map(slot => (
+            <div className="topology-live-slot" key={slot.slotId}>
+              <i className={`status-${slot.operationalState.toLowerCase()}`} />
+              <span><strong>{slot.slotId}</strong><small>{slot.products.join(', ') || 'empty'}</small></span>
+              <em>{slot.slotState}</em>
+            </div>
+          ))}
+          {runtimeView.slots.length === 0 ? <p>No Slots in this topology</p> : null}
+        </section>
+      </div>
+    </aside>
+  );
+}
+
 function runtimeTargetStatusKey(
   stationSystemId: string,
   targetKind: string,
@@ -2446,80 +2521,279 @@ function runtimeTargetStatusKey(
 }
 
 function toTargetOperationalState(
-  status: RuntimeTargetStatus | undefined,
+  status: TopologyRuntimeStatus | undefined,
   runtimeConnected: boolean
 ): OperationalState {
   if (!runtimeConnected) {
     return 'Offline';
   }
+  return status?.operationalState ?? 'Idle';
+}
 
-  switch (status?.commandStatus) {
-    case 'Pending':
-    case 'Accepted':
-    case 'InProgress':
+function describeRuntimeMonitorState(
+  statuses: TopologyRuntimeStatus[],
+  activeRunCount: number
+): string {
+  if (activeRunCount > 0) {
+    const queued = statuses.reduce((total, status) => total + status.queueCount, 0);
+    return `${activeRunCount} active product${activeRunCount === 1 ? '' : 's'} · ${queued} queued`;
+  }
+  return 'Line idle · projection connected';
+}
+
+function toOperationalState(
+  status: TopologyRuntimeStatus | undefined,
+  runtimeConnected: boolean
+): OperationalState {
+  if (!runtimeConnected) {
+    return 'Offline';
+  }
+  return status?.operationalState ?? 'Idle';
+}
+
+function emptyTopologyRuntimeView(): TopologyRuntimeView {
+  return {
+    stationStatuses: new Map(),
+    targetStatusByKey: new Map(),
+    slots: []
+  };
+}
+
+function buildTopologyRuntimeView(
+  topology: AutomationTopologyResponse | null,
+  lineState: ProductionLineRuntimeStateResponse | null
+): TopologyRuntimeView {
+  if (!topology) {
+    return emptyTopologyRuntimeView();
+  }
+
+  const stationAccumulators = new Map<string, RuntimeAccumulator>();
+  for (const station of topology.systems.filter(system => system.kind === 'Station')) {
+    stationAccumulators.set(station.systemId, createRuntimeAccumulator());
+  }
+  const slots = new Map<string, TopologySlotRuntimeStatus>();
+  for (const slot of topology.slots) {
+    const slotState: RuntimeSlotState = slot.isEnabled ? 'Available' : 'Offline';
+    slots.set(slot.slotId, {
+      slotId: slot.slotId,
+      stationSystemId: findStationAncestor(slot.parentSystemId, topology) ?? slot.parentSystemId,
+      slotState,
+      operationalState: slotOperationalState(slotState),
+      products: [],
+      queueCount: 0,
+      operationIds: [],
+      fencingToken: null
+    });
+  }
+
+  for (const run of lineState?.activeRuns ?? []) {
+    accumulateRun(stationAccumulators, slots, run);
+  }
+
+  const stationStatuses = new Map<string, TopologyRuntimeStatus>();
+  for (const [stationSystemId, accumulator] of stationAccumulators) {
+    stationStatuses.set(stationSystemId, freezeAccumulator(accumulator));
+  }
+
+  const targetStatusByKey = new Map<string, TopologyRuntimeStatus>();
+  for (const slot of slots.values()) {
+    targetStatusByKey.set(
+      runtimeTargetStatusKey(slot.stationSystemId, 'Slot', slot.slotId),
+      slot);
+  }
+  for (const group of topology.slotGroups) {
+    const groupSlots = group.slotIds
+      .map(slotId => slots.get(slotId))
+      .filter((slot): slot is TopologySlotRuntimeStatus => slot !== undefined);
+    const groupState = groupSlots.reduce<OperationalState>(
+      (current, slot) => operationalStatePriority(slot.operationalState) > operationalStatePriority(current)
+        ? slot.operationalState
+        : current,
+      'Idle');
+    targetStatusByKey.set(
+      runtimeTargetStatusKey(
+        findStationAncestor(group.parentSystemId, topology) ?? group.parentSystemId,
+        'SlotGroup',
+        group.slotGroupId),
+      {
+        operationalState: groupState,
+        products: unique(groupSlots.flatMap(slot => slot.products)),
+        queueCount: groupSlots.reduce((total, slot) => total + slot.queueCount, 0),
+        operationIds: unique(groupSlots.flatMap(slot => slot.operationIds))
+      });
+  }
+  for (const system of topology.systems.filter(candidate => candidate.kind === 'System')) {
+    const stationSystemId = findStationAncestor(system.systemId, topology);
+    if (!stationSystemId) {
+      continue;
+    }
+    const stationStatus = stationStatuses.get(stationSystemId);
+    if (stationStatus) {
+      targetStatusByKey.set(
+        runtimeTargetStatusKey(stationSystemId, 'System', system.systemId),
+        stationStatus);
+    }
+  }
+
+  return {
+    stationStatuses,
+    targetStatusByKey,
+    slots: [...slots.values()].sort((left, right) => left.slotId.localeCompare(right.slotId))
+  };
+}
+
+interface RuntimeAccumulator {
+  products: Set<string>;
+  operationIds: Set<string>;
+  queueProducts: Set<string>;
+  runningCount: number;
+  completedCount: number;
+  failedCount: number;
+}
+
+function createRuntimeAccumulator(): RuntimeAccumulator {
+  return {
+    products: new Set(),
+    operationIds: new Set(),
+    queueProducts: new Set(),
+    runningCount: 0,
+    completedCount: 0,
+    failedCount: 0
+  };
+}
+
+function accumulateRun(
+  stations: Map<string, RuntimeAccumulator>,
+  slots: Map<string, TopologySlotRuntimeStatus>,
+  run: ProductionRunReadModel
+): void {
+  const product = run.productionUnitIdentity.value;
+  const runningOperations = run.operations.filter(operation => operation.executionStatus === 'Running');
+  const locatedOperations = runningOperations.length > 0
+    ? runningOperations
+    : run.operations.filter(operation => operation.executionStatus === 'Pending').slice(0, 1);
+  const lastLocatedOperation = locatedOperations.length === 0
+    ? run.operations[run.operations.length - 1]
+    : null;
+  const locatedOperationRunIds = new Set([
+    ...locatedOperations.map(operation => operation.operationRunId),
+    ...(lastLocatedOperation ? [lastLocatedOperation.operationRunId] : [])
+  ]);
+  for (const operation of run.operations) {
+    const station = stations.get(operation.stationSystemId) ?? createRuntimeAccumulator();
+    stations.set(operation.stationSystemId, station);
+    station.operationIds.add(operation.operationId);
+    if (operation.executionStatus === 'Pending') {
+      station.queueProducts.add(product);
+    }
+    if (locatedOperationRunIds.has(operation.operationRunId)) {
+      station.products.add(product);
+      if (operation.executionStatus === 'Running' || run.controlState === 'Held' || run.controlState === 'Paused') {
+        station.runningCount += 1;
+      } else if (operation.executionStatus === 'Completed') {
+        station.completedCount += 1;
+      } else if (operation.executionStatus === 'Failed'
+          || operation.executionStatus === 'TimedOut'
+          || operation.executionStatus === 'Rejected'
+          || operation.incidentCount > 0) {
+        station.failedCount += 1;
+      }
+    }
+
+    for (const resource of operation.resources.filter(candidate => candidate.kind === 'Slot')) {
+      const existing = slots.get(resource.resourceId);
+      const slotState = runtimeSlotState(operation, resource.fencingToken);
+      const candidate: TopologySlotRuntimeStatus = {
+        slotId: resource.resourceId,
+        stationSystemId: existing?.stationSystemId ?? operation.stationSystemId,
+        slotState,
+        operationalState: slotOperationalState(slotState),
+        products: resource.fencingToken === null ? [] : [product],
+        queueCount: operation.executionStatus === 'Pending' && resource.fencingToken !== null ? 1 : 0,
+        operationIds: [operation.operationId],
+        fencingToken: resource.fencingToken
+      };
+      if (!existing || slotStatePriority(candidate.slotState) >= slotStatePriority(existing.slotState)) {
+        slots.set(resource.resourceId, candidate);
+      }
+    }
+  }
+}
+
+function freezeAccumulator(accumulator: RuntimeAccumulator): TopologyRuntimeStatus {
+  const operationalState: OperationalState = accumulator.failedCount > 0
+    ? 'Failed'
+    : accumulator.runningCount > 0
+      ? 'Running'
+      : accumulator.completedCount > 0
+        ? 'Completed'
+        : 'Idle';
+  return {
+    operationalState,
+    products: [...accumulator.products].sort(),
+    queueCount: accumulator.queueProducts.size,
+    operationIds: [...accumulator.operationIds].sort()
+  };
+}
+
+function runtimeSlotState(
+  operation: ProductionOperationRunReadModel,
+  fencingToken: number | null
+): RuntimeSlotState {
+  if (fencingToken === null) {
+    return 'Available';
+  }
+  if (operation.executionStatus === 'Running') {
+    return 'Running';
+  }
+  if (operation.executionStatus === 'Pending') {
+    return 'Reserved';
+  }
+  if (operation.executionStatus === 'Failed'
+      || operation.executionStatus === 'TimedOut'
+      || operation.executionStatus === 'Rejected') {
+    return 'Blocked';
+  }
+  return 'Occupied';
+}
+
+function slotOperationalState(state: RuntimeSlotState): OperationalState {
+  switch (state) {
+    case 'Running':
+    case 'Reserved':
+    case 'Occupied':
       return 'Running';
-    case 'Completed':
-      return 'Completed';
-    case 'Failed':
-    case 'TimedOut':
-    case 'Rejected':
-    case 'Canceled':
+    case 'Blocked':
       return 'Failed';
+    case 'Offline':
+      return 'Offline';
     default:
       return 'Idle';
   }
 }
 
-function describeRuntimeMonitorState(statuses: RuntimeStationStatus[]): string {
-  if (statuses.some(status => !status.isTerminal)) {
-    return 'Project is running';
-  }
-
-  const latest = statuses
-    .slice()
-    .sort((left, right) => right.lastTransitionAtUtc.localeCompare(left.lastTransitionAtUtc))[0];
-  switch (latest?.sessionStatus) {
-    case 'Completed':
-      return 'Last run completed';
-    case 'Failed':
-    case 'Canceled':
-    case 'Stopped':
-      return 'Last run failed';
-    default:
-      return 'Monitor mode';
-  }
+function slotStatePriority(state: RuntimeSlotState): number {
+  return { Available: 0, Offline: 1, Reserved: 2, Occupied: 3, Running: 4, Blocked: 5 }[state];
 }
 
-function toOperationalState(
-  status: RuntimeStationStatus | undefined,
-  runtimeConnected: boolean
-): OperationalState {
-  if (!runtimeConnected) {
-    return 'Offline';
-  }
-  if (!status) {
-    return 'Idle';
-  }
+function operationalStatePriority(state: OperationalState): number {
+  return { Idle: 0, Completed: 1, Running: 2, Offline: 3, Failed: 4 }[state];
+}
 
-  if (status.incidentCount > 0) {
-    return 'Failed';
+function findStationAncestor(systemId: string, topology: AutomationTopologyResponse): string | null {
+  const systemById = new Map(topology.systems.map(system => [system.systemId, system]));
+  let current = systemById.get(systemId);
+  while (current) {
+    if (current.kind === 'Station') {
+      return current.systemId;
+    }
+    current = current.parentSystemId ? systemById.get(current.parentSystemId) : undefined;
   }
+  return null;
+}
 
-  switch (status.sessionStatus) {
-    case 'Created':
-    case 'Queued':
-    case 'Running':
-    case 'Pausing':
-    case 'Paused':
-    case 'Stopping':
-      return 'Running';
-    case 'Completed':
-      return 'Completed';
-    case 'Failed':
-    case 'Canceled':
-    case 'Stopped':
-      return 'Failed';
-  }
+function unique(values: string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 function resolveDropInsertionElement(

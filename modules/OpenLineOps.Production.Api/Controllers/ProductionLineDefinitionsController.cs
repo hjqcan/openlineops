@@ -4,6 +4,8 @@ using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Production.Api.Models;
 using OpenLineOps.Production.Application.LineDefinitions;
+using OpenLineOps.Production.Domain.Models;
+using OpenLineOps.Runtime.Contracts;
 using ApiAdapterRequest = OpenLineOps.Production.Api.Models.ExternalTestProgramAdapterRequest;
 using ApiSaveRequest = OpenLineOps.Production.Api.Models.SaveProductionLineRequest;
 using AppAdapterRequest = OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramAdapterRequest;
@@ -12,7 +14,7 @@ using AppSaveRequest = OpenLineOps.Production.Application.LineDefinitions.SavePr
 namespace OpenLineOps.Production.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.ProductionV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Production)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProductionLines)]
 public sealed class ProductionLineDefinitionsController : ControllerBase
 {
@@ -112,61 +114,109 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.LineDefinitionId)
             || string.IsNullOrWhiteSpace(request.DisplayName)
             || string.IsNullOrWhiteSpace(request.TopologyId)
-            || request.DutModel is null
-            || string.IsNullOrWhiteSpace(request.DutModel.DutModelId)
-            || string.IsNullOrWhiteSpace(request.DutModel.ModelCode)
-            || string.IsNullOrWhiteSpace(request.DutModel.IdentityInputKey)
-            || request.Workstations is null
-            || request.Stages is null
+            || request.ProductModel is null
+            || string.IsNullOrWhiteSpace(request.ProductModel.ProductModelId)
+            || string.IsNullOrWhiteSpace(request.ProductModel.ModelCode)
+            || string.IsNullOrWhiteSpace(request.ProductModel.IdentityInputKey)
+            || string.IsNullOrWhiteSpace(request.EntryOperationId)
+            || request.Operations is null
+            || request.Transitions is null
             || request.ExternalTestProgramAdapters is null)
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestIncomplete",
-                "Line identity, topology, DUT model, workstations, stages and adapters are required."));
+                "Line identity, topology, product model, entry operation, operations, transitions and adapters are required."));
         }
 
-        if (request.Workstations.Any(workstation =>
-                workstation is null
-                || string.IsNullOrWhiteSpace(workstation.WorkstationId)
-                || string.IsNullOrWhiteSpace(workstation.DisplayName)
-                || string.IsNullOrWhiteSpace(workstation.StationSystemId))
-            || request.Stages.Any(stage =>
-                stage is null
-                || string.IsNullOrWhiteSpace(stage.StageId)
-                || stage.Sequence is null
-                || string.IsNullOrWhiteSpace(stage.DisplayName)
-                || string.IsNullOrWhiteSpace(stage.WorkstationId)
-                || string.IsNullOrWhiteSpace(stage.FlowDefinitionId)
-                || string.IsNullOrWhiteSpace(stage.ConfigurationSnapshotId))
+        if (request.Operations.Any(operation =>
+                operation is null
+                || string.IsNullOrWhiteSpace(operation.OperationId)
+                || string.IsNullOrWhiteSpace(operation.DisplayName)
+                || string.IsNullOrWhiteSpace(operation.StationSystemId)
+                || string.IsNullOrWhiteSpace(operation.FlowDefinitionId)
+                || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId))
+            || request.Transitions.Any(transition =>
+                transition is null
+                || string.IsNullOrWhiteSpace(transition.TransitionId)
+                || string.IsNullOrWhiteSpace(transition.SourceOperationId)
+                || string.IsNullOrWhiteSpace(transition.TargetOperationId)
+                || string.IsNullOrWhiteSpace(transition.Kind))
             || request.ExternalTestProgramAdapters.Any(AdapterIsIncomplete))
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestItemIncomplete",
-                "Every workstation, stage and external test adapter must contain its required contract fields."));
+                "Every operation, transition and external test adapter must contain its required contract fields."));
+        }
+
+        var transitions = new List<OpenLineOps.Production.Application.LineDefinitions.RouteTransitionRequest>();
+        foreach (var transition in request.Transitions)
+        {
+            if (!TryParseExact(transition!.Kind!, out RouteTransitionKind kind)
+                || (transition.RequiredJudgement is not null
+                    && !TryParseExact(
+                        transition.RequiredJudgement,
+                        out RouteJudgement requiredJudgement))
+                || (transition.ExpectedOutputKind is not null
+                    && !TryParseExact(
+                        transition.ExpectedOutputKind,
+                        out ProductionContextValueKind expectedOutputKind)))
+            {
+                return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
+                    "Production.RouteTransitionTokenInvalid",
+                    "Route transition kinds, judgements and Production Context value kinds must use exact supported tokens."));
+            }
+
+            var hasOutputCondition = transition.OutputKey is not null
+                && transition.ExpectedOutputKind is not null
+                && transition.ExpectedOutputValue is not null;
+            var hasAnyOutputConditionField = transition.OutputKey is not null
+                || transition.ExpectedOutputKind is not null
+                || transition.ExpectedOutputValue is not null;
+            if (hasAnyOutputConditionField != hasOutputCondition
+                || (kind == RouteTransitionKind.Condition) != hasOutputCondition)
+            {
+                return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
+                    "Production.RouteOutputConditionInvalid",
+                    "Condition transitions require outputKey, expectedOutputKind and expectedOutputValue; other transitions cannot define them."));
+            }
+
+            var judgement = transition.RequiredJudgement is null
+                ? (RouteJudgement?)null
+                : Enum.Parse<RouteJudgement>(transition.RequiredJudgement, ignoreCase: false);
+            transitions.Add(new OpenLineOps.Production.Application.LineDefinitions.RouteTransitionRequest(
+                transition.TransitionId!,
+                transition.SourceOperationId!,
+                transition.TargetOperationId!,
+                kind,
+                judgement,
+                transition.MaxTraversals,
+                transition.ParallelGroupId,
+                transition.OutputKey,
+                transition.ExpectedOutputKind is null
+                    ? null
+                    : Enum.Parse<ProductionContextValueKind>(
+                        transition.ExpectedOutputKind,
+                        ignoreCase: false),
+                transition.ExpectedOutputValue));
         }
 
         return Result.Success(new AppSaveRequest(
             request.LineDefinitionId,
             request.DisplayName,
             request.TopologyId,
-            new OpenLineOps.Production.Application.LineDefinitions.DutModelRequest(
-                request.DutModel.DutModelId,
-                request.DutModel.ModelCode,
-                request.DutModel.IdentityInputKey),
-            request.Workstations.Select(workstation =>
-                new OpenLineOps.Production.Application.LineDefinitions.WorkstationRequest(
-                    workstation!.WorkstationId!,
-                    workstation.DisplayName!,
-                    workstation.StationSystemId!)).ToArray(),
-            request.Stages.Select(stage =>
-                new OpenLineOps.Production.Application.LineDefinitions.ProcessStageRequest(
-                    stage!.StageId!,
-                    stage.Sequence!.Value,
-                    stage.DisplayName!,
-                    stage.WorkstationId!,
-                    stage.FlowDefinitionId!,
-                    stage.ConfigurationSnapshotId!,
-                    stage.ExternalTestProgramAdapterId)).ToArray(),
+            new OpenLineOps.Production.Application.LineDefinitions.ProductModelRequest(
+                request.ProductModel.ProductModelId,
+                request.ProductModel.ModelCode,
+                request.ProductModel.IdentityInputKey),
+            request.EntryOperationId,
+            request.Operations.Select(operation =>
+                new OpenLineOps.Production.Application.LineDefinitions.OperationDefinitionRequest(
+                    operation!.OperationId!,
+                    operation.DisplayName!,
+                    operation.StationSystemId!,
+                    operation.FlowDefinitionId!,
+                    operation.ConfigurationSnapshotId!)).ToArray(),
+            transitions,
             request.ExternalTestProgramAdapters.Select(adapter => new AppAdapterRequest(
                 adapter!.AdapterId!,
                 adapter.DisplayName!,
@@ -189,6 +239,14 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     adapter.OutcomeMapping.FailedToken!,
                     adapter.OutcomeMapping.AbortedToken!),
                 adapter.TimeoutMilliseconds!.Value)).ToArray()));
+    }
+
+    private static bool TryParseExact<T>(string value, out T parsed)
+        where T : struct, Enum
+    {
+        return Enum.TryParse(value, ignoreCase: false, out parsed)
+            && Enum.IsDefined(parsed)
+            && string.Equals(value, parsed.ToString(), StringComparison.Ordinal);
     }
 
     private static bool AdapterIsIncomplete(ApiAdapterRequest? adapter)
@@ -227,23 +285,28 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             details.LineDefinitionId,
             details.DisplayName,
             details.TopologyId,
-            new DutModelResponse(
-                details.DutModel.DutModelId,
-                details.DutModel.ModelCode,
-                details.DutModel.IdentityInputKey),
-            details.Workstations.Select(workstation => new WorkstationResponse(
-                workstation.WorkstationId,
-                workstation.DisplayName,
-                workstation.StationSystemId)).ToArray(),
-            details.Stages.Select(stage => new ProcessStageResponse(
-                stage.StageId,
-                stage.Sequence,
-                stage.DisplayName,
-                stage.WorkstationId,
-                stage.FlowDefinitionId,
-                stage.ConfigurationSnapshotId,
-                stage.ExternalTestProgramAdapterId,
-                stage.NextStageId)).ToArray(),
+            new ProductModelResponse(
+                details.ProductModel.ProductModelId,
+                details.ProductModel.ModelCode,
+                details.ProductModel.IdentityInputKey),
+            details.EntryOperationId,
+            details.Operations.Select(operation => new OperationDefinitionResponse(
+                operation.OperationId,
+                operation.DisplayName,
+                operation.StationSystemId,
+                operation.FlowDefinitionId,
+                operation.ConfigurationSnapshotId)).ToArray(),
+            details.Transitions.Select(transition => new RouteTransitionResponse(
+                transition.TransitionId,
+                transition.SourceOperationId,
+                transition.TargetOperationId,
+                transition.Kind,
+                transition.RequiredJudgement,
+                transition.MaxTraversals,
+                transition.ParallelGroupId,
+                transition.OutputKey,
+                transition.ExpectedOutputKind,
+                transition.ExpectedOutputValue)).ToArray(),
             details.ExternalTestProgramAdapters.Select(adapter => new ExternalTestProgramAdapterResponse(
                 adapter.AdapterId,
                 adapter.DisplayName,
@@ -273,8 +336,8 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             summary.LineDefinitionId,
             summary.DisplayName,
             summary.TopologyId,
-            summary.DutModelCode,
-            summary.StageCount,
+            summary.ProductModelCode,
+            summary.OperationCount,
             summary.UpdatedAtUtc);
     }
 

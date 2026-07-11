@@ -12,7 +12,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 namespace OpenLineOps.Runtime.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.RuntimeV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.RuntimeMonitoring)]
 public sealed class RuntimeMonitoringController : ControllerBase
 {

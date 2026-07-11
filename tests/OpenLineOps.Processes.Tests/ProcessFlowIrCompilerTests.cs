@@ -38,7 +38,7 @@ public sealed class ProcessFlowIrCompilerTests
 
         var compilation = firstResult.Value;
         var document = compilation.Document;
-        Assert.Equal(FlowIrSchemaVersions.V1, document.SchemaVersion);
+        Assert.Equal(FlowIrSchema.Current, document.SchemaVersion);
         Assert.Equal("packaging-line-eol", document.ProcessDefinitionId);
         Assert.Equal("packaging-line-eol@1.0.0", document.ProcessVersionId);
         Assert.Equal("start", document.StartNodeId);
@@ -69,7 +69,7 @@ public sealed class ProcessFlowIrCompilerTests
     [InlineData(ProcessActionTargetKind.System, FlowIrTargetReferenceKind.System)]
     [InlineData(ProcessActionTargetKind.SlotGroup, FlowIrTargetReferenceKind.SlotGroup)]
     [InlineData(ProcessActionTargetKind.Slot, FlowIrTargetReferenceKind.Slot)]
-    [InlineData(ProcessActionTargetKind.Dut, FlowIrTargetReferenceKind.Dut)]
+    [InlineData(ProcessActionTargetKind.ProductionUnit, FlowIrTargetReferenceKind.ProductionUnit)]
     [InlineData(ProcessActionTargetKind.Capability, FlowIrTargetReferenceKind.Capability)]
     [InlineData(ProcessActionTargetKind.Driver, FlowIrTargetReferenceKind.Driver)]
     public void CompilePreservesEveryFormalCommandTargetKind(
@@ -235,7 +235,7 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.True(second.IsSuccess, second.Error.Message);
         Assert.Equal(first.Value.CanonicalJson, second.Value.CanonicalJson);
         Assert.Equal(first.Value.Sha256, second.Value.Sha256);
-        Assert.StartsWith("{\"schemaVersion\":\"openlineops.flow-ir/v1\"", first.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.StartsWith("{\"schemaVersion\":\"openlineops.flow-ir\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"kind\":\"deviceCommand\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"timeoutMilliseconds\":30000", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"cancellationMode\":\"cooperative\"", first.Value.CanonicalJson, StringComparison.Ordinal);
@@ -288,7 +288,7 @@ public sealed class ProcessFlowIrCompilerTests
     public void CanonicalDeserializerRejectsHostileNullStructureDeterministically()
     {
         const string hostileJson =
-            "{\"schemaVersion\":\"openlineops.flow-ir/v1\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1\",\"displayName\":\"Main\",\"startNodeId\":\"start\",\"nodes\":[null],\"transitions\":[],\"blockDependencies\":[]}";
+            "{\"schemaVersion\":\"openlineops.flow-ir\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1\",\"displayName\":\"Main\",\"startNodeId\":\"start\",\"nodes\":[null],\"transitions\":[],\"blockDependencies\":[]}";
 
         var result = new FlowIrCanonicalSerializer().Deserialize(hostileJson);
 

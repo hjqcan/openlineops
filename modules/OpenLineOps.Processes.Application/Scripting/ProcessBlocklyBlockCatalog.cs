@@ -454,7 +454,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["Production Unit", "ProductionUnit"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -513,7 +513,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["Production Unit", "ProductionUnit"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -559,7 +559,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["Production Unit", "ProductionUnit"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",
@@ -636,7 +636,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_dropdown",
                       "name": "TARGET_KIND",
-                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["DUT", "Dut"], ["Capability", "Capability"], ["Driver", "Driver"]]
+                      "options": [["System", "System"], ["Slot group", "SlotGroup"], ["Slot", "Slot"], ["Production Unit", "ProductionUnit"], ["Capability", "Capability"], ["Driver", "Driver"]]
                     },
                     {
                       "type": "field_input",

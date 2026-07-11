@@ -17,9 +17,9 @@ import type {
   EngineeringTraceSearchResponse,
   EngineeringTraceSearchRowResponse,
   TraceFacetCountResponse,
+  TraceOperationExecutionResponse,
   TraceRecordExportPackageResponse,
-  TraceRecordResponse,
-  TraceStageExecutionResponse
+  TraceRecordResponse
 } from './contracts';
 import { exportTraceRecord, getTraceRecord, searchEngineeringTrace } from './api';
 
@@ -31,12 +31,14 @@ interface TraceWorkbenchProps {
 }
 
 interface TraceFilters {
-  dutIdentityValue: string;
-  batchId: string;
-  stationId: string;
+  productionUnitIdentityValue: string;
+  lotId: string;
+  carrierId: string;
+  stationSystemId: string;
   deviceId: string;
-  runStatus: string;
+  executionStatus: string;
   judgement: string;
+  disposition: string;
   processVersionId: string;
   projectId: string;
   applicationId: string;
@@ -48,8 +50,9 @@ const emptySearch: EngineeringTraceSearchResponse = {
   results: { items: [], pageNumber: 1, pageSize: 25, totalCount: 0, totalPages: 0 },
   facets: {
     judgements: [],
-    runStatuses: [],
-    stations: [],
+    executionStatuses: [],
+    dispositions: [],
+    stationSystems: [],
     devices: [],
     productionLines: [],
     processVersions: [],
@@ -71,7 +74,6 @@ export function TraceWorkbench({
   const [details, setDetails] = useState<TraceRecordResponse | null>(null);
   const [exportPackage, setExportPackage] = useState<TraceRecordExportPackageResponse | null>(null);
   const [busy, setBusy] = useState(false);
-
   const selectedRow = useMemo(
     () => searchResult.results.items.find(row => row.traceRecordId === selectedTraceId) ?? null,
     [searchResult.results.items, selectedTraceId]);
@@ -87,16 +89,17 @@ export function TraceWorkbench({
     if (!isBackendHealthy) {
       return;
     }
-
     setBusy(true);
     try {
       const result = await searchEngineeringTrace({
-        dutIdentityValue: filters.dutIdentityValue,
-        batchId: filters.batchId,
-        stationId: filters.stationId,
+        productionUnitIdentityValue: filters.productionUnitIdentityValue,
+        lotId: filters.lotId,
+        carrierId: filters.carrierId,
+        stationSystemId: filters.stationSystemId,
         deviceId: filters.deviceId,
-        runStatus: filters.runStatus,
+        executionStatus: filters.executionStatus,
         judgement: filters.judgement,
+        disposition: filters.disposition,
         processVersionId: filters.processVersionId,
         projectId: filters.projectId,
         applicationId: filters.applicationId,
@@ -119,14 +122,13 @@ export function TraceWorkbench({
 
   useEffect(() => {
     runSearch().catch(error => onMessage(`Production trace search failed: ${String(error)}`));
-  }, [runSearch, onMessage]);
+  }, [onMessage, runSearch]);
 
   useEffect(() => {
     if (!isBackendHealthy || !selectedTraceId) {
       setDetails(null);
       return;
     }
-
     let disposed = false;
     getTraceRecord(selectedTraceId)
       .then(trace => {
@@ -143,13 +145,12 @@ export function TraceWorkbench({
     if (!details) {
       return;
     }
-
     setBusy(true);
     try {
       const result = await exportTraceRecord(details.traceRecordId);
       setExportPackage(result);
       onMessage(result
-        ? `Production trace export loaded ${result.packageFormatVersion}`
+        ? `Production trace export loaded ${result.packageFormat}`
         : 'Production trace export returned no package');
     } finally {
       setBusy(false);
@@ -164,7 +165,7 @@ export function TraceWorkbench({
           <span>{searchResult.results.totalCount} runs</span>
         </div>
         <div className="trace-toolbar">
-          <button type="button" className="button ghost" onClick={() => { void runSearch(); }} disabled={!isBackendHealthy || busy} data-testid="trace-search-run">
+          <button type="button" className="button ghost" onClick={() => void runSearch()} disabled={!isBackendHealthy || busy} data-testid="trace-search-run">
             <Search size={15} />Search
           </button>
           <button type="button" className="button ghost" onClick={() => setFilters(createScopedFilters(projectId, applicationId))} disabled={busy}>
@@ -182,9 +183,10 @@ export function TraceWorkbench({
           </summary>
           <div className="trace-facets">
             <FacetGroup title="Judgement" facets={searchResult.facets.judgements} />
-            <FacetGroup title="Run Status" facets={searchResult.facets.runStatuses} />
+            <FacetGroup title="Execution Status" facets={searchResult.facets.executionStatuses} />
+            <FacetGroup title="Disposition" facets={searchResult.facets.dispositions} />
             <FacetGroup title="Production Line" facets={searchResult.facets.productionLines} />
-            <FacetGroup title="Station" facets={searchResult.facets.stations} />
+            <FacetGroup title="Station" facets={searchResult.facets.stationSystems} />
             <FacetGroup title="Device" facets={searchResult.facets.devices} />
             <FacetGroup title="Process Version" facets={searchResult.facets.processVersions} />
             <FacetGroup title="Project Snapshot" facets={searchResult.facets.projectSnapshots} />
@@ -195,15 +197,14 @@ export function TraceWorkbench({
       <div className="panel trace-detail-panel">
         <div className="panel-title">
           <div><Boxes size={17} /><h2>Run Evidence</h2></div>
-          <span>{selectedRow?.runStatus ?? 'none'}</span>
+          <span>{selectedRow?.executionStatus ?? 'none'}</span>
         </div>
         {details ? (
           <TraceDetails details={details} exportPackage={exportPackage} onExport={loadExportPackage} disabled={busy} />
         ) : (
-          <div className="trace-empty">Select a production run to inspect its ordered stage evidence.</div>
+          <div className="trace-empty">Select a production run to inspect its Operation evidence.</div>
         )}
       </div>
-
     </section>
   );
 }
@@ -224,12 +225,14 @@ function TraceFilterForm({
         <span>{activeFilterCount === 0 ? 'All runs' : `${activeFilterCount} active`}</span>
       </summary>
       <div className="trace-filter-fields">
-        <TraceTextField label="DUT identity" value={filters.dutIdentityValue} onChange={value => update('dutIdentityValue', value)} />
-        <TraceTextField label="Batch" value={filters.batchId} onChange={value => update('batchId', value)} />
+        <TraceTextField label="Production Unit identity" value={filters.productionUnitIdentityValue} onChange={value => update('productionUnitIdentityValue', value)} />
+        <TraceTextField label="Lot" value={filters.lotId} onChange={value => update('lotId', value)} />
+        <TraceTextField label="Carrier" value={filters.carrierId} onChange={value => update('carrierId', value)} />
         <TraceTextField label="Production line" value={filters.productionLineDefinitionId} onChange={value => update('productionLineDefinitionId', value)} />
-        <TraceTextField label="Run status" value={filters.runStatus} onChange={value => update('runStatus', value)} />
+        <TraceTextField label="Execution status" value={filters.executionStatus} onChange={value => update('executionStatus', value)} />
         <TraceTextField label="Judgement" value={filters.judgement} onChange={value => update('judgement', value)} />
-        <TraceTextField label="Station" value={filters.stationId} onChange={value => update('stationId', value)} />
+        <TraceTextField label="Disposition" value={filters.disposition} onChange={value => update('disposition', value)} />
+        <TraceTextField label="Station System" value={filters.stationSystemId} onChange={value => update('stationSystemId', value)} />
         <TraceTextField label="Process version" value={filters.processVersionId} onChange={value => update('processVersionId', value)} />
         <TraceTextField label="Device" value={filters.deviceId} onChange={value => update('deviceId', value)} />
         <TraceTextField label="Project" value={filters.projectId} onChange={value => update('projectId', value)} />
@@ -259,9 +262,7 @@ function TraceResults({
 }): React.ReactElement {
   return (
     <div className="trace-results">
-      <div className="trace-result-head">
-        <span>Production runs</span><span>{rows.length} loaded</span>
-      </div>
+      <div className="trace-result-head"><span>Production runs</span><span>{rows.length} loaded</span></div>
       {rows.length === 0 ? (
         <div className="trace-empty">No production traces match the current filters.</div>
       ) : rows.map(row => (
@@ -273,17 +274,12 @@ function TraceResults({
           data-testid="trace-result-row"
         >
           <span className="trace-result-primary">
-            <strong title={`${row.dutModelId} · ${row.dutIdentityInputKey}`}>{row.dutIdentityValue}</strong>
+            <strong title={`${row.productModelId} · ${row.productionUnitIdentityInputKey}`}>{row.productionUnitIdentityValue}</strong>
             <small>{row.productionLineDefinitionId}</small>
           </span>
-          <span className="trace-result-state">
-            <RunStatus value={row.runStatus} />
-            <TraceJudgement value={row.judgement} />
-          </span>
+          <span className="trace-result-state"><RunStatus value={row.executionStatus} /><TraceJudgement value={row.judgement} /></span>
           <small className="trace-result-id">{row.productionRunId}</small>
-          <span className="trace-result-counts">
-            {row.stageCount} stages · {row.commandCount} commands
-          </span>
+          <span className="trace-result-counts">{row.operationCount} Operations · {row.commandCount} commands</span>
         </button>
       ))}
     </div>
@@ -306,41 +302,45 @@ function TraceDetails({
       <div className="trace-detail-header">
         <TraceJudgement value={details.judgement} />
         <div>
-          <strong>{details.dutIdentityValue}</strong>
-          <span>{details.dutModelId} · {details.dutIdentityInputKey} · {details.productionRunId}</span>
+          <strong>{details.productionUnitIdentityValue}</strong>
+          <span>{details.productModelId} · {details.productionUnitIdentityInputKey} · {details.productionRunId}</span>
         </div>
       </div>
-
       <div className="trace-run-state">
-        <RunStatus value={details.runStatus} />
-        <span>{details.stages.length} ordered stages</span>
-        <span>{details.productionLineDefinitionId}</span>
+        <RunStatus value={details.executionStatus} />
+        <span>{details.judgement}</span><span>{details.disposition}</span><span>{details.operations.length} Operations</span>
       </div>
-
       <dl>
         <dt>Project</dt><dd>{details.projectId} / {details.applicationId}</dd>
         <dt>Snapshot</dt><dd>{details.projectSnapshotId}</dd>
         <dt>Topology</dt><dd>{details.topologyId}</dd>
-        <dt>Batch</dt><dd>{details.batchId ?? 'n/a'}</dd>
-        <dt>Fixture</dt><dd>{details.fixtureId ?? 'n/a'}</dd>
-        <dt>Device</dt><dd>{details.deviceId ?? 'n/a'}</dd>
+        <dt>Lot</dt><dd>{details.lotId ?? 'n/a'}</dd>
+        <dt>Carrier</dt><dd>{details.carrierId ?? 'n/a'}</dd>
         <dt>Actor</dt><dd>{details.actorId}</dd>
         <dt>Started</dt><dd>{formatOptionalDateTime(details.startedAtUtc)}</dd>
         <dt>Completed</dt><dd>{formatDateTime(details.completedAtUtc)}</dd>
         {details.failureCode ? <><dt>Failure</dt><dd>{details.failureCode} · {details.failureReason}</dd></> : null}
       </dl>
-
-      <button type="button" className="button ghost" onClick={() => { void onExport(); }} disabled={disabled} data-testid="trace-export-package">
+      <button type="button" className="button ghost" onClick={() => void onExport()} disabled={disabled} data-testid="trace-export-package">
         <Download size={15} />Export Immutable Package
       </button>
       {exportPackage ? (
-        <div className="trace-export-box"><strong>{exportPackage.packageFormatVersion}</strong><span>{formatDateTime(exportPackage.exportedAtUtc)}</span></div>
+        <div className="trace-export-box"><strong>{exportPackage.packageFormat}</strong><span>{formatDateTime(exportPackage.exportedAtUtc)}</span></div>
       ) : null}
-
-      <div className="trace-stage-stack">
-        {details.stages.map(stage => <TraceStageCard key={stage.stageId} stage={stage} />)}
+      <div className="trace-operation-stack">
+        {details.operations.map(operation => <TraceOperationCard key={operation.operationRunId} operation={operation} />)}
       </div>
-
+      <section className="trace-route-decisions">
+        <strong>Route decisions</strong>
+        {details.routeDecisions.map(decision => (
+          <article key={`${decision.sourceOperationRunId}-${decision.transitionId}-${decision.traversal}`}>
+            <span>{decision.transitionId}</span>
+            <strong>{decision.sourceJudgement} → {decision.targetOperationId}</strong>
+            <small>traversal {decision.traversal} · {formatDateTime(decision.decidedAtUtc)}</small>
+          </article>
+        ))}
+        {details.routeDecisions.length === 0 ? <p>No route decisions</p> : null}
+      </section>
       <section className="trace-audit-list">
         <strong>Run audit</strong>
         {details.auditEntries.map(entry => (
@@ -354,38 +354,54 @@ function TraceDetails({
   );
 }
 
-function TraceStageCard({ stage }: { stage: TraceStageExecutionResponse }): React.ReactElement {
-  const isFailed = stage.status === 'Failed' || stage.status === 'Canceled';
+function TraceOperationCard({ operation }: { operation: TraceOperationExecutionResponse }): React.ReactElement {
+  const isFailed = operation.executionStatus === 'Failed'
+    || operation.executionStatus === 'Canceled'
+    || operation.executionStatus === 'TimedOut'
+    || operation.executionStatus === 'Rejected';
   return (
-    <details className={isFailed ? 'trace-stage-card failed' : 'trace-stage-card'} open={stage.sequence === 1 || isFailed} data-testid="trace-stage-card">
+    <details
+      className={isFailed ? 'trace-operation-card failed' : 'trace-operation-card'}
+      open={operation.attempt === 1 || isFailed}
+      data-testid="trace-operation-card"
+    >
       <summary>
-        <span className="trace-stage-sequence">{String(stage.sequence).padStart(2, '0')}</span>
-        <div><strong>{stage.stageId}</strong><small>{stage.workstationId} · {stage.stationId}</small></div>
-        <RunStatus value={stage.status} />
+        <span className="trace-operation-attempt">{String(operation.attempt).padStart(2, '0')}</span>
+        <div><strong>{operation.operationId}</strong><small>{operation.stationSystemId} · {operation.stationId}</small></div>
+        <RunStatus value={operation.executionStatus} />
+        <TraceJudgement value={operation.judgement} />
         <ChevronRight size={14} />
       </summary>
-      <div className="trace-stage-body">
-        <div className="trace-stage-metadata">
-          <span><small>Process</small><strong>{stage.processVersionId}</strong></span>
-          <span><small>Configuration</small><strong>{stage.configurationSnapshotId}</strong></span>
-          <span><small>Recipe</small><strong>{stage.recipeSnapshotId}</strong></span>
-          <span><small>Session</small><strong>{stage.runtimeSessionStatus ?? 'not started'}</strong></span>
+      <div className="trace-operation-body">
+        <div className="trace-operation-metadata">
+          <span><small>Process</small><strong>{operation.processVersionId}</strong></span>
+          <span><small>Configuration</small><strong>{operation.configurationSnapshotId}</strong></span>
+          <span><small>Recipe</small><strong>{operation.recipeSnapshotId}</strong></span>
+          <span><small>Session</small><strong>{operation.runtimeSessionStatus ?? 'not started'}</strong></span>
         </div>
-        {stage.failureCode ? <div className="trace-stage-failure"><AlertTriangle size={14} /><span>{stage.failureCode} · {stage.failureReason}</span></div> : null}
-        <div className="trace-stage-counts">
-          <span>{stage.completedStepCount} steps</span><span>{stage.commandCount} commands</span><span>{stage.incidentCount} incidents</span>
+        {operation.failureCode ? (
+          <div className="trace-operation-failure"><AlertTriangle size={14} /><span>{operation.failureCode} · {operation.failureReason}</span></div>
+        ) : null}
+        <div className="trace-operation-counts">
+          <span>{operation.completedStepCount} steps</span><span>{operation.commandCount} commands</span>
+          <span>{operation.incidentCount} incidents</span><span>{operation.outputs.length} outputs</span>
         </div>
         <div className="trace-evidence-grid">
           <EvidenceSection title="Commands" emptyText="No commands">
-            {stage.commands.slice(0, 8).map(command => (
+            {operation.commands.slice(0, 8).map(command => (
               <article key={command.runtimeCommandId}>
-                <span>{command.commandName}</span><strong>{command.semanticOutcome ?? command.status}</strong>
+                <span>{command.commandName}</span><strong>{command.status} · {command.resultJudgement ?? 'Pending'}</strong>
                 <small>{command.actionId} · {command.targetKind}:{command.targetId}</small>
               </article>
             ))}
           </EvidenceSection>
+          <EvidenceSection title="Production Context Outputs" emptyText="No outputs">
+            {operation.outputs.slice(0, 8).map(output => (
+              <article key={output.key}><span>{output.key}</span><strong>{output.valueKind}</strong><small>{output.canonicalJson}</small></article>
+            ))}
+          </EvidenceSection>
           <EvidenceSection title="Measurements" emptyText="No measurements">
-            {stage.measurements.slice(0, 8).map(measurement => (
+            {operation.measurements.slice(0, 8).map(measurement => (
               <article key={measurement.measurementRecordId}>
                 <span>{measurement.name}</span>
                 <strong>{formatMeasurementValue(measurement.numericValue, measurement.textValue, measurement.unit)}</strong>
@@ -393,18 +409,21 @@ function TraceStageCard({ stage }: { stage: TraceStageExecutionResponse }): Reac
               </article>
             ))}
           </EvidenceSection>
-          <EvidenceSection title="Incidents" emptyText="No incidents">
-            {stage.incidents.slice(0, 8).map(incident => (
-              <article key={incident.runtimeIncidentId}>
-                <span>{incident.code}</span><strong>{incident.severity}</strong><small>{incident.message}</small>
+          <EvidenceSection title="Resource Fencing" emptyText="No fencing tokens">
+            {operation.fencingTokens.slice(0, 8).map(resource => (
+              <article key={`${resource.resourceKind}:${resource.resourceId}`}>
+                <span>{resource.resourceKind}</span><strong>{resource.resourceId}</strong><small>token {resource.fencingToken}</small>
               </article>
             ))}
           </EvidenceSection>
+          <EvidenceSection title="Incidents" emptyText="No incidents">
+            {operation.incidents.slice(0, 8).map(incident => (
+              <article key={incident.runtimeIncidentId}><span>{incident.code}</span><strong>{incident.severity}</strong><small>{incident.message}</small></article>
+            ))}
+          </EvidenceSection>
           <EvidenceSection title="Artifacts" emptyText="No artifacts">
-            {stage.artifacts.slice(0, 8).map(artifact => (
-              <article key={artifact.artifactRecordId}>
-                <span>{artifact.name}</span><strong>{artifact.kind}</strong><small>{artifact.storageKey}</small>
-              </article>
+            {operation.artifacts.slice(0, 8).map(artifact => (
+              <article key={artifact.artifactRecordId}><span>{artifact.name}</span><strong>{artifact.kind}</strong><small>{artifact.storageKey}</small></article>
             ))}
           </EvidenceSection>
         </div>
@@ -440,9 +459,9 @@ function FacetGroup({ title, facets }: { title: string; facets: TraceFacetCountR
 function RunStatus({ value }: { value: string }): React.ReactElement {
   const className = value === 'Completed'
     ? 'completed'
-    : value === 'Failed'
+    : value === 'Failed' || value === 'TimedOut' || value === 'Rejected'
       ? 'failed'
-      : value === 'Canceled' || value === 'Skipped'
+      : value === 'Canceled'
         ? 'canceled'
         : 'neutral';
   return <span className={`trace-run-status ${className}`}><Activity size={12} />{value}</span>;
@@ -459,12 +478,14 @@ function TraceJudgement({ value }: { value: string }): React.ReactElement {
 
 function createScopedFilters(projectId: string | null, applicationId: string | null): TraceFilters {
   return {
-    dutIdentityValue: '',
-    batchId: '',
-    stationId: '',
+    productionUnitIdentityValue: '',
+    lotId: '',
+    carrierId: '',
+    stationSystemId: '',
     deviceId: '',
-    runStatus: '',
+    executionStatus: '',
     judgement: '',
+    disposition: '',
     processVersionId: '',
     projectId: projectId ?? '',
     applicationId: applicationId ?? '',

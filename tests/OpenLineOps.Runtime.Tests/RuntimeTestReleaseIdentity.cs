@@ -7,10 +7,12 @@ namespace OpenLineOps.Runtime.Tests;
 internal static class RuntimeTestReleaseIdentity
 {
     public static RuntimeSessionTraceMetadata TraceMetadata(
-        string? dutIdentityValue = null,
-        string? batchId = null,
+        string? productionUnitIdentityValue = null,
+        string? lotId = null,
+        string? carrierId = null,
         string? fixtureId = null,
         string? deviceId = null,
+        string stationSystemId = "station.main",
         string actorId = "runtime-test-operator",
         string projectId = "project.main",
         string applicationId = "application.main",
@@ -20,11 +22,15 @@ internal static class RuntimeTestReleaseIdentity
         return new RuntimeSessionTraceMetadata(
             new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
             "line.main",
-            "stage.main",
+            "operation.main",
             1,
-            "workstation.main",
-            new DutIdentity("dut.default", "serialNumber", dutIdentityValue ?? "DUT-DEFAULT"),
-            batchId,
+            stationSystemId,
+            new ProductionUnitIdentity(
+                "product.default",
+                "serialNumber",
+                productionUnitIdentityValue ?? "UNIT-DEFAULT"),
+            lotId,
+            carrierId,
             fixtureId,
             deviceId,
             actorId,

@@ -247,8 +247,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 $"Topology {topology.TopologyId} does not contain a runtime target."));
         }
 
-        var blockVersionIds = frozenProduction.Stages
-            .SelectMany(stage => stage.BlockVersionIds)
+        var blockVersionIds = frozenProduction.Operations
+            .SelectMany(operation => operation.BlockVersionIds)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
@@ -287,23 +287,23 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 $"Production line {line.Id} references topology {line.TopologyId}, not {topology.TopologyId}.");
         }
 
-        foreach (var workstation in line.Workstations)
+        foreach (var operation in line.Operations)
         {
             var station = topology.Systems.SingleOrDefault(system => string.Equals(
                 system.SystemId,
-                workstation.StationSystemId,
+                operation.StationSystemId,
                 StringComparison.Ordinal));
             if (station is null || !string.Equals(station.Kind, "Station", StringComparison.Ordinal))
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionWorkstationInvalid",
-                    $"Production workstation {workstation.Id} must reference an existing Station system in topology {topology.TopologyId}.");
+                    "Projects.ReleaseProductionOperationStationInvalid",
+                    $"Production operation {operation.Id} must reference an existing Station system in topology {topology.TopologyId}.");
             }
         }
 
         var resolvedFlows = new Dictionary<string, ResolvedProductionFlow>(StringComparer.Ordinal);
-        foreach (var flowDefinitionId in line.Stages
-                     .Select(stage => stage.FlowDefinitionId)
+        foreach (var flowDefinitionId in line.Operations
+                     .Select(operation => operation.FlowDefinitionId)
                      .Distinct(StringComparer.Ordinal)
                      .Order(StringComparer.Ordinal))
         {
@@ -317,14 +317,14 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             catch (ArgumentException exception)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageFlowIdInvalid",
+                    "Projects.ReleaseProductionOperationFlowIdInvalid",
                     exception.Message);
             }
 
             if (flow is null || !flow.IsPublished)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageFlowNotPublished",
+                    "Projects.ReleaseProductionOperationFlowNotPublished",
                     $"Production line {line.Id} flow {flowDefinitionId} must exist and be published in application {scope.ApplicationId}.");
             }
 
@@ -332,7 +332,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             if (compilation.IsFailure)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageFlowCompilationFailed",
+                    "Projects.ReleaseProductionOperationFlowCompilationFailed",
                     $"Production line {line.Id} flow {flowDefinitionId} cannot compile to Flow IR: {compilation.Error.Message}");
             }
 
@@ -340,7 +340,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             if (artifact.IsFailure)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageFlowSerializationFailed",
+                    "Projects.ReleaseProductionOperationFlowSerializationFailed",
                     $"Production line {line.Id} flow {flowDefinitionId} cannot be serialized canonically: {artifact.Error.Message}");
             }
 
@@ -350,31 +350,31 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         var engineeringProjects = await _engineeringRepository
             .ListProjectsAsync(scope, cancellationToken)
             .ConfigureAwait(false);
-        foreach (var stage in line.Stages.OrderBy(candidate => candidate.Sequence))
+        foreach (var operation in line.Operations.OrderBy(candidate => candidate.Id.Value, StringComparer.Ordinal))
         {
             var snapshotMatches = engineeringProjects
                 .SelectMany(project => project.Snapshots)
                 .Where(snapshot => string.Equals(
                     snapshot.Id.Value,
-                    stage.ConfigurationSnapshotId,
+                    operation.ConfigurationSnapshotId,
                     StringComparison.Ordinal))
                 .Select(EngineeringConfigurationMapper.ToDetails)
                 .ToArray();
             if (snapshotMatches.Length == 0)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageConfigurationNotFound",
-                    $"Production stage {stage.Id} configuration snapshot {stage.ConfigurationSnapshotId} was not found in application {scope.ApplicationId}.");
+                    "Projects.ReleaseProductionOperationConfigurationNotFound",
+                    $"Production operation {operation.Id} configuration snapshot {operation.ConfigurationSnapshotId} was not found in application {scope.ApplicationId}.");
             }
 
             if (snapshotMatches.Length > 1)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageConfigurationAmbiguous",
-                    $"Production stage {stage.Id} configuration snapshot id {stage.ConfigurationSnapshotId} is used by more than one engineering project in application {scope.ApplicationId}.");
+                    "Projects.ReleaseProductionOperationConfigurationAmbiguous",
+                    $"Production operation {operation.Id} configuration snapshot id {operation.ConfigurationSnapshotId} is used by more than one engineering project in application {scope.ApplicationId}.");
             }
 
-            var resolvedFlow = resolvedFlows[stage.FlowDefinitionId];
+            var resolvedFlow = resolvedFlows[operation.FlowDefinitionId];
             var configurationSnapshot = snapshotMatches[0];
             var configurationValidation = ValidateConfigurationSnapshot(
                 ProcessDefinitionMapper.ToDetails(resolvedFlow.Definition),
@@ -393,24 +393,23 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             if (stationProfile is null)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageStationProfileNotFound",
-                    $"Production stage {stage.Id} configuration snapshot {configurationSnapshot.SnapshotId} station profile {configurationSnapshot.StationProfileId} was not found.");
+                    "Projects.ReleaseProductionOperationStationProfileNotFound",
+                    $"Production operation {operation.Id} configuration snapshot {configurationSnapshot.SnapshotId} station profile {configurationSnapshot.StationProfileId} was not found.");
             }
 
-            var workstation = line.Workstations.Single(candidate => candidate.Id == stage.WorkstationId);
             if (!string.Equals(
-                    workstation.StationSystemId,
+                    operation.StationSystemId,
                     stationProfile.StationSystemId,
                     StringComparison.Ordinal))
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionStageStationMismatch",
-                    $"Production stage {stage.Id} workstation uses Station system {workstation.StationSystemId}, but configuration snapshot {configurationSnapshot.SnapshotId} uses {stationProfile.StationSystemId}.");
+                    "Projects.ReleaseProductionOperationStationMismatch",
+                    $"Production operation {operation.Id} uses Station system {operation.StationSystemId}, but configuration snapshot {configurationSnapshot.SnapshotId} uses {stationProfile.StationSystemId}.");
             }
 
             var bindingValidation = ValidateRequiredCapabilityBindings(
                 resolvedFlow.Document,
-                stage.FlowDefinitionId,
+                operation.FlowDefinitionId,
                 topology,
                 configurationSnapshot);
             if (bindingValidation is not null)
@@ -480,38 +479,22 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             }
         }
 
-        foreach (var stage in line.Stages)
+        foreach (var adapter in line.ExternalTestProgramAdapters)
         {
-            if (stage.ExternalTestProgramAdapterId is null)
-            {
-                continue;
-            }
-
-            var adapter = line.ExternalTestProgramAdapters.Single(candidate =>
-                candidate.Id == stage.ExternalTestProgramAdapterId);
-            var workstation = line.Workstations.Single(candidate => candidate.Id == stage.WorkstationId);
-            var station = topology.Systems.Single(candidate => string.Equals(
-                candidate.SystemId,
-                workstation.StationSystemId,
-                StringComparison.Ordinal));
-            if (!station.ProvidedCapabilityIds.Contains(adapter.CapabilityId, StringComparer.Ordinal))
-            {
-                return ProductionFailure(
-                    "Projects.ReleaseProductionExternalTestCapabilityNotProvided",
-                    $"Production workstation {workstation.Id} Station system does not provide capability {adapter.CapabilityId}.");
-            }
-
-            var flow = resolvedFlows[stage.FlowDefinitionId].Document;
-            var matchingActions = flow.Nodes
-                .SelectMany(node => node.Actions)
-                .Where(action => ExternalTestActionMatches(action, adapter, workstation))
+            var matchingActions = line.Operations
+                .SelectMany(operation => resolvedFlows[operation.FlowDefinitionId].Document.Nodes
+                    .SelectMany(node => node.Actions)
+                    .Where(action => ExternalTestActionMatches(
+                        action,
+                        adapter,
+                        operation.StationSystemId)))
                 .Take(2)
                 .ToArray();
             if (matchingActions.Length != 1)
             {
                 return ProductionFailure(
                     "Projects.ReleaseProductionExternalTestActionInvalid",
-                    $"Production stage {stage.Id} flow must contain exactly one matching external test action.");
+                    $"External test adapter {adapter.Id} must be referenced by exactly one matching Production operation Flow action.");
             }
         }
 
@@ -519,29 +502,22 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             line.Id.Value,
             line.DisplayName,
             line.TopologyId,
-            new ProjectReleaseDutModel(
-                line.DutModel.Id.Value,
-                line.DutModel.ModelCode,
-                line.DutModel.IdentityInputKey),
-            line.Workstations
-                .OrderBy(workstation => workstation.Id.Value, StringComparer.Ordinal)
-                .Select(workstation => new ProjectReleaseWorkstation(
-                    workstation.Id.Value,
-                    workstation.DisplayName,
-                    workstation.StationSystemId))
-                .ToArray(),
-            line.Stages
-                .OrderBy(stage => stage.Sequence)
-                .Select(stage =>
+            new ProjectReleaseProductModel(
+                line.ProductModel.Id.Value,
+                line.ProductModel.ModelCode,
+                line.ProductModel.IdentityInputKey),
+            line.EntryOperationId.Value,
+            line.Operations
+                .OrderBy(operation => operation.Id.Value, StringComparer.Ordinal)
+                .Select(operation =>
                 {
-                    var flow = resolvedFlows[stage.FlowDefinitionId];
-                    return new ProjectReleaseProductionStage(
-                        stage.Id.Value,
-                        stage.Sequence,
-                        stage.DisplayName,
-                        stage.WorkstationId.Value,
-                        stage.FlowDefinitionId,
-                        stage.ConfigurationSnapshotId,
+                    var flow = resolvedFlows[operation.FlowDefinitionId];
+                    return new ProjectReleaseOperation(
+                        operation.Id.Value,
+                        operation.DisplayName,
+                        operation.StationSystemId,
+                        operation.FlowDefinitionId,
+                        operation.ConfigurationSnapshotId,
                         flow.Definition.VersionId.Value,
                         flow.Artifact.SchemaVersion,
                         flow.Artifact.Sha256,
@@ -549,9 +525,22 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                         flow.Document.BlockDependencies
                             .Select(dependency => dependency.LockId)
                             .Order(StringComparer.Ordinal)
-                            .ToArray(),
-                        stage.ExternalTestProgramAdapterId?.Value);
+                            .ToArray());
                 })
+                .ToArray(),
+            line.Transitions
+                .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
+                .Select(transition => new ProjectReleaseRouteTransition(
+                    transition.Id.Value,
+                    transition.SourceOperationId.Value,
+                    transition.TargetOperationId.Value,
+                    transition.Kind.ToString(),
+                    transition.RequiredJudgement?.ToString(),
+                    transition.MaxTraversals,
+                    transition.ParallelGroupId,
+                    transition.OutputCondition?.OutputKey,
+                    transition.OutputCondition?.ExpectedValue.Kind.ToString(),
+                    transition.OutputCondition?.ExpectedValue.CanonicalValue))
                 .ToArray(),
             line.ExternalTestProgramAdapters
                 .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
@@ -610,7 +599,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     private static bool ExternalTestActionMatches(
         FlowIrAction action,
         ExternalTestProgramAdapter adapter,
-        WorkstationDefinition workstation)
+        string stationSystemId)
     {
         var expectedTimeoutMilliseconds = checked(
             adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond);
@@ -619,7 +608,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             || !string.Equals(action.CommandName, adapter.CommandName, StringComparison.Ordinal)
             || action.Execution.TimeoutMilliseconds != expectedTimeoutMilliseconds
             || action.Target.Kind != FlowIrTargetReferenceKind.System
-            || !string.Equals(action.Target.Reference, workstation.StationSystemId, StringComparison.Ordinal)
+            || !string.Equals(action.Target.Reference, stationSystemId, StringComparison.Ordinal)
             || string.IsNullOrWhiteSpace(action.InputPayload))
         {
             return false;
@@ -824,8 +813,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 "Driver",
                 binding.BindingId)))
             .Concat(topology.Slots
-                .Where(slot => string.Equals(slot.MaterialKind, "Dut", StringComparison.Ordinal))
-                .Select(slot => new ProjectReleaseTargetReference("Dut", slot.SlotId)))
+                .Where(slot => string.Equals(slot.MaterialKind, "ProductionUnit", StringComparison.Ordinal))
+                .Select(slot => new ProjectReleaseTargetReference("ProductionUnit", slot.SlotId)))
             .DistinctBy(target => $"{target.Kind}\u001f{target.TargetId}", StringComparer.Ordinal)
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
@@ -1059,9 +1048,9 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             FlowIrTargetReferenceKind.Driver => topology.DriverBindings.Any(binding =>
                 string.Equals(binding.BindingId, reference, StringComparison.Ordinal)
                 && string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal)),
-            FlowIrTargetReferenceKind.Dut => topology.Slots.Any(slot =>
+            FlowIrTargetReferenceKind.ProductionUnit => topology.Slots.Any(slot =>
                 string.Equals(slot.SlotId, reference, StringComparison.Ordinal)
-                && string.Equals(slot.MaterialKind, "Dut", StringComparison.Ordinal)),
+                && string.Equals(slot.MaterialKind, "ProductionUnit", StringComparison.Ordinal)),
             FlowIrTargetReferenceKind.System => (string.Equals(
                         capabilityId,
                         RuntimeFlowCommand.Capability,

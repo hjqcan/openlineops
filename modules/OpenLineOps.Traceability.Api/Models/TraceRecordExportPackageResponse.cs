@@ -1,6 +1,6 @@
 namespace OpenLineOps.Traceability.Api.Models;
 
 public sealed record TraceRecordExportPackageResponse(
-    string PackageFormatVersion,
+    string PackageFormat,
     DateTimeOffset ExportedAtUtc,
     TraceRecordResponse TraceRecord);

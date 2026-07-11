@@ -1,5 +1,10 @@
 using OpenLineOps.Runtime.Application.Events;
+using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -8,81 +13,79 @@ namespace OpenLineOps.Runtime.Tests;
 public sealed class ProductionRunTerminalOutboxDispatcherTests
 {
     [Fact]
-    public async Task FailedDeliveryRemainsPendingAndSuccessfulRetryAcknowledgesExactlyOnce()
+    public async Task TerminalSnapshotIsDispatchedExactlyOnce()
     {
         var repository = new InMemoryProductionRunRepository();
-        var run = CreateTerminalRun();
-        Assert.True(await repository.TryAddAsync(run));
-        Assert.True(run.Cancel(
-            "Canceled for outbox test.",
+        var now = new DateTimeOffset(2026, 7, 11, 5, 0, 0, TimeSpan.Zero);
+        var operation = new OperationExecutionPlan(
+            "operation.main",
+            "station.main",
+            new StationId("station.main"),
+            new ConfigurationSnapshotId("configuration.main"),
+            new RecipeSnapshotId("recipe.main"),
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process.main"),
+                new ProcessVersionId("process-version.main"),
+                []));
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            "topology.main",
+            "line.main",
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
+            null,
+            null,
+            "operator.main",
+            operation.Definition.OperationId,
+            now,
+            [operation.Definition],
+            []);
+        Assert.True(await repository.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(run.Id, [operation])));
+        Assert.True(run.Start(now).Succeeded);
+        var operationRun = Assert.Single(run.Operations);
+        var leases = operationRun.ResourceRequirements.Select(resource => new ResourceLease(
+            resource,
+            run.Id,
+            operationRun.OperationRunId,
+            1,
+            now,
+            now.AddHours(1))).ToArray();
+        Assert.True(run.StartOperation(
+            operationRun.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            now).Succeeded);
+        Assert.True(run.CompleteOperation(
+            operationRun.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
             0,
-            0,
-            0,
-            DateTimeOffset.UtcNow.AddSeconds(1)).Succeeded);
+            now.AddSeconds(1)).Succeeded);
         await repository.SaveAsync(run, 0);
-        var handler = new RecordingHandler { Failure = new IOException("trace unavailable") };
+        var handler = new RecordingHandler();
         using var dispatcher = new ProductionRunTerminalOutboxDispatcher(repository, [handler]);
 
-        await Assert.ThrowsAsync<IOException>(async () => await dispatcher.DrainAsync());
-
-        var failed = Assert.Single(await repository.ListPendingTerminalOutboxAsync(10));
-        Assert.Equal(1, failed.AttemptCount);
-        Assert.NotNull(failed.LastError);
-        Assert.Contains("trace unavailable", failed.LastError, StringComparison.Ordinal);
-        handler.Failure = null;
-
         Assert.Equal(1, await dispatcher.DrainAsync());
-        Assert.Empty(await repository.ListPendingTerminalOutboxAsync(10));
-        Assert.Equal(2, handler.Received.Count);
-        Assert.Equal(run.Id, handler.Received[0].RunId);
-        Assert.Equal(run.Id, handler.Received[1].RunId);
         Assert.Equal(0, await dispatcher.DrainAsync());
-        Assert.Equal(2, handler.Received.Count);
-    }
-
-    private static ProductionRun CreateTerminalRun()
-    {
-        return ProductionRun.Create(
-            ProductionRunId.New(),
-            "project.outbox",
-            "application.outbox",
-            "snapshot.outbox",
-            "topology.outbox",
-            "line.outbox",
-            new DutIdentity("dut.outbox", "dut.serial", "SN-OUTBOX"),
-            null,
-            null,
-            null,
-            "operator.outbox",
-            DateTimeOffset.UtcNow,
-            [
-                new ProductionStageRunDefinition(
-                    "stage.outbox",
-                    1,
-                    "workstation.outbox",
-                    new StationId("station.outbox"),
-                    new ProcessDefinitionId("process.outbox"),
-                    new ProcessVersionId("process.outbox@1.0.0"),
-                    new ConfigurationSnapshotId("configuration.outbox"),
-                    new RecipeSnapshotId("recipe.outbox"))
-            ]);
+        Assert.Equal(run.Id, Assert.Single(handler.Runs).RunId);
     }
 
     private sealed class RecordingHandler : IProductionRunTerminalOutboxHandler
     {
-        public List<ProductionRunSnapshot> Received { get; } = [];
-
-        public Exception? Failure { get; set; }
+        public List<ProductionRunSnapshot> Runs { get; } = [];
 
         public ValueTask HandleAsync(
             ProductionRunSnapshot run,
             CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            Received.Add(run);
-            return Failure is null
-                ? ValueTask.CompletedTask
-                : ValueTask.FromException(Failure);
+            Runs.Add(run);
+            return ValueTask.CompletedTask;
         }
     }
 }

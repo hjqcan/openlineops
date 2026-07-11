@@ -3,6 +3,8 @@ using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner;
@@ -11,22 +13,22 @@ public sealed class RunnerCommand
 {
     private readonly IAutomationProjectWorkspaceService _workspaceService;
     private readonly IProjectReleaseProductionRunLauncher _productionRunLauncher;
+    private readonly IProductionRunRunner _productionRunRunner;
     private readonly IProductionRunRecoveryService _recoveryService;
     private readonly IProductionRunTerminalOutboxDispatcher _terminalOutboxDispatcher;
-    private readonly IProjectExecutionCoordinator _executionCoordinator;
 
     public RunnerCommand(
         IAutomationProjectWorkspaceService workspaceService,
         IProjectReleaseProductionRunLauncher productionRunLauncher,
+        IProductionRunRunner productionRunRunner,
         IProductionRunRecoveryService recoveryService,
-        IProductionRunTerminalOutboxDispatcher terminalOutboxDispatcher,
-        IProjectExecutionCoordinator executionCoordinator)
+        IProductionRunTerminalOutboxDispatcher terminalOutboxDispatcher)
     {
         _workspaceService = workspaceService;
         _productionRunLauncher = productionRunLauncher;
+        _productionRunRunner = productionRunRunner;
         _recoveryService = recoveryService;
         _terminalOutboxDispatcher = terminalOutboxDispatcher;
-        _executionCoordinator = executionCoordinator;
     }
 
     public async Task<int> RunAsync(
@@ -105,53 +107,56 @@ public sealed class RunnerCommand
         }
 
         var snapshot = selection.Snapshot!;
-        await using var executionLease = await _executionCoordinator
-            .TryAcquireAsync(workspace.Project.ProjectPath, cancellationToken)
-            .ConfigureAwait(false);
-        if (executionLease is null)
-        {
-            return await WriteFailureAsync(
-                RunnerExitCodes.ProductionRunStartRejected,
-                projectTarget,
-                "Runner.ProjectExecutionAlreadyActive",
-                $"The IDE or another Runner owns the execution lease for project {workspace.Project.ProjectId}.",
-                output,
-                workspace,
-                snapshot).ConfigureAwait(false);
-        }
-
         await _recoveryService.RecoverAsync(cancellationToken).ConfigureAwait(false);
         await _terminalOutboxDispatcher.DrainAsync(cancellationToken).ConfigureAwait(false);
 
-        var runResult = await _productionRunLauncher
-            .StartAsync(
+        var submission = await _productionRunLauncher
+            .SubmitAsync(
                 snapshot,
-                new StartProjectReleaseProductionRunRequest(
+                new SubmitProjectReleaseProductionRunRequest(
                     options.ProductionRunId,
-                    options.DutIdentityValue,
+                    options.ProductionUnitIdentityValue,
                     options.ActorId,
-                    options.BatchId,
+                    options.LotId,
+                    options.CarrierId,
+                    options.SlotId,
                     options.FixtureId,
                     options.DeviceId),
                 cancellationToken)
             .ConfigureAwait(false);
-        if (runResult.IsFailure)
+        if (submission.IsFailure)
         {
             return await WriteFailureAsync(
-                IsMissingRelease(runResult.Error.Code)
+                IsMissingRelease(submission.Error.Code)
                     ? RunnerExitCodes.ImmutableReleaseMissing
                     : RunnerExitCodes.ProductionRunStartRejected,
                 projectTarget,
-                runResult.Error.Code,
-                runResult.Error.Message,
+                submission.Error.Code,
+                submission.Error.Message,
                 output,
                 workspace,
                 snapshot).ConfigureAwait(false);
         }
 
-        var productionRun = runResult.Value.Run;
+        var execution = await _productionRunRunner
+            .ExecuteAsync(submission.Value.RunId, cancellationToken)
+            .ConfigureAwait(false);
+        if (execution.IsFailure)
+        {
+            return await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunExecutionFailed,
+                projectTarget,
+                execution.Error.Code,
+                execution.Error.Message,
+                output,
+                workspace,
+                snapshot,
+                submission.Value).ConfigureAwait(false);
+        }
+
+        var productionRun = execution.Value.Run;
         await _terminalOutboxDispatcher.DrainAsync(CancellationToken.None).ConfigureAwait(false);
-        if (productionRun.Status == ProductionRunStatus.Canceled)
+        if (productionRun.ExecutionStatus == ExecutionStatus.Canceled)
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.Canceled,
@@ -164,14 +169,15 @@ public sealed class RunnerCommand
                 productionRun).ConfigureAwait(false);
         }
 
-        if (productionRun.Status != ProductionRunStatus.Completed)
+        if (productionRun.ExecutionStatus != ExecutionStatus.Completed)
         {
             return await WriteFailureAsync(
                 RunnerExitCodes.ProductionRunExecutionFailed,
                 projectTarget,
                 productionRun.FailureCode ?? "Runner.ProductionRunFailed",
                 productionRun.FailureReason
-                    ?? $"Production Run {productionRun.RunId.Value:D} ended with status {productionRun.Status}.",
+                    ?? $"Production Run {productionRun.RunId.Value:D} ended with execution status "
+                    + $"{productionRun.ExecutionStatus} and control state {productionRun.ControlState}.",
                 output,
                 workspace,
                 snapshot,

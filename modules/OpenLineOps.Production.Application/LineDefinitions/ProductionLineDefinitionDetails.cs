@@ -4,9 +4,10 @@ public sealed record ProductionLineDefinitionDetails(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    DutModelDetails DutModel,
-    IReadOnlyCollection<WorkstationDetails> Workstations,
-    IReadOnlyCollection<ProcessStageDetails> Stages,
+    ProductModelDetails ProductModel,
+    string EntryOperationId,
+    IReadOnlyCollection<OperationDefinitionDetails> Operations,
+    IReadOnlyCollection<RouteTransitionDetails> Transitions,
     IReadOnlyCollection<ExternalTestProgramAdapterDetails> ExternalTestProgramAdapters,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
@@ -15,29 +16,33 @@ public sealed record ProductionLineDefinitionSummary(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    string DutModelCode,
-    int StageCount,
+    string ProductModelCode,
+    int OperationCount,
     DateTimeOffset UpdatedAtUtc);
 
-public sealed record DutModelDetails(
-    string DutModelId,
+public sealed record ProductModelDetails(
+    string ProductModelId,
     string ModelCode,
     string IdentityInputKey);
 
-public sealed record WorkstationDetails(
-    string WorkstationId,
+public sealed record OperationDefinitionDetails(
+    string OperationId,
     string DisplayName,
-    string StationSystemId);
-
-public sealed record ProcessStageDetails(
-    string StageId,
-    int Sequence,
-    string DisplayName,
-    string WorkstationId,
+    string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId,
-    string? ExternalTestProgramAdapterId,
-    string? NextStageId);
+    string ConfigurationSnapshotId);
+
+public sealed record RouteTransitionDetails(
+    string TransitionId,
+    string SourceOperationId,
+    string TargetOperationId,
+    string Kind,
+    string? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    string? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 public sealed record ExternalTestProgramAdapterDetails(
     string AdapterId,

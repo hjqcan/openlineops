@@ -158,13 +158,13 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId.Value,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            new RuntimeDutIdentityResponse(
-                session.TraceMetadata.DutIdentity.ModelId,
-                session.TraceMetadata.DutIdentity.InputKey,
-                session.TraceMetadata.DutIdentity.Value),
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            session.TraceMetadata.StationSystemId,
+            new RuntimeProductionUnitIdentityResponse(
+                session.TraceMetadata.ProductionUnitIdentity.ModelId,
+                session.TraceMetadata.ProductionUnitIdentity.InputKey,
+                session.TraceMetadata.ProductionUnitIdentity.Value),
             session.StationId.Value,
             "Unknown",
             null,
@@ -225,20 +225,21 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId.Value,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            new RuntimeDutIdentityResponse(
-                session.TraceMetadata.DutIdentity.ModelId,
-                session.TraceMetadata.DutIdentity.InputKey,
-                session.TraceMetadata.DutIdentity.Value),
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            session.TraceMetadata.StationSystemId,
+            new RuntimeProductionUnitIdentityResponse(
+                session.TraceMetadata.ProductionUnitIdentity.ModelId,
+                session.TraceMetadata.ProductionUnitIdentity.InputKey,
+                session.TraceMetadata.ProductionUnitIdentity.Value),
             session.StationId.Value,
             session.Id.Value,
             session.ProcessDefinitionId.Value,
             session.ProcessVersionId.Value,
             session.ConfigurationSnapshotId.Value,
             session.RecipeSnapshotId.Value,
-            session.TraceMetadata.BatchId,
+            session.TraceMetadata.LotId,
+            session.TraceMetadata.CarrierId,
             session.TraceMetadata.FixtureId,
             session.TraceMetadata.DeviceId,
             session.Status.ToString(),
@@ -259,7 +260,7 @@ public sealed class RuntimeProgressHubDomainEventSubscriber : IRuntimeDomainEven
             session.TraceMetadata.ProjectSnapshotId,
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId.Value,
-            session.StationId.Value);
+            session.TraceMetadata.StationSystemId);
     }
 
     private static string ProductionRunGroup(RuntimeSession session)

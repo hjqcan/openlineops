@@ -144,7 +144,7 @@ public sealed class ProjectReleaseSourceResolverTests
                     "node.move",
                     null));
             var document = new FlowIrDocument(
-                FlowIrSchemaVersions.V1,
+                FlowIrSchema.Current,
                 "process.main",
                 "process.main@1",
                 "Main",

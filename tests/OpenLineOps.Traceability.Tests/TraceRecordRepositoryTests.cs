@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using OpenLineOps.Runtime.Contracts;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Traceability.Application.Queries;
@@ -42,12 +43,14 @@ public sealed class TraceRecordRepositoryTests
         var pageTwo = await repository.QueryAsync(new TraceRecordQuery(paging: new PagedRequest(2, 2)));
 
         Assert.Equal(3, pageOne.TotalCount);
-        Assert.Equal(["SMX-0001", "SMX-0002"], pageOne.Items.Select(item => item.DutIdentityValue));
-        Assert.Equal(["SMX-0003"], pageTwo.Items.Select(item => item.DutIdentityValue));
+        Assert.Equal(
+            ["SMX-0001", "SMX-0002"],
+            pageOne.Items.Select(item => item.ProductionUnitIdentityValue));
+        Assert.Equal(["SMX-0003"], pageTwo.Items.Select(item => item.ProductionUnitIdentityValue));
     }
 
     [Fact]
-    public async Task SqlitePersistsWholeProductionRunStageEvidenceAcrossRestart()
+    public async Task SqlitePersistsWholeProductionRunOperationEvidenceAcrossRestart()
     {
         using var database = TemporarySqliteDatabase.Create();
         var trace = TraceTestData.CreateTrace(
@@ -65,19 +68,21 @@ public sealed class TraceRecordRepositoryTests
 
         Assert.NotNull(restored);
         Assert.Equal(restored.Id.Value, restored.ProductionRunId.Value);
-        Assert.Equal("SMX-1001", restored.DutIdentityValue);
+        Assert.Equal("SMX-1001", restored.ProductionUnitIdentityValue);
         Assert.Equal("line-a", restored.ProductionLineDefinitionId);
-        var stage = Assert.Single(restored.Stages);
-        Assert.Equal("stage-inspect", stage.StageId);
-        var command = Assert.Single(stage.Commands);
-        Assert.Equal(TraceCommandSemanticOutcome.Passed, command.SemanticOutcome);
-        Assert.Single(stage.Measurements);
-        Assert.Single(stage.Artifacts);
+        var operation = Assert.Single(restored.Operations);
+        Assert.Equal("operation.inspect", operation.OperationId);
+        var command = Assert.Single(operation.Commands);
+        Assert.Equal(ResultJudgement.Passed, command.ResultJudgement);
+        Assert.Single(operation.Measurements);
+        Assert.Single(operation.Artifacts);
+        Assert.Single(operation.Outputs);
+        Assert.Equal(2, operation.FencingTokens.Count);
         Assert.Single(restored.AuditEntries);
     }
 
     [Fact]
-    public async Task SqliteQueryFiltersRootAndSameNestedStageThenUsesStablePagination()
+    public async Task SqliteQueryFiltersRootAndSameNestedOperationThenUsesStablePagination()
     {
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteTraceRecordRepository(database.ConnectionString);
@@ -110,7 +115,7 @@ public sealed class TraceRecordRepositoryTests
         await repository.TryAddAsync(match);
 
         var result = await repository.QueryAsync(new TraceRecordQuery(
-            dutIdentityValue: "SMX-3001",
+            productionUnitIdentityValue: "SMX-3001",
             processVersionId: "process-packaging@match",
             deviceId: "device-match",
             judgement: "Failed",
@@ -118,12 +123,12 @@ public sealed class TraceRecordRepositoryTests
             paging: new PagedRequest(1, 10)));
 
         var stored = Assert.Single(result.Items);
-        Assert.Equal("SMX-3001", stored.DutIdentityValue);
+        Assert.Equal("SMX-3001", stored.ProductionUnitIdentityValue);
         Assert.Equal(1, result.TotalCount);
     }
 
     [Fact]
-    public async Task SqliteSnapshotRequiresExactCanonicalRunStatusToken()
+    public async Task SqliteSnapshotRequiresExactCanonicalExecutionStatusToken()
     {
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteTraceRecordRepository(database.ConnectionString);
@@ -139,7 +144,7 @@ public sealed class TraceRecordRepositoryTests
         select.CommandText = "SELECT document_json FROM trace_records WHERE trace_id = $trace_id;";
         select.Parameters.AddWithValue("$trace_id", trace.Id.Value.ToString("D"));
         var document = JsonNode.Parse((string)(await select.ExecuteScalarAsync())!)!.AsObject();
-        document["runStatus"] = "completed";
+        document["executionStatus"] = "completed";
         await using var update = connection.CreateCommand();
         update.CommandText = "UPDATE trace_records SET document_json = $json WHERE trace_id = $trace_id;";
         update.Parameters.AddWithValue("$json", document.ToJsonString());

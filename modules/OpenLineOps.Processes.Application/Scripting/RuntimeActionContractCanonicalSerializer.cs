@@ -56,7 +56,7 @@ public sealed class RuntimeActionContractCanonicalSerializer
             }
 
             return Result.Success(new RuntimeActionContractCanonicalArtifact(
-                RuntimeActionContractSchemaVersions.V1,
+                RuntimeActionContractSchema.Current,
                 Encoding.UTF8.GetString(bytes),
                 Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()));
         }

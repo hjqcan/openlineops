@@ -7,29 +7,38 @@ public sealed record SaveProductionLineRequest(
     string? LineDefinitionId,
     string? DisplayName,
     string? TopologyId,
-    DutModelRequest? DutModel,
-    IReadOnlyCollection<WorkstationRequest?>? Workstations,
-    IReadOnlyCollection<ProcessStageRequest?>? Stages,
+    ProductModelRequest? ProductModel,
+    string? EntryOperationId,
+    IReadOnlyCollection<OperationDefinitionRequest?>? Operations,
+    IReadOnlyCollection<RouteTransitionRequest?>? Transitions,
     IReadOnlyCollection<ExternalTestProgramAdapterRequest?>? ExternalTestProgramAdapters);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record DutModelRequest(string? DutModelId, string? ModelCode, string? IdentityInputKey);
+public sealed record ProductModelRequest(
+    string? ProductModelId,
+    string? ModelCode,
+    string? IdentityInputKey);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record WorkstationRequest(
-    string? WorkstationId,
+public sealed record OperationDefinitionRequest(
+    string? OperationId,
     string? DisplayName,
-    string? StationSystemId);
-
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ProcessStageRequest(
-    string? StageId,
-    int? Sequence,
-    string? DisplayName,
-    string? WorkstationId,
+    string? StationSystemId,
     string? FlowDefinitionId,
-    string? ConfigurationSnapshotId,
-    string? ExternalTestProgramAdapterId);
+    string? ConfigurationSnapshotId);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record RouteTransitionRequest(
+    string? TransitionId,
+    string? SourceOperationId,
+    string? TargetOperationId,
+    string? Kind,
+    string? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    string? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalTestProgramAdapterRequest(
@@ -62,9 +71,10 @@ public sealed record ProductionLineResponse(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    DutModelResponse DutModel,
-    IReadOnlyCollection<WorkstationResponse> Workstations,
-    IReadOnlyCollection<ProcessStageResponse> Stages,
+    ProductModelResponse ProductModel,
+    string EntryOperationId,
+    IReadOnlyCollection<OperationDefinitionResponse> Operations,
+    IReadOnlyCollection<RouteTransitionResponse> Transitions,
     IReadOnlyCollection<ExternalTestProgramAdapterResponse> ExternalTestProgramAdapters,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
@@ -73,26 +83,33 @@ public sealed record ProductionLineSummaryResponse(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    string DutModelCode,
-    int StageCount,
+    string ProductModelCode,
+    int OperationCount,
     DateTimeOffset UpdatedAtUtc);
 
-public sealed record DutModelResponse(string DutModelId, string ModelCode, string IdentityInputKey);
+public sealed record ProductModelResponse(
+    string ProductModelId,
+    string ModelCode,
+    string IdentityInputKey);
 
-public sealed record WorkstationResponse(
-    string WorkstationId,
+public sealed record OperationDefinitionResponse(
+    string OperationId,
     string DisplayName,
-    string StationSystemId);
-
-public sealed record ProcessStageResponse(
-    string StageId,
-    int Sequence,
-    string DisplayName,
-    string WorkstationId,
+    string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId,
-    string? ExternalTestProgramAdapterId,
-    string? NextStageId);
+    string ConfigurationSnapshotId);
+
+public sealed record RouteTransitionResponse(
+    string TransitionId,
+    string SourceOperationId,
+    string TargetOperationId,
+    string Kind,
+    string? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    string? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 public sealed record ExternalTestProgramAdapterResponse(
     string AdapterId,

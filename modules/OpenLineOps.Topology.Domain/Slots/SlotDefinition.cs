@@ -41,7 +41,7 @@ public sealed class SlotDefinition : Entity<SlotDefinitionId>
         AutomationSystemId parentSystemId,
         string address,
         string displayName,
-        SlotMaterialKind materialKind = SlotMaterialKind.Dut,
+        SlotMaterialKind materialKind = SlotMaterialKind.ProductionUnit,
         bool isEnabled = true)
     {
         return new SlotDefinition(

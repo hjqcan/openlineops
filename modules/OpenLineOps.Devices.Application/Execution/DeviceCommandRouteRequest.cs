@@ -8,16 +8,19 @@ public sealed record DeviceCommandRouteRequest
         string runtimeSessionId,
         string productionRunId,
         string productionLineDefinitionId,
-        string productionStageId,
-        int stageSequence,
-        string workstationId,
-        string dutModelId,
-        string dutIdentityInputKey,
-        string dutIdentityValue,
+        string operationId,
+        int operationAttempt,
+        string productModelId,
+        string productionUnitIdentityInputKey,
+        string productionUnitIdentityValue,
+        string? lotId,
+        string? carrierId,
+        string? fixtureId,
+        string? deviceId,
         string runtimeStepId,
         string runtimeCommandId,
         string runtimeNodeId,
-        string stationId,
+        string stationSystemId,
         string configurationSnapshotId,
         DeviceCapabilityId capabilityId,
         string commandName,
@@ -34,23 +37,30 @@ public sealed record DeviceCommandRouteRequest
         ProductionLineDefinitionId = NotBlank(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
-        ProductionStageId = NotBlank(productionStageId, nameof(productionStageId));
-        if (stageSequence <= 0)
+        OperationId = NotBlank(operationId, nameof(operationId));
+        if (operationAttempt <= 0)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(stageSequence),
-                "Stage sequence must be positive.");
+                nameof(operationAttempt),
+                "Operation attempt must be positive.");
         }
 
-        StageSequence = stageSequence;
-        WorkstationId = NotBlank(workstationId, nameof(workstationId));
-        DutModelId = NotBlank(dutModelId, nameof(dutModelId));
-        DutIdentityInputKey = NotBlank(dutIdentityInputKey, nameof(dutIdentityInputKey));
-        DutIdentityValue = NotBlank(dutIdentityValue, nameof(dutIdentityValue));
+        OperationAttempt = operationAttempt;
+        ProductModelId = NotBlank(productModelId, nameof(productModelId));
+        ProductionUnitIdentityInputKey = NotBlank(
+            productionUnitIdentityInputKey,
+            nameof(productionUnitIdentityInputKey));
+        ProductionUnitIdentityValue = NotBlank(
+            productionUnitIdentityValue,
+            nameof(productionUnitIdentityValue));
+        LotId = Optional(lotId, nameof(lotId));
+        CarrierId = Optional(carrierId, nameof(carrierId));
+        FixtureId = Optional(fixtureId, nameof(fixtureId));
+        DeviceId = Optional(deviceId, nameof(deviceId));
         RuntimeStepId = NotBlank(runtimeStepId, nameof(runtimeStepId));
         RuntimeCommandId = NotBlank(runtimeCommandId, nameof(runtimeCommandId));
         RuntimeNodeId = NotBlank(runtimeNodeId, nameof(runtimeNodeId));
-        StationId = NotBlank(stationId, nameof(stationId));
+        StationSystemId = NotBlank(stationSystemId, nameof(stationSystemId));
         ConfigurationSnapshotId = NotBlank(configurationSnapshotId, nameof(configurationSnapshotId));
         CapabilityId = capabilityId ?? throw new ArgumentNullException(nameof(capabilityId));
         CommandName = NotBlank(commandName, nameof(commandName));
@@ -77,17 +87,23 @@ public sealed record DeviceCommandRouteRequest
 
     public string ProductionLineDefinitionId { get; }
 
-    public string ProductionStageId { get; }
+    public string OperationId { get; }
 
-    public int StageSequence { get; }
+    public int OperationAttempt { get; }
 
-    public string WorkstationId { get; }
+    public string ProductModelId { get; }
 
-    public string DutModelId { get; }
+    public string ProductionUnitIdentityInputKey { get; }
 
-    public string DutIdentityInputKey { get; }
+    public string ProductionUnitIdentityValue { get; }
 
-    public string DutIdentityValue { get; }
+    public string? LotId { get; }
+
+    public string? CarrierId { get; }
+
+    public string? FixtureId { get; }
+
+    public string? DeviceId { get; }
 
     public string RuntimeStepId { get; }
 
@@ -95,7 +111,7 @@ public sealed record DeviceCommandRouteRequest
 
     public string RuntimeNodeId { get; }
 
-    public string StationId { get; }
+    public string StationSystemId { get; }
 
     public string ConfigurationSnapshotId { get; }
 
@@ -125,6 +141,11 @@ public sealed record DeviceCommandRouteRequest
                 $"{parameterName} must be non-empty canonical text.",
                 parameterName)
             : value;
+    }
+
+    private static string? Optional(string? value, string parameterName)
+    {
+        return value is null ? null : NotBlank(value, parameterName);
     }
 
     private static string CanonicalGuid(string value, string parameterName)

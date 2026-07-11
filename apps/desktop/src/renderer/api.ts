@@ -2,6 +2,7 @@ import * as signalR from '@microsoft/signalr';
 import type { ApiResponse } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
 import type {
+  ActiveProductionRunsResponse,
   AddAutomationSystemRequest,
   AddCapabilityContractRequest,
   AddDriverBindingRequest,
@@ -39,8 +40,13 @@ import type {
   ProcessDefinitionSummary,
   ProcessGraphValidationReport,
   ProcessBlocklyBlockDefinition,
+  OperatorProductionRunCommand,
   ProductionLineResponse,
+  ProductionLineRuntimeStateResponse,
   ProductionLineSummaryResponse,
+  ProductionOperationsFilters,
+  ProductionRunCommandRequest,
+  ProductionRunReadModel,
   PluginLifecycleRecordResponse,
   PluginManagementOverviewResponse,
   PublishConfigurationSnapshotRequest,
@@ -59,8 +65,8 @@ import type {
   RuntimeTimelineResponse,
   SaveProductionLineRequest,
   RegisterProcessBlocklyBlockDefinitionRequest,
-  StartedProjectSnapshotProductionRunResponse,
-  StartProjectSnapshotProductionRunRequest,
+  SubmittedProjectSnapshotProductionRunResponse,
+  SubmitProjectSnapshotProductionRunRequest,
   StationProfileResponse,
   TraceRecordExportPackageResponse,
   TraceRecordQueryResponse,
@@ -180,12 +186,12 @@ export async function publishProjectSnapshot(
     });
 }
 
-export async function startProjectSnapshotProductionRun(
+export async function submitProjectSnapshotProductionRun(
   projectId: string,
   snapshotId: string,
-  request: StartProjectSnapshotProductionRunRequest
-): Promise<ApiResponse<StartedProjectSnapshotProductionRunResponse>> {
-  return desktop.apiRequest<StartedProjectSnapshotProductionRunResponse>(
+  request: SubmitProjectSnapshotProductionRunRequest
+): Promise<ApiResponse<SubmittedProjectSnapshotProductionRunResponse>> {
+  return desktop.apiRequest<SubmittedProjectSnapshotProductionRunResponse>(
     `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/production-runs`,
     {
       method: 'POST',
@@ -485,9 +491,9 @@ export async function getTimeline(
   return response.body?.items ?? [];
 }
 
-export async function getTraceRecords(dutIdentityValue?: string): Promise<TraceRecordQueryResponse | null> {
-  const query = dutIdentityValue
-    ? `?dutIdentityValue=${encodeURIComponent(dutIdentityValue)}`
+export async function getTraceRecords(productionUnitIdentityValue?: string): Promise<TraceRecordQueryResponse | null> {
+  const query = productionUnitIdentityValue
+    ? `?productionUnitIdentityValue=${encodeURIComponent(productionUnitIdentityValue)}`
     : '';
   const response = await desktop.apiRequest<TraceRecordQueryResponse>(
     `/api/traceability/records${query}`);
@@ -782,6 +788,43 @@ export async function replaceProductionLine(
     `${productionLineCollectionPath(scope)}/${encodeURIComponent(lineDefinitionId)}`,
     {
       method: 'PUT',
+      body: request
+    });
+}
+
+export async function getActiveProductionRuns(
+  filters: ProductionOperationsFilters
+): Promise<ApiResponse<ActiveProductionRunsResponse>> {
+  const query = new URLSearchParams();
+  if (filters.productionLineDefinitionId) {
+    query.set('productionLineDefinitionId', filters.productionLineDefinitionId);
+  }
+  if (filters.stationSystemId) {
+    query.set('stationSystemId', filters.stationSystemId);
+  }
+  if (filters.slotId) {
+    query.set('slotId', filters.slotId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  return desktop.apiRequest<ActiveProductionRunsResponse>(`/api/operations/active-runs${suffix}`);
+}
+
+export async function getProductionLineRuntimeState(
+  productionLineDefinitionId: string
+): Promise<ApiResponse<ProductionLineRuntimeStateResponse>> {
+  return desktop.apiRequest<ProductionLineRuntimeStateResponse>(
+    `/api/operations/lines/${encodeURIComponent(productionLineDefinitionId)}/state`);
+}
+
+export async function commandProductionRun(
+  productionRunId: string,
+  command: OperatorProductionRunCommand,
+  request: ProductionRunCommandRequest
+): Promise<ApiResponse<ProductionRunReadModel>> {
+  return desktop.apiRequest<ProductionRunReadModel>(
+    `/api/production-runs/${encodeURIComponent(productionRunId)}/commands/${command}`,
+    {
+      method: 'POST',
       body: request
     });
 }

@@ -368,7 +368,7 @@ The implemented `ProjectReleasePublisher` performs this use case:
 4. Resolve topology targets and bindings plus the current catalog version for
    every Blockly block type found in the process workspace.
 5. Compile the published process graph to canonical
-   `openlineops.flow-ir/v1`, then record its schema, JSON, and SHA-256.
+   `openlineops.flow-ir`, then record its schema, JSON, and SHA-256.
 6. Copy the complete application source into a staging release, write per-file
    size and SHA-256 records, and compute the release content digest.
 7. Verify the staged release, atomically move it into its immutable final
@@ -413,7 +413,7 @@ cancellation, timeout, monitoring, and trace use the same lifecycle.
 ## Declarative Runtime Action Contracts And Dependency Locks
 
 Processes.Application defines strict
-`openlineops.runtime-action-contract/v1` contracts with deterministic canonical
+`openlineops.runtime-action-contract` contracts with deterministic canonical
 serialization and SHA-256. Built-in, Application-local custom, and compatible
 plugin-generated blocks use only declarative `deviceCommand`, `delay`, and
 `resultPatch` emits. Legacy Python templates and arbitrary frontend generators

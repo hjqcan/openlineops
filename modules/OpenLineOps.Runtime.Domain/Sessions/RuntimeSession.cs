@@ -1,5 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
@@ -320,11 +321,11 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         RuntimeCommandId commandId,
         string? resultPayload,
         DateTimeOffset completedAtUtc,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        ResultJudgement resultJudgement = ResultJudgement.NotApplicable)
     {
         return ChangeCommandStatus(
             commandId,
-            command => command.Complete(resultPayload, completedAtUtc, semanticOutcome),
+            command => command.Complete(resultPayload, completedAtUtc, resultJudgement),
             "Command completed.");
     }
 
@@ -333,17 +334,23 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         string reason,
         DateTimeOffset failedAtUtc,
         string? resultPayload = null,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        ResultJudgement resultJudgement = ResultJudgement.Unknown)
     {
         return ChangeCommandStatus(
             commandId,
-            command => command.Fail(reason, failedAtUtc, resultPayload, semanticOutcome),
+            command => command.Fail(reason, failedAtUtc, resultPayload, resultJudgement),
             RequiredReason(reason));
     }
 
-    public RuntimeOperationResult TimeoutCommand(RuntimeCommandId commandId, DateTimeOffset timedOutAtUtc)
+    public RuntimeOperationResult TimeoutCommand(
+        RuntimeCommandId commandId,
+        DateTimeOffset timedOutAtUtc,
+        string? resultPayload = null)
     {
-        return ChangeCommandStatus(commandId, command => command.TimeoutAt(timedOutAtUtc), "Command timed out.");
+        return ChangeCommandStatus(
+            commandId,
+            command => command.TimeoutAt(timedOutAtUtc, resultPayload),
+            "Command timed out.");
     }
 
     public RuntimeOperationResult CancelCommand(
@@ -351,11 +358,11 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         DateTimeOffset canceledAtUtc,
         string reason = "Command canceled.",
         string? resultPayload = null,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        ResultJudgement resultJudgement = ResultJudgement.Unknown)
     {
         return ChangeCommandStatus(
             commandId,
-            command => command.Cancel(canceledAtUtc, reason, resultPayload, semanticOutcome),
+            command => command.Cancel(canceledAtUtc, reason, resultPayload, resultJudgement),
             RequiredReason(reason));
     }
 

@@ -7,9 +7,9 @@ public interface IProductionRunRecoveryService
 }
 
 public sealed record ProductionRunRecoveryResult(
-    int CanceledRunCount,
-    int FailedRunCount,
-    int CompletedRunCount)
+    int PendingRunCount,
+    int ResumableRunCount,
+    int RecoveryRequiredRunCount)
 {
-    public int TotalRecoveredRuns => CanceledRunCount + FailedRunCount + CompletedRunCount;
+    public int TotalInspectedRuns => PendingRunCount + ResumableRunCount + RecoveryRequiredRunCount;
 }

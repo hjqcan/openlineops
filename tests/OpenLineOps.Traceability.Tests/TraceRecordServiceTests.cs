@@ -1,4 +1,3 @@
-using OpenLineOps.Traceability.Application.Judgements;
 using OpenLineOps.Traceability.Application.Records;
 using OpenLineOps.Traceability.Infrastructure.Persistence;
 using OpenLineOps.Traceability.Infrastructure.Time;
@@ -17,13 +16,12 @@ public sealed class TraceRecordServiceTests
         var repository = new InMemoryTraceRecordRepository();
         var service = new TraceRecordService(
             repository,
-            new SystemClock(),
-            new ConfiguredTraceJudgementGenerator(new TraceJudgementOptions()));
-        var request = CreateRequest("DUT-001");
+            new SystemClock());
+        var request = CreateRequest("UNIT-001");
 
         var created = await service.CreateAsync(request);
         var identicalReplay = await service.CreateAsync(request);
-        var conflictingReplay = await service.CreateAsync(CreateRequest("DUT-DIFFERENT"));
+        var conflictingReplay = await service.CreateAsync(CreateRequest("UNIT-DIFFERENT"));
 
         Assert.True(created.IsSuccess, created.Error.Message);
         Assert.True(identicalReplay.IsFailure);
@@ -37,7 +35,7 @@ public sealed class TraceRecordServiceTests
         Assert.Equal(1, repository.AddCount);
     }
 
-    private static CreateTraceRecordRequest CreateRequest(string dutIdentityValue)
+    private static CreateTraceRecordRequest CreateRequest(string productionUnitIdentityValue)
     {
         return new CreateTraceRecordRequest(
             ProductionRunId,
@@ -46,25 +44,26 @@ public sealed class TraceRecordServiceTests
             "snapshot-a",
             "topology-a",
             "line-a",
-            "dut-model-a",
+            "product-model-a",
             "barcode",
-            dutIdentityValue,
-            "batch-a",
-            "fixture-a",
-            "device-a",
+            productionUnitIdentityValue,
+            "lot-a",
+            "carrier-a",
             "operator-a",
             "Completed",
             "Passed",
+            "Completed",
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc.AddMinutes(1),
             null,
             null,
             [
-                new CreateTraceStageExecutionRequest(
-                    "stage-a",
+                new CreateTraceOperationExecutionRequest(
+                    "operation-a@0001",
+                    "operation-a",
                     1,
-                    "workstation-a",
+                    "station-system-a",
                     "station-a",
                     "process-a",
                     "process-a@1.0.0",
@@ -73,6 +72,7 @@ public sealed class TraceRecordServiceTests
                     RuntimeSessionId,
                     "Completed",
                     "Completed",
+                    "Passed",
                     TraceTestData.BaseTimeUtc,
                     TraceTestData.BaseTimeUtc.AddMinutes(1),
                     null,
@@ -83,8 +83,11 @@ public sealed class TraceRecordServiceTests
                     [],
                     [],
                     [],
+                    [],
+                    [],
                     [])
             ],
+            [],
             [
                 new CreateAuditEntryRequest(
                     AuditEntryId,

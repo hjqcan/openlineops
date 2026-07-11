@@ -1,4 +1,6 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
+using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
@@ -29,22 +31,23 @@ public sealed class RuntimeCommandLifecycleTests
     }
 
     [Fact]
-    public void SemanticOutcomeMustMatchTerminalCommandStatus()
+    public void ProductJudgementCompletesCommandWithoutBecomingExecutionFailure()
     {
         var session = CreateRunningSession();
         var command = CreateCommand(session);
         session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2));
         session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3));
 
-        Assert.Throws<ArgumentException>(() => session.CompleteCommand(
+        var completed = session.CompleteCommand(
             command.Id,
             "{\"judgement\":\"Failed\"}",
             StartedAtUtc.AddSeconds(4),
-            RuntimeCommandSemanticOutcome.Failed));
+            ResultJudgement.Failed);
 
-        Assert.Equal(RuntimeCommandStatus.InProgress, command.Status);
-        Assert.Null(command.SemanticOutcome);
-        Assert.Null(command.ResultPayload);
+        Assert.True(completed.Succeeded);
+        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
+        Assert.Equal("{\"judgement\":\"Failed\"}", command.ResultPayload);
     }
 
     [Fact]

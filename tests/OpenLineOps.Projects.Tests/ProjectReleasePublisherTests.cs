@@ -272,13 +272,13 @@ public sealed class ProjectReleasePublisherTests
     private static ProjectReleaseSourceMetadata CreateMetadataWithChangedFlowIr()
     {
         var metadata = CreateMetadata();
-        var stage = Assert.Single(metadata.ProductionLine.Stages) with
+        var operation = Assert.Single(metadata.ProductionLine.Operations) with
         {
             FlowIrSha256 = new string('b', 64)
         };
         return metadata with
         {
-            ProductionLine = metadata.ProductionLine with { Stages = [stage] }
+            ProductionLine = metadata.ProductionLine with { Operations = [operation] }
         };
     }
 
@@ -288,23 +288,22 @@ public sealed class ProjectReleasePublisherTests
             "line.main",
             "Main Line",
             "topology.main",
-            new ProjectReleaseDutModel("dut.main", "MAINBOARD-A", "serialNumber"),
-            [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+            new ProjectReleaseProductModel("product.main", "MAINBOARD-A", "serialNumber"),
+            "operation.eol",
             [
-                new ProjectReleaseProductionStage(
-                    "stage.eol",
-                    1,
+                new ProjectReleaseOperation(
+                    "operation.eol",
                     "EOL",
-                    "workstation.eol",
+                    "station.eol",
                     "process.main",
                     "configuration.main.v1",
                     "process.main@1.0.0",
-                    "openlineops.flow-ir/v1",
+                    "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                     "{}",
-                    ["openlineops_move_axis@1"],
-                    ExternalTestProgramAdapterId: null)
+                    ["openlineops_move_axis@1"])
             ],
+            Transitions: [],
             ExternalTestProgramAdapters: []);
     }
 

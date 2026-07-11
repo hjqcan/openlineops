@@ -83,42 +83,39 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
                 line.LineDefinitionId,
                 request.ProductionLineDefinitionId,
                 StringComparison.Ordinal)
-            || !string.Equals(line.DutModel.DutModelId, request.DutModelId, StringComparison.Ordinal)
             || !string.Equals(
-                line.DutModel.IdentityInputKey,
-                request.DutIdentityInputKey,
+                line.ProductModel.ProductModelId,
+                request.ProductModelId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                line.ProductModel.IdentityInputKey,
+                request.ProductionUnitIdentityInputKey,
                 StringComparison.Ordinal))
         {
             return null;
         }
 
-        var stageMatches = (
-                from stage in line.Stages
-                join workstation in line.Workstations
-                    on stage.WorkstationId equals workstation.WorkstationId
-                where string.Equals(stage.StageId, request.ProductionStageId, StringComparison.Ordinal)
-                      && stage.Sequence == request.StageSequence
-                      && string.Equals(
-                          stage.WorkstationId,
-                          request.WorkstationId,
-                          StringComparison.Ordinal)
-                      && string.Equals(
-                          stage.ConfigurationSnapshotId,
-                          request.ConfigurationSnapshotId,
-                          StringComparison.Ordinal)
-                      && string.Equals(
-                          workstation.StationSystemId,
-                          request.StationId,
-                          StringComparison.Ordinal)
-                select new { Stage = stage, Workstation = workstation })
+        var operationMatches = line.Operations
+            .Where(operation => string.Equals(
+                                    operation.OperationId,
+                                    request.OperationId,
+                                    StringComparison.Ordinal)
+                                && string.Equals(
+                                    operation.ConfigurationSnapshotId,
+                                    request.ConfigurationSnapshotId,
+                                    StringComparison.Ordinal)
+                                && string.Equals(
+                                    operation.StationSystemId,
+                                    request.StationSystemId,
+                                    StringComparison.Ordinal))
             .Take(2)
             .ToArray();
-        if (stageMatches.Length != 1)
+        if (operationMatches.Length != 1)
         {
             return null;
         }
 
-        var stageRoute = stageMatches[0];
+        var operationRoute = operationMatches[0];
         var targetMatches = release.Metadata.TargetReferences.Count(target =>
             string.Equals(target.Kind, request.TargetKind, StringComparison.Ordinal)
             && string.Equals(target.TargetId, request.TargetId, StringComparison.Ordinal));
@@ -178,7 +175,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
         if (stationProfile is null
             || !string.Equals(
                 stationProfile.StationSystemId,
-                stageRoute.Workstation.StationSystemId,
+                operationRoute.StationSystemId,
                 StringComparison.Ordinal))
         {
             return null;
@@ -197,8 +194,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
                 release,
                 releaseScope,
                 configurationSnapshot,
-                stageRoute.Stage,
-                stageRoute.Workstation,
+                operationRoute,
                 topologyBinding,
                 adapterMarker.AdapterId);
         }
@@ -211,19 +207,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
         OpenedProjectReleaseArtifact release,
         ProjectApplicationWorkspaceScope releaseScope,
         ConfigurationSnapshot configurationSnapshot,
-        ProjectReleaseProductionStage stage,
-        ProjectReleaseWorkstation workstation,
+        ProjectReleaseOperation operation,
         ProjectReleaseCapabilityBinding topologyBinding,
         string requestedAdapterId)
     {
-        if (!string.Equals(
-                stage.ExternalTestProgramAdapterId,
-                requestedAdapterId,
-                StringComparison.Ordinal)
-            || !string.Equals(request.TargetKind, "System", StringComparison.Ordinal)
+        if (!string.Equals(request.TargetKind, "System", StringComparison.Ordinal)
             || !string.Equals(
                 request.TargetId,
-                workstation.StationSystemId,
+                operation.StationSystemId,
                 StringComparison.Ordinal))
         {
             return null;
@@ -341,9 +332,9 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
             adapter.AdapterId,
             adapter.LaunchKind,
             releaseScope.ApplicationRootPath,
-            release.Metadata.ProductionLine.DutModel.DutModelId,
-            release.Metadata.ProductionLine.DutModel.ModelCode,
-            release.Metadata.ProductionLine.DutModel.IdentityInputKey,
+            release.Metadata.ProductionLine.ProductModel.ProductModelId,
+            release.Metadata.ProductionLine.ProductModel.ModelCode,
+            release.Metadata.ProductionLine.ProductModel.IdentityInputKey,
             adapter.Executable,
             executableFile?.SizeBytes,
             executableFile?.Sha256,

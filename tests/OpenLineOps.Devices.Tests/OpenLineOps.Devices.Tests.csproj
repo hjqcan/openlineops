@@ -34,6 +34,7 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

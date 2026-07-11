@@ -309,7 +309,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
     private static RuntimeActionContractCanonicalArtifact CreateContract(string actionType)
     {
         var result = new RuntimeActionContractCanonicalSerializer().Serialize(new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             actionType,
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal),
             new RuntimeDelayEmit(new RuntimeActionLiteralValue(JsonSerializer.SerializeToElement(1)))));
@@ -323,7 +323,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         string expectedActionType)
     {
         Assert.Equal(ProcessBlocklyBlockExecutionModes.DeclarativeActionContract, block.ExecutionMode);
-        Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+        Assert.Equal(RuntimeActionContractSchema.Current, block.RuntimeActionContractSchemaVersion);
         var serializer = new RuntimeActionContractCanonicalSerializer();
         var parsed = serializer.Deserialize(block.RuntimeActionContractJson);
         Assert.True(parsed.IsSuccess, parsed.Error.Message);

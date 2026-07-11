@@ -56,10 +56,12 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 publishedProjectPath,
                 "--snapshot",
                 "active",
-                "--dut",
-                $"DUT-{suffix}",
-                "--batch",
-                $"BATCH-{suffix}",
+                "--production-unit",
+                $"UNIT-{suffix}",
+                "--lot",
+                $"LOT-{suffix}",
+                "--carrier",
+                $"CARRIER-{suffix}",
                 "--fixture",
                 $"FIXTURE-{suffix}",
                 "--device",
@@ -90,9 +92,10 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 Assert.Equal(
                     productionRunId,
                     productionRun.GetProperty("productionRunId").GetGuid());
-                Assert.Equal("Completed", productionRun.GetProperty("status").GetString());
-                Assert.Equal(1, productionRun.GetProperty("stageCount").GetInt32());
-                Assert.Equal(1, productionRun.GetProperty("completedStageCount").GetInt32());
+                Assert.Equal("Completed", productionRun.GetProperty("executionStatus").GetString());
+                Assert.Equal("Passed", productionRun.GetProperty("resultJudgement").GetString());
+                Assert.Equal(1, productionRun.GetProperty("operationCount").GetInt32());
+                Assert.Equal(1, productionRun.GetProperty("completedOperationCount").GetInt32());
                 Assert.Equal(0, productionRun.GetProperty("incidentCount").GetInt32());
                 Assert.True(productionRun.GetProperty("completedStepCount").GetInt32() > 0);
                 Assert.True(productionRun.GetProperty("commandCount").GetInt32() > 0);
@@ -100,15 +103,15 @@ public sealed class RunnerPublishedProjectProcessE2ETests
 
             var executionDataPath = ProjectExecutionDataDirectory.ForProjectDirectory(
                 publishedProjectPath);
-            var runtimeDatabasePath = Path.Combine(
+            var productionDatabasePath = Path.Combine(
                 executionDataPath,
-                "openlineops-runtime.sqlite");
+                "openlineops-production.sqlite");
             var traceDatabasePath = Path.Combine(
                 executionDataPath,
                 "openlineops-traceability.sqlite");
             Assert.Equal(
                 1,
-                await CountRunRowsAsync(runtimeDatabasePath, "production_runs", productionRunId));
+                await CountRunRowsAsync(productionDatabasePath, "production_runs", productionRunId));
             Assert.Equal(
                 1,
                 await CountRunRowsAsync(traceDatabasePath, "trace_records", productionRunId));
@@ -118,10 +121,12 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 publishedProjectPath,
                 "--snapshot",
                 "active",
-                "--dut",
-                $"DUT-{suffix}",
-                "--batch",
-                $"BATCH-{suffix}",
+                "--production-unit",
+                $"UNIT-{suffix}",
+                "--lot",
+                $"LOT-{suffix}",
+                "--carrier",
+                $"CARRIER-{suffix}",
                 "--fixture",
                 $"FIXTURE-{suffix}",
                 "--device",
@@ -136,7 +141,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 + $"stdout: {idempotentRetry.StandardOutput}; stderr: {idempotentRetry.StandardError}");
             Assert.Equal(
                 1,
-                await CountRunRowsAsync(runtimeDatabasePath, "production_runs", productionRunId));
+                await CountRunRowsAsync(productionDatabasePath, "production_runs", productionRunId));
             Assert.Equal(
                 1,
                 await CountRunRowsAsync(traceDatabasePath, "trace_records", productionRunId));
@@ -149,8 +154,8 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 missingReleaseProjectPath,
                 "--snapshot",
                 "active",
-                "--dut",
-                $"DUT-{suffix}",
+                "--production-unit",
+                $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
             AssertRunnerFailure(
@@ -164,8 +169,8 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 tamperedReleaseProjectPath,
                 "--snapshot",
                 "active",
-                "--dut",
-                $"DUT-{suffix}",
+                "--production-unit",
+                $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
             AssertRunnerFailure(
@@ -185,8 +190,8 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 draftProjectPath,
                 "--snapshot",
                 "active",
-                "--dut",
-                $"DUT-{suffix}",
+                "--production-unit",
+                $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
             AssertRunnerFailure(
@@ -295,7 +300,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                        systemType = "runner.e2e.station",
                        displayName = "Runner E2E Station",
                        requiredCapabilityIds = Array.Empty<string>(),
-                       providedCapabilityIds = Array.Empty<string>(),
+                       providedCapabilityIds = new[] { capabilityId },
                        metadata = new Dictionary<string, string>()
                    }))
         {
@@ -386,34 +391,25 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                        lineDefinitionId = productionLineDefinitionId,
                        displayName = "Runner E2E Production Line",
                        topologyId,
-                       dutModel = new
+                       productModel = new
                        {
-                           dutModelId = $"dut-runner-{suffix}",
+                           productModelId = $"product-runner-{suffix}",
                            modelCode = $"MODEL-{suffix}",
                            identityInputKey = "serialNumber"
                        },
-                       workstations = new[]
+                       entryOperationId = "operation.main",
+                       operations = new[]
                        {
                            new
                            {
-                               workstationId = "workstation.main",
-                               displayName = "Runner E2E Workstation",
-                               stationSystemId = "station.main"
-                           }
-                       },
-                       stages = new[]
-                       {
-                           new
-                           {
-                               stageId = "stage.main",
-                               sequence = 1,
-                               displayName = "Runner E2E Stage",
-                               workstationId = "workstation.main",
+                               operationId = "operation.main",
+                               displayName = "Runner E2E Operation",
+                               stationSystemId = "station.main",
                                flowDefinitionId = processDefinitionId,
-                               configurationSnapshotId,
-                               externalTestProgramAdapterId = (string?)null
+                               configurationSnapshotId
                            }
                        },
+                       transitions = Array.Empty<object>(),
                        externalTestProgramAdapters = Array.Empty<object>()
                    }))
         {
@@ -673,6 +669,13 @@ public sealed class RunnerPublishedProjectProcessE2ETests
         }
 
         startInfo.Environment["OpenLineOps__Runtime__Persistence__Provider"] = "InMemory";
+        startInfo.Environment["OpenLineOps__Runtime__Coordination__Provider"] = "Sqlite";
+        startInfo.Environment["OpenLineOps__Runtime__Coordination__SqliteDatabasePath"] =
+            Path.Combine(
+                ProjectExecutionDataDirectory.ForProjectDirectory(workingDirectory),
+                "openlineops-production.sqlite");
+        startInfo.Environment["OpenLineOps__Runtime__AgentTransport__Provider"] = "Disabled";
+        startInfo.Environment["OpenLineOps__Runtime__StationExecution__Provider"] = "InProcess";
         startInfo.Environment["OpenLineOps__Devices__Persistence__Provider"] = "InMemory";
         startInfo.Environment["OpenLineOps__Plugins__EventLog__Provider"] = "Sqlite";
         startInfo.Environment["OpenLineOps__Plugins__EventLog__DatabasePath"] =
@@ -751,7 +754,12 @@ public sealed class RunnerPublishedProjectProcessE2ETests
         var configuration = """
             {
               "OpenLineOps": {
-                "Runtime": { "Persistence": { "Provider": "InMemory" } },
+                "Runtime": {
+                  "Persistence": { "Provider": "InMemory" },
+                  "Coordination": { "Provider": "InMemory" },
+                  "AgentTransport": { "Provider": "Disabled" },
+                  "StationExecution": { "Provider": "InProcess" }
+                },
                 "Traceability": { "Persistence": { "Provider": "InMemory" } },
                 "Devices": { "Persistence": { "Provider": "InMemory" } },
                 "Plugins": {

@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\OpenLineOps.Devices.Application\OpenLineOps.Devices.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Devices.Domain\OpenLineOps.Devices.Domain.csproj" />
     <ProjectReference Include="..\OpenLineOps.Engineering.Application\OpenLineOps.Engineering.Application.csproj" />

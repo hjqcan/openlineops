@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Api.Models;
@@ -7,26 +8,36 @@ internal static class ProductionRunResponseMapper
     public static ProductionRunResponse ToResponse(ProductionRunSnapshot run)
     {
         ArgumentNullException.ThrowIfNull(run);
-
-        var stages = run.Stages.Select(stage => new ProductionRunStageResponse(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId.Value,
-            stage.ProcessDefinitionId.Value,
-            stage.ProcessVersionId.Value,
-            stage.ConfigurationSnapshotId.Value,
-            stage.RecipeSnapshotId.Value,
-            stage.Status.ToString(),
-            IsTerminal(stage.Status),
-            stage.RuntimeSessionId?.Value,
-            stage.StartedAtUtc,
-            stage.CompletedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount)).ToArray();
+        var operations = run.Operations.Select(operation => new ProductionRunOperationResponse(
+            operation.OperationRunId,
+            operation.Definition.OperationId,
+            operation.Attempt,
+            operation.Definition.StationSystemId,
+            operation.Definition.StationId.Value,
+            operation.Definition.ProcessDefinitionId.Value,
+            operation.Definition.ProcessVersionId.Value,
+            operation.Definition.ConfigurationSnapshotId.Value,
+            operation.Definition.RecipeSnapshotId.Value,
+            operation.ExecutionStatus.ToString(),
+            operation.Judgement.ToString(),
+            IsTerminal(operation.ExecutionStatus),
+            operation.RuntimeSessionId?.Value,
+            operation.StartedAtUtc,
+            operation.CompletedAtUtc,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount,
+            operation.Definition.ResourceRequirements.Select(resource =>
+                new ProductionRunResourceResponse(
+                    resource.Kind.ToString(),
+                    resource.ResourceId,
+                    operation.FencingTokens.GetValueOrDefault(resource))).ToArray(),
+            operation.Outputs.Select(output => new ProductionRunOutputResponse(
+                output.Key,
+                output.Value.Kind.ToString(),
+                output.Value.CanonicalValue)).ToArray())).ToArray();
 
         return new ProductionRunResponse(
             run.RunId.Value,
@@ -35,36 +46,43 @@ internal static class ProductionRunResponseMapper
             run.ProjectSnapshotId,
             run.TopologyId,
             run.ProductionLineDefinitionId,
-            new RuntimeDutIdentityResponse(
-                run.DutIdentity.ModelId,
-                run.DutIdentity.InputKey,
-                run.DutIdentity.Value),
-            run.BatchId,
-            run.FixtureId,
-            run.DeviceId,
+            new RuntimeProductionUnitIdentityResponse(
+                run.ProductionUnitIdentity.ModelId,
+                run.ProductionUnitIdentity.InputKey,
+                run.ProductionUnitIdentity.Value),
+            run.LotId,
+            run.CarrierId,
             run.ActorId,
-            run.Status.ToString(),
-            run.Status is ProductionRunStatus.Completed
-                or ProductionRunStatus.Failed
-                or ProductionRunStatus.Canceled,
+            run.ExecutionStatus.ToString(),
+            run.Judgement.ToString(),
+            run.Disposition.ToString(),
+            run.ControlState.ToString(),
+            IsTerminal(run.ExecutionStatus),
             run.CreatedAtUtc,
             run.LastTransitionAtUtc,
             run.StartedAtUtc,
             run.CompletedAtUtc,
             run.FailureCode,
             run.FailureReason,
-            run.Stages.Count(stage => stage.Status == ProductionStageRunStatus.Completed),
-            stages.Sum(stage => stage.CompletedStepCount),
-            stages.Sum(stage => stage.CommandCount),
-            stages.Sum(stage => stage.IncidentCount),
-            stages);
+            run.EntryOperationId,
+            operations.Count(operation => operation.ExecutionStatus == ExecutionStatus.Completed.ToString()),
+            operations.Sum(static operation => operation.CompletedStepCount),
+            operations.Sum(static operation => operation.CommandCount),
+            operations.Sum(static operation => operation.IncidentCount),
+            operations,
+            run.RouteDecisions.Select(decision => new ProductionRunRouteDecisionResponse(
+                decision.SourceOperationRunId,
+                decision.TransitionId,
+                decision.TargetOperationId,
+                decision.SourceJudgement.ToString(),
+                decision.Traversal,
+                decision.DecidedAtUtc)).ToArray());
     }
 
-    private static bool IsTerminal(ProductionStageRunStatus status)
-    {
-        return status is ProductionStageRunStatus.Completed
-            or ProductionStageRunStatus.Failed
-            or ProductionStageRunStatus.Canceled
-            or ProductionStageRunStatus.Skipped;
-    }
+    private static bool IsTerminal(ExecutionStatus status) => status is
+        ExecutionStatus.Completed
+        or ExecutionStatus.Failed
+        or ExecutionStatus.TimedOut
+        or ExecutionStatus.Canceled
+        or ExecutionStatus.Rejected;
 }

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Projects.Infrastructure.Releases;
 
@@ -583,7 +584,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 $"embedded Production line {metadata.ProductionLine.LineDefinitionId} is missing or duplicated");
         }
 
-        await ValidateEmbeddedStageConfigurationsAsync(
+        await ValidateEmbeddedOperationConfigurationsAsync(
                 sourceApplicationPath,
                 applicationId,
                 metadata,
@@ -592,7 +593,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .ConfigureAwait(false);
     }
 
-    private static async ValueTask ValidateEmbeddedStageConfigurationsAsync(
+    private static async ValueTask ValidateEmbeddedOperationConfigurationsAsync(
         string sourceApplicationPath,
         string applicationId,
         ProjectReleaseSourceMetadata metadata,
@@ -720,11 +721,11 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     manifestPath)));
         }
 
-        foreach (var stage in metadata.ProductionLine.Stages)
+        foreach (var operation in metadata.ProductionLine.Operations)
         {
             var matchingSnapshots = snapshots.Where(snapshot => string.Equals(
                     snapshot.SnapshotId,
-                    stage.ConfigurationSnapshotId,
+                    operation.ConfigurationSnapshotId,
                     StringComparison.Ordinal))
                 .Take(2)
                 .ToArray();
@@ -732,23 +733,23 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             {
                 throw InvalidRelease(
                     manifestPath,
-                    $"Production stage {stage.StageId} configuration snapshot {stage.ConfigurationSnapshotId} is missing or duplicated");
+                    $"Production operation {operation.OperationId} configuration snapshot {operation.ConfigurationSnapshotId} is missing or duplicated");
             }
 
             var snapshot = matchingSnapshots[0];
             if (!string.Equals(snapshot.Status, "Published", StringComparison.Ordinal)
                 || !string.Equals(
                     snapshot.ProcessDefinitionId,
-                    stage.FlowDefinitionId,
+                    operation.FlowDefinitionId,
                     StringComparison.Ordinal)
                 || !string.Equals(
                     snapshot.ProcessVersionId,
-                    stage.FlowVersionId,
+                    operation.FlowVersionId,
                     StringComparison.Ordinal))
             {
                 throw InvalidRelease(
                     manifestPath,
-                    $"Production stage {stage.StageId} configuration snapshot does not match its frozen Flow");
+                    $"Production operation {operation.OperationId} configuration snapshot does not match its frozen Flow");
             }
 
             var matchingProfiles = stationProfiles.Where(profile => string.Equals(
@@ -757,19 +758,15 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     StringComparison.Ordinal))
                 .Take(2)
                 .ToArray();
-            var workstation = metadata.ProductionLine.Workstations.Single(candidate => string.Equals(
-                candidate.WorkstationId,
-                stage.WorkstationId,
-                StringComparison.Ordinal));
             if (matchingProfiles.Length != 1
                 || !string.Equals(
                     matchingProfiles[0].StationSystemId,
-                    workstation.StationSystemId,
+                    operation.StationSystemId,
                     StringComparison.Ordinal))
             {
                 throw InvalidRelease(
                     manifestPath,
-                    $"Production stage {stage.StageId} configuration Station does not match its frozen Workstation");
+                    $"Production operation {operation.OperationId} configuration Station does not match its frozen Station System");
             }
         }
     }
@@ -1082,27 +1079,27 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 "Production line topology must match release topology.",
                 nameof(metadata));
         }
-        if (productionLine.Workstations.Any(workstation => targetReferences.Count(target =>
+        if (productionLine.Operations.Any(operation => targetReferences.Count(target =>
                 string.Equals(target.Kind, "System", StringComparison.Ordinal)
                 && string.Equals(
                     target.TargetId,
-                    workstation.StationSystemId,
+                    operation.StationSystemId,
                     StringComparison.Ordinal)) != 1))
         {
             throw new ArgumentException(
-                "Every frozen Production Workstation Station must match exactly one System target reference.",
+                "Every frozen Production operation Station must match exactly one System target reference.",
                 nameof(metadata));
         }
 
-        var productionBlockVersionIds = productionLine.Stages
-            .SelectMany(stage => stage.BlockVersionIds)
+        var productionBlockVersionIds = productionLine.Operations
+            .SelectMany(operation => operation.BlockVersionIds)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
         if (!blockVersionIds.SequenceEqual(productionBlockVersionIds, StringComparer.Ordinal))
         {
             throw new ArgumentException(
-                "Release block version locks must equal the union of frozen Production stage block locks.",
+                "Release block version locks must equal the union of frozen Production operation block locks.",
                 nameof(metadata));
         }
         if (packageDependencies.Any(dependency => capabilityBindings.Count(binding =>
@@ -1134,108 +1131,92 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             throw new ArgumentException("ProductionLine is required.", nameof(line));
         }
 
-        if (line.DutModel is null)
+        if (line.ProductModel is null)
         {
-            throw new ArgumentException("ProductionLine.DutModel is required.", nameof(line));
+            throw new ArgumentException("ProductionLine.ProductModel is required.", nameof(line));
         }
 
-        var dutModel = new ProjectReleaseDutModel(
-            RequireProductionValue(line.DutModel.DutModelId, nameof(line.DutModel.DutModelId)),
-            RequireProductionValue(line.DutModel.ModelCode, nameof(line.DutModel.ModelCode)),
-            RequireProductionValue(line.DutModel.IdentityInputKey, nameof(line.DutModel.IdentityInputKey)));
-        var workstations = (line.Workstations
-                ?? throw new ArgumentException("ProductionLine.Workstations is required.", nameof(line)))
-            .Select(workstation => workstation is null
-                ? throw new ArgumentException("ProductionLine.Workstations cannot contain null.", nameof(line))
-                : new ProjectReleaseWorkstation(
-                    RequireProductionValue(workstation.WorkstationId, nameof(workstation.WorkstationId)),
-                    RequireProductionValue(workstation.DisplayName, nameof(workstation.DisplayName)),
-                    RequireProductionValue(workstation.StationSystemId, nameof(workstation.StationSystemId))))
-            .OrderBy(workstation => workstation.WorkstationId, StringComparer.Ordinal)
-            .ToArray();
-        if (workstations.Length == 0)
-        {
-            throw new ArgumentException("ProductionLine requires at least one Workstation.", nameof(line));
-        }
-
-        EnsureProductionIdentifiersAreUnique(
-            workstations.Select(workstation => workstation.WorkstationId),
-            "Production Workstation ids");
-        EnsureProductionIdentifiersAreUnique(
-            workstations.Select(workstation => workstation.StationSystemId),
-            "Production Workstation Station System ids");
-
-        var stages = (line.Stages
-                ?? throw new ArgumentException("ProductionLine.Stages is required.", nameof(line)))
-            .Select(stage =>
+        var productModel = new ProjectReleaseProductModel(
+            RequireProductionValue(
+                line.ProductModel.ProductModelId,
+                nameof(line.ProductModel.ProductModelId)),
+            RequireProductionValue(line.ProductModel.ModelCode, nameof(line.ProductModel.ModelCode)),
+            RequireProductionValue(
+                line.ProductModel.IdentityInputKey,
+                nameof(line.ProductModel.IdentityInputKey)));
+        var operations = (line.Operations
+                ?? throw new ArgumentException("ProductionLine.Operations is required.", nameof(line)))
+            .Select(operation =>
             {
-                if (stage is null)
+                if (operation is null)
                 {
-                    throw new ArgumentException("ProductionLine.Stages cannot contain null.", nameof(line));
-                }
-
-                if (stage.Sequence <= 0)
-                {
-                    throw new ArgumentException("Production stage sequence must be positive.", nameof(line));
+                    throw new ArgumentException(
+                        "ProductionLine.Operations cannot contain null.",
+                        nameof(line));
                 }
 
                 var flowIr = NormalizeFrozenFlowIr(
-                    stage.FlowIrSchemaVersion,
-                    stage.FlowIrSha256,
-                    stage.FlowIrCanonicalJson,
-                    $"Production stage {stage.StageId} Flow IR");
-                return new ProjectReleaseProductionStage(
-                    RequireProductionValue(stage.StageId, nameof(stage.StageId)),
-                    stage.Sequence,
-                    RequireProductionValue(stage.DisplayName, nameof(stage.DisplayName)),
-                    RequireProductionValue(stage.WorkstationId, nameof(stage.WorkstationId)),
-                    RequireProductionValue(stage.FlowDefinitionId, nameof(stage.FlowDefinitionId)),
+                    operation.FlowIrSchema,
+                    operation.FlowIrSha256,
+                    operation.FlowIrCanonicalJson,
+                    $"Production operation {operation.OperationId} Flow IR");
+                return new ProjectReleaseOperation(
+                    RequireProductionValue(operation.OperationId, nameof(operation.OperationId)),
+                    RequireProductionValue(operation.DisplayName, nameof(operation.DisplayName)),
                     RequireProductionValue(
-                        stage.ConfigurationSnapshotId,
-                        nameof(stage.ConfigurationSnapshotId)),
-                    RequireProductionValue(stage.FlowVersionId, nameof(stage.FlowVersionId)),
+                        operation.StationSystemId,
+                        nameof(operation.StationSystemId)),
+                    RequireProductionValue(
+                        operation.FlowDefinitionId,
+                        nameof(operation.FlowDefinitionId)),
+                    RequireProductionValue(
+                        operation.ConfigurationSnapshotId,
+                        nameof(operation.ConfigurationSnapshotId)),
+                    RequireProductionValue(
+                        operation.FlowVersionId,
+                        nameof(operation.FlowVersionId)),
                     flowIr.SchemaVersion,
                     flowIr.Sha256,
                     flowIr.CanonicalJson,
-                    NormalizeIdentifiers(stage.BlockVersionIds, nameof(stage.BlockVersionIds)),
-                    stage.ExternalTestProgramAdapterId is null
-                        ? null
-                        : RequireProductionValue(
-                            stage.ExternalTestProgramAdapterId,
-                            nameof(stage.ExternalTestProgramAdapterId)));
+                    NormalizeIdentifiers(
+                        operation.BlockVersionIds,
+                        nameof(operation.BlockVersionIds)));
             })
-            .OrderBy(stage => stage.Sequence)
+            .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
             .ToArray();
-        if (stages.Length == 0)
+        if (operations.Length == 0)
         {
-            throw new ArgumentException("ProductionLine requires at least one Stage.", nameof(line));
+            throw new ArgumentException("ProductionLine requires at least one Operation.", nameof(line));
         }
 
-        EnsureProductionIdentifiersAreUnique(stages.Select(stage => stage.StageId), "Production Stage ids");
-        if (!stages.Select(stage => stage.Sequence).SequenceEqual(Enumerable.Range(1, stages.Length)))
+        EnsureProductionIdentifiersAreUnique(
+            operations.Select(operation => operation.OperationId),
+            "Production Operation ids");
+        var entryOperationId = RequireProductionValue(
+            line.EntryOperationId,
+            nameof(line.EntryOperationId));
+        if (operations.Count(operation => string.Equals(
+                operation.OperationId,
+                entryOperationId,
+                StringComparison.Ordinal)) != 1)
         {
             throw new ArgumentException(
-                "Production stage sequence must be contiguous and start at 1.",
+                $"Production entry Operation {entryOperationId} must exist exactly once.",
                 nameof(line));
         }
 
-        var workstationIds = workstations
-            .Select(workstation => workstation.WorkstationId)
+        var operationIds = operations
+            .Select(operation => operation.OperationId)
             .ToHashSet(StringComparer.Ordinal);
-        if (stages.Any(stage => !workstationIds.Contains(stage.WorkstationId)))
-        {
-            throw new ArgumentException(
-                "Every Production stage must reference one frozen Workstation.",
-                nameof(line));
-        }
-
-        if (workstations.Any(workstation => stages.All(stage =>
-                !string.Equals(stage.WorkstationId, workstation.WorkstationId, StringComparison.Ordinal))))
-        {
-            throw new ArgumentException(
-                "Every frozen Production Workstation must be used by at least one Stage.",
-                nameof(line));
-        }
+        var transitions = (line.Transitions
+                ?? throw new ArgumentException("ProductionLine.Transitions is required.", nameof(line)))
+            .Select(transition => NormalizeRouteTransition(transition, operationIds))
+            .OrderBy(transition => transition.TransitionId, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            transitions.Select(transition => transition.TransitionId),
+            "Production Route Transition ids");
+        ValidateRouteGraph(entryOperationId, operations, transitions);
 
         var adapters = (line.ExternalTestProgramAdapters
                 ?? throw new ArgumentException(
@@ -1247,33 +1228,539 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         EnsureProductionIdentifiersAreUnique(
             adapters.Select(adapter => adapter.AdapterId),
             "Production external test adapter ids");
-        var adapterIds = adapters.Select(adapter => adapter.AdapterId).ToHashSet(StringComparer.Ordinal);
-        if (stages.Any(stage => stage.ExternalTestProgramAdapterId is not null
-            && !adapterIds.Contains(stage.ExternalTestProgramAdapterId)))
-        {
-            throw new ArgumentException(
-                "Every Production stage external test adapter must reference one frozen adapter.",
-                nameof(line));
-        }
-
-        if (adapters.Any(adapter => stages.All(stage => !string.Equals(
-                stage.ExternalTestProgramAdapterId,
-                adapter.AdapterId,
-                StringComparison.Ordinal))))
-        {
-            throw new ArgumentException(
-                "Every frozen external test adapter must be used by at least one Production stage.",
-                nameof(line));
-        }
 
         return new ProjectReleaseProductionLine(
             RequireProductionValue(line.LineDefinitionId, nameof(line.LineDefinitionId)),
             RequireProductionValue(line.DisplayName, nameof(line.DisplayName)),
             RequireProductionValue(line.TopologyId, nameof(line.TopologyId)),
-            dutModel,
-            workstations,
-            stages,
+            productModel,
+            entryOperationId,
+            operations,
+            transitions,
             adapters);
+    }
+
+    private static ProjectReleaseRouteTransition NormalizeRouteTransition(
+        ProjectReleaseRouteTransition? transition,
+        HashSet<string> operationIds)
+    {
+        if (transition is null)
+        {
+            throw new ArgumentException(
+                "ProductionLine.Transitions cannot contain null.",
+                nameof(transition));
+        }
+
+        var transitionId = RequireProductionValue(
+            transition.TransitionId,
+            nameof(transition.TransitionId));
+        var sourceOperationId = RequireProductionValue(
+            transition.SourceOperationId,
+            nameof(transition.SourceOperationId));
+        var targetOperationId = RequireProductionValue(
+            transition.TargetOperationId,
+            nameof(transition.TargetOperationId));
+        if (!operationIds.Contains(sourceOperationId) || !operationIds.Contains(targetOperationId))
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} must reference existing Operations.",
+                nameof(transition));
+        }
+
+        if (string.Equals(sourceOperationId, targetOperationId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} cannot target its source Operation.",
+                nameof(transition));
+        }
+
+        var kind = RequireProductionValue(transition.Kind, nameof(transition.Kind));
+        if (kind is not ("Sequence" or "Judgement" or "Condition" or "Rework" or "ParallelFork" or "ParallelJoin"))
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} kind '{kind}' is invalid.",
+                nameof(transition));
+        }
+
+        var isConditional = kind is "Judgement" or "Rework";
+        var judgement = transition.RequiredJudgement is null
+            ? null
+            : RequireProductionValue(
+                transition.RequiredJudgement,
+                nameof(transition.RequiredJudgement));
+        if (isConditional != (judgement is not null)
+            || judgement is not null
+            && judgement is not ("Passed" or "Failed" or "Aborted" or "Unknown" or "NotApplicable"))
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} has an invalid result judgement.",
+                nameof(transition));
+        }
+
+        if ((kind == "Rework") != (transition.MaxTraversals is not null)
+            || transition.MaxTraversals is <= 0)
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} has an invalid rework traversal limit.",
+                nameof(transition));
+        }
+
+        var isParallel = kind is "ParallelFork" or "ParallelJoin";
+        var parallelGroupId = transition.ParallelGroupId is null
+            ? null
+            : NormalizeParallelGroupId(transition.ParallelGroupId);
+        if (isParallel != (parallelGroupId is not null))
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} has an invalid parallel group.",
+                nameof(transition));
+        }
+
+        var hasAllOutputConditionFields = transition.OutputKey is not null
+            && transition.ExpectedOutputKind is not null
+            && transition.ExpectedOutputValue is not null;
+        var hasAnyOutputConditionField = transition.OutputKey is not null
+            || transition.ExpectedOutputKind is not null
+            || transition.ExpectedOutputValue is not null;
+        if (hasAnyOutputConditionField != hasAllOutputConditionFields
+            || (kind == "Condition") != hasAllOutputConditionFields)
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} has an invalid typed output condition.",
+                nameof(transition));
+        }
+
+        string? outputKey = null;
+        string? expectedOutputKind = null;
+        string? expectedOutputValue = null;
+        if (hasAllOutputConditionFields)
+        {
+            outputKey = RequireProductionValue(transition.OutputKey!, nameof(transition.OutputKey));
+            expectedOutputKind = RequireProductionValue(
+                transition.ExpectedOutputKind!,
+                nameof(transition.ExpectedOutputKind));
+            if (!Enum.TryParse<ProductionContextValueKind>(
+                    expectedOutputKind,
+                    ignoreCase: false,
+                    out var valueKind)
+                || !Enum.IsDefined(valueKind)
+                || !string.Equals(valueKind.ToString(), expectedOutputKind, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"Production Route Transition {transitionId} output kind '{expectedOutputKind}' is invalid.",
+                    nameof(transition));
+            }
+
+            expectedOutputValue = RequireProductionValue(
+                transition.ExpectedOutputValue!,
+                nameof(transition.ExpectedOutputValue));
+            _ = new ProductionContextValue(valueKind, expectedOutputValue);
+        }
+
+        return new ProjectReleaseRouteTransition(
+            transitionId,
+            sourceOperationId,
+            targetOperationId,
+            kind,
+            judgement,
+            transition.MaxTraversals,
+            parallelGroupId,
+            outputKey,
+            expectedOutputKind,
+            expectedOutputValue);
+    }
+
+    private static void ValidateRouteGraph(
+        string entryOperationId,
+        ProjectReleaseOperation[] operations,
+        ProjectReleaseRouteTransition[] transitions)
+    {
+        var duplicateEdge = transitions
+            .GroupBy(transition => (
+                transition.SourceOperationId,
+                transition.TargetOperationId,
+                transition.Kind))
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateEdge is not null)
+        {
+            throw new ArgumentException(
+                "Production Route cannot contain duplicate semantic Transitions.",
+                nameof(transitions));
+        }
+
+        var forward = transitions
+            .Where(transition => !string.Equals(
+                transition.Kind,
+                "Rework",
+                StringComparison.Ordinal))
+            .ToArray();
+        if (forward.Any(transition => string.Equals(
+                transition.TargetOperationId,
+                entryOperationId,
+                StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "Production entry Operation cannot have an incoming forward Transition.",
+                nameof(transitions));
+        }
+
+        foreach (var operation in operations)
+        {
+            var outgoing = transitions.Where(transition => string.Equals(
+                    transition.SourceOperationId,
+                    operation.OperationId,
+                    StringComparison.Ordinal))
+                .ToArray();
+            if (outgoing.Length == 0)
+            {
+                continue;
+            }
+
+            if (outgoing.Length == 1 && outgoing[0].Kind is "Sequence" or "ParallelJoin")
+            {
+                continue;
+            }
+
+            if (outgoing.All(transition => transition.Kind is "Judgement" or "Rework"))
+            {
+                if (outgoing.Select(transition => transition.RequiredJudgement)
+                    .Distinct(StringComparer.Ordinal).Count() == outgoing.Length)
+                {
+                    continue;
+                }
+            }
+            else if (outgoing.All(transition => transition.Kind == "Condition"))
+            {
+                var keys = outgoing.Select(transition => transition.OutputKey)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                var values = outgoing.Select(transition => (
+                        transition.ExpectedOutputKind,
+                        transition.ExpectedOutputValue))
+                    .ToArray();
+                if (keys.Length == 1 && values.Distinct().Count() == values.Length)
+                {
+                    continue;
+                }
+            }
+            else if (outgoing.Length >= 2
+                     && outgoing.All(transition => transition.Kind == "ParallelFork")
+                     && outgoing.Select(transition => transition.ParallelGroupId)
+                         .Distinct(StringComparer.Ordinal).Count() == 1)
+            {
+                continue;
+            }
+
+            throw new ArgumentException(
+                $"Production Operation {operation.OperationId} has an invalid outgoing Route shape.",
+                nameof(transitions));
+        }
+
+        var reachable = TraverseFrom(entryOperationId, transitions);
+        var unreachable = operations.FirstOrDefault(operation => !reachable.Contains(operation.OperationId));
+        if (unreachable is not null)
+        {
+            throw new ArgumentException(
+                $"Production Operation {unreachable.OperationId} is not reachable from the entry Operation.",
+                nameof(transitions));
+        }
+
+        var indegrees = operations.ToDictionary(operation => operation.OperationId, _ => 0, StringComparer.Ordinal);
+        foreach (var transition in forward)
+        {
+            indegrees[transition.TargetOperationId]++;
+        }
+
+        var pending = new Queue<string>(
+            indegrees.Where(pair => pair.Value == 0).Select(pair => pair.Key));
+        var visitedCount = 0;
+        while (pending.TryDequeue(out var operationId))
+        {
+            visitedCount++;
+            foreach (var transition in forward.Where(candidate => string.Equals(
+                         candidate.SourceOperationId,
+                         operationId,
+                         StringComparison.Ordinal)))
+            {
+                indegrees[transition.TargetOperationId]--;
+                if (indegrees[transition.TargetOperationId] == 0)
+                {
+                    pending.Enqueue(transition.TargetOperationId);
+                }
+            }
+        }
+
+        if (visitedCount != operations.Length)
+        {
+            throw new ArgumentException(
+                "Production forward Route must be acyclic; loops require bounded Rework Transitions.",
+                nameof(transitions));
+        }
+
+        var terminals = operations
+            .Where(operation => forward.All(transition => !string.Equals(
+                transition.SourceOperationId,
+                operation.OperationId,
+                StringComparison.Ordinal)))
+            .Select(operation => operation.OperationId)
+            .ToArray();
+        var completable = new HashSet<string>(terminals, StringComparer.Ordinal);
+        pending = new Queue<string>(terminals);
+        while (pending.TryDequeue(out var targetId))
+        {
+            foreach (var transition in forward.Where(candidate => string.Equals(
+                         candidate.TargetOperationId,
+                         targetId,
+                         StringComparison.Ordinal)))
+            {
+                if (completable.Add(transition.SourceOperationId))
+                {
+                    pending.Enqueue(transition.SourceOperationId);
+                }
+            }
+        }
+
+        var trapped = operations.FirstOrDefault(operation => !completable.Contains(operation.OperationId));
+        if (trapped is not null)
+        {
+            throw new ArgumentException(
+                $"Production Operation {trapped.OperationId} has no forward path to a terminal Operation.",
+                nameof(transitions));
+        }
+
+        foreach (var rework in transitions.Where(transition => transition.Kind == "Rework"))
+        {
+            if (!TraverseFrom(rework.TargetOperationId, forward).Contains(rework.SourceOperationId))
+            {
+                throw new ArgumentException(
+                    $"Rework Transition {rework.TransitionId} must return to an earlier Operation.",
+                    nameof(transitions));
+            }
+        }
+
+        ValidateParallelGroups(forward, transitions);
+    }
+
+    private static void ValidateParallelGroups(
+        IReadOnlyCollection<ProjectReleaseRouteTransition> forwardTransitions,
+        IReadOnlyCollection<ProjectReleaseRouteTransition> transitions)
+    {
+        var groups = transitions
+            .Where(transition => transition.ParallelGroupId is not null)
+            .GroupBy(transition => transition.ParallelGroupId!, StringComparer.Ordinal)
+            .ToArray();
+        foreach (var group in groups)
+        {
+            var forks = group.Where(transition => transition.Kind == "ParallelFork").ToArray();
+            var joins = group.Where(transition => transition.Kind == "ParallelJoin").ToArray();
+            if (forks.Length < 2
+                || joins.Length < 2
+                || forks.Length != joins.Length
+                || forks.Select(transition => transition.SourceOperationId)
+                    .Distinct(StringComparer.Ordinal).Count() != 1
+                || joins.Select(transition => transition.TargetOperationId)
+                    .Distinct(StringComparer.Ordinal).Count() != 1
+                || forks.Select(transition => transition.TargetOperationId)
+                    .Distinct(StringComparer.Ordinal).Count() != forks.Length
+                || joins.Select(transition => transition.SourceOperationId)
+                    .Distinct(StringComparer.Ordinal).Count() != joins.Length)
+            {
+                throw new ArgumentException(
+                    $"Parallel group {group.Key} must define equal distinct fork and join branches.",
+                    nameof(transitions));
+            }
+
+            var forkSource = forks[0].SourceOperationId;
+            var joinTarget = joins[0].TargetOperationId;
+            if (string.Equals(forkSource, joinTarget, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"Parallel group {group.Key} fork and join Operations must be distinct.",
+                    nameof(transitions));
+            }
+
+            var joinSources = joins.Select(transition => transition.SourceOperationId)
+                .ToHashSet(StringComparer.Ordinal);
+            var assignedJoinSources = new HashSet<string>(StringComparer.Ordinal);
+            var branchSets = new List<HashSet<string>>();
+            foreach (var fork in forks)
+            {
+                var branch = TraverseUntil(
+                    fork.TargetOperationId,
+                    joinTarget,
+                    forwardTransitions);
+                var branchJoinSources = branch.Where(joinSources.Contains).ToArray();
+                if (branchJoinSources.Length != 1 || !assignedJoinSources.Add(branchJoinSources[0]))
+                {
+                    throw new ArgumentException(
+                        $"Parallel group {group.Key} must map each fork to one distinct join branch.",
+                        nameof(transitions));
+                }
+
+                if (branch.Any(operationId => forwardTransitions.Any(transition =>
+                        string.Equals(
+                            transition.SourceOperationId,
+                            operationId,
+                            StringComparison.Ordinal)
+                        && transition.Kind is "ParallelFork" or "ParallelJoin"
+                        && !string.Equals(
+                            transition.ParallelGroupId,
+                            group.Key,
+                            StringComparison.Ordinal))))
+                {
+                    throw new ArgumentException(
+                        $"Parallel group {group.Key} cannot contain a nested parallel group.",
+                        nameof(transitions));
+                }
+
+                var branchTerminal = branch.FirstOrDefault(operationId =>
+                    forwardTransitions.All(transition => !string.Equals(
+                        transition.SourceOperationId,
+                        operationId,
+                        StringComparison.Ordinal)));
+                if (branchTerminal is not null)
+                {
+                    throw new ArgumentException(
+                        $"Parallel group {group.Key} branch {fork.TargetOperationId} can terminate before its join.",
+                        nameof(transitions));
+                }
+
+                if (branchSets.Any(existing => existing.Overlaps(branch)))
+                {
+                    throw new ArgumentException(
+                        $"Parallel group {group.Key} branches must remain disjoint until the join.",
+                        nameof(transitions));
+                }
+
+                branchSets.Add(branch);
+            }
+
+            if (!assignedJoinSources.SetEquals(joinSources))
+            {
+                throw new ArgumentException(
+                    $"Parallel group {group.Key} has an unmatched join branch.",
+                    nameof(transitions));
+            }
+
+            foreach (var branch in branchSets)
+            {
+                foreach (var operationId in branch)
+                {
+                    var invalidIncoming = forwardTransitions.Any(transition =>
+                        string.Equals(
+                            transition.TargetOperationId,
+                            operationId,
+                            StringComparison.Ordinal)
+                        && !branch.Contains(transition.SourceOperationId)
+                        && !(string.Equals(
+                                transition.SourceOperationId,
+                                forkSource,
+                                StringComparison.Ordinal)
+                            && transition.Kind == "ParallelFork"
+                            && string.Equals(
+                                transition.ParallelGroupId,
+                                group.Key,
+                                StringComparison.Ordinal)));
+                    if (invalidIncoming)
+                    {
+                        throw new ArgumentException(
+                            $"Parallel group {group.Key} branch cannot be entered outside its fork.",
+                            nameof(transitions));
+                    }
+
+                    var invalidJoin = forwardTransitions.Any(transition =>
+                        string.Equals(
+                            transition.SourceOperationId,
+                            operationId,
+                            StringComparison.Ordinal)
+                        && string.Equals(
+                            transition.TargetOperationId,
+                            joinTarget,
+                            StringComparison.Ordinal)
+                        && (transition.Kind != "ParallelJoin"
+                            || !string.Equals(
+                                transition.ParallelGroupId,
+                                group.Key,
+                                StringComparison.Ordinal)));
+                    if (invalidJoin)
+                    {
+                        throw new ArgumentException(
+                            $"Parallel group {group.Key} branches must enter their join through ParallelJoin Transitions.",
+                            nameof(transitions));
+                    }
+                }
+            }
+        }
+    }
+
+    private static HashSet<string> TraverseFrom(
+        string start,
+        IEnumerable<ProjectReleaseRouteTransition> transitions)
+    {
+        var edges = transitions.ToLookup(
+            transition => transition.SourceOperationId,
+            StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Queue<string>();
+        pending.Enqueue(start);
+        while (pending.TryDequeue(out var operationId))
+        {
+            if (!visited.Add(operationId))
+            {
+                continue;
+            }
+
+            foreach (var transition in edges[operationId])
+            {
+                pending.Enqueue(transition.TargetOperationId);
+            }
+        }
+
+        return visited;
+    }
+
+    private static HashSet<string> TraverseUntil(
+        string start,
+        string stop,
+        IEnumerable<ProjectReleaseRouteTransition> transitions)
+    {
+        var edges = transitions.ToLookup(
+            transition => transition.SourceOperationId,
+            StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Queue<string>();
+        pending.Enqueue(start);
+        while (pending.TryDequeue(out var operationId))
+        {
+            if (string.Equals(operationId, stop, StringComparison.Ordinal)
+                || !visited.Add(operationId))
+            {
+                continue;
+            }
+
+            foreach (var transition in edges[operationId])
+            {
+                pending.Enqueue(transition.TargetOperationId);
+            }
+        }
+
+        return visited;
+    }
+
+    private static string NormalizeParallelGroupId(string value)
+    {
+        var normalized = RequireProductionValue(value, nameof(value));
+        if (normalized.Any(char.IsControl)
+            || normalized.Contains('/', StringComparison.Ordinal)
+            || normalized.Contains('\\', StringComparison.Ordinal)
+            || normalized is "." or "..")
+        {
+            throw new ArgumentException(
+                "Production parallel group id must be a portable path segment.",
+                nameof(value));
+        }
+
+        return normalized;
     }
 
     private static ProjectReleaseExternalTestProgramAdapter NormalizeProductionAdapter(
@@ -1355,15 +1842,15 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             $"Production adapter {adapter.AdapterId} result targets");
         if (inputMappings.All(mapping => !string.Equals(
                 mapping.Source,
-                "$dut.identity",
+                "$product.identity",
                 StringComparison.Ordinal))
             || inputMappings.All(mapping => !string.Equals(
                 mapping.Source,
-                "$dut.model",
+                "$product.model",
                 StringComparison.Ordinal)))
         {
             throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} input mappings must include DUT identity and DUT model.",
+                $"Production external test adapter {adapter.AdapterId} input mappings must include Product identity and Product model.",
                 nameof(adapter));
         }
 

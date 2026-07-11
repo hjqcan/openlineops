@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Domain.Identifiers;
 using OpenLineOps.Traceability.Domain.Records;
 
@@ -9,9 +10,9 @@ internal static class TraceTestData
 
     public static TraceRecord CreateTrace(
         string runId,
-        string dutIdentityValue,
+        string productionUnitIdentityValue,
         DateTimeOffset completedAtUtc,
-        string stationId = "station-a",
+        string stationSystemId = "station-a",
         string processVersionId = "process-packaging@2026.06.29",
         string deviceId = "vision-camera-a",
         ResultJudgement judgement = ResultJudgement.Passed,
@@ -22,37 +23,41 @@ internal static class TraceTestData
         var productionRunId = Guid.Parse(runId);
         var runtimeSessionId = Guid.NewGuid();
         var runtimeCommandId = Guid.NewGuid();
-        var failed = judgement == ResultJudgement.Failed;
         var command = new TraceCommandRecord(
             new RuntimeCommandId(runtimeCommandId),
             Guid.NewGuid(),
             "action.inspect.width",
             TraceTargetKind.System,
-            stationId,
+            stationSystemId,
             "capability.inspect",
             "Inspect",
-            failed ? TraceCommandStatus.Failed : TraceCommandStatus.Completed,
-            failed ? TraceCommandSemanticOutcome.Failed : TraceCommandSemanticOutcome.Passed,
+            TraceCommandStatus.Completed,
+            judgement,
             BaseTimeUtc.AddSeconds(10),
             BaseTimeUtc.AddSeconds(40),
             BaseTimeUtc.AddSeconds(11),
             BaseTimeUtc.AddSeconds(12),
             BaseTimeUtc.AddSeconds(20),
-            failed ? null : "ok",
-            failed ? "Inspection failed." : null);
+            judgement == ResultJudgement.Failed ? "Inspection failed." : "ok",
+            null);
         var measurement = new MeasurementRecord(
             new MeasurementRecordId(runtimeCommandId),
             "Inspect",
             null,
-            failed ? "Inspection failed." : "ok",
+            judgement == ResultJudgement.Failed ? "Inspection failed." : "ok",
             null,
             new DeviceId(deviceId),
             new RuntimeCommandId(runtimeCommandId),
             command.ActionId,
             TraceTargetKind.System,
-            stationId,
+            stationSystemId,
             command.Status,
-            !failed,
+            judgement switch
+            {
+                ResultJudgement.Passed => true,
+                ResultJudgement.Failed => false,
+                _ => null
+            },
             command.CompletedAtUtc!.Value);
         var artifacts = includeArtifact
             ? new[]
@@ -69,29 +74,36 @@ internal static class TraceTestData
                     completedAtUtc)
             }
             : [];
-        var stage = new TraceStageExecution(
-            "stage-inspect",
+        var operation = new TraceOperationExecution(
+            "operation.inspect@0001",
+            "operation.inspect",
             1,
-            "workstation-a",
-            new StationId(stationId),
+            stationSystemId,
+            new StationId(stationSystemId),
             new ProcessDefinitionId("process-packaging"),
             new ProcessVersionId(processVersionId),
             new ConfigurationSnapshotId("config-snapshot-a"),
             new RecipeSnapshotId("recipe-snapshot-a"),
             new RuntimeSessionId(runtimeSessionId),
-            failed ? TraceRuntimeSessionStatus.Failed : TraceRuntimeSessionStatus.Completed,
-            failed ? TraceStageStatus.Failed : TraceStageStatus.Completed,
+            TraceRuntimeSessionStatus.Completed,
+            ExecutionStatus.Completed,
+            judgement,
             BaseTimeUtc,
             completedAtUtc,
-            failed ? "Runtime.CommandFailed" : null,
-            failed ? "Inspection failed." : null,
-            failed ? 0 : 1,
+            null,
+            null,
+            1,
             1,
             0,
             [command],
             [measurement],
             artifacts,
-            []);
+            [],
+            [new TraceOperationOutput("inspection.result", "Text", "\"recorded\"")],
+            [
+                new TraceResourceFencingToken("Station", stationSystemId, 1),
+                new TraceResourceFencingToken("Device", deviceId, 7)
+            ]);
 
         return TraceRecord.Create(
             new TraceRecordId(productionRunId),
@@ -101,27 +113,30 @@ internal static class TraceTestData
             projectSnapshotId,
             "topology-trace-a",
             productionLineDefinitionId,
-            "dut-model-a",
+            "product-model-a",
             "serialNumber",
-            dutIdentityValue,
-            "batch-a",
-            "fixture-a",
-            deviceId,
+            productionUnitIdentityValue,
+            "lot-a",
+            "carrier-a",
             new ActorId("operator-a"),
-            failed ? TraceProductionRunStatus.Failed : TraceProductionRunStatus.Completed,
+            ExecutionStatus.Completed,
             judgement,
+            judgement == ResultJudgement.Failed
+                ? ProductDisposition.Nonconforming
+                : ProductDisposition.Completed,
             BaseTimeUtc,
             BaseTimeUtc,
             completedAtUtc,
-            failed ? "Runtime.StageFailed" : null,
-            failed ? "Inspection failed." : null,
-            [stage],
+            null,
+            null,
+            [operation],
+            [],
             [
                 new AuditEntry(
                     AuditEntryId.New(),
                     new ActorId("operator-a"),
-                    failed ? "ProductionRun.Failed" : "ProductionRun.Completed",
-                    "Production run trace recorded.",
+                    "ProductionRun.Completed",
+                    "Production Run trace recorded.",
                     completedAtUtc)
             ]);
     }

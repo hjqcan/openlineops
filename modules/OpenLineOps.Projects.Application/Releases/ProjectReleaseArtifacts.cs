@@ -15,34 +15,40 @@ public sealed record ProjectReleaseProductionLine(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    ProjectReleaseDutModel DutModel,
-    IReadOnlyCollection<ProjectReleaseWorkstation> Workstations,
-    IReadOnlyCollection<ProjectReleaseProductionStage> Stages,
+    ProjectReleaseProductModel ProductModel,
+    string EntryOperationId,
+    IReadOnlyCollection<ProjectReleaseOperation> Operations,
+    IReadOnlyCollection<ProjectReleaseRouteTransition> Transitions,
     IReadOnlyCollection<ProjectReleaseExternalTestProgramAdapter> ExternalTestProgramAdapters);
 
-public sealed record ProjectReleaseDutModel(
-    string DutModelId,
+public sealed record ProjectReleaseProductModel(
+    string ProductModelId,
     string ModelCode,
     string IdentityInputKey);
 
-public sealed record ProjectReleaseWorkstation(
-    string WorkstationId,
+public sealed record ProjectReleaseOperation(
+    string OperationId,
     string DisplayName,
-    string StationSystemId);
-
-public sealed record ProjectReleaseProductionStage(
-    string StageId,
-    int Sequence,
-    string DisplayName,
-    string WorkstationId,
+    string StationSystemId,
     string FlowDefinitionId,
     string ConfigurationSnapshotId,
     string FlowVersionId,
-    string FlowIrSchemaVersion,
+    string FlowIrSchema,
     string FlowIrSha256,
     string FlowIrCanonicalJson,
-    IReadOnlyCollection<string> BlockVersionIds,
-    string? ExternalTestProgramAdapterId);
+    IReadOnlyCollection<string> BlockVersionIds);
+
+public sealed record ProjectReleaseRouteTransition(
+    string TransitionId,
+    string SourceOperationId,
+    string TargetOperationId,
+    string Kind,
+    string? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    string? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 public sealed record ProjectReleaseExternalTestProgramAdapter(
     string AdapterId,

@@ -1,5 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Targets;
 
@@ -66,7 +67,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
     public string? FailureReason { get; private set; }
 
-    public RuntimeCommandSemanticOutcome? SemanticOutcome { get; private set; }
+    public CommandResultJudgement? ResultJudgement { get; private set; }
 
     public bool IsTerminal => Status is RuntimeCommandStatus.Completed
         or RuntimeCommandStatus.Failed
@@ -108,7 +109,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset? completedAtUtc,
         string? resultPayload,
         string? failureReason,
-        RuntimeCommandSemanticOutcome? semanticOutcome,
+        CommandResultJudgement? resultJudgement,
         RuntimeActionId actionId,
         RuntimeTargetReference target)
     {
@@ -128,10 +129,10 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             CompletedAtUtc = completedAtUtc,
             ResultPayload = resultPayload,
             FailureReason = CanonicalOptional(failureReason),
-            SemanticOutcome = semanticOutcome
+            ResultJudgement = resultJudgement
         };
 
-        ValidateSemanticOutcome(status, semanticOutcome);
+        ValidateResultJudgement(status, resultJudgement);
 
         return command;
     }
@@ -149,9 +150,9 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
     internal RuntimeOperationResult Complete(
         string? resultPayload,
         DateTimeOffset completedAtUtc,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        CommandResultJudgement resultJudgement = CommandResultJudgement.NotApplicable)
     {
-        ValidateSemanticOutcome(RuntimeCommandStatus.Completed, semanticOutcome);
+        ValidateResultJudgement(RuntimeCommandStatus.Completed, resultJudgement);
         var result = TransitionTo(RuntimeCommandStatus.Completed, completedAtUtc);
         if (!result.Succeeded)
         {
@@ -159,7 +160,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         }
 
         ResultPayload = resultPayload;
-        SemanticOutcome = semanticOutcome;
+        ResultJudgement = resultJudgement;
         return result;
     }
 
@@ -167,9 +168,9 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         string reason,
         DateTimeOffset failedAtUtc,
         string? resultPayload = null,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        CommandResultJudgement resultJudgement = CommandResultJudgement.Unknown)
     {
-        ValidateSemanticOutcome(RuntimeCommandStatus.Failed, semanticOutcome);
+        ValidateResultJudgement(RuntimeCommandStatus.Failed, resultJudgement);
         var canonicalReason = Required(reason, nameof(reason));
         var result = TransitionTo(RuntimeCommandStatus.Failed, failedAtUtc);
         if (!result.Succeeded)
@@ -179,13 +180,17 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
         FailureReason = canonicalReason;
         ResultPayload = resultPayload;
-        SemanticOutcome = semanticOutcome;
+        ResultJudgement = resultJudgement;
         return result;
     }
 
-    internal RuntimeOperationResult TimeoutAt(DateTimeOffset timedOutAtUtc)
+    internal RuntimeOperationResult TimeoutAt(
+        DateTimeOffset timedOutAtUtc,
+        string? resultPayload = null)
     {
         FailureReason = "Command timed out.";
+        ResultPayload = resultPayload;
+        ResultJudgement = CommandResultJudgement.Unknown;
 
         return TransitionTo(RuntimeCommandStatus.TimedOut, timedOutAtUtc);
     }
@@ -194,9 +199,9 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset canceledAtUtc,
         string reason = "Command canceled.",
         string? resultPayload = null,
-        RuntimeCommandSemanticOutcome? semanticOutcome = null)
+        CommandResultJudgement resultJudgement = CommandResultJudgement.Unknown)
     {
-        ValidateSemanticOutcome(RuntimeCommandStatus.Canceled, semanticOutcome);
+        ValidateResultJudgement(RuntimeCommandStatus.Canceled, resultJudgement);
         var canonicalReason = Required(reason, nameof(reason));
         var result = TransitionTo(RuntimeCommandStatus.Canceled, canceledAtUtc);
         if (!result.Succeeded)
@@ -206,13 +211,14 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
         FailureReason = canonicalReason;
         ResultPayload = resultPayload;
-        SemanticOutcome = semanticOutcome;
+        ResultJudgement = resultJudgement;
         return result;
     }
 
     internal RuntimeOperationResult Reject(string reason, DateTimeOffset rejectedAtUtc)
     {
         FailureReason = Required(reason, nameof(reason));
+        ResultJudgement = CommandResultJudgement.Unknown;
 
         return TransitionTo(RuntimeCommandStatus.Rejected, rejectedAtUtc);
     }
@@ -284,28 +290,52 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         return value is null ? null : Required(value, nameof(value));
     }
 
-    private static void ValidateSemanticOutcome(
+    private static void ValidateResultJudgement(
         RuntimeCommandStatus status,
-        RuntimeCommandSemanticOutcome? semanticOutcome)
+        CommandResultJudgement? resultJudgement)
     {
-        if (semanticOutcome is null)
+        var isTerminal = status is RuntimeCommandStatus.Completed
+            or RuntimeCommandStatus.Failed
+            or RuntimeCommandStatus.TimedOut
+            or RuntimeCommandStatus.Canceled
+            or RuntimeCommandStatus.Rejected;
+        if (!isTerminal)
         {
+            if (resultJudgement is not null)
+            {
+                throw new ArgumentException(
+                    $"Non-terminal command status {status} cannot define a result judgement.",
+                    nameof(resultJudgement));
+            }
+
             return;
         }
 
-        var valid = (status, semanticOutcome) switch
+        if (resultJudgement is null)
         {
-            (RuntimeCommandStatus.Completed, RuntimeCommandSemanticOutcome.Passed) => true,
-            (RuntimeCommandStatus.Failed, RuntimeCommandSemanticOutcome.Failed) => true,
-            (RuntimeCommandStatus.Canceled, RuntimeCommandSemanticOutcome.Aborted) => true,
+            throw new ArgumentException(
+                $"Terminal command status {status} requires a result judgement.",
+                nameof(resultJudgement));
+        }
+
+        var valid = (status, resultJudgement.Value) switch
+        {
+            (RuntimeCommandStatus.Completed, CommandResultJudgement.Passed) => true,
+            (RuntimeCommandStatus.Completed, CommandResultJudgement.Failed) => true,
+            (RuntimeCommandStatus.Completed, CommandResultJudgement.Aborted) => true,
+            (RuntimeCommandStatus.Completed, CommandResultJudgement.NotApplicable) => true,
+            (RuntimeCommandStatus.Failed, CommandResultJudgement.Unknown) => true,
+            (RuntimeCommandStatus.TimedOut, CommandResultJudgement.Unknown) => true,
+            (RuntimeCommandStatus.Canceled, CommandResultJudgement.Unknown) => true,
+            (RuntimeCommandStatus.Rejected, CommandResultJudgement.Unknown) => true,
             _ => false
         };
 
         if (!valid)
         {
             throw new ArgumentException(
-                $"Semantic outcome {semanticOutcome} is invalid for command status {status}.",
-                nameof(semanticOutcome));
+                $"Result judgement {resultJudgement} is invalid for command status {status}.",
+                nameof(resultJudgement));
         }
     }
 

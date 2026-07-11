@@ -41,7 +41,7 @@ foreach ($relativePath in $trackedFiles) {
     }
 
     $fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($portablePath)
-    if ($fileNameWithoutExtension -match '(?i)(?:^|[._-])v(?:[2-9]|[1-9][0-9]+)$') {
+    if ($fileNameWithoutExtension -match '(?i)(?:^|[._-])v[1-9][0-9]*$') {
         $Failures.Add("Version-suffixed implementation filename: $portablePath") | Out-Null
     }
 
@@ -53,15 +53,15 @@ foreach ($relativePath in $trackedFiles) {
     $lineNumber = 0
     foreach ($line in Get-Content -LiteralPath $fullPath) {
         $lineNumber += 1
-        if ($line -cmatch '\b[A-Za-z_][A-Za-z0-9_]*V(?:[2-9]|[1-9][0-9]+)\b') {
+        if ($line -cmatch '\b[A-Za-z_][A-Za-z0-9_]*V[1-9][0-9]*\b') {
             $Failures.Add("Version-suffixed implementation identifier: ${portablePath}:$lineNumber") | Out-Null
         }
 
-        if ($line -match '(?i)(?:^|[^a-z0-9])v(?:2|5)(?:[^a-z0-9]|$)') {
+        if ($line -match '(?i)(?:openlineops|flow-ir|runtime-action-contract)[a-z0-9./_-]*(?:/|-|_)v[1-9][0-9]*|(?:platform|devices|engineering|operations|plugins|production|projects|processes|runtime|topology|traceability|health)-v[1-9][0-9]*') {
             $Failures.Add("Forbidden internal version token: ${portablePath}:$lineNumber") | Out-Null
         }
 
-        if ($line -match '["'']/(?:api/)?v(?:[2-9]|[1-9][0-9]+)(?:/|["''])') {
+        if ($line -match '["'']/(?:api/)?v[1-9][0-9]*(?:/|["''])') {
             $Failures.Add("Versioned pre-release route: ${portablePath}:$lineNumber") | Out-Null
         }
     }

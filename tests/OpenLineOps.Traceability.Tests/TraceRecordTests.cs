@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Domain.Identifiers;
 using OpenLineOps.Traceability.Domain.Records;
 
@@ -6,7 +7,7 @@ namespace OpenLineOps.Traceability.Tests;
 public sealed class TraceRecordTests
 {
     [Fact]
-    public void CreateFreezesProductionRunDutScopeAndNestedStageEvidence()
+    public void CreateFreezesProductionUnitScopeAndNestedOperationEvidence()
     {
         var trace = TraceTestData.CreateTrace(
             "00000000-0000-0000-0000-000000000001",
@@ -19,29 +20,35 @@ public sealed class TraceRecordTests
         Assert.Equal("project-snapshot-trace-a", trace.ProjectSnapshotId);
         Assert.Equal("topology-trace-a", trace.TopologyId);
         Assert.Equal("line-a", trace.ProductionLineDefinitionId);
-        Assert.Equal("dut-model-a", trace.DutModelId);
-        Assert.Equal("serialNumber", trace.DutIdentityInputKey);
-        Assert.Equal("SMX-0001", trace.DutIdentityValue);
-        Assert.Equal(TraceProductionRunStatus.Completed, trace.RunStatus);
+        Assert.Equal("product-model-a", trace.ProductModelId);
+        Assert.Equal("serialNumber", trace.ProductionUnitIdentityInputKey);
+        Assert.Equal("SMX-0001", trace.ProductionUnitIdentityValue);
+        Assert.Equal("lot-a", trace.LotId);
+        Assert.Equal("carrier-a", trace.CarrierId);
+        Assert.Equal(ExecutionStatus.Completed, trace.ExecutionStatus);
         Assert.Equal(ResultJudgement.Passed, trace.Judgement);
+        Assert.Equal(ProductDisposition.Completed, trace.Disposition);
 
-        var stage = Assert.Single(trace.Stages);
-        Assert.Equal("stage-inspect", stage.StageId);
-        Assert.Equal("workstation-a", stage.WorkstationId);
-        Assert.Equal("station-a", stage.StationId.Value);
-        Assert.Equal("process-packaging@2026.06.29", stage.ProcessVersionId.Value);
-        Assert.Equal("config-snapshot-a", stage.ConfigurationSnapshotId.Value);
-        Assert.Equal("recipe-snapshot-a", stage.RecipeSnapshotId.Value);
-        var command = Assert.Single(stage.Commands);
-        Assert.Equal(TraceCommandSemanticOutcome.Passed, command.SemanticOutcome);
-        Assert.Single(stage.Measurements);
-        Assert.Single(stage.Artifacts);
+        var operation = Assert.Single(trace.Operations);
+        Assert.Equal("operation.inspect", operation.OperationId);
+        Assert.Equal(1, operation.Attempt);
+        Assert.Equal("station-a", operation.StationSystemId);
+        Assert.Equal("station-a", operation.StationId.Value);
+        Assert.Equal("process-packaging@2026.06.29", operation.ProcessVersionId.Value);
+        Assert.Equal("config-snapshot-a", operation.ConfigurationSnapshotId.Value);
+        Assert.Equal("recipe-snapshot-a", operation.RecipeSnapshotId.Value);
+        var command = Assert.Single(operation.Commands);
+        Assert.Equal(ResultJudgement.Passed, command.ResultJudgement);
+        Assert.Single(operation.Measurements);
+        Assert.Single(operation.Artifacts);
+        Assert.Single(operation.Outputs);
+        Assert.Equal(2, operation.FencingTokens.Count);
     }
 
     [Fact]
-    public void CommandRejectsSemanticOutcomeThatContradictsLifecycleStatus()
+    public void CommandAcceptsFailedProductJudgementForCompletedExecution()
     {
-        var exception = Assert.Throws<ArgumentException>(() => new TraceCommandRecord(
+        var command = new TraceCommandRecord(
             new RuntimeCommandId(Guid.NewGuid()),
             Guid.NewGuid(),
             "action.inspect",
@@ -50,16 +57,17 @@ public sealed class TraceRecordTests
             "capability.inspect",
             "Inspect",
             TraceCommandStatus.Completed,
-            TraceCommandSemanticOutcome.Failed,
+            ResultJudgement.Failed,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc.AddMinutes(1),
             TraceTestData.BaseTimeUtc.AddSeconds(1),
             TraceTestData.BaseTimeUtc.AddSeconds(2),
             TraceTestData.BaseTimeUtc.AddSeconds(3),
             "ok",
-            null));
+            null);
 
-        Assert.Equal("semanticOutcome", exception.ParamName);
+        Assert.Equal(TraceCommandStatus.Completed, command.Status);
+        Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
     }
 
     [Fact]
@@ -74,20 +82,21 @@ public sealed class TraceRecordTests
             "snapshot-a",
             "topology-a",
             "line-a",
-            "dut-a",
+            "product-a",
             "serialNumber",
             "SMX-0002",
             null,
             null,
-            null,
             new ActorId("operator-a"),
-            TraceProductionRunStatus.Completed,
+            ExecutionStatus.Completed,
             ResultJudgement.Passed,
+            ProductDisposition.Completed,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc.AddMinutes(1),
             null,
             null,
+            [],
             [],
             []));
 
@@ -95,12 +104,13 @@ public sealed class TraceRecordTests
     }
 
     [Fact]
-    public void StageRejectsEvidenceCountThatDiffersFromFrozenCollections()
+    public void OperationRejectsEvidenceCountThatDiffersFromFrozenCollections()
     {
-        var exception = Assert.Throws<ArgumentException>(() => new TraceStageExecution(
-            "stage-a",
+        var exception = Assert.Throws<ArgumentException>(() => new TraceOperationExecution(
+            "operation-a@0001",
+            "operation-a",
             1,
-            "workstation-a",
+            "station-a",
             new StationId("station-a"),
             new ProcessDefinitionId("process-a"),
             new ProcessVersionId("process-a@1.0.0"),
@@ -108,7 +118,8 @@ public sealed class TraceRecordTests
             new RecipeSnapshotId("recipe-a"),
             new RuntimeSessionId(Guid.NewGuid()),
             TraceRuntimeSessionStatus.Completed,
-            TraceStageStatus.Completed,
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc.AddMinutes(1),
             null,
@@ -119,9 +130,46 @@ public sealed class TraceRecordTests
             [],
             [],
             [],
+            [],
+            [],
             []));
 
         Assert.Contains("counts", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OperationCanceledBeforeDispatchKeepsHonestEmptyRuntimeEvidence()
+    {
+        var operation = new TraceOperationExecution(
+            "operation-a@0001",
+            "operation-a",
+            1,
+            "station-a",
+            new StationId("station-a"),
+            new ProcessDefinitionId("process-a"),
+            new ProcessVersionId("process-a@1.0.0"),
+            new ConfigurationSnapshotId("config-a"),
+            new RecipeSnapshotId("recipe-a"),
+            null,
+            null,
+            ExecutionStatus.Canceled,
+            ResultJudgement.Aborted,
+            null,
+            TraceTestData.BaseTimeUtc.AddMinutes(1),
+            "Runtime.ProductionRunStopped",
+            "Stopped before dispatch.",
+            0,
+            0,
+            0,
+            [],
+            [],
+            [],
+            [],
+            [],
+            []);
+
+        Assert.Null(operation.RuntimeSessionId);
+        Assert.Null(operation.StartedAtUtc);
     }
 
     [Theory]

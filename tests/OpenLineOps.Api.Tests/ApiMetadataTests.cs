@@ -22,12 +22,12 @@ public sealed class ApiMetadataTests : IClassFixture<WebApplicationFactory<Progr
             .Select(group => group.GroupName)
             .ToHashSet(StringComparer.Ordinal);
 
-        Assert.Contains(OpenLineOpsApiGroups.PlatformV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.EngineeringV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.PluginsV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.ProcessesV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.ProductionV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.RuntimeV1, groupNames);
-        Assert.Contains(OpenLineOpsApiGroups.TraceabilityV1, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Platform, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Engineering, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Plugins, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Processes, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Production, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Runtime, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Traceability, groupNames);
     }
 }

@@ -146,7 +146,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<WebApplic
                 applicationFilePath,
                 $$"""
                 {
-                  "schemaVersion": "openlineops.automation-application/v1",
+                  "schemaVersion": "openlineops.automation-application",
                   "formatVersion": 1,
                   "kind": "OpenLineOps.AutomationApplication",
                   "product": "OpenLineOps",

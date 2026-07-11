@@ -17,7 +17,7 @@ using AppUpdateElementPresentationRequest = OpenLineOps.Topology.Application.Lay
 namespace OpenLineOps.Topology.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.TopologyV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationSiteLayouts)]
 public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
 {

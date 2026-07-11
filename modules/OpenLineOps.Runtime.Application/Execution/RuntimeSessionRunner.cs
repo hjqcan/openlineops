@@ -10,6 +10,7 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
@@ -284,11 +285,14 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             session.Id,
             session.TraceMetadata.ProductionRunId,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            session.TraceMetadata.DutIdentity,
-            session.StationId,
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            session.TraceMetadata.StationSystemId,
+            session.TraceMetadata.ProductionUnitIdentity,
+            session.TraceMetadata.LotId,
+            session.TraceMetadata.CarrierId,
+            session.TraceMetadata.FixtureId,
+            session.TraceMetadata.DeviceId,
             session.ConfigurationSnapshotId,
             step.Id,
             command.Id,
@@ -316,7 +320,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 step.Id,
                 command.Id,
                 executionResult.Payload,
-                executionResult.SemanticOutcome,
+                executionResult.ResultJudgement,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Failed => await FailNodeAsync(
                 session,
@@ -325,7 +329,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 "Runtime.CommandFailed",
                 executionResult.Reason ?? "Command failed.",
                 executionResult.Payload,
-                executionResult.SemanticOutcome,
+                executionResult.ResultJudgement,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Rejected => await RejectNodeAsync(
                 session,
@@ -338,6 +342,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 step.Id,
                 command.Id,
                 executionResult.Reason ?? "Command timed out.",
+                executionResult.Payload,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Canceled => await CancelNodeAsync(
                 session,
@@ -345,7 +350,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 command.Id,
                 executionResult.Reason ?? "Command canceled.",
                 executionResult.Payload,
-                executionResult.SemanticOutcome,
+                executionResult.ResultJudgement,
                 cancellationToken.IsCancellationRequested
                     ? CancellationToken.None
                     : cancellationToken).ConfigureAwait(false),
@@ -381,14 +386,14 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string? payload,
-        RuntimeCommandSemanticOutcome? semanticOutcome,
+        ResultJudgement resultJudgement,
         CancellationToken cancellationToken)
     {
         var commandResult = session.CompleteCommand(
             commandId,
             payload,
             _clock.UtcNow,
-            semanticOutcome);
+            resultJudgement);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -412,7 +417,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         string code,
         string reason,
         string? payload,
-        RuntimeCommandSemanticOutcome? semanticOutcome,
+        ResultJudgement resultJudgement,
         CancellationToken cancellationToken)
     {
         var commandResult = session.FailCommand(
@@ -420,7 +425,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             reason,
             _clock.UtcNow,
             payload,
-            semanticOutcome);
+            resultJudgement);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -460,9 +465,10 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string reason,
+        string? payload,
         CancellationToken cancellationToken)
     {
-        var commandResult = session.TimeoutCommand(commandId, _clock.UtcNow);
+        var commandResult = session.TimeoutCommand(commandId, _clock.UtcNow, payload);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);
@@ -482,7 +488,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandId commandId,
         string reason,
         string? payload,
-        RuntimeCommandSemanticOutcome? semanticOutcome,
+        ResultJudgement resultJudgement,
         CancellationToken cancellationToken)
     {
         var commandResult = session.CancelCommand(
@@ -490,7 +496,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             _clock.UtcNow,
             reason,
             payload,
-            semanticOutcome);
+            resultJudgement);
         if (!commandResult.Succeeded)
         {
             return ToNodeExecutionFailure(commandResult);

@@ -1,5 +1,6 @@
 using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Application.Persistence;
 using OpenLineOps.Traceability.Application.Queries;
 using OpenLineOps.Traceability.Domain.Records;
@@ -21,11 +22,11 @@ public sealed class TraceReadModelService : ITraceReadModelService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(query);
-        if (!IsCanonical(query.StationId))
+        if (!IsCanonical(query.StationSystemId))
         {
             return Result.Failure<StationTraceDashboardReadModel>(ApplicationError.Validation(
-                "Traceability.StationIdNotCanonical",
-                "StationId must be a non-empty canonical string."));
+                "Traceability.StationSystemIdNotCanonical",
+                "StationSystemId must be a non-empty canonical string."));
         }
 
         var timeRangeError = ValidateTimeRange(query.CompletedFromUtc, query.CompletedToUtc);
@@ -36,7 +37,7 @@ public sealed class TraceReadModelService : ITraceReadModelService
 
         var result = await _repository.QueryAsync(
             new TraceRecordQuery(
-                stationId: query.StationId,
+                stationSystemId: query.StationSystemId,
                 completedFromUtc: query.CompletedFromUtc,
                 completedToUtc: query.CompletedToUtc,
                 paging: new PagedRequest(1, TraceRecordQuery.MaxPageSize)),
@@ -46,11 +47,11 @@ public sealed class TraceReadModelService : ITraceReadModelService
             .OrderByDescending(record => record.CompletedAtUtc)
             .ThenByDescending(record => record.Id.Value)
             .Take(Math.Clamp(query.RecentLimit, 1, MaxRecentTraceLimit))
-            .Select(record => ToStationRecentTrace(record, query.StationId!))
+            .Select(record => ToStationRecentTrace(record, query.StationSystemId!))
             .ToArray();
 
         return Result.Success(new StationTraceDashboardReadModel(
-            query.StationId!,
+            query.StationSystemId!,
             query.CompletedFromUtc,
             query.CompletedToUtc,
             result.TotalCount,
@@ -58,6 +59,7 @@ public sealed class TraceReadModelService : ITraceReadModelService
             CountJudgement(records, ResultJudgement.Failed),
             CountJudgement(records, ResultJudgement.Aborted),
             CountJudgement(records, ResultJudgement.Unknown),
+            CountJudgement(records, ResultJudgement.NotApplicable),
             records.Length == 0 ? null : records.Min(record => record.CompletedAtUtc),
             records.Length == 0 ? null : records.Max(record => record.CompletedAtUtc),
             result.TotalCount > records.Length,
@@ -96,36 +98,42 @@ public sealed class TraceReadModelService : ITraceReadModelService
     {
         return new TraceRecordQuery(
             query.ProductionRunId,
-            query.DutModelId,
-            query.DutIdentityInputKey,
-            query.DutIdentityValue,
-            query.BatchId,
-            query.FixtureId,
-            query.DeviceId,
+            query.ProductModelId,
+            query.ProductionUnitIdentityInputKey,
+            query.ProductionUnitIdentityValue,
+            query.LotId,
+            query.CarrierId,
             query.ActorId,
-            query.RunStatus,
+            query.ExecutionStatus,
             query.Judgement,
+            query.Disposition,
             query.ProjectId,
             query.ApplicationId,
             query.ProjectSnapshotId,
             query.TopologyId,
             query.ProductionLineDefinitionId,
-            query.StageId,
-            query.WorkstationId,
+            query.OperationId,
+            query.StationSystemId,
             query.StationId,
             query.ProcessDefinitionId,
             query.ProcessVersionId,
             query.ConfigurationSnapshotId,
             query.RecipeSnapshotId,
+            query.ResourceKind,
+            query.ResourceId,
+            query.DeviceId,
             query.CompletedFromUtc,
             query.CompletedToUtc,
             paging);
     }
 
-    private static StationRecentTraceReadModel ToStationRecentTrace(TraceRecord record, string stationId)
+    private static StationRecentTraceReadModel ToStationRecentTrace(TraceRecord record, string stationSystemId)
     {
-        var stages = record.Stages
-            .Where(stage => string.Equals(stage.StationId.Value, stationId, StringComparison.Ordinal))
+        var operations = record.Operations
+            .Where(operation => string.Equals(
+                operation.StationSystemId,
+                stationSystemId,
+                StringComparison.Ordinal))
             .ToArray();
         return new StationRecentTraceReadModel(
             record.Id.Value,
@@ -135,22 +143,22 @@ public sealed class TraceReadModelService : ITraceReadModelService
             record.ProjectSnapshotId,
             record.TopologyId,
             record.ProductionLineDefinitionId,
-            record.DutModelId,
-            record.DutIdentityInputKey,
-            record.DutIdentityValue,
-            record.BatchId,
-            record.FixtureId,
-            record.DeviceId,
-            record.RunStatus.ToString(),
+            record.ProductModelId,
+            record.ProductionUnitIdentityInputKey,
+            record.ProductionUnitIdentityValue,
+            record.LotId,
+            record.CarrierId,
+            record.ExecutionStatus.ToString(),
             record.Judgement.ToString(),
+            record.Disposition.ToString(),
             record.CompletedAtUtc,
-            stages.Length,
-            stages.Sum(stage => stage.Commands.Count),
-            stages.Sum(stage => stage.Commands.Count(command => command.Status != TraceCommandStatus.Completed)),
-            stages.Sum(stage => stage.Measurements.Count),
-            stages.Sum(stage => stage.Measurements.Count(measurement => measurement.Passed == false)),
-            stages.Sum(stage => stage.Artifacts.Count),
-            stages.Sum(stage => stage.Incidents.Count));
+            operations.Length,
+            operations.Sum(operation => operation.Commands.Count),
+            operations.Sum(operation => operation.Commands.Count(IsExecutionFailure)),
+            operations.Sum(operation => operation.Measurements.Count),
+            operations.Sum(operation => operation.Measurements.Count(measurement => measurement.Passed == false)),
+            operations.Sum(operation => operation.Artifacts.Count),
+            operations.Sum(operation => operation.Incidents.Count));
     }
 
     private static EngineeringTraceSearchRowReadModel ToEngineeringSearchRow(TraceRecord record)
@@ -163,26 +171,27 @@ public sealed class TraceReadModelService : ITraceReadModelService
             record.ProjectSnapshotId,
             record.TopologyId,
             record.ProductionLineDefinitionId,
-            record.DutModelId,
-            record.DutIdentityInputKey,
-            record.DutIdentityValue,
-            record.BatchId,
-            record.FixtureId,
-            record.DeviceId,
+            record.ProductModelId,
+            record.ProductionUnitIdentityInputKey,
+            record.ProductionUnitIdentityValue,
+            record.LotId,
+            record.CarrierId,
             record.ActorId.Value,
-            record.RunStatus.ToString(),
+            record.ExecutionStatus.ToString(),
             record.Judgement.ToString(),
+            record.Disposition.ToString(),
             record.CreatedAtUtc,
             record.StartedAtUtc,
             record.CompletedAtUtc,
-            record.Stages.Count,
-            record.Stages.Count(stage => stage.Status is TraceStageStatus.Failed or TraceStageStatus.Canceled),
-            record.Stages.Sum(stage => stage.Commands.Count),
-            record.Stages.Sum(stage => stage.Commands.Count(command => command.Status != TraceCommandStatus.Completed)),
-            record.Stages.Sum(stage => stage.Measurements.Count),
-            record.Stages.Sum(stage => stage.Measurements.Count(measurement => measurement.Passed == false)),
-            record.Stages.Sum(stage => stage.Artifacts.Count),
-            record.Stages.Sum(stage => stage.Incidents.Count));
+            record.Operations.Count,
+            record.Operations.Count(operation => operation.ExecutionStatus != ExecutionStatus.Completed),
+            record.Operations.Sum(operation => operation.Commands.Count),
+            record.Operations.Sum(operation => operation.Commands.Count(IsExecutionFailure)),
+            record.Operations.Sum(operation => operation.Measurements.Count),
+            record.Operations.Sum(operation => operation.Measurements.Count(measurement => measurement.Passed == false)),
+            record.Operations.Sum(operation => operation.Artifacts.Count),
+            record.Operations.Sum(operation => operation.Incidents.Count),
+            record.RouteDecisions.Count);
     }
 
     private static EngineeringTraceSearchFacetsReadModel CreateFacets(
@@ -190,13 +199,31 @@ public sealed class TraceReadModelService : ITraceReadModelService
     {
         return new EngineeringTraceSearchFacetsReadModel(
             CountBy(records.Select(record => record.Judgement.ToString())),
-            CountBy(records.Select(record => record.RunStatus.ToString())),
-            CountBy(records.SelectMany(record => record.Stages.Select(stage => stage.StationId.Value).Distinct(StringComparer.Ordinal))),
-            CountBy(records.Select(record => record.DeviceId).Where(value => value is not null).Select(value => value!)),
+            CountBy(records.Select(record => record.ExecutionStatus.ToString())),
+            CountBy(records.Select(record => record.Disposition.ToString())),
+            CountBy(records.SelectMany(record => record.Operations
+                .Select(operation => operation.StationSystemId)
+                .Distinct(StringComparer.Ordinal))),
+            CountBy(records.SelectMany(DeviceIds)),
             CountBy(records.Select(record => record.ProductionLineDefinitionId)),
-            CountBy(records.SelectMany(record => record.Stages.Select(stage => stage.ProcessVersionId.Value).Distinct(StringComparer.Ordinal))),
+            CountBy(records.SelectMany(record => record.Operations
+                .Select(operation => operation.ProcessVersionId.Value)
+                .Distinct(StringComparer.Ordinal))),
             CountBy(records.Select(record => record.ProjectSnapshotId)));
     }
+
+    private static IEnumerable<string> DeviceIds(TraceRecord record)
+    {
+        return record.Operations
+            .SelectMany(operation => operation.Measurements.Select(measurement => measurement.DeviceId?.Value)
+                .Concat(operation.Artifacts.Select(artifact => artifact.DeviceId?.Value)))
+            .Where(value => value is not null)
+            .Select(value => value!)
+            .Distinct(StringComparer.Ordinal);
+    }
+
+    private static bool IsExecutionFailure(TraceCommandRecord command) =>
+        command.Status != TraceCommandStatus.Completed;
 
     private static TraceFacetCountReadModel[] CountBy(IEnumerable<string> values)
     {

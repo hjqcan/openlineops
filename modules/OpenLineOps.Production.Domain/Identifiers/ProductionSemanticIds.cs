@@ -1,8 +1,8 @@
 namespace OpenLineOps.Production.Domain.Identifiers;
 
-public sealed record WorkstationId
+public sealed record OperationDefinitionId
 {
-    public WorkstationId(string value) =>
+    public OperationDefinitionId(string value) =>
         Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
 
     public string Value { get; }
@@ -10,9 +10,9 @@ public sealed record WorkstationId
     public override string ToString() => Value;
 }
 
-public sealed record ProcessStageId
+public sealed record RouteTransitionId
 {
-    public ProcessStageId(string value) =>
+    public RouteTransitionId(string value) =>
         Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
 
     public string Value { get; }
@@ -20,9 +20,9 @@ public sealed record ProcessStageId
     public override string ToString() => Value;
 }
 
-public sealed record DutModelId
+public sealed record ProductModelId
 {
-    public DutModelId(string value) =>
+    public ProductModelId(string value) =>
         Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
 
     public string Value { get; }

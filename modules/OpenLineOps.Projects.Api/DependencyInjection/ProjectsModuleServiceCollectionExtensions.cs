@@ -26,7 +26,6 @@ public static class ProjectsModuleServiceCollectionExtensions
         services.TryAddSingleton<IProjectReleaseArtifactStore, FileSystemProjectReleaseArtifactStore>();
         services.TryAddSingleton<IProjectReleasePluginCommandResolver, ProjectReleasePluginCommandResolver>();
         services.TryAddScoped<IProjectApplicationWorkspaceScopeResolver, AutomationProjectWorkspaceScopeResolver>();
-        services.TryAddScoped<IProjectExecutionCoordinator, ProjectExecutionCoordinator>();
         services.AddScoped<IProjectReleaseSourceResolver, ProjectReleaseSourceResolver>();
         services.AddScoped<IProjectReleasePublisher, ProjectReleasePublisher>();
         services.AddScoped<IProjectReleaseProductionRunLauncher, ProjectReleaseProductionRunLauncher>();

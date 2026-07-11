@@ -28,6 +28,7 @@ npm install
 - Blockly workspaces compile server-side directly to immutable Flow IR actions. Python is a separate, explicit action type and cannot return a runtime execution plan.
 - Runtime starts only from a published project release snapshot. There is no simulated-session endpoint or direct ProcessDefinition launch path.
 - Runtime commands, steps, monitoring, and trace records carry required ActionId, TargetKind, and TargetId identities.
+- Operations reconnects through the persisted Active Runs and Line State projections; line, Station, and Slot filters are Coordinator queries.
 - SignalR monitoring connects at `/hubs/runtime-progress`.
 - The API base URL defaults to `http://localhost:5135` and can be overridden with `OPENLINEOPS_API_BASE_URL`.
 - Source-development backend roots can be overridden with `OPENLINEOPS_API_PROJECT` and `OPENLINEOPS_REPO_ROOT`; packaged builds never depend on a source checkout.
@@ -39,7 +40,8 @@ npm install
 - Flow Designer for distinct Blockly, PythonScript, Command, Decision, Delay, Start, and End nodes.
 - Application-scoped declarative Blockly block catalog and registration.
 - Engineering, devices, plugins, traceability, monitoring, and alarm workbenches.
-- Line Designer for Application-owned production-line definitions, DUT identity, workstations, ordered stages, and external test adapters.
+- Line Designer for Application-owned Product Models, Station-bound Operations, typed route graphs, and portable external-program resources.
+- Line Operations for Active Runs, dual execution/judgement axes, product queues, Slot occupancy, and operator control commands.
 - Release publication and release-snapshot runtime launch.
 
 ## Packaging

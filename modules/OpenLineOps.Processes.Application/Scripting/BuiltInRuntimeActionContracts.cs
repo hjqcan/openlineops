@@ -168,7 +168,7 @@ internal static class BuiltInRuntimeActionContracts
         RuntimeActionEmit emit)
     {
         return new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             actionType,
             fields,
             emit);

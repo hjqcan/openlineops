@@ -9,7 +9,7 @@ using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 namespace OpenLineOps.Plugins.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.PluginsV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Plugins)]
 [Route(OpenLineOpsApiRoutes.Plugins)]
 public sealed class PluginManagementController : ControllerBase
 {

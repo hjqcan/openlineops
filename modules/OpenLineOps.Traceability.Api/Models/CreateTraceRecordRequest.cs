@@ -7,27 +7,29 @@ public sealed record CreateTraceRecordRequest(
     string? ProjectSnapshotId,
     string? TopologyId,
     string? ProductionLineDefinitionId,
-    string? DutModelId,
-    string? DutIdentityInputKey,
-    string? DutIdentityValue,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
+    string? ProductModelId,
+    string? ProductionUnitIdentityInputKey,
+    string? ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string? ActorId,
-    string? RunStatus,
+    string? ExecutionStatus,
     string? Judgement,
+    string? Disposition,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
     string? FailureReason,
-    IReadOnlyCollection<CreateTraceStageExecutionRequest>? Stages,
+    IReadOnlyCollection<CreateTraceOperationExecutionRequest>? Operations,
+    IReadOnlyCollection<CreateTraceRouteDecisionRequest>? RouteDecisions,
     IReadOnlyCollection<CreateAuditEntryRequest>? AuditEntries);
 
-public sealed record CreateTraceStageExecutionRequest(
-    string? StageId,
-    int Sequence,
-    string? WorkstationId,
+public sealed record CreateTraceOperationExecutionRequest(
+    string? OperationRunId,
+    string? OperationId,
+    int Attempt,
+    string? StationSystemId,
     string? StationId,
     string? ProcessDefinitionId,
     string? ProcessVersionId,
@@ -35,7 +37,8 @@ public sealed record CreateTraceStageExecutionRequest(
     string? RecipeSnapshotId,
     Guid? RuntimeSessionId,
     string? RuntimeSessionStatus,
-    string? Status,
+    string? ExecutionStatus,
+    string? Judgement,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
@@ -46,7 +49,27 @@ public sealed record CreateTraceStageExecutionRequest(
     IReadOnlyCollection<CreateTraceCommandRequest>? Commands,
     IReadOnlyCollection<CreateMeasurementRecordRequest>? Measurements,
     IReadOnlyCollection<CreateArtifactRecordRequest>? Artifacts,
-    IReadOnlyCollection<CreateTraceIncidentRequest>? Incidents);
+    IReadOnlyCollection<CreateTraceIncidentRequest>? Incidents,
+    IReadOnlyCollection<CreateTraceOperationOutputRequest>? Outputs,
+    IReadOnlyCollection<CreateTraceResourceFencingTokenRequest>? FencingTokens);
+
+public sealed record CreateTraceRouteDecisionRequest(
+    string? SourceOperationRunId,
+    string? TransitionId,
+    string? TargetOperationId,
+    string? SourceJudgement,
+    int Traversal,
+    DateTimeOffset DecidedAtUtc);
+
+public sealed record CreateTraceOperationOutputRequest(
+    string? Key,
+    string? ValueKind,
+    string? CanonicalJson);
+
+public sealed record CreateTraceResourceFencingTokenRequest(
+    string? ResourceKind,
+    string? ResourceId,
+    long FencingToken);
 
 public sealed record CreateTraceCommandRequest(
     Guid RuntimeCommandId,
@@ -57,7 +80,7 @@ public sealed record CreateTraceCommandRequest(
     string? TargetCapabilityId,
     string? CommandName,
     string? Status,
-    string? SemanticOutcome,
+    string? ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,

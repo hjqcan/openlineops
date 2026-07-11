@@ -8,11 +8,12 @@ public sealed record RuntimeSessionTraceMetadata
     public RuntimeSessionTraceMetadata(
         ProductionRunId productionRunId,
         string productionLineDefinitionId,
-        string productionStageId,
-        int stageSequence,
-        string workstationId,
-        DutIdentity dutIdentity,
-        string? batchId,
+        string operationId,
+        int operationAttempt,
+        string stationSystemId,
+        ProductionUnitIdentity productionUnitIdentity,
+        string? lotId,
+        string? carrierId,
         string? fixtureId,
         string? deviceId,
         string actorId,
@@ -30,16 +31,20 @@ public sealed record RuntimeSessionTraceMetadata
         ProductionLineDefinitionId = Required(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
-        ProductionStageId = Required(productionStageId, nameof(productionStageId));
-        if (stageSequence <= 0)
+        OperationId = Required(operationId, nameof(operationId));
+        if (operationAttempt <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(stageSequence), "Stage sequence must be positive.");
+            throw new ArgumentOutOfRangeException(
+                nameof(operationAttempt),
+                "Operation attempt must be positive.");
         }
 
-        StageSequence = stageSequence;
-        WorkstationId = Required(workstationId, nameof(workstationId));
-        DutIdentity = dutIdentity ?? throw new ArgumentNullException(nameof(dutIdentity));
-        BatchId = NormalizeOptional(batchId);
+        OperationAttempt = operationAttempt;
+        StationSystemId = Required(stationSystemId, nameof(stationSystemId));
+        ProductionUnitIdentity = productionUnitIdentity
+            ?? throw new ArgumentNullException(nameof(productionUnitIdentity));
+        LotId = NormalizeOptional(lotId);
+        CarrierId = NormalizeOptional(carrierId);
         FixtureId = NormalizeOptional(fixtureId);
         DeviceId = NormalizeOptional(deviceId);
         ActorId = Required(actorId, nameof(actorId));
@@ -53,15 +58,17 @@ public sealed record RuntimeSessionTraceMetadata
 
     public string ProductionLineDefinitionId { get; }
 
-    public string ProductionStageId { get; }
+    public string OperationId { get; }
 
-    public int StageSequence { get; }
+    public int OperationAttempt { get; }
 
-    public string WorkstationId { get; }
+    public string StationSystemId { get; }
 
-    public DutIdentity DutIdentity { get; }
+    public ProductionUnitIdentity ProductionUnitIdentity { get; }
 
-    public string? BatchId { get; }
+    public string? LotId { get; }
+
+    public string? CarrierId { get; }
 
     public string? FixtureId { get; }
 

@@ -77,7 +77,7 @@ interface StartProjectGroup {
 
 type StartDialog = 'new-project' | 'open-path' | null;
 
-const recentProjectsStorageKey = 'openlineops.recentProjects.v1';
+const recentProjectsStorageKey = 'openlineops.recentProjects';
 
 export function ProjectsWorkbench({
   activeWorkspace,
@@ -111,7 +111,7 @@ export function ProjectsWorkbench({
   const manifestRows = useMemo(
     () => activeWorkspace
       ? [
-        { label: 'Format', value: `v${activeWorkspace.manifest.formatVersion}` },
+        { label: 'Schema', value: String(activeWorkspace.manifest.formatVersion) },
         { label: 'Product', value: activeWorkspace.manifest.product },
         { label: 'Updated', value: formatDate(activeWorkspace.manifest.updatedAtUtc) },
         { label: 'Manifest', value: activeWorkspace.manifestPath }

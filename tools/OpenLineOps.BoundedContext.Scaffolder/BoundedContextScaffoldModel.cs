@@ -88,7 +88,7 @@ internal sealed class BoundedContextScaffoldModel
         AggregatePluralName = $"{AggregateName}s";
         ContextRouteSegment = ToKebabCase(ContextName);
         AggregateRouteSegment = ToKebabCase(AggregateName);
-        ApiGroupName = $"{ContextRouteSegment}-v1";
+        ApiGroupName = ContextRouteSegment;
     }
 
     public string ContextName { get; }

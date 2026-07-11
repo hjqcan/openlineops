@@ -5,7 +5,9 @@ using OpenLineOps.Processes.Application.Runtime;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Projects.Api.Integrations;
@@ -15,8 +17,7 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
     private readonly IProjectApplicationWorkspaceScopeResolver _scopeResolver;
     private readonly IProjectReleaseArtifactStore _releaseStore;
     private readonly IProjectRuntimeConfigurationSnapshotResolver _configurationResolver;
-    private readonly IProjectExecutionCoordinator _executionCoordinator;
-    private readonly IProductionRunRunner _productionRunRunner;
+    private readonly IProductionRunCoordinator _productionRunCoordinator;
     private readonly IFlowIrCanonicalSerializer _flowIrSerializer;
     private readonly IFlowIrExecutableRuntimeProcessMapper _flowIrMapper;
 
@@ -24,32 +25,29 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
         IProjectApplicationWorkspaceScopeResolver scopeResolver,
         IProjectReleaseArtifactStore releaseStore,
         IProjectRuntimeConfigurationSnapshotResolver configurationResolver,
-        IProjectExecutionCoordinator executionCoordinator,
-        IProductionRunRunner productionRunRunner,
+        IProductionRunCoordinator productionRunCoordinator,
         IFlowIrCanonicalSerializer flowIrSerializer,
         IFlowIrExecutableRuntimeProcessMapper flowIrMapper)
     {
         _scopeResolver = scopeResolver;
         _releaseStore = releaseStore;
         _configurationResolver = configurationResolver;
-        _executionCoordinator = executionCoordinator;
-        _productionRunRunner = productionRunRunner;
+        _productionRunCoordinator = productionRunCoordinator;
         _flowIrSerializer = flowIrSerializer;
         _flowIrMapper = flowIrMapper;
     }
 
-    public async ValueTask<Result<ProductionRunRunResult>> StartAsync(
+    public async ValueTask<Result<ProductionRunSnapshot>> SubmitAsync(
         PublishedProjectSnapshotDetails snapshot,
-        StartProjectReleaseProductionRunRequest request,
+        SubmitProjectReleaseProductionRunRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(request);
-
         var requestValidation = ValidateRequest(request);
         if (requestValidation is not null)
         {
-            return Result.Failure<ProductionRunRunResult>(requestValidation);
+            return Result.Failure<ProductionRunSnapshot>(requestValidation);
         }
 
         try
@@ -63,16 +61,6 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                     "Projects.ProjectApplicationNotFound",
                     $"Application {snapshot.ApplicationId} was not found in project {snapshot.ProjectId}.",
                     notFound: true);
-            }
-
-            await using var executionLease = await _executionCoordinator
-                .TryAcquireAsync(liveScope.ProjectPath, cancellationToken)
-                .ConfigureAwait(false);
-            if (executionLease is null)
-            {
-                return Failure(
-                    "Projects.ProjectExecutionAlreadyActive",
-                    $"Project {snapshot.ProjectId} already has an active execution owner.");
             }
 
             var release = await _releaseStore
@@ -104,38 +92,27 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                 release.SourceRootPath,
                 release.ApplicationProjectRelativePath);
             var line = release.Metadata.ProductionLine;
-            var orderedStages = line.Stages.OrderBy(stage => stage.Sequence).ToArray();
-            if (orderedStages.Length == 0
-                || orderedStages.Select(stage => stage.StageId).Distinct(StringComparer.Ordinal).Count()
-                    != orderedStages.Length
-                || orderedStages.Where((stage, index) => stage.Sequence != index + 1).Any())
+            var operations = line.Operations.ToArray();
+            if (operations.Length == 0
+                || operations.Select(operation => operation.OperationId)
+                    .Distinct(StringComparer.Ordinal).Count() != operations.Length
+                || !operations.Any(operation => string.Equals(
+                    operation.OperationId,
+                    line.EntryOperationId,
+                    StringComparison.Ordinal)))
             {
                 return Failure(
-                    "Projects.ProjectReleaseProductionStagesInvalid",
-                    $"Immutable release {snapshot.SnapshotId} does not contain a contiguous, uniquely identified Production stage route.");
+                    "Projects.ProjectReleaseOperationsInvalid",
+                    $"Immutable release {snapshot.SnapshotId} has invalid or duplicate Operations or no entry Operation.");
             }
 
-            var plans = new List<ProductionStageExecutionPlan>(orderedStages.Length);
-            foreach (var stage in orderedStages)
+            var plans = new List<OperationExecutionPlan>(operations.Length);
+            foreach (var operation in operations)
             {
-                var workstationMatches = line.Workstations
-                    .Where(workstation => string.Equals(
-                        workstation.WorkstationId,
-                        stage.WorkstationId,
-                        StringComparison.Ordinal))
-                    .Take(2)
-                    .ToArray();
-                if (workstationMatches.Length != 1)
-                {
-                    return Failure(
-                        "Projects.ProjectReleaseWorkstationInvalid",
-                        $"Production stage {stage.StageId} must reference exactly one frozen Workstation.");
-                }
-
-                var flowResult = ResolveFrozenFlowIr(snapshot.SnapshotId, stage);
+                var flowResult = ResolveFrozenFlowIr(snapshot.SnapshotId, operation);
                 if (flowResult.IsFailure)
                 {
-                    return Result.Failure<ProductionRunRunResult>(flowResult.Error);
+                    return Result.Failure<ProductionRunSnapshot>(flowResult.Error);
                 }
 
                 var executableResult = _flowIrMapper.Map(flowResult.Value);
@@ -143,60 +120,65 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                 {
                     return Failure(
                         "Projects.ProjectReleaseFlowIrMappingFailed",
-                        $"Production stage {stage.StageId} frozen Flow IR cannot be mapped to Runtime: {executableResult.Error.Message}");
+                        $"Operation {operation.OperationId} frozen Flow IR cannot be mapped to Runtime: {executableResult.Error.Message}");
                 }
 
                 var configurationResult = await _configurationResolver
-                    .ResolveAsync(releaseScope, stage.ConfigurationSnapshotId, cancellationToken)
+                    .ResolveAsync(
+                        releaseScope,
+                        operation.ConfigurationSnapshotId,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 if (configurationResult.IsFailure)
                 {
                     return Failure(
-                        "Projects.ProjectReleaseStageConfigurationInvalid",
-                        $"Production stage {stage.StageId} cannot resolve frozen configuration {stage.ConfigurationSnapshotId}: {configurationResult.Error.Message}");
+                        "Projects.ProjectReleaseOperationConfigurationInvalid",
+                        $"Operation {operation.OperationId} cannot resolve frozen configuration {operation.ConfigurationSnapshotId}: {configurationResult.Error.Message}");
                 }
 
                 var configuration = configurationResult.Value;
-                var configurationMismatch = FindStageConfigurationMismatch(
-                    stage,
-                    workstationMatches[0],
+                var configurationMismatch = FindOperationConfigurationMismatch(
+                    operation,
                     configuration);
                 if (configurationMismatch is not null)
                 {
                     return Failure(
-                        "Projects.ProjectReleaseStageConfigurationMismatch",
-                        $"Production stage {stage.StageId} configuration does not match its frozen route: {configurationMismatch}.");
+                        "Projects.ProjectReleaseOperationConfigurationMismatch",
+                        $"Operation {operation.OperationId} configuration does not match its frozen route: {configurationMismatch}.");
                 }
 
-                plans.Add(new ProductionStageExecutionPlan(
-                    line.LineDefinitionId,
-                    stage.StageId,
-                    stage.Sequence,
-                    stage.WorkstationId,
-                    new StationId(workstationMatches[0].StationSystemId),
+                plans.Add(new OperationExecutionPlan(
+                    operation.OperationId,
+                    operation.StationSystemId,
+                    new StationId(operation.StationSystemId),
                     new ConfigurationSnapshotId(configuration.ConfigurationSnapshotId),
                     new RecipeSnapshotId(configuration.RecipeSnapshotId),
-                    executableResult.Value));
+                    executableResult.Value,
+                    CreateResourceRequirements(operation, request)));
             }
 
-            return await _productionRunRunner
-                .RunAsync(
-                    new StartProductionRunRequest(
+            var transitions = line.Transitions
+                .Select(ToRuntimeTransition)
+                .ToArray();
+            return await _productionRunCoordinator
+                .SubmitAsync(
+                    new SubmitProductionRunRequest(
                         new ProductionRunId(request.ProductionRunId),
                         snapshot.ProjectId,
                         snapshot.ApplicationId,
                         snapshot.SnapshotId,
                         snapshot.TopologyId,
                         line.LineDefinitionId,
-                        new DutIdentity(
-                            line.DutModel.DutModelId,
-                            line.DutModel.IdentityInputKey,
-                            request.DutIdentityValue),
+                        new ProductionUnitIdentity(
+                            line.ProductModel.ProductModelId,
+                            line.ProductModel.IdentityInputKey,
+                            request.ProductionUnitIdentityValue),
                         request.ActorId,
+                        line.EntryOperationId,
                         plans,
-                        request.BatchId,
-                        request.FixtureId,
-                        request.DeviceId),
+                        transitions,
+                        request.LotId,
+                        request.CarrierId),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -213,14 +195,14 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
 
     private Result<FlowIrDocument> ResolveFrozenFlowIr(
         string snapshotId,
-        ProjectReleaseProductionStage stage)
+        ProjectReleaseOperation operation)
     {
-        var documentResult = _flowIrSerializer.Deserialize(stage.FlowIrCanonicalJson);
+        var documentResult = _flowIrSerializer.Deserialize(operation.FlowIrCanonicalJson);
         if (documentResult.IsFailure)
         {
             return Result.Failure<FlowIrDocument>(ApplicationError.Conflict(
                 "Projects.ProjectReleaseFlowIrInvalid",
-                $"Production stage {stage.StageId} in release {snapshotId} has invalid canonical Flow IR: {documentResult.Error.Message}"));
+                $"Operation {operation.OperationId} in release {snapshotId} has invalid canonical Flow IR: {documentResult.Error.Message}"));
         }
 
         var artifactResult = _flowIrSerializer.Serialize(documentResult.Value);
@@ -228,7 +210,7 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
         {
             return Result.Failure<FlowIrDocument>(ApplicationError.Conflict(
                 "Projects.ProjectReleaseFlowIrInvalid",
-                $"Production stage {stage.StageId} in release {snapshotId} Flow IR cannot be serialized canonically: {artifactResult.Error.Message}"));
+                $"Operation {operation.OperationId} in release {snapshotId} Flow IR cannot be serialized canonically: {artifactResult.Error.Message}"));
         }
 
         var document = documentResult.Value;
@@ -237,58 +219,146 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
             .Select(dependency => dependency.LockId)
             .Order(StringComparer.Ordinal)
             .ToArray();
-        if (!string.Equals(stage.FlowIrSchemaVersion, artifact.SchemaVersion, StringComparison.Ordinal)
-            || !string.Equals(stage.FlowIrSha256, artifact.Sha256, StringComparison.Ordinal)
-            || !string.Equals(stage.FlowIrCanonicalJson, artifact.CanonicalJson, StringComparison.Ordinal)
-            || !string.Equals(document.ProcessDefinitionId, stage.FlowDefinitionId, StringComparison.Ordinal)
-            || !string.Equals(document.ProcessVersionId, stage.FlowVersionId, StringComparison.Ordinal)
+        if (!string.Equals(operation.FlowIrSchema, artifact.SchemaVersion, StringComparison.Ordinal)
+            || !string.Equals(operation.FlowIrSha256, artifact.Sha256, StringComparison.Ordinal)
+            || !string.Equals(operation.FlowIrCanonicalJson, artifact.CanonicalJson, StringComparison.Ordinal)
+            || !string.Equals(document.ProcessDefinitionId, operation.FlowDefinitionId, StringComparison.Ordinal)
+            || !string.Equals(document.ProcessVersionId, operation.FlowVersionId, StringComparison.Ordinal)
             || !blockVersionIds.SequenceEqual(
-                stage.BlockVersionIds.Order(StringComparer.Ordinal),
+                operation.BlockVersionIds.Order(StringComparer.Ordinal),
                 StringComparer.Ordinal))
         {
             return Result.Failure<FlowIrDocument>(ApplicationError.Conflict(
                 "Projects.ProjectReleaseFlowIrIdentityMismatch",
-                $"Production stage {stage.StageId} in release {snapshotId} Flow IR identity, dependencies, canonical JSON, or SHA-256 does not match its frozen metadata."));
+                $"Operation {operation.OperationId} in release {snapshotId} Flow IR identity, dependencies, canonical JSON, or SHA-256 does not match frozen metadata."));
         }
 
         return Result.Success(document);
     }
 
-    private static string? FindStageConfigurationMismatch(
-        ProjectReleaseProductionStage stage,
-        ProjectReleaseWorkstation workstation,
+    private static string? FindOperationConfigurationMismatch(
+        ProjectReleaseOperation operation,
         RuntimeConfigurationSnapshotDetails configuration)
     {
         if (!string.Equals(
                 configuration.ConfigurationSnapshotId,
-                stage.ConfigurationSnapshotId,
+                operation.ConfigurationSnapshotId,
                 StringComparison.Ordinal))
         {
-            return $"configuration id is {configuration.ConfigurationSnapshotId}, expected {stage.ConfigurationSnapshotId}";
+            return $"configuration id is {configuration.ConfigurationSnapshotId}, expected {operation.ConfigurationSnapshotId}";
         }
 
         if (!string.Equals(
                 configuration.ProcessDefinitionId,
-                stage.FlowDefinitionId,
+                operation.FlowDefinitionId,
                 StringComparison.Ordinal))
         {
-            return $"process definition is {configuration.ProcessDefinitionId}, expected {stage.FlowDefinitionId}";
+            return $"process definition is {configuration.ProcessDefinitionId}, expected {operation.FlowDefinitionId}";
         }
 
         if (!string.Equals(
                 configuration.ProcessVersionId,
-                stage.FlowVersionId,
+                operation.FlowVersionId,
                 StringComparison.Ordinal))
         {
-            return $"process version is {configuration.ProcessVersionId}, expected {stage.FlowVersionId}";
+            return $"process version is {configuration.ProcessVersionId}, expected {operation.FlowVersionId}";
         }
 
         return string.Equals(
             configuration.StationSystemId,
-            workstation.StationSystemId,
+            operation.StationSystemId,
             StringComparison.Ordinal)
             ? null
-            : $"Station system is {configuration.StationSystemId}, expected {workstation.StationSystemId}";
+            : $"Station system is {configuration.StationSystemId}, expected {operation.StationSystemId}";
+    }
+
+    private static List<ResourceRequirement> CreateResourceRequirements(
+        ProjectReleaseOperation operation,
+        SubmitProjectReleaseProductionRunRequest request)
+    {
+        var resources = new List<ResourceRequirement>
+        {
+            new(ResourceKind.Station, operation.StationSystemId)
+        };
+        AddOptional(ResourceKind.Slot, request.SlotId);
+        AddOptional(ResourceKind.Fixture, request.FixtureId);
+        AddOptional(ResourceKind.Device, request.DeviceId);
+        return resources;
+
+        void AddOptional(ResourceKind kind, string? resourceId)
+        {
+            if (resourceId is not null)
+            {
+                resources.Add(new ResourceRequirement(kind, resourceId));
+            }
+        }
+    }
+
+    private static RouteTransitionDefinition ToRuntimeTransition(
+        ProjectReleaseRouteTransition transition)
+    {
+        if (!Enum.TryParse<RuntimeRouteTransitionKind>(
+                transition.Kind,
+                ignoreCase: false,
+                out var kind)
+            || !Enum.IsDefined(kind)
+            || !string.Equals(kind.ToString(), transition.Kind, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Route transition {transition.TransitionId} has invalid kind '{transition.Kind}'.");
+        }
+
+        ResultJudgement? judgement = null;
+        if (transition.RequiredJudgement is not null)
+        {
+            if (!Enum.TryParse<ResultJudgement>(
+                    transition.RequiredJudgement,
+                    ignoreCase: false,
+                    out var parsed)
+                || !Enum.IsDefined(parsed)
+                || !string.Equals(
+                    parsed.ToString(),
+                    transition.RequiredJudgement,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Route transition {transition.TransitionId} has invalid judgement '{transition.RequiredJudgement}'.");
+            }
+
+            judgement = parsed;
+        }
+
+        return new RouteTransitionDefinition(
+            transition.TransitionId,
+            transition.SourceOperationId,
+            transition.TargetOperationId,
+            kind,
+            judgement,
+            transition.MaxTraversals,
+            transition.ParallelGroupId,
+            transition.OutputKey is null
+                ? null
+                : new OpenLineOps.Runtime.Domain.Runs.RouteOutputCondition(
+                    transition.OutputKey,
+                    new ProductionContextValue(
+                        ParseExact<ProductionContextValueKind>(
+                            transition.ExpectedOutputKind!,
+                            "Production Context value kind"),
+                        transition.ExpectedOutputValue!)));
+    }
+
+    private static T ParseExact<T>(string value, string description)
+        where T : struct, Enum
+    {
+        if (!Enum.TryParse<T>(value, ignoreCase: false, out var parsed)
+            || !Enum.IsDefined(parsed)
+            || !string.Equals(parsed.ToString(), value, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Route transition has invalid {description} '{value}'.");
+        }
+
+        return parsed;
     }
 
     private static string? FindMetadataMismatch(
@@ -412,7 +482,8 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
             : $"release manifest path is {actualRelativePath}, expected {declaredPath}";
     }
 
-    private static ApplicationError? ValidateRequest(StartProjectReleaseProductionRunRequest request)
+    private static ApplicationError? ValidateRequest(
+        SubmitProjectReleaseProductionRunRequest request)
     {
         if (request.ProductionRunId == Guid.Empty)
         {
@@ -421,20 +492,22 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                 "ProductionRunId must be a non-empty GUID.");
         }
 
-        if (!IsCanonical(request.DutIdentityValue) || !IsCanonical(request.ActorId))
+        if (!IsCanonical(request.ProductionUnitIdentityValue) || !IsCanonical(request.ActorId))
         {
             return ApplicationError.Validation(
                 "Projects.ProductionRunIdentityInvalid",
-                "DUT identity and actor identity must be non-empty canonical values.");
+                "Production Unit identity and actor identity must be non-empty canonical values.");
         }
 
-        return IsCanonicalOptional(request.BatchId)
+        return IsCanonicalOptional(request.LotId)
+            && IsCanonicalOptional(request.CarrierId)
+            && IsCanonicalOptional(request.SlotId)
             && IsCanonicalOptional(request.FixtureId)
             && IsCanonicalOptional(request.DeviceId)
             ? null
             : ApplicationError.Validation(
                 "Projects.ProductionRunMetadataInvalid",
-                "Optional Production run metadata must be null or non-empty canonical values.");
+                "Optional Production Run metadata must be null or non-empty canonical values.");
     }
 
     private static bool IsCanonical(string value) =>
@@ -447,11 +520,11 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
         left.Order(StringComparer.Ordinal)
             .SequenceEqual(right.Order(StringComparer.Ordinal), StringComparer.Ordinal);
 
-    private static Result<ProductionRunRunResult> Failure(
+    private static Result<ProductionRunSnapshot> Failure(
         string code,
         string message,
         bool notFound = false) =>
-        Result.Failure<ProductionRunRunResult>(notFound
+        Result.Failure<ProductionRunSnapshot>(notFound
             ? ApplicationError.NotFound(code, message)
             : ApplicationError.Conflict(code, message));
 }

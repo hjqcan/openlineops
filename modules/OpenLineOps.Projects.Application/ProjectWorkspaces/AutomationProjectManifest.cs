@@ -37,7 +37,7 @@ public sealed record AutomationProjectFile(
     AutomationProjectApplicationReference[] Applications,
     AutomationProjectSnapshotFile[] Snapshots)
 {
-    public const string CurrentSchemaVersion = "openlineops.automation-project/v1";
+    public const string CurrentSchemaVersion = "openlineops.automation-project";
 
     public const string KindName = "OpenLineOps.AutomationProject";
 }
@@ -70,7 +70,7 @@ public sealed record AutomationApplicationProjectFile(
     string? TopologyId,
     string[] ProcessDefinitionIds)
 {
-    public const string CurrentSchemaVersion = "openlineops.automation-application/v1";
+    public const string CurrentSchemaVersion = "openlineops.automation-application";
 
     public const int CurrentFormatVersion = 1;
 

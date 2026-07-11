@@ -4,8 +4,10 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Devices.Application.Configuration;
 using OpenLineOps.Devices.Application.Execution;
+using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Application.Persistence;
 using OpenLineOps.Devices.Infrastructure.Execution;
+using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Infrastructure.Persistence;
 using OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 using OpenLineOps.Devices.Infrastructure.Time;
@@ -34,6 +36,9 @@ public static class DevicesModuleServiceCollectionExtensions
 
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
+        var externalProgramHostOptions = LoadExternalProgramHostOptions(configuration);
+        services.AddSingleton(externalProgramHostOptions);
+        services.TryAddSingleton<IExternalProgramHost, ExternalProgramHost>();
 
         services.TryAddSingleton<ProjectReleaseSimulatorDeviceCommandExecutor>();
         services.TryAddSingleton<PluginDeviceCommandExecutor>();
@@ -105,6 +110,69 @@ public static class DevicesModuleServiceCollectionExtensions
             WorkerWorkingDirectory = section?["WorkerWorkingDirectory"],
             Sandbox = LoadPythonScriptWorkerSandboxOptions(section?.GetSection("Sandbox"))
         };
+    }
+
+    private static ExternalProgramHostOptions LoadExternalProgramHostOptions(
+        IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(ExternalProgramHostOptions.SectionName);
+        var traceArtifactRoot = configuration?
+            .GetSection("OpenLineOps:Traceability:ArtifactStorage")["RootPath"];
+        var options = new ExternalProgramHostOptions
+        {
+            WorkspaceRootPath = section?["WorkspaceRootPath"]
+                ?? "data/openlineops-external-program-workspaces",
+            EvidenceRootPath = section?["EvidenceRootPath"]
+                ?? traceArtifactRoot
+                ?? "data/openlineops-traceability-artifacts",
+            MaximumStandardOutputBytes = ReadOptionalInt(
+                section?["MaximumStandardOutputBytes"],
+                4 * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumStandardOutputBytes"),
+            MaximumStandardErrorBytes = ReadOptionalInt(
+                section?["MaximumStandardErrorBytes"],
+                4 * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumStandardErrorBytes"),
+            MaximumArtifactCount = ReadOptionalInt(
+                section?["MaximumArtifactCount"],
+                128,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumArtifactCount"),
+            MaximumArtifactBytes = ReadOptionalLong(
+                section?["MaximumArtifactBytes"],
+                128L * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumArtifactBytes"),
+            MaximumTotalArtifactBytes = ReadOptionalLong(
+                section?["MaximumTotalArtifactBytes"],
+                512L * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumTotalArtifactBytes"),
+            ProcessMemoryLimitBytes = ReadOptionalLong(
+                section?["ProcessMemoryLimitBytes"],
+                1024L * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:ProcessMemoryLimitBytes"),
+            ActiveProcessLimit = ReadOptionalInt(
+                section?["ActiveProcessLimit"],
+                32,
+                $"{ExternalProgramHostOptions.SectionName}:ActiveProcessLimit"),
+            CpuTimeLimitSeconds = ReadOptionalInt(
+                section?["CpuTimeLimitSeconds"],
+                3600,
+                $"{ExternalProgramHostOptions.SectionName}:CpuTimeLimitSeconds"),
+            RequireWindowsJobObject = ReadOptionalBoolean(
+                section?["RequireWindowsJobObject"],
+                defaultValue: true,
+                $"{ExternalProgramHostOptions.SectionName}:RequireWindowsJobObject")
+        };
+        options.AllowedInheritedEnvironmentVariables.Clear();
+        foreach (var variable in section?
+                     .GetSection("AllowedInheritedEnvironmentVariables")
+                     .Get<string[]>()
+                 ?? ["SystemRoot", "WINDIR"])
+        {
+            options.AllowedInheritedEnvironmentVariables.Add(variable);
+        }
+
+        options.Validate();
+        return options;
     }
 
     private static PythonScriptWorkerSandboxOptions LoadPythonScriptWorkerSandboxOptions(
@@ -192,6 +260,19 @@ public static class DevicesModuleServiceCollectionExtensions
         }
 
         return int.TryParse(value, out var parsed)
+            ? parsed
+            : throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must be an integer.");
+    }
+
+    private static long ReadOptionalLong(string? value, long defaultValue, string configurationPath)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        return long.TryParse(value, out var parsed)
             ? parsed
             : throw new InvalidOperationException(
                 $"Configuration '{configurationPath}' must be an integer.");

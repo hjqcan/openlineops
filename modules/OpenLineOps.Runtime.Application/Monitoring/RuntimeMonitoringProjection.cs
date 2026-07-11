@@ -63,8 +63,8 @@ public sealed class RuntimeMonitoringProjection :
                 monitoringScope.ProjectSnapshotId,
                 monitoringScope.TopologyId,
                 session.TraceMetadata.ProductionRunId,
-                session.TraceMetadata.ProductionStageId,
-                session.StationId.Value);
+                session.TraceMetadata.OperationId,
+                session.TraceMetadata.StationSystemId);
             if (eventGroup.Any(envelope => envelope.DomainEvent is RuntimeSessionCreatedDomainEvent))
             {
                 RemovePriorTargetOverlay(stationStatusKey);
@@ -106,8 +106,8 @@ public sealed class RuntimeMonitoringProjection :
                 || string.Equals(status.StationSystemId, canonicalStationSystemId, StringComparison.Ordinal))
             .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
             .ThenBy(status => status.ProductionRunId.Value)
-            .ThenBy(status => status.StageSequence)
-            .ThenBy(status => status.StageId, StringComparer.Ordinal)
+            .ThenBy(status => status.OperationAttempt)
+            .ThenBy(status => status.OperationId, StringComparer.Ordinal)
             .ToArray();
 
         return ValueTask.FromResult(statuses);
@@ -130,8 +130,8 @@ public sealed class RuntimeMonitoringProjection :
                 || string.Equals(status.StationSystemId, canonicalStationSystemId, StringComparison.Ordinal))
             .OrderBy(status => status.StationSystemId, StringComparer.Ordinal)
             .ThenBy(status => status.ProductionRunId.Value)
-            .ThenBy(status => status.StageSequence)
-            .ThenBy(status => status.StageId, StringComparer.Ordinal)
+            .ThenBy(status => status.OperationAttempt)
+            .ThenBy(status => status.OperationId, StringComparer.Ordinal)
             .ThenBy(status => status.TargetKind, StringComparer.Ordinal)
             .ThenBy(status => status.TargetId, StringComparer.Ordinal)
             .ToArray();
@@ -267,7 +267,7 @@ public sealed class RuntimeMonitoringProjection :
             projection.ProjectSnapshotId,
             projection.TopologyId,
             projection.ProductionRunId,
-            projection.StageId,
+            projection.OperationId,
             projection.StationSystemId,
             projection.TargetKind,
             projection.TargetId);
@@ -355,10 +355,10 @@ public sealed class RuntimeMonitoringProjection :
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            session.TraceMetadata.DutIdentity,
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            session.TraceMetadata.StationSystemId,
+            session.TraceMetadata.ProductionUnitIdentity,
             session.StationId.Value,
             entityKind,
             entityId,
@@ -379,17 +379,18 @@ public sealed class RuntimeMonitoringProjection :
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            session.TraceMetadata.DutIdentity,
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            session.TraceMetadata.StationSystemId,
+            session.TraceMetadata.ProductionUnitIdentity,
             session.StationId.Value,
             session.Id,
             session.ProcessDefinitionId.Value,
             session.ProcessVersionId.Value,
             session.ConfigurationSnapshotId.Value,
             session.RecipeSnapshotId.Value,
-            session.TraceMetadata.BatchId,
+            session.TraceMetadata.LotId,
+            session.TraceMetadata.CarrierId,
             session.TraceMetadata.FixtureId,
             session.TraceMetadata.DeviceId,
             session.Status,
@@ -499,7 +500,7 @@ public sealed class RuntimeMonitoringProjection :
         string ProjectSnapshotId,
         string TopologyId,
         ProductionRunId ProductionRunId,
-        string StageId,
+        string OperationId,
         string StationSystemId);
 
     private readonly record struct RuntimeTargetStatusKey(
@@ -508,7 +509,7 @@ public sealed class RuntimeMonitoringProjection :
         string ProjectSnapshotId,
         string TopologyId,
         ProductionRunId ProductionRunId,
-        string StageId,
+        string OperationId,
         string StationSystemId,
         string TargetKind,
         string TargetId);
@@ -528,7 +529,7 @@ public sealed class RuntimeMonitoringProjection :
                 && StringComparer.Ordinal.Equals(x.ProjectSnapshotId, y.ProjectSnapshotId)
                 && StringComparer.Ordinal.Equals(x.TopologyId, y.TopologyId)
                 && x.ProductionRunId == y.ProductionRunId
-                && StringComparer.Ordinal.Equals(x.StageId, y.StageId)
+                && StringComparer.Ordinal.Equals(x.OperationId, y.OperationId)
                 && StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId)
                 && StringComparer.Ordinal.Equals(x.TargetKind, y.TargetKind)
                 && StringComparer.Ordinal.Equals(x.TargetId, y.TargetId);
@@ -542,7 +543,7 @@ public sealed class RuntimeMonitoringProjection :
                 StringComparer.Ordinal.GetHashCode(obj.ProjectSnapshotId),
                 StringComparer.Ordinal.GetHashCode(obj.TopologyId),
                 obj.ProductionRunId,
-                StringComparer.Ordinal.GetHashCode(obj.StageId));
+                StringComparer.Ordinal.GetHashCode(obj.OperationId));
             return HashCode.Combine(
                 scopeHash,
                 StringComparer.Ordinal.GetHashCode(obj.StationSystemId),
@@ -562,7 +563,7 @@ public sealed class RuntimeMonitoringProjection :
                 && StringComparer.Ordinal.Equals(x.ProjectSnapshotId, y.ProjectSnapshotId)
                 && StringComparer.Ordinal.Equals(x.TopologyId, y.TopologyId)
                 && x.ProductionRunId == y.ProductionRunId
-                && StringComparer.Ordinal.Equals(x.StageId, y.StageId)
+                && StringComparer.Ordinal.Equals(x.OperationId, y.OperationId)
                 && StringComparer.Ordinal.Equals(x.StationSystemId, y.StationSystemId);
         }
 
@@ -574,7 +575,7 @@ public sealed class RuntimeMonitoringProjection :
                 StringComparer.Ordinal.GetHashCode(obj.ProjectSnapshotId),
                 StringComparer.Ordinal.GetHashCode(obj.TopologyId),
                 obj.ProductionRunId,
-                StringComparer.Ordinal.GetHashCode(obj.StageId),
+                StringComparer.Ordinal.GetHashCode(obj.OperationId),
                 StringComparer.Ordinal.GetHashCode(obj.StationSystemId));
         }
 
@@ -585,7 +586,7 @@ public sealed class RuntimeMonitoringProjection :
                 && StringComparer.Ordinal.Equals(target.ProjectSnapshotId, station.ProjectSnapshotId)
                 && StringComparer.Ordinal.Equals(target.TopologyId, station.TopologyId)
                 && target.ProductionRunId == station.ProductionRunId
-                && StringComparer.Ordinal.Equals(target.StageId, station.StageId)
+                && StringComparer.Ordinal.Equals(target.OperationId, station.OperationId)
                 && StringComparer.Ordinal.Equals(target.StationSystemId, station.StationSystemId);
         }
     }

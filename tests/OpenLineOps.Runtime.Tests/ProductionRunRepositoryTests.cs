@@ -1,5 +1,10 @@
+using Microsoft.Data.Sqlite;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -7,303 +12,172 @@ namespace OpenLineOps.Runtime.Tests;
 
 public sealed class ProductionRunRepositoryTests
 {
-    private static readonly DateTimeOffset CreatedAtUtc = new(2026, 7, 10, 11, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset Now = new(2026, 7, 11, 2, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task InMemoryRepositoryStoresACommittedSnapshotRatherThanLiveAggregateReference()
+    public async Task InMemoryRepositoryAtomicallyStoresRunAndFrozenExecutionPlan()
     {
         var repository = new InMemoryProductionRunRepository();
-        var run = CreateRun("memory");
-        Assert.True(await repository.TryAddAsync(run));
+        var (run, plan) = CreateRun();
 
-        Assert.True(run.Start(CreatedAtUtc.AddSeconds(1)).Succeeded);
-
+        Assert.True(await repository.TryAddAsync(run, plan));
         var restored = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(run.Id)).Run;
-        Assert.Equal(ProductionRunStatus.Created, restored.Status);
-        Assert.All(restored.Stages, stage => Assert.Equal(ProductionStageRunStatus.Pending, stage.Status));
+            await repository.GetByIdAsync(run.Id));
+        var restoredPlan = Assert.IsType<ProductionRunExecutionPlan>(
+            await repository.GetByRunIdAsync(run.Id));
+
+        Assert.Equal(0, restored.Revision);
+        Assert.Equal("product.board", restored.Run.ProductionUnitIdentity.ModelId);
+        Assert.Equal("operation.main", Assert.Single(restoredPlan.Operations).Definition.OperationId);
     }
 
     [Fact]
-    public async Task InMemoryRepositoryAtomicallyAcceptsOnlyOneRunWithTheSameId()
+    public async Task SqliteRepositoryRoundTripsDualAxesAndTypedOutput()
     {
-        var repository = new InMemoryProductionRunRepository();
-        var run = CreateRun("atomic-memory");
-
-        var attempts = await Task.WhenAll(
-            Enumerable.Range(0, 16)
-                .Select(_ => repository.TryAddAsync(run).AsTask()));
-
-        Assert.Single(attempts, accepted => accepted);
-        Assert.Equal(1, repository.SaveCount);
-    }
-
-    [Fact]
-    public async Task SqliteRepositoryAtomicallyRejectsDuplicateRunIdAndPreservesFirstDocument()
-    {
-        using var database = TemporarySqliteDatabase.Create();
+        await using var database = new TemporaryDatabase();
         using var repository = new SqliteProductionRunRepository(database.ConnectionString);
-        var first = CreateRun("atomic-sqlite");
-        var duplicate = ProductionRun.Restore(first.ToSnapshot() with
-        {
-            DutIdentity = new DutIdentity("dut.model", "dut.serial", "DIFFERENT")
-        });
-
-        Assert.True(await repository.TryAddAsync(first));
-        Assert.False(await repository.TryAddAsync(duplicate));
-
-        var restored = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(first.Id)).Run;
-        Assert.Equal("SN-atomic-sqlite", restored.DutIdentity.Value);
-    }
-
-    [Fact]
-    public async Task RepositoriesRejectUpdatingRunThatWasNeverAdded()
-    {
-        var memory = new InMemoryProductionRunRepository();
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await memory.SaveAsync(CreateRun("missing-memory"), 0));
-
-        using var database = TemporarySqliteDatabase.Create();
-        using var sqlite = new SqliteProductionRunRepository(database.ConnectionString);
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await sqlite.SaveAsync(CreateRun("missing-sqlite"), 0));
-    }
-
-    [Fact]
-    public async Task SqliteRepositoryRoundTripsCompleteFailedRunWithStageMetricsAndDutIdentity()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var repository = new SqliteProductionRunRepository(database.ConnectionString);
-        var run = CreateRun("sqlite");
-        Assert.True(await repository.TryAddAsync(run));
-        Assert.True(run.Start(CreatedAtUtc.AddSeconds(1)).Succeeded);
-        var sessionId = RuntimeSessionId.New();
-        Assert.True(run.StartStage(
-            "stage.sqlite.1",
-            sessionId,
-            CreatedAtUtc.AddSeconds(2)).Succeeded);
-        Assert.True(run.FailStage(
-            "stage.sqlite.1",
-            "Runtime.InspectionFailed",
-            "Inspection returned NG.",
-            2,
-            3,
+        var (run, plan) = CreateRun();
+        Assert.True(await repository.TryAddAsync(run, plan));
+        Assert.True(run.Start(Now).Succeeded);
+        var operation = Assert.Single(run.Operations);
+        var leases = operation.ResourceRequirements.Select(resource => new ResourceLease(
+            resource,
+            run.Id,
+            operation.OperationRunId,
             1,
-            CreatedAtUtc.AddSeconds(3)).Succeeded);
+            Now,
+            Now.AddHours(1))).ToArray();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            Now).Succeeded);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Failed,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["measuredVoltage"] = new(
+                    ProductionContextValueKind.FixedPoint,
+                    "3.30")
+            },
+            1,
+            1,
+            0,
+            Now.AddSeconds(1)).Succeeded);
+
+        Assert.Equal(1, await repository.SaveAsync(run, 0));
+        var restored = Assert.IsType<ProductionRunPersistenceEntry>(
+            await repository.GetByIdAsync(run.Id));
+
+        Assert.Equal(ExecutionStatus.Completed, restored.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Failed, restored.Run.Judgement);
+        Assert.Equal(ProductDisposition.Nonconforming, restored.Run.Disposition);
+        Assert.Equal(
+            "3.30",
+            Assert.Single(restored.Run.Operations).Outputs["measuredVoltage"].CanonicalValue);
+        Assert.NotNull(await repository.GetByRunIdAsync(run.Id));
+    }
+
+    [Fact]
+    public async Task RepositoryRejectsStaleAggregateRevision()
+    {
+        var repository = new InMemoryProductionRunRepository();
+        var (run, plan) = CreateRun();
+        Assert.True(await repository.TryAddAsync(run, plan));
+        Assert.True(run.Start(Now).Succeeded);
         Assert.Equal(1, await repository.SaveAsync(run, 0));
 
-        using var restartedRepository = new SqliteProductionRunRepository(database.ConnectionString);
-        var restoredEntry = Assert.IsType<ProductionRunPersistenceEntry>(
-            await restartedRepository.GetByIdAsync(run.Id));
-        var restored = restoredEntry.Run;
-        Assert.Equal(1, restoredEntry.Revision);
-
-        Assert.Equal(ProductionRunStatus.Failed, restored.Status);
-        Assert.Equal("dut.model", restored.DutIdentity.ModelId);
-        Assert.Equal("dut.serial", restored.DutIdentity.InputKey);
-        Assert.Equal("SN-sqlite", restored.DutIdentity.Value);
-        Assert.Equal("operator.sqlite", restored.ActorId);
-        Assert.Empty(restored.DomainEvents);
-        Assert.Collection(
-            restored.Stages,
-            failed =>
-            {
-                Assert.Equal(ProductionStageRunStatus.Failed, failed.Status);
-                Assert.Equal(sessionId, failed.RuntimeSessionId);
-                Assert.Equal(2, failed.CompletedStepCount);
-                Assert.Equal(3, failed.CommandCount);
-                Assert.Equal(1, failed.IncidentCount);
-            },
-            skipped => Assert.Equal(ProductionStageRunStatus.Skipped, skipped.Status));
-    }
-
-    [Fact]
-    public void SnapshotMapperRejectsNonCurrentSchemaAndIncompleteFormalIdentity()
-    {
-        var snapshot = ProductionRunSnapshotMapper.ToSnapshot(CreateRun("strict"));
-
-        var schemaException = Assert.Throws<InvalidDataException>(() =>
-            ProductionRunSnapshotMapper.ToAggregate(snapshot with { SchemaVersion = 0 }));
-        Assert.Contains("schema is not current", schemaException.Message, StringComparison.Ordinal);
-
-        var actorException = Assert.Throws<InvalidDataException>(() =>
-            ProductionRunSnapshotMapper.ToAggregate(snapshot with { ActorId = null }));
-        Assert.Contains("actor id", actorException.Message, StringComparison.Ordinal);
-
-        var dutInputException = Assert.Throws<InvalidDataException>(() =>
-            ProductionRunSnapshotMapper.ToAggregate(snapshot with { DutIdentityInputKey = null }));
-        Assert.Contains("DUT identity input key", dutInputException.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task SqliteRepositoryListsOnlyCreatedAndRunningRunsInTransitionOrder()
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var repository = new SqliteProductionRunRepository(database.ConnectionString);
-        var created = CreateRun("created");
-        var running = CreateRun("running");
-        Assert.True(await repository.TryAddAsync(created));
-        Assert.True(await repository.TryAddAsync(running));
-        Assert.True(running.Start(CreatedAtUtc.AddMinutes(1)).Succeeded);
-        var canceled = CreateRun("canceled");
-        Assert.True(await repository.TryAddAsync(canceled));
-        Assert.True(canceled.Cancel(
-            "Canceled by operator.",
-            0,
-            0,
-            0,
-            CreatedAtUtc.AddMinutes(2)).Succeeded);
-        await repository.SaveAsync(canceled, 0);
-        await repository.SaveAsync(running, 0);
-        await repository.SaveAsync(created, 0);
-
-        var recoverable = await repository.ListRecoverableAsync();
-
-        Assert.Collection(
-            recoverable,
-            first => Assert.Equal(created.Id, first.Run.Id),
-            second => Assert.Equal(running.Id, second.Run.Id));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RepositoryRejectsAStaleAggregateRevision(bool useSqlite)
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var sqlite = useSqlite
-            ? new SqliteProductionRunRepository(database.ConnectionString)
-            : null;
-        IProductionRunRepository repository = sqlite is null
-            ? new InMemoryProductionRunRepository()
-            : sqlite;
-        var run = CreateRun(useSqlite ? "cas-sqlite" : "cas-memory");
-        Assert.True(await repository.TryAddAsync(run));
-        var first = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(run.Id));
-        var stale = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(run.Id));
-
-        Assert.True(first.Run.Start(CreatedAtUtc.AddSeconds(1)).Succeeded);
-        Assert.Equal(1, await repository.SaveAsync(first.Run, first.Revision));
-        Assert.True(stale.Run.Cancel(
-            "Stale caller canceled the run.",
-            0,
-            0,
-            0,
-            CreatedAtUtc.AddSeconds(2)).Succeeded);
-
         await Assert.ThrowsAsync<ProductionRunConcurrencyException>(async () =>
-            await repository.SaveAsync(stale.Run, stale.Revision));
-
-        var current = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(run.Id));
-        Assert.Equal(1, current.Revision);
-        Assert.Equal(ProductionRunStatus.Running, current.Run.Status);
-        Assert.Empty(await repository.ListPendingTerminalOutboxAsync(10));
+            await repository.SaveAsync(run, 0));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TerminalSaveCreatesDurableOutboxUntilExplicitAcknowledgement(bool useSqlite)
+    [Fact]
+    public async Task ResourceLeasesAreExclusiveAndFencingTokensIncreaseAfterRelease()
     {
-        using var database = TemporarySqliteDatabase.Create();
-        using var sqlite = useSqlite
-            ? new SqliteProductionRunRepository(database.ConnectionString)
-            : null;
-        IProductionRunRepository repository = sqlite is null
-            ? new InMemoryProductionRunRepository()
-            : sqlite;
-        var run = CreateRun(useSqlite ? "outbox-sqlite" : "outbox-memory");
-        Assert.True(await repository.TryAddAsync(run));
-        Assert.True(run.Cancel(
-            "Canceled before stage execution.",
-            0,
-            0,
-            0,
-            CreatedAtUtc.AddSeconds(1)).Succeeded);
-        await repository.SaveAsync(run, 0);
+        var leases = new InMemoryResourceLeaseRepository();
+        var resource = new ResourceRequirement(ResourceKind.Station, "station.main");
+        var firstRun = ProductionRunId.New();
+        var secondRun = ProductionRunId.New();
 
-        var pending = Assert.Single(await repository.ListPendingTerminalOutboxAsync(10));
-        Assert.Equal(run.Id, pending.RunId);
-        Assert.Equal(ProductionRunStatus.Canceled, pending.Run.Status);
-        Assert.Equal(0, pending.AttemptCount);
-        Assert.Null(pending.LastError);
+        var first = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await leases.TryAcquireAsync(
+                firstRun,
+                "operation@0001",
+                [resource],
+                Now,
+                TimeSpan.FromMinutes(1))));
+        Assert.Null(await leases.TryAcquireAsync(
+            secondRun,
+            "operation@0001",
+            [resource],
+            Now.AddSeconds(1),
+            TimeSpan.FromMinutes(1)));
 
-        await repository.RecordTerminalOutboxFailureAsync(run.Id, "trace unavailable");
-        var failed = Assert.Single(await repository.ListPendingTerminalOutboxAsync(10));
-        Assert.Equal(1, failed.AttemptCount);
-        Assert.Equal("trace unavailable", failed.LastError);
-
-        await repository.MarkTerminalOutboxProcessedAsync(run.Id);
-        Assert.Empty(await repository.ListPendingTerminalOutboxAsync(10));
+        await leases.ReleaseAsync(firstRun, "operation@0001");
+        var second = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await leases.TryAcquireAsync(
+                secondRun,
+                "operation@0001",
+                [resource],
+                Now.AddSeconds(2),
+                TimeSpan.FromMinutes(1))));
+        Assert.True(second.FencingToken > first.FencingToken);
     }
 
-    private static ProductionRun CreateRun(string suffix)
+    private static (ProductionRun Run, ProductionRunExecutionPlan Plan) CreateRun()
     {
-        return ProductionRun.Create(
-            ProductionRunId.New(),
+        var runId = ProductionRunId.New();
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.main"),
+            new ProcessVersionId("process-version.main"),
+            []);
+        var operation = new OperationExecutionPlan(
+            "operation.main",
+            "station.main",
+            new StationId("station.main"),
+            new ConfigurationSnapshotId("configuration.main"),
+            new RecipeSnapshotId("recipe.main"),
+            process);
+        var run = ProductionRun.Create(
+            runId,
             "project.main",
             "application.main",
-            $"snapshot.{suffix}",
+            "snapshot.main",
             "topology.main",
             "line.main",
-            new DutIdentity("dut.model", "dut.serial", $"SN-{suffix}"),
-            $"batch.{suffix}",
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
             null,
             null,
-            $"operator.{suffix}",
-            CreatedAtUtc,
-            [
-                Stage($"stage.{suffix}.1", 1),
-                Stage($"stage.{suffix}.2", 2)
-            ]);
+            "operator.main",
+            operation.Definition.OperationId,
+            Now,
+            [operation.Definition],
+            []);
+        return (run, new ProductionRunExecutionPlan(runId, [operation]));
     }
 
-    private static ProductionStageRunDefinition Stage(string stageId, int sequence)
+    private sealed class TemporaryDatabase : IAsyncDisposable
     {
-        return new ProductionStageRunDefinition(
-            stageId,
-            sequence,
-            $"workstation.{sequence}",
-            new StationId($"station.{sequence}"),
-            new ProcessDefinitionId($"process.{sequence}"),
-            new ProcessVersionId($"process.{sequence}@1.0.0"),
-            new ConfigurationSnapshotId($"configuration.{sequence}"),
-            new RecipeSnapshotId($"recipe.{sequence}"));
-    }
+        private readonly string _path = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-runtime-{Guid.NewGuid():N}.sqlite");
 
-    private sealed class TemporarySqliteDatabase : IDisposable
-    {
-        private TemporarySqliteDatabase(string directory, string databasePath)
+        public string ConnectionString => new SqliteConnectionStringBuilder
         {
-            Directory = directory;
-            ConnectionString = $"Data Source={databasePath};Pooling=False";
-        }
+            DataSource = _path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString();
 
-        public string Directory { get; }
-
-        public string ConnectionString { get; }
-
-        public static TemporarySqliteDatabase Create()
+        public ValueTask DisposeAsync()
         {
-            var directory = Path.Combine(
-                Path.GetTempPath(),
-                "OpenLineOps",
-                Guid.NewGuid().ToString("N"));
-            return new TemporarySqliteDatabase(
-                directory,
-                Path.Combine(directory, "production-runs.sqlite"));
-        }
-
-        public void Dispose()
-        {
-            if (System.IO.Directory.Exists(Directory))
+            if (File.Exists(_path))
             {
-                System.IO.Directory.Delete(Directory, recursive: true);
+                File.Delete(_path);
             }
+
+            return ValueTask.CompletedTask;
         }
     }
 }

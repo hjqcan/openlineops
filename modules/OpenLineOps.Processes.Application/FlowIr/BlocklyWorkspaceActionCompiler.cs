@@ -812,7 +812,7 @@ internal static class BlocklyWorkspaceActionCompiler
             RuntimeActionTargetKinds.System => FlowIrTargetReferenceKind.System,
             RuntimeActionTargetKinds.SlotGroup => FlowIrTargetReferenceKind.SlotGroup,
             RuntimeActionTargetKinds.Slot => FlowIrTargetReferenceKind.Slot,
-            RuntimeActionTargetKinds.Dut => FlowIrTargetReferenceKind.Dut,
+            RuntimeActionTargetKinds.ProductionUnit => FlowIrTargetReferenceKind.ProductionUnit,
             RuntimeActionTargetKinds.Capability => FlowIrTargetReferenceKind.Capability,
             RuntimeActionTargetKinds.Driver => FlowIrTargetReferenceKind.Driver,
             _ => default

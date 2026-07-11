@@ -291,10 +291,10 @@ async function main() {
     'Slot Group to be dragged into the Station');
   await dragPaletteItemToCanvas('add-topology-slot', 0.35, 0.48);
   await waitForExpression(
-    '(() => document.body.innerText.includes("DUT Slot added ")'
+    '(() => document.body.innerText.includes("Production Unit Slot added ")'
     + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("S1"))()',
     30000,
-    'DUT Slot to be dragged into its Slot Group');
+    'Production Unit Slot to be dragged into its Slot Group');
   await captureSmokeScreenshot('topology-edit.png');
   await setInputByTestId('layout-geometry-x', '18');
   await clickByTestId('save-layout-geometry');
@@ -446,7 +446,7 @@ async function main() {
     + ' "apply-project-target-driver-0",'
     + ' "apply-project-target-slot-group-0",'
     + ' "apply-project-target-slot-0",'
-    + ' "apply-project-target-dut-0"'
+    + ' "apply-project-target-production-unit-0"'
     + '].every(testId => Boolean(document.querySelector(`[data-testid="${testId}"]`))))()',
     15000,
     'all six formal process target kinds to be available');
@@ -478,7 +478,7 @@ async function main() {
   await waitForExpression(
     '(() => document.body.innerText.includes("Fixture Action")'
     + ' && document.body.innerText.includes("1 custom")'
-    + ' && document.body.innerText.includes("Registered Blockly block user_fixture_action v1")'
+    + ' && document.body.innerText.includes("Registered Blockly block user_fixture_action revision 1")'
     + ' && !document.querySelector("[data-testid=\\"register-blockly-block\\"]")?.disabled)()',
     30000,
     'custom Blockly block to register from UI');
@@ -487,10 +487,10 @@ async function main() {
     '(() => document.querySelectorAll("[data-testid=\\"block-version-history\\"] .block-version-row").length === 2)()',
     30000,
     'custom Blockly block version history to load');
-  await clickByTestId('restore-blockly-block-v1');
+  await clickByTestId('restore-blockly-block-revision-1');
   await waitForExpression(
-    '(() => document.body.innerText.includes("Restored user_fixture_action v1 as v3")'
-    + ' && document.querySelector("[data-testid=\\"block-version-history\\"]")?.textContent?.includes("v3"))()',
+    '(() => document.body.innerText.includes("Restored user_fixture_action revision 1 as revision 3")'
+    + ' && document.querySelector("[data-testid=\\"block-version-history\\"]")?.textContent?.includes("revision 3"))()',
     30000,
     'custom Blockly block version to restore from UI');
   await clickByTestId('add-command-node');
@@ -596,14 +596,14 @@ async function main() {
     'production line designer to render');
   await clickByTestId('new-production-line');
   await waitForExpression(
-    `(() => document.querySelector('[data-testid="production-stage-configuration-0"]')?.value === ${JSON.stringify(configurationSnapshotId)})()`,
+    `(() => document.querySelector('[data-testid="production-operation-configuration-0"]')?.value === ${JSON.stringify(configurationSnapshotId)})()`,
     30000,
-    'production stage to bind its published Station and Flow configuration');
+    'production Operation to bind its published Station and Flow configuration');
   await clickByTestId('save-production-line');
   await waitForExpression(
     '(() => document.body.innerText.includes("Production line saved line-"))()',
     30000,
-    'DUT, workstation, and stage production line to save');
+    'Product Model and Operation route graph to save');
   await captureSmokeScreenshot('line-designer.png');
   const productionLineDefinitionId = await assertProductionLinePersisted();
   await waitForExpression(
@@ -658,10 +658,10 @@ async function main() {
       return document.body.innerText.includes('Production run Completed')
         && workbench?.textContent?.includes('Live line overview')
         && workbench?.textContent?.includes('Station 01')
-        && workbench?.textContent?.includes('Completed')
-        && workbench?.querySelector('[data-testid="topology-runtime-state-label"]')?.textContent?.includes('Last run completed')
-        && !workbench?.querySelector('[data-testid="topology-runtime-state-label"]')?.textContent?.includes('Project is running')
-        && station?.getAttribute('data-operational-state') === 'Completed'
+        && workbench?.querySelector('[data-testid="topology-runtime-state-label"]')?.textContent?.includes('Line idle')
+        && workbench?.querySelector('[data-testid="topology-live-projection"]')?.textContent?.includes('No active products')
+        && workbench?.querySelector('[data-testid="topology-live-projection"]')?.textContent?.includes('CONNECTED')
+        && station?.getAttribute('data-operational-state') === 'Idle'
         && childSystem?.getAttribute('data-operational-state') === 'Idle'
         && group?.getAttribute('data-operational-state') === 'Idle'
         && slot?.getAttribute('data-operational-state') === 'Idle'
@@ -680,12 +680,20 @@ async function main() {
     + ' const childSystem = systems.find(element => element.getAttribute("aria-label")?.startsWith("System 1,"));'
     + ' const viewport = document.querySelector("[data-testid=\\"topology-3d-viewport\\"]");'
     + ' return viewport?.textContent?.includes("Station 01")'
-    + '   && station?.getAttribute("data-operational-state") === "Completed"'
+    + '   && station?.getAttribute("data-operational-state") === "Idle"'
     + '   && childSystem?.getAttribute("data-operational-state") === "Idle";'
     + '})()',
     30000,
     '3D monitor to project the exact station and target runtime states');
   await captureSmokeScreenshot('topology-3d-monitor.png');
+
+  await clickByTestId('nav-dashboard');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("Projection connected")'
+    + ' && document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("Line State"))()',
+    30000,
+    'Operations workbench to reconnect through the formal persisted projection');
+  await captureSmokeScreenshot('line-operations.png');
 
   const traceRecordsAfterRuns = await expectApiStatus(
     `/api/traceability/records?projectId=${encodeURIComponent(openedProject.projectId)}`,
@@ -963,7 +971,7 @@ async function assertProductionLinePersisted() {
     `/api/automation-projects/${encodeURIComponent(activeProjectApplicationScope.projectId)}`
     + `/applications/${encodeURIComponent(activeProjectApplicationScope.applicationId)}/production-lines`);
   const line = response.body?.find(
-    candidate => candidate.stageCount === 1 && candidate.dutModelCode === 'MAINBOARD-A');
+    candidate => candidate.operationCount === 1 && candidate.productModelCode === 'MAINBOARD-A');
   if (response.status !== 200 || !line) {
     throw new Error(`Production line was not persisted: ${response.text}`);
   }

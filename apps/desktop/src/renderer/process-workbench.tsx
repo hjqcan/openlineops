@@ -45,7 +45,7 @@ import {
 type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'Blockly' | 'PythonScript';
 type AddableProcessNodeKind = Exclude<ProcessNodeKind, 'Start'>;
 type TransitionLoopPolicy = 'None' | 'Counted';
-type ProcessTargetKind = 'System' | 'SlotGroup' | 'Slot' | 'Dut' | 'Capability' | 'Driver';
+type ProcessTargetKind = 'System' | 'SlotGroup' | 'Slot' | 'ProductionUnit' | 'Capability' | 'Driver';
 
 interface ProcessWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
@@ -202,7 +202,7 @@ const processTargetKinds: ProcessTargetKind[] = [
   'Driver',
   'SlotGroup',
   'Slot',
-  'Dut'
+  'ProductionUnit'
 ];
 
 export function ProcessWorkbench({
@@ -632,7 +632,7 @@ export function ProcessWorkbench({
       category: customBlockDraft.category,
       displayName: customBlockDraft.displayName,
       blocklyJson,
-      runtimeActionContractSchemaVersion: 'openlineops.runtime-action-contract/v1',
+      runtimeActionContractSchemaVersion: 'openlineops.runtime-action-contract',
       runtimeActionContract
     };
 
@@ -662,7 +662,7 @@ export function ProcessWorkbench({
       }
       setBlockHistory(versions);
       setCustomBlockDraft(createCustomBlocklyBlockDraft());
-      onMessage(`Registered Blockly block ${response.body.blockType} v${response.body.version}`);
+      onMessage(`Registered Blockly block ${response.body.blockType} revision ${response.body.version}`);
     } finally {
       setBusy(false);
     }
@@ -715,7 +715,7 @@ export function ProcessWorkbench({
         return;
       }
       setBlockHistory(versions);
-      onMessage(`Restored ${block.blockType} v${block.version} as v${response.body.version}`);
+      onMessage(`Restored ${block.blockType} revision ${block.version} as revision ${response.body.version}`);
     } finally {
       setBusy(false);
     }
@@ -1591,7 +1591,7 @@ function ProcessBlocklyBlockCatalogPanel({
           >
             <Plus size={12} />
             <span>{block.displayName}</span>
-            <small>{block.isBuiltIn ? 'v1' : `v${block.version}`}</small>
+            <small>revision {block.version}</small>
           </button>
         ))}
         {blockCatalog.length > 7 ? <em>+{blockCatalog.length - 7} more</em> : null}
@@ -1669,7 +1669,7 @@ function ProcessBlocklyBlockCatalogPanel({
             >
               {customBlocks.map(block => (
                 <option key={block.blockType} value={block.blockType}>
-                  {block.displayName} v{block.version}
+                  {block.displayName} revision {block.version}
                 </option>
               ))}
             </select>
@@ -1677,7 +1677,7 @@ function ProcessBlocklyBlockCatalogPanel({
               {blockHistory.length > 0 ? blockHistory.map(version => (
                 <div className="block-version-row" key={`${version.blockType}-${version.version}`}>
                   <div>
-                    <strong>v{version.version}</strong>
+                    <strong>revision {version.version}</strong>
                     <span>{formatCompactDateTime(version.updatedAtUtc)}</span>
                     <small>{version.displayName}</small>
                   </div>
@@ -1686,8 +1686,8 @@ function ProcessBlocklyBlockCatalogPanel({
                     className="button ghost"
                     onClick={() => onRestoreVersion(version)}
                     disabled={!isBackendHealthy || busy || blockHistoryBusy || version.version === latestVersion}
-                    data-testid={`restore-blockly-block-v${version.version}`}
-                    title={`Restore ${version.blockType} v${version.version}`}
+                    data-testid={`restore-blockly-block-revision-${version.version}`}
+                    title={`Restore ${version.blockType} revision ${version.version}`}
                   >
                     <RotateCcw size={14} />
                     Restore
@@ -1937,14 +1937,14 @@ function createProjectTargetOptions(
     `${slot.address}, ${slot.materialKind}`,
     capabilitiesForSystem(systemsById, slot.parentSystemId)));
 
-  const dutTargets = topology.slots
-    .filter(slot => slot.materialKind === 'Dut')
+  const productionUnitTargets = topology.slots
+    .filter(slot => slot.materialKind === 'ProductionUnit')
     .map((slot, index) => createOption(
-      `dut-${index}`,
-      'Dut',
+      `production-unit-${index}`,
+      'ProductionUnit',
       slot.slotId,
       slot.displayName,
-      `${slot.address}, DUT`,
+      `${slot.address}, Production Unit`,
       capabilitiesForSystem(systemsById, slot.parentSystemId)));
 
   const capabilityTargets = topology.capabilities.map((capability, index) => createOption(
@@ -1969,7 +1969,7 @@ function createProjectTargetOptions(
     ...driverTargets,
     ...slotGroupTargets,
     ...slotTargets,
-    ...dutTargets
+    ...productionUnitTargets
   ];
 }
 
@@ -2105,7 +2105,7 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
             ['System', 'System'],
             ['Slot group', 'SlotGroup'],
             ['Slot', 'Slot'],
-            ['DUT', 'Dut'],
+            ['Production Unit', 'ProductionUnit'],
             ['Capability', 'Capability'],
             ['Driver', 'Driver']
           ]
@@ -2127,7 +2127,7 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
       tooltip: 'Emit a target-bound fixture command through Flow IR.'
     }, null, 2),
     runtimeActionContractText: JSON.stringify({
-      schemaVersion: 'openlineops.runtime-action-contract/v1',
+      schemaVersion: 'openlineops.runtime-action-contract',
       actionType: 'fixture.action',
       fields: {
         ACTION: {
@@ -2147,7 +2147,7 @@ function createCustomBlocklyBlockDraft(): CustomBlocklyBlockDraft {
             'System',
             'SlotGroup',
             'Slot',
-            'Dut',
+            'ProductionUnit',
             'Capability',
             'Driver'
           ],

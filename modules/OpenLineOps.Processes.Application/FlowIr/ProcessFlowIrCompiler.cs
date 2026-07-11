@@ -105,7 +105,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             .ToImmutableArray();
 
         var document = new FlowIrDocument(
-            FlowIrSchemaVersions.V1,
+            FlowIrSchema.Current,
             definition.Id.Value,
             definition.VersionId.Value,
             definition.DisplayName,
@@ -306,7 +306,7 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             ProcessActionTargetKind.System => FlowIrTargetReferenceKind.System,
             ProcessActionTargetKind.SlotGroup => FlowIrTargetReferenceKind.SlotGroup,
             ProcessActionTargetKind.Slot => FlowIrTargetReferenceKind.Slot,
-            ProcessActionTargetKind.Dut => FlowIrTargetReferenceKind.Dut,
+            ProcessActionTargetKind.ProductionUnit => FlowIrTargetReferenceKind.ProductionUnit,
             ProcessActionTargetKind.Capability => FlowIrTargetReferenceKind.Capability,
             ProcessActionTargetKind.Driver => FlowIrTargetReferenceKind.Driver,
             _ => throw new InvalidOperationException($"Unsupported command target kind {kind}.")

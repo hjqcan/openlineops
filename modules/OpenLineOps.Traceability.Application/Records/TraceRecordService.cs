@@ -3,7 +3,7 @@ using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Domain.Abstractions.Serialization;
-using OpenLineOps.Traceability.Application.Judgements;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Application.Persistence;
 using OpenLineOps.Traceability.Application.Queries;
 using OpenLineOps.Traceability.Domain.Identifiers;
@@ -13,20 +13,17 @@ namespace OpenLineOps.Traceability.Application.Records;
 
 public sealed class TraceRecordService : ITraceRecordService
 {
-    private const string PackageFormatVersion = "openlineops.production-run-trace-package.v1";
+    private const string PackageFormat = "openlineops.production-run-trace-package";
 
     private readonly ITraceRecordRepository _repository;
     private readonly IClock _clock;
-    private readonly ITraceJudgementGenerator _judgementGenerator;
 
     public TraceRecordService(
         ITraceRecordRepository repository,
-        IClock clock,
-        ITraceJudgementGenerator judgementGenerator)
+        IClock clock)
     {
         _repository = repository;
         _clock = clock;
-        _judgementGenerator = judgementGenerator;
     }
 
     public async Task<Result<TraceRecordDetails>> CreateAsync(
@@ -43,12 +40,6 @@ public sealed class TraceRecordService : ITraceRecordService
 
         try
         {
-            var judgement = _judgementGenerator.Generate(request);
-            if (judgement.IsFailure)
-            {
-                return Result.Failure<TraceRecordDetails>(judgement.Error);
-            }
-
             var runId = new ProductionRunId(request.ProductionRunId);
             var traceRecord = TraceRecord.Create(
                 new TraceRecordId(runId.Value),
@@ -58,21 +49,22 @@ public sealed class TraceRecordService : ITraceRecordService
                 request.ProjectSnapshotId!,
                 request.TopologyId!,
                 request.ProductionLineDefinitionId!,
-                request.DutModelId!,
-                request.DutIdentityInputKey!,
-                request.DutIdentityValue!,
-                request.BatchId,
-                request.FixtureId,
-                request.DeviceId,
+                request.ProductModelId!,
+                request.ProductionUnitIdentityInputKey!,
+                request.ProductionUnitIdentityValue!,
+                request.LotId,
+                request.CarrierId,
                 new ActorId(request.ActorId!),
-                ParseEnum<TraceProductionRunStatus>(request.RunStatus!, "Traceability.InvalidRunStatus"),
-                judgement.Value,
+                ParseEnum<ExecutionStatus>(request.ExecutionStatus!, "Traceability.InvalidExecutionStatus"),
+                ParseEnum<ResultJudgement>(request.Judgement!, "Traceability.InvalidJudgement"),
+                ParseEnum<ProductDisposition>(request.Disposition!, "Traceability.InvalidDisposition"),
                 request.CreatedAtUtc,
                 request.StartedAtUtc,
                 request.CompletedAtUtc,
                 request.FailureCode,
                 request.FailureReason,
-                request.Stages!.Select(ToStage),
+                request.Operations!.Select(ToOperation),
+                (request.RouteDecisions ?? []).Select(ToRouteDecision),
                 (request.AuditEntries ?? []).Select(ToAuditEntry));
 
             var added = await _repository
@@ -152,18 +144,19 @@ public sealed class TraceRecordService : ITraceRecordService
         return details.IsFailure
             ? Result.Failure<TraceRecordExportPackage>(details.Error)
             : Result.Success(new TraceRecordExportPackage(
-                PackageFormatVersion,
+                PackageFormat,
                 _clock.UtcNow,
                 details.Value));
     }
 
-    private static TraceStageExecution ToStage(CreateTraceStageExecutionRequest request)
+    private static TraceOperationExecution ToOperation(CreateTraceOperationExecutionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return new TraceStageExecution(
-            request.StageId!,
-            request.Sequence,
-            request.WorkstationId!,
+        return new TraceOperationExecution(
+            request.OperationRunId!,
+            request.OperationId!,
+            request.Attempt,
+            request.StationSystemId!,
             new StationId(request.StationId!),
             new ProcessDefinitionId(request.ProcessDefinitionId!),
             new ProcessVersionId(request.ProcessVersionId!),
@@ -175,7 +168,10 @@ public sealed class TraceRecordService : ITraceRecordService
                 : ParseEnum<TraceRuntimeSessionStatus>(
                     request.RuntimeSessionStatus,
                     "Traceability.InvalidRuntimeSessionStatus"),
-            ParseEnum<TraceStageStatus>(request.Status!, "Traceability.InvalidStageStatus"),
+            ParseEnum<ExecutionStatus>(
+                request.ExecutionStatus!,
+                "Traceability.InvalidOperationExecutionStatus"),
+            ParseEnum<ResultJudgement>(request.Judgement!, "Traceability.InvalidOperationJudgement"),
             request.StartedAtUtc,
             request.CompletedAtUtc,
             request.FailureCode,
@@ -186,8 +182,31 @@ public sealed class TraceRecordService : ITraceRecordService
             (request.Commands ?? []).Select(ToCommand),
             (request.Measurements ?? []).Select(ToMeasurement),
             (request.Artifacts ?? []).Select(ToArtifact),
-            (request.Incidents ?? []).Select(ToIncident));
+            (request.Incidents ?? []).Select(ToIncident),
+            (request.Outputs ?? []).Select(ToOutput),
+            (request.FencingTokens ?? []).Select(ToFencingToken));
     }
+
+    private static TraceRouteDecision ToRouteDecision(CreateTraceRouteDecisionRequest request) => new(
+        request.SourceOperationRunId!,
+        request.TransitionId!,
+        request.TargetOperationId!,
+        ParseEnum<ResultJudgement>(
+            request.SourceJudgement!,
+            "Traceability.InvalidRouteSourceJudgement"),
+        request.Traversal,
+        request.DecidedAtUtc);
+
+    private static TraceOperationOutput ToOutput(CreateTraceOperationOutputRequest request) => new(
+        request.Key!,
+        request.ValueKind!,
+        request.CanonicalJson!);
+
+    private static TraceResourceFencingToken ToFencingToken(
+        CreateTraceResourceFencingTokenRequest request) => new(
+        request.ResourceKind!,
+        request.ResourceId!,
+        request.FencingToken);
 
     private static TraceCommandRecord ToCommand(CreateTraceCommandRequest request)
     {
@@ -200,9 +219,9 @@ public sealed class TraceRecordService : ITraceRecordService
             request.TargetCapabilityId!,
             request.CommandName!,
             ParseEnum<TraceCommandStatus>(request.Status!, "Traceability.InvalidCommandStatus"),
-            ParseOptionalEnum<TraceCommandSemanticOutcome>(
-                request.SemanticOutcome,
-                "Traceability.InvalidCommandSemanticOutcome"),
+            ParseOptionalEnum<OpenLineOps.Runtime.Contracts.ResultJudgement>(
+                request.ResultJudgement,
+                "Traceability.InvalidCommandResultJudgement"),
             request.CreatedAtUtc,
             request.DeadlineAtUtc,
             request.AcceptedAtUtc,
@@ -299,14 +318,19 @@ public sealed class TraceRecordService : ITraceRecordService
             ?? RequiredCanonical(request.ProjectSnapshotId, "ProjectSnapshotId")
             ?? RequiredCanonical(request.TopologyId, "TopologyId")
             ?? RequiredCanonical(request.ProductionLineDefinitionId, "ProductionLineDefinitionId")
-            ?? RequiredCanonical(request.DutModelId, "DutModelId")
-            ?? RequiredCanonical(request.DutIdentityInputKey, "DutIdentityInputKey")
-            ?? RequiredCanonical(request.DutIdentityValue, "DutIdentityValue")
+            ?? RequiredCanonical(request.ProductModelId, "ProductModelId")
+            ?? RequiredCanonical(
+                request.ProductionUnitIdentityInputKey,
+                "ProductionUnitIdentityInputKey")
+            ?? RequiredCanonical(
+                request.ProductionUnitIdentityValue,
+                "ProductionUnitIdentityValue")
             ?? RequiredCanonical(request.ActorId, "ActorId")
-            ?? RequiredCanonical(request.RunStatus, "RunStatus")
-            ?? OptionalCanonical(request.BatchId, "BatchId")
-            ?? OptionalCanonical(request.FixtureId, "FixtureId")
-            ?? OptionalCanonical(request.DeviceId, "DeviceId")
+            ?? RequiredCanonical(request.ExecutionStatus, "ExecutionStatus")
+            ?? RequiredCanonical(request.Judgement, "Judgement")
+            ?? RequiredCanonical(request.Disposition, "Disposition")
+            ?? OptionalCanonical(request.LotId, "LotId")
+            ?? OptionalCanonical(request.CarrierId, "CarrierId")
             ?? OptionalCanonical(request.FailureCode, "FailureCode")
             ?? OptionalCanonical(request.FailureReason, "FailureReason");
         if (requiredError is not null)
@@ -314,11 +338,23 @@ public sealed class TraceRecordService : ITraceRecordService
             return requiredError;
         }
 
-        if (request.Stages is null || request.Stages.Count == 0)
+        if (request.Operations is null)
         {
             return ApplicationError.Validation(
-                "Traceability.StagesRequired",
-                "A production run trace must contain at least one stage.");
+                "Traceability.OperationsRequired",
+                "Operations are required, including an empty collection for a pre-start cancellation.");
+        }
+
+        if (request.Operations.Count == 0
+            && (!string.Equals(
+                    request.ExecutionStatus,
+                    ExecutionStatus.Canceled.ToString(),
+                    StringComparison.Ordinal)
+                || request.StartedAtUtc is not null))
+        {
+            return ApplicationError.Validation(
+                "Traceability.OperationsRequired",
+                "Only a Production Run canceled before execution may contain no Operations.");
         }
 
         return null;

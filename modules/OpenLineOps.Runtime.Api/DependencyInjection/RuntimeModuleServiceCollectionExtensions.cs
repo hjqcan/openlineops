@@ -6,6 +6,7 @@ using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Identifiers;
+using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
@@ -14,9 +15,11 @@ using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 using OpenLineOps.Runtime.Infrastructure.Events;
+using OpenLineOps.Runtime.Infrastructure.Execution;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Time;
+using OpenLineOps.Runtime.Infrastructure.Transport;
 using OpenLineOps.Runtime.Api.HostedServices;
 
 namespace OpenLineOps.Runtime.Api.DependencyInjection;
@@ -32,7 +35,13 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddSingleton<IRuntimeIdProvider, GuidRuntimeIdProvider>();
 
         var persistenceOptions = LoadPersistenceOptions(configuration);
+        var coordinationOptions = LoadCoordinationPersistenceOptions(configuration);
+        var transportOptions = LoadStationCoordinatorTransportOptions(configuration);
+        var stationExecutionOptions = LoadStationExecutionOptions(configuration);
         services.AddSingleton(persistenceOptions);
+        services.AddSingleton(coordinationOptions);
+        services.AddSingleton(transportOptions);
+        services.AddSingleton(stationExecutionOptions);
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
 
@@ -42,8 +51,6 @@ public static class RuntimeModuleServiceCollectionExtensions
                 var sqliteConnectionString = persistenceOptions.ResolveSqliteConnectionString();
                 services.AddSingleton<IRuntimeSessionRepository>(_ =>
                     new SqliteRuntimeSessionRepository(sqliteConnectionString));
-                services.AddSingleton<IProductionRunRepository>(_ =>
-                    new SqliteProductionRunRepository(sqliteConnectionString));
                 services.AddSingleton(new SqliteRuntimeStoreExclusiveLease(sqliteConnectionString));
                 services.AddHostedService<SqliteRuntimeStoreLeaseHostedService>();
                 break;
@@ -51,10 +58,105 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<InMemoryRuntimeSessionRepository>();
                 services.AddSingleton<IRuntimeSessionRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryRuntimeSessionRepository>());
+                break;
+        }
+
+        var coordinationProvider = ProductionCoordinationPersistenceProviders.Parse(
+            coordinationOptions.Provider);
+        switch (coordinationProvider)
+        {
+            case ProductionCoordinationPersistenceProvider.PostgreSql:
+                var productionPostgreSqlConnectionString =
+                    coordinationOptions.ResolvePostgreSqlConnectionString();
+                services.AddSingleton(_ => new PostgreSqlProductionCoordinationStore(
+                    productionPostgreSqlConnectionString));
+                services.AddSingleton<IProductionRunRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
+                services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
+                services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
+                services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
+                services.AddSingleton<IProductionMaterialRepository>(_ =>
+                    new PostgreSqlProductionMaterialRepository(
+                        productionPostgreSqlConnectionString));
+                break;
+            case ProductionCoordinationPersistenceProvider.Sqlite:
+                var productionSqliteConnectionString = coordinationOptions.ResolveSqliteConnectionString();
+                services.AddSingleton(_ =>
+                    new SqliteProductionRunRepository(productionSqliteConnectionString));
+                services.AddSingleton<IProductionRunRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
+                services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
+                services.AddSingleton<IResourceLeaseRepository>(_ =>
+                    new SqliteResourceLeaseRepository(productionSqliteConnectionString));
+                services.AddSingleton<InMemoryStationJobCoordinationStore>();
+                services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
+                services.AddSingleton<IProductionMaterialRepository>(_ =>
+                    new SqliteProductionMaterialRepository(productionSqliteConnectionString));
+                break;
+            case ProductionCoordinationPersistenceProvider.InMemory:
                 services.AddSingleton<InMemoryProductionRunRepository>();
                 services.AddSingleton<IProductionRunRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryProductionRunRepository>());
+                services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryProductionRunRepository>());
+                services.AddSingleton<IResourceLeaseRepository, InMemoryResourceLeaseRepository>();
+                services.AddSingleton<InMemoryStationJobCoordinationStore>();
+                services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
+                services.AddSingleton<IProductionMaterialRepository,
+                    InMemoryProductionMaterialRepository>();
                 break;
+        }
+
+        services.AddScoped<ProductionMaterialService>();
+
+        services.TryAddSingleton<IStationDeploymentResolver, ConfigurationStationDeploymentResolver>();
+        var transportProvider = StationCoordinatorTransportProviders.Parse(transportOptions.Provider);
+        switch (transportProvider)
+        {
+            case StationCoordinatorTransportProvider.RabbitMq:
+                _ = transportOptions.ResolveBrokerUri();
+                services.AddSingleton<RabbitMqStationCoordinatorTransport>();
+                services.AddSingleton<IStationJobOutboxPublisher>(serviceProvider =>
+                    serviceProvider.GetRequiredService<RabbitMqStationCoordinatorTransport>());
+                services.TryAddSingleton<IStationJobGateway, DurableStationJobGateway>();
+                services.TryAddSingleton<IStationSafetyGateway, RabbitMqStationSafetyGateway>();
+                services.AddHostedService<StationJobOutboxHostedService>();
+                services.AddHostedService<StationResultInboxHostedService>();
+                break;
+            case StationCoordinatorTransportProvider.Disabled:
+                if (coordinationProvider == ProductionCoordinationPersistenceProvider.PostgreSql)
+                {
+                    throw new InvalidOperationException(
+                        "PostgreSQL Production coordination requires RabbitMq Station transport.");
+                }
+
+                services.TryAddSingleton<IStationJobGateway, DisabledStationJobGateway>();
+                services.TryAddSingleton<IStationSafetyGateway, DisabledStationSafetyGateway>();
+                break;
+        }
+
+        var stationExecutionProvider = StationExecutionProviders.Parse(
+            stationExecutionOptions.Provider);
+        if (stationExecutionProvider == StationExecutionProvider.Agent
+            && transportProvider != StationCoordinatorTransportProvider.RabbitMq)
+        {
+            throw new InvalidOperationException(
+                "Agent Station execution requires RabbitMq Station transport.");
+        }
+
+        if (stationExecutionProvider == StationExecutionProvider.InProcess
+            && (coordinationProvider == ProductionCoordinationPersistenceProvider.PostgreSql
+                || transportProvider != StationCoordinatorTransportProvider.Disabled))
+        {
+            throw new InvalidOperationException(
+                "InProcess Station execution is allowed only with explicit local/test coordination "
+                + "and Disabled Agent transport.");
         }
 
         services.AddSingleton<IRuntimeDomainEventPublisher, RuntimeDomainEventPublisher>();
@@ -72,10 +174,32 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddSingleton<IRuntimeDomainEventSubscriber>(serviceProvider =>
             serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
         services.AddScoped<IRuntimeSessionRunner, RuntimeSessionRunner>();
+        // The in-process dispatcher is available only for explicit test composition.
+        // Production composition must provide an Agent gateway and deployment resolver.
+        services.AddScoped<InProcessStationOperationDispatcher>();
+        services.AddScoped<AgentStationOperationDispatcher>();
+        services.AddScoped<AgentStationSafetyController>();
+        services.AddScoped<InProcessStationSafetyController>();
+        if (stationExecutionProvider == StationExecutionProvider.Agent)
+        {
+            services.TryAddScoped<IStationOperationDispatcher>(serviceProvider =>
+                serviceProvider.GetRequiredService<AgentStationOperationDispatcher>());
+            services.TryAddScoped<IStationSafetyController>(serviceProvider =>
+                serviceProvider.GetRequiredService<AgentStationSafetyController>());
+        }
+        else
+        {
+            services.TryAddScoped<IStationOperationDispatcher>(serviceProvider =>
+                serviceProvider.GetRequiredService<InProcessStationOperationDispatcher>());
+            services.TryAddScoped<IStationSafetyController>(serviceProvider =>
+                serviceProvider.GetRequiredService<InProcessStationSafetyController>());
+        }
         services.AddScoped<IProductionRunRunner, ProductionRunRunner>();
+        services.AddScoped<IProductionRunCoordinator, ProductionRunCoordinator>();
         services.AddScoped<IRuntimeSessionRecoveryService, RuntimeSessionRecoveryService>();
         services.AddScoped<IProductionRunRecoveryService, ProductionRunRecoveryService>();
         services.AddHostedService<ProductionRunStartupRecoveryHostedService>();
+        services.AddHostedService<ProductionRunCoordinatorHostedService>();
 
         return services;
     }
@@ -89,6 +213,37 @@ public static class RuntimeModuleServiceCollectionExtensions
             Provider = section?["Provider"] ?? RuntimeSessionPersistenceProviders.Sqlite,
             ConnectionString = section?["ConnectionString"],
             DatabasePath = section?["DatabasePath"] ?? "data/openlineops-runtime.sqlite"
+        };
+    }
+
+    private static ProductionCoordinationPersistenceOptions LoadCoordinationPersistenceOptions(
+        IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(ProductionCoordinationPersistenceOptions.SectionName);
+        return new ProductionCoordinationPersistenceOptions
+        {
+            Provider = section?["Provider"]
+                ?? ProductionCoordinationPersistenceProviders.PostgreSql,
+            ConnectionString = section?["ConnectionString"],
+            SqliteDatabasePath = section?["SqliteDatabasePath"]
+        };
+    }
+
+    private static StationCoordinatorTransportOptions LoadStationCoordinatorTransportOptions(
+        IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(StationCoordinatorTransportOptions.SectionName);
+        return section?.Get<StationCoordinatorTransportOptions>()
+               ?? new StationCoordinatorTransportOptions();
+    }
+
+    private static StationExecutionOptions LoadStationExecutionOptions(
+        IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(StationExecutionOptions.SectionName);
+        return new StationExecutionOptions
+        {
+            Provider = section?["Provider"] ?? StationExecutionProviders.Agent
         };
     }
 

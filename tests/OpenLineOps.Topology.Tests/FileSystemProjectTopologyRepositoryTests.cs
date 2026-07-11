@@ -11,7 +11,7 @@ namespace OpenLineOps.Topology.Tests;
 
 public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "openlineops-topology-v1", Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "openlineops-topology", Guid.NewGuid().ToString("N"));
 
     [Fact]
     public async Task RoundTripPersistsCurrentV1SystemsAndNestedLayoutContracts()
@@ -34,14 +34,14 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
 
         var topologyJson = await File.ReadAllTextAsync(Directory.GetFiles(
             Path.Combine(scope.ApplicationRootPath, "topology"), "*.json").Single());
-        Assert.Contains("\"schemaVersion\": \"openlineops.automation-topology/v1\"", topologyJson, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\": \"openlineops.automation-topology\"", topologyJson, StringComparison.Ordinal);
         Assert.Contains("\"systems\"", topologyJson, StringComparison.Ordinal);
         Assert.DoesNotContain("equipmentNodes", topologyJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("automationModules", topologyJson, StringComparison.OrdinalIgnoreCase);
 
         var layoutJson = await File.ReadAllTextAsync(Directory.GetFiles(
             Path.Combine(scope.ApplicationRootPath, "layouts"), "*.json").Single());
-        Assert.Contains("\"schemaVersion\": \"openlineops.site-layout/v1\"", layoutJson, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\": \"openlineops.site-layout\"", layoutJson, StringComparison.Ordinal);
         Assert.Contains("\"parentElementId\"", layoutJson, StringComparison.Ordinal);
         Assert.Contains("\"target\"", layoutJson, StringComparison.Ordinal);
     }
@@ -116,8 +116,8 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             new Dictionary<string, string> { ["line"] = "A" }).Succeeded);
         Assert.True(topology.UpdateSlot(
             new SlotDefinitionId("slot.1"),
-            "DUT-A1",
-            "DUT Position A1",
+            "UNIT-A1",
+            "Production Unit Position A1",
             SlotMaterialKind.Carrier,
             false).Succeeded);
         Assert.Equal(2, layout.RemoveElementsByTargets(new HashSet<LayoutTargetReference>
@@ -189,7 +189,7 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             group.Id,
             station.Id,
             "1",
-            "DUT 1")).Succeeded);
+            "Production Unit 1")).Succeeded);
         return topology;
     }
 

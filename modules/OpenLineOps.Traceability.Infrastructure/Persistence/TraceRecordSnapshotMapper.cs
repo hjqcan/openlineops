@@ -1,4 +1,5 @@
 using OpenLineOps.Domain.Abstractions.Serialization;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Domain.Identifiers;
 using OpenLineOps.Traceability.Domain.Records;
 
@@ -16,21 +17,22 @@ internal static class TraceRecordSnapshotMapper
             record.ProjectSnapshotId,
             record.TopologyId,
             record.ProductionLineDefinitionId,
-            record.DutModelId,
-            record.DutIdentityInputKey,
-            record.DutIdentityValue,
-            record.BatchId,
-            record.FixtureId,
-            record.DeviceId,
+            record.ProductModelId,
+            record.ProductionUnitIdentityInputKey,
+            record.ProductionUnitIdentityValue,
+            record.LotId,
+            record.CarrierId,
             record.ActorId.Value,
-            record.RunStatus.ToString(),
+            record.ExecutionStatus.ToString(),
             record.Judgement.ToString(),
+            record.Disposition.ToString(),
             record.CreatedAtUtc,
             record.StartedAtUtc,
             record.CompletedAtUtc,
             record.FailureCode,
             record.FailureReason,
-            record.Stages.Select(ToSnapshot).ToArray(),
+            record.Operations.Select(ToSnapshot).ToArray(),
+            record.RouteDecisions.Select(ToSnapshot).ToArray(),
             record.AuditEntries.Select(ToSnapshot).ToArray());
     }
 
@@ -45,81 +47,124 @@ internal static class TraceRecordSnapshotMapper
             snapshot.ProjectSnapshotId,
             snapshot.TopologyId,
             snapshot.ProductionLineDefinitionId,
-            snapshot.DutModelId,
-            snapshot.DutIdentityInputKey,
-            snapshot.DutIdentityValue,
-            snapshot.BatchId,
-            snapshot.FixtureId,
-            snapshot.DeviceId,
+            snapshot.ProductModelId,
+            snapshot.ProductionUnitIdentityInputKey,
+            snapshot.ProductionUnitIdentityValue,
+            snapshot.LotId,
+            snapshot.CarrierId,
             new ActorId(snapshot.ActorId),
-            ParseEnum<TraceProductionRunStatus>(snapshot.RunStatus, nameof(snapshot.RunStatus)),
+            ParseEnum<ExecutionStatus>(snapshot.ExecutionStatus, nameof(snapshot.ExecutionStatus)),
             ParseEnum<ResultJudgement>(snapshot.Judgement, nameof(snapshot.Judgement)),
+            ParseEnum<ProductDisposition>(snapshot.Disposition, nameof(snapshot.Disposition)),
             snapshot.CreatedAtUtc,
             snapshot.StartedAtUtc,
             snapshot.CompletedAtUtc,
             snapshot.FailureCode,
             snapshot.FailureReason,
-            snapshot.Stages.Select(ToAggregate),
+            snapshot.Operations.Select(ToAggregate),
+            snapshot.RouteDecisions.Select(ToAggregate),
             snapshot.AuditEntries.Select(ToAggregate));
     }
 
-    private static PersistedTraceStageExecution ToSnapshot(TraceStageExecution stage)
+    private static PersistedTraceOperationExecution ToSnapshot(TraceOperationExecution operation)
     {
-        return new PersistedTraceStageExecution(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId.Value,
-            stage.ProcessDefinitionId.Value,
-            stage.ProcessVersionId.Value,
-            stage.ConfigurationSnapshotId.Value,
-            stage.RecipeSnapshotId.Value,
-            stage.RuntimeSessionId?.Value,
-            stage.RuntimeSessionStatus?.ToString(),
-            stage.Status.ToString(),
-            stage.StartedAtUtc,
-            stage.CompletedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount,
-            stage.Commands.Select(ToSnapshot).ToArray(),
-            stage.Measurements.Select(ToSnapshot).ToArray(),
-            stage.Artifacts.Select(ToSnapshot).ToArray(),
-            stage.Incidents.Select(ToSnapshot).ToArray());
+        return new PersistedTraceOperationExecution(
+            operation.OperationRunId,
+            operation.OperationId,
+            operation.Attempt,
+            operation.StationSystemId,
+            operation.StationId.Value,
+            operation.ProcessDefinitionId.Value,
+            operation.ProcessVersionId.Value,
+            operation.ConfigurationSnapshotId.Value,
+            operation.RecipeSnapshotId.Value,
+            operation.RuntimeSessionId?.Value,
+            operation.RuntimeSessionStatus?.ToString(),
+            operation.ExecutionStatus.ToString(),
+            operation.Judgement.ToString(),
+            operation.StartedAtUtc,
+            operation.CompletedAtUtc,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount,
+            operation.Commands.Select(ToSnapshot).ToArray(),
+            operation.Measurements.Select(ToSnapshot).ToArray(),
+            operation.Artifacts.Select(ToSnapshot).ToArray(),
+            operation.Incidents.Select(ToSnapshot).ToArray(),
+            operation.Outputs.Select(ToSnapshot).ToArray(),
+            operation.FencingTokens.Select(ToSnapshot).ToArray());
     }
 
-    private static TraceStageExecution ToAggregate(PersistedTraceStageExecution stage)
+    private static TraceOperationExecution ToAggregate(PersistedTraceOperationExecution operation)
     {
-        return new TraceStageExecution(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            new StationId(stage.StationId),
-            new ProcessDefinitionId(stage.ProcessDefinitionId),
-            new ProcessVersionId(stage.ProcessVersionId),
-            new ConfigurationSnapshotId(stage.ConfigurationSnapshotId),
-            new RecipeSnapshotId(stage.RecipeSnapshotId),
-            stage.RuntimeSessionId is null ? null : new RuntimeSessionId(stage.RuntimeSessionId.Value),
-            stage.RuntimeSessionStatus is null
+        return new TraceOperationExecution(
+            operation.OperationRunId,
+            operation.OperationId,
+            operation.Attempt,
+            operation.StationSystemId,
+            new StationId(operation.StationId),
+            new ProcessDefinitionId(operation.ProcessDefinitionId),
+            new ProcessVersionId(operation.ProcessVersionId),
+            new ConfigurationSnapshotId(operation.ConfigurationSnapshotId),
+            new RecipeSnapshotId(operation.RecipeSnapshotId),
+            operation.RuntimeSessionId is null ? null : new RuntimeSessionId(operation.RuntimeSessionId.Value),
+            operation.RuntimeSessionStatus is null
                 ? null
                 : ParseEnum<TraceRuntimeSessionStatus>(
-                    stage.RuntimeSessionStatus,
-                    nameof(stage.RuntimeSessionStatus)),
-            ParseEnum<TraceStageStatus>(stage.Status, nameof(stage.Status)),
-            stage.StartedAtUtc,
-            stage.CompletedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount,
-            stage.Commands.Select(ToAggregate),
-            stage.Measurements.Select(ToAggregate),
-            stage.Artifacts.Select(ToAggregate),
-            stage.Incidents.Select(ToAggregate));
+                    operation.RuntimeSessionStatus,
+                    nameof(operation.RuntimeSessionStatus)),
+            ParseEnum<ExecutionStatus>(operation.ExecutionStatus, nameof(operation.ExecutionStatus)),
+            ParseEnum<ResultJudgement>(operation.Judgement, nameof(operation.Judgement)),
+            operation.StartedAtUtc,
+            operation.CompletedAtUtc,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount,
+            operation.Commands.Select(ToAggregate),
+            operation.Measurements.Select(ToAggregate),
+            operation.Artifacts.Select(ToAggregate),
+            operation.Incidents.Select(ToAggregate),
+            operation.Outputs.Select(ToAggregate),
+            operation.FencingTokens.Select(ToAggregate));
     }
+
+    private static PersistedTraceRouteDecision ToSnapshot(TraceRouteDecision decision)
+    {
+        return new PersistedTraceRouteDecision(
+            decision.SourceOperationRunId,
+            decision.TransitionId,
+            decision.TargetOperationId,
+            decision.SourceJudgement.ToString(),
+            decision.Traversal,
+            decision.DecidedAtUtc);
+    }
+
+    private static TraceRouteDecision ToAggregate(PersistedTraceRouteDecision decision)
+    {
+        return new TraceRouteDecision(
+            decision.SourceOperationRunId,
+            decision.TransitionId,
+            decision.TargetOperationId,
+            ParseEnum<ResultJudgement>(decision.SourceJudgement, nameof(decision.SourceJudgement)),
+            decision.Traversal,
+            decision.DecidedAtUtc);
+    }
+
+    private static PersistedTraceOperationOutput ToSnapshot(TraceOperationOutput output) =>
+        new(output.Key, output.ValueKind, output.CanonicalJson);
+
+    private static TraceOperationOutput ToAggregate(PersistedTraceOperationOutput output) =>
+        new(output.Key, output.ValueKind, output.CanonicalJson);
+
+    private static PersistedTraceResourceFencingToken ToSnapshot(TraceResourceFencingToken token) =>
+        new(token.ResourceKind, token.ResourceId, token.FencingToken);
+
+    private static TraceResourceFencingToken ToAggregate(PersistedTraceResourceFencingToken token) =>
+        new(token.ResourceKind, token.ResourceId, token.FencingToken);
 
     private static PersistedTraceCommand ToSnapshot(TraceCommandRecord command)
     {
@@ -132,7 +177,7 @@ internal static class TraceRecordSnapshotMapper
             command.TargetCapabilityId,
             command.CommandName,
             command.Status.ToString(),
-            command.SemanticOutcome?.ToString(),
+            command.ResultJudgement?.ToString(),
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,
@@ -153,11 +198,9 @@ internal static class TraceRecordSnapshotMapper
             command.TargetCapabilityId,
             command.CommandName,
             ParseEnum<TraceCommandStatus>(command.Status, nameof(command.Status)),
-            command.SemanticOutcome is null
+            command.ResultJudgement is null
                 ? null
-                : ParseEnum<TraceCommandSemanticOutcome>(
-                    command.SemanticOutcome,
-                    nameof(command.SemanticOutcome)),
+                : ParseEnum<ResultJudgement>(command.ResultJudgement, nameof(command.ResultJudgement)),
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,
@@ -293,27 +336,29 @@ internal sealed record PersistedTraceRecord(
     string ProjectSnapshotId,
     string TopologyId,
     string ProductionLineDefinitionId,
-    string DutModelId,
-    string DutIdentityInputKey,
-    string DutIdentityValue,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
+    string ProductModelId,
+    string ProductionUnitIdentityInputKey,
+    string ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string ActorId,
-    string RunStatus,
+    string ExecutionStatus,
     string Judgement,
+    string Disposition,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
     string? FailureReason,
-    PersistedTraceStageExecution[] Stages,
+    PersistedTraceOperationExecution[] Operations,
+    PersistedTraceRouteDecision[] RouteDecisions,
     PersistedAuditEntry[] AuditEntries);
 
-internal sealed record PersistedTraceStageExecution(
-    string StageId,
-    int Sequence,
-    string WorkstationId,
+internal sealed record PersistedTraceOperationExecution(
+    string OperationRunId,
+    string OperationId,
+    int Attempt,
+    string StationSystemId,
     string StationId,
     string ProcessDefinitionId,
     string ProcessVersionId,
@@ -321,7 +366,8 @@ internal sealed record PersistedTraceStageExecution(
     string RecipeSnapshotId,
     Guid? RuntimeSessionId,
     string? RuntimeSessionStatus,
-    string Status,
+    string ExecutionStatus,
+    string Judgement,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset CompletedAtUtc,
     string? FailureCode,
@@ -332,7 +378,24 @@ internal sealed record PersistedTraceStageExecution(
     PersistedTraceCommand[] Commands,
     PersistedMeasurementRecord[] Measurements,
     PersistedArtifactRecord[] Artifacts,
-    PersistedTraceIncident[] Incidents);
+    PersistedTraceIncident[] Incidents,
+    PersistedTraceOperationOutput[] Outputs,
+    PersistedTraceResourceFencingToken[] FencingTokens);
+
+internal sealed record PersistedTraceRouteDecision(
+    string SourceOperationRunId,
+    string TransitionId,
+    string TargetOperationId,
+    string SourceJudgement,
+    int Traversal,
+    DateTimeOffset DecidedAtUtc);
+
+internal sealed record PersistedTraceOperationOutput(string Key, string ValueKind, string CanonicalJson);
+
+internal sealed record PersistedTraceResourceFencingToken(
+    string ResourceKind,
+    string ResourceId,
+    long FencingToken);
 
 internal sealed record PersistedTraceCommand(
     Guid RuntimeCommandId,
@@ -343,7 +406,7 @@ internal sealed record PersistedTraceCommand(
     string TargetCapabilityId,
     string CommandName,
     string Status,
-    string? SemanticOutcome,
+    string? ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,

@@ -1,3 +1,4 @@
+using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 using OpenLineOps.Traceability.Domain.Identifiers;
 
 namespace OpenLineOps.Traceability.Domain.Records;
@@ -13,7 +14,7 @@ public sealed record TraceCommandRecord
         string targetCapabilityId,
         string commandName,
         TraceCommandStatus status,
-        TraceCommandSemanticOutcome? semanticOutcome,
+        CommandResultJudgement? resultJudgement,
         DateTimeOffset createdAtUtc,
         DateTimeOffset deadlineAtUtc,
         DateTimeOffset? acceptedAtUtc,
@@ -30,7 +31,7 @@ public sealed record TraceCommandRecord
         TargetCapabilityId = TraceabilityIdGuard.NotBlank(targetCapabilityId, nameof(targetCapabilityId));
         CommandName = TraceabilityIdGuard.NotBlank(commandName, nameof(commandName));
         Status = status;
-        SemanticOutcome = semanticOutcome;
+        ResultJudgement = resultJudgement;
         CreatedAtUtc = RequiredTimestamp(createdAtUtc, nameof(createdAtUtc));
         DeadlineAtUtc = RequiredTimestamp(deadlineAtUtc, nameof(deadlineAtUtc));
         AcceptedAtUtc = acceptedAtUtc;
@@ -51,7 +52,7 @@ public sealed record TraceCommandRecord
             throw new ArgumentException("Command timestamps must be chronological.", nameof(completedAtUtc));
         }
 
-        ValidateSemanticOutcome(status, semanticOutcome);
+        ValidateResultJudgement(status, resultJudgement);
     }
 
     public RuntimeCommandId RuntimeCommandId { get; }
@@ -70,7 +71,7 @@ public sealed record TraceCommandRecord
 
     public TraceCommandStatus Status { get; }
 
-    public TraceCommandSemanticOutcome? SemanticOutcome { get; }
+    public CommandResultJudgement? ResultJudgement { get; }
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -93,27 +94,51 @@ public sealed record TraceCommandRecord
             : value;
     }
 
-    private static void ValidateSemanticOutcome(
+    private static void ValidateResultJudgement(
         TraceCommandStatus status,
-        TraceCommandSemanticOutcome? semanticOutcome)
+        CommandResultJudgement? resultJudgement)
     {
-        if (semanticOutcome is null)
+        var isTerminal = status is TraceCommandStatus.Completed
+            or TraceCommandStatus.Failed
+            or TraceCommandStatus.TimedOut
+            or TraceCommandStatus.Canceled
+            or TraceCommandStatus.Rejected;
+        if (!isTerminal)
         {
+            if (resultJudgement is not null)
+            {
+                throw new ArgumentException(
+                    $"Non-terminal command status {status} cannot define a result judgement.",
+                    nameof(resultJudgement));
+            }
+
             return;
         }
 
-        var isValid = (status, semanticOutcome) switch
+        if (resultJudgement is null)
         {
-            (TraceCommandStatus.Completed, TraceCommandSemanticOutcome.Passed) => true,
-            (TraceCommandStatus.Failed, TraceCommandSemanticOutcome.Failed) => true,
-            (TraceCommandStatus.Canceled, TraceCommandSemanticOutcome.Aborted) => true,
+            throw new ArgumentException(
+                $"Terminal command status {status} requires a result judgement.",
+                nameof(resultJudgement));
+        }
+
+        var isValid = (status, resultJudgement.Value) switch
+        {
+            (TraceCommandStatus.Completed, CommandResultJudgement.Passed) => true,
+            (TraceCommandStatus.Completed, CommandResultJudgement.Failed) => true,
+            (TraceCommandStatus.Completed, CommandResultJudgement.Aborted) => true,
+            (TraceCommandStatus.Completed, CommandResultJudgement.NotApplicable) => true,
+            (TraceCommandStatus.Failed, CommandResultJudgement.Unknown) => true,
+            (TraceCommandStatus.TimedOut, CommandResultJudgement.Unknown) => true,
+            (TraceCommandStatus.Canceled, CommandResultJudgement.Unknown) => true,
+            (TraceCommandStatus.Rejected, CommandResultJudgement.Unknown) => true,
             _ => false
         };
         if (!isValid)
         {
             throw new ArgumentException(
-                $"Semantic outcome {semanticOutcome} is invalid for command status {status}.",
-                nameof(semanticOutcome));
+                $"Result judgement {resultJudgement} is invalid for command status {status}.",
+                nameof(resultJudgement));
         }
     }
 }

@@ -5,7 +5,6 @@ using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Traceability.Api.RuntimeIntegration;
 using OpenLineOps.Traceability.Application.Artifacts;
-using OpenLineOps.Traceability.Application.Judgements;
 using OpenLineOps.Traceability.Application.Persistence;
 using OpenLineOps.Traceability.Application.ReadModels;
 using OpenLineOps.Traceability.Application.Records;
@@ -27,8 +26,6 @@ public static class TraceabilityModuleServiceCollectionExtensions
         services.AddSingleton(persistenceOptions);
         var artifactStorageOptions = LoadArtifactStorageOptions(configuration);
         services.AddSingleton(artifactStorageOptions);
-        var judgementOptions = LoadJudgementOptions(configuration);
-        services.AddSingleton(judgementOptions);
 
         switch (TraceRecordPersistenceProviders.Parse(persistenceOptions.Provider))
         {
@@ -52,7 +49,6 @@ public static class TraceabilityModuleServiceCollectionExtensions
         }
 
         services.AddSingleton<ITraceRecordService, TraceRecordService>();
-        services.AddSingleton<ITraceJudgementGenerator, ConfiguredTraceJudgementGenerator>();
         services.AddSingleton<ITraceReadModelService, TraceReadModelService>();
         services.AddSingleton<ProductionRunTraceDomainEventSubscriber>();
         services.AddSingleton<IRuntimeDomainEventSubscriber>(serviceProvider =>
@@ -76,19 +72,6 @@ public static class TraceabilityModuleServiceCollectionExtensions
         };
     }
 
-    private static TraceJudgementOptions LoadJudgementOptions(IConfiguration? configuration)
-    {
-        var section = configuration?.GetSection(TraceJudgementOptions.SectionName);
-
-        return new TraceJudgementOptions
-        {
-            DefaultJudgement = section?["DefaultJudgement"] ?? "Passed",
-            FailWhenAnyMeasurementFailed = ParseBoolean(section?["FailWhenAnyMeasurementFailed"], defaultValue: true),
-            UnknownWhenAnyMeasurementIndeterminate = ParseBoolean(section?["UnknownWhenAnyMeasurementIndeterminate"], defaultValue: false),
-            UnknownWhenNoMeasurements = ParseBoolean(section?["UnknownWhenNoMeasurements"], defaultValue: false)
-        };
-    }
-
     private static TraceArtifactStorageOptions LoadArtifactStorageOptions(IConfiguration? configuration)
     {
         var section = configuration?.GetSection(TraceArtifactStorageOptions.SectionName);
@@ -100,10 +83,4 @@ public static class TraceabilityModuleServiceCollectionExtensions
         };
     }
 
-    private static bool ParseBoolean(string? value, bool defaultValue)
-    {
-        return bool.TryParse(value, out var parsed)
-            ? parsed
-            : defaultValue;
-    }
 }

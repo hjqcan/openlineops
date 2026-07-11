@@ -9,7 +9,14 @@ public static class OpenLineOpsApiRoutes
     public const string AutomationProjects = "api/automation-projects";
     public const string AutomationProjectWorkspaces = "api/automation-project-workspaces";
     public const string RuntimeMonitoring = "api/runtime/monitoring";
-    public const string RuntimeProductionRuns = "api/runtime/production-runs";
+    public const string ProductionRuns = "api/production-runs";
+    public const string ProductionUnits = "api/production-units";
+    public const string ProductionLots = "api/production-lots";
+    public const string ProductionCarriers = "api/production-carriers";
+    public const string SlotOccupancies = "api/slot-occupancies";
+    public const string MaterialGenealogy = "api/material-genealogy";
+    public const string OperationsActiveRuns = "api/operations/active-runs";
+    public const string OperationsLineState = "api/operations/lines/{lineId}/state";
     public const string RuntimeSessions = "api/runtime/sessions";
     public const string ProjectApplicationTopologies =
         AutomationProjects + "/{projectId}/applications/{applicationId}/topologies";

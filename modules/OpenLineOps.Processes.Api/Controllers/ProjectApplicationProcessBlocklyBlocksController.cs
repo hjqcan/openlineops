@@ -9,7 +9,7 @@ using RegisterApiBlockRequest = OpenLineOps.Processes.Api.Models.RegisterProcess
 namespace OpenLineOps.Processes.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.ProcessesV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Processes)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProcessBlocklyBlocks)]
 public sealed class ProjectApplicationProcessBlocklyBlocksController : ControllerBase
 {

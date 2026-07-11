@@ -5,7 +5,9 @@ using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
+using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
@@ -40,7 +42,7 @@ public sealed class RuntimeSessionRunnerTests
         Assert.Equal(2, result.Value.CommandCount);
         Assert.Equal(0, result.Value.IncidentCount);
         Assert.Equal(2, commandExecutor.Contexts.Count);
-        Assert.Equal("station-a", commandExecutor.Contexts[0].StationId.Value);
+        Assert.Equal("station.main", commandExecutor.Contexts[0].StationSystemId);
         Assert.Equal("snapshot-20260629-001", commandExecutor.Contexts[0].ConfigurationSnapshotId.Value);
         Assert.Equal("node-scan", commandExecutor.Contexts[0].NodeId.Value);
         Assert.Equal("node-measure", commandExecutor.Contexts[1].NodeId.Value);
@@ -48,12 +50,11 @@ public sealed class RuntimeSessionRunnerTests
             Guid.Parse("10000000-0000-0000-0000-000000000001"),
             commandExecutor.Contexts[0].ProductionRunId.Value);
         Assert.Equal("line.main", commandExecutor.Contexts[0].ProductionLineDefinitionId);
-        Assert.Equal("stage.main", commandExecutor.Contexts[0].ProductionStageId);
-        Assert.Equal(1, commandExecutor.Contexts[0].StageSequence);
-        Assert.Equal("workstation.main", commandExecutor.Contexts[0].WorkstationId);
-        Assert.Equal("dut.default", commandExecutor.Contexts[0].DutIdentity.ModelId);
-        Assert.Equal("serialNumber", commandExecutor.Contexts[0].DutIdentity.InputKey);
-        Assert.Equal("DUT-DEFAULT", commandExecutor.Contexts[0].DutIdentity.Value);
+        Assert.Equal("operation.main", commandExecutor.Contexts[0].OperationId);
+        Assert.Equal(1, commandExecutor.Contexts[0].OperationAttempt);
+        Assert.Equal("product.default", commandExecutor.Contexts[0].ProductionUnitIdentity.ModelId);
+        Assert.Equal("serialNumber", commandExecutor.Contexts[0].ProductionUnitIdentity.InputKey);
+        Assert.Equal("UNIT-DEFAULT", commandExecutor.Contexts[0].ProductionUnitIdentity.Value);
 
         var persisted = await repository.GetByIdAsync(result.Value.SessionId);
         Assert.NotNull(persisted);
@@ -95,13 +96,13 @@ public sealed class RuntimeSessionRunnerTests
     }
 
     [Fact]
-    public async Task SemanticFailedResultPersistsTypedJudgementAndVendorEvidence()
+    public async Task ProductFailureJudgementCompletesExecutionAndPersistsProductJudgement()
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var commandExecutor = new ScriptedRuntimeCommandExecutor(
-            RuntimeCommandExecutionResult.SemanticFailed(
-                "External adapter reported failure.",
-                "{\"judgement\":\"Failed\"}"));
+            RuntimeCommandExecutionResult.Completed(
+                "{\"judgement\":\"Failed\"}",
+                ResultJudgement.Failed));
         var runner = CreateRunner(
             repository,
             new InMemoryRuntimeDomainEventPublisher(),
@@ -110,23 +111,25 @@ public sealed class RuntimeSessionRunnerTests
         var result = await runner.RunAsync(CreateStartRequest(CreateTwoNodeProcess()));
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
         var persisted = Assert.IsType<RuntimeSession>(
             await repository.GetByIdAsync(result.Value.SessionId));
-        var command = Assert.Single(persisted.Commands);
-        Assert.Equal(RuntimeCommandStatus.Failed, command.Status);
-        Assert.Equal(RuntimeCommandSemanticOutcome.Failed, command.SemanticOutcome);
+        var command = Assert.Single(
+            persisted.Commands,
+            candidate => candidate.ResultJudgement == ResultJudgement.Failed);
+        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
         Assert.Equal("{\"judgement\":\"Failed\"}", command.ResultPayload);
     }
 
     [Fact]
-    public async Task SemanticAbortedResultCancelsSessionAndPersistsVendorEvidence()
+    public async Task AbortedJudgementCompletesExecutionAndPersistsProductJudgement()
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var commandExecutor = new ScriptedRuntimeCommandExecutor(
-            RuntimeCommandExecutionResult.SemanticAborted(
-                "External adapter reported abort.",
-                "{\"judgement\":\"Aborted\"}"));
+            RuntimeCommandExecutionResult.Completed(
+                "{\"judgement\":\"Aborted\"}",
+                ResultJudgement.Aborted));
         var runner = CreateRunner(
             repository,
             new InMemoryRuntimeDomainEventPublisher(),
@@ -135,12 +138,14 @@ public sealed class RuntimeSessionRunnerTests
         var result = await runner.RunAsync(CreateStartRequest(CreateTwoNodeProcess()));
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(RuntimeSessionStatus.Canceled, result.Value.Status);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
         var persisted = Assert.IsType<RuntimeSession>(
             await repository.GetByIdAsync(result.Value.SessionId));
-        var command = Assert.Single(persisted.Commands);
-        Assert.Equal(RuntimeCommandStatus.Canceled, command.Status);
-        Assert.Equal(RuntimeCommandSemanticOutcome.Aborted, command.SemanticOutcome);
+        var command = Assert.Single(
+            persisted.Commands,
+            candidate => candidate.ResultJudgement == ResultJudgement.Aborted);
+        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ResultJudgement.Aborted, command.ResultJudgement);
         Assert.Equal("{\"judgement\":\"Aborted\"}", command.ResultPayload);
     }
 

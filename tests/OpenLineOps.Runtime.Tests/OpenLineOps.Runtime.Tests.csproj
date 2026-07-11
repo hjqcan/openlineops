@@ -15,6 +15,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>
 

@@ -50,7 +50,7 @@ public sealed class AutomationTopologyServiceTests
             "app",
             "topology.main",
             new AddSlotDefinitionRequest(
-                "group.fixture", "slot.1", "station.eol", "1", "DUT 1", "Dut"))).IsSuccess);
+                "group.fixture", "slot.1", "station.eol", "1", "Production Unit 1", "ProductionUnit"))).IsSuccess);
 
         Assert.True((await service.CreateLayoutAsync(
             "project",
@@ -175,7 +175,7 @@ public sealed class AutomationTopologyServiceTests
         await service.AddSlotAsync(
             "project", "app", "topology",
             new AddSlotDefinitionRequest(
-                "Group.Main", "Slot.Main", "Station.Main", "A1", "Old Slot", "Dut"));
+                "Group.Main", "Slot.Main", "Station.Main", "A1", "Old Slot", "ProductionUnit"));
 
         await service.CreateLayoutAsync(
             "project", "app", new CreateSiteLayoutRequest("layout", "topology", "Layout", 900, 600, "px"));
@@ -206,13 +206,13 @@ public sealed class AutomationTopologyServiceTests
                 "station.eol", "EOL Station", new Dictionary<string, string> { ["area"] = "EOL" }));
         var updatedGroup = await service.UpdateSlotGroupAsync(
             "project", "app", "topology", "Group.Main",
-            new UpdateSlotGroupRequest("DUT Fixture", "TesterBank", 4));
+            new UpdateSlotGroupRequest("Production Unit Fixture", "TesterBank", 4));
         var updatedSlot = await service.UpdateSlotAsync(
             "project", "app", "topology", "Slot.Main",
-            new UpdateSlotDefinitionRequest("A-01", "DUT Position", "Carrier", false));
+            new UpdateSlotDefinitionRequest("A-01", "Production Unit Position", "Carrier", false));
 
         Assert.Equal("EOL Station", updatedSystem.Value.Systems.Single(system => system.SystemId == "Station.Main").DisplayName);
-        Assert.Equal("DUT Fixture", updatedGroup.Value.SlotGroups.Single().DisplayName);
+        Assert.Equal("Production Unit Fixture", updatedGroup.Value.SlotGroups.Single().DisplayName);
         Assert.Equal("A-01", updatedSlot.Value.Slots.Single().Address);
         Assert.False(updatedSlot.Value.Slots.Single().IsEnabled);
         var wrongCase = await service.DeleteSystemAsync(

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.HostedServices;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
@@ -11,6 +12,7 @@ using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Events;
+using OpenLineOps.Runtime.Infrastructure.Commands;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -21,27 +23,48 @@ public sealed class RuntimeModuleDependencyInjectionTests
     {
         var services = new ServiceCollection();
 
-        services.AddOpenLineOpsRuntimeModule();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
 
         using var serviceProvider = services.BuildServiceProvider();
         using var scope = serviceProvider.CreateScope();
-        Assert.IsType<SqliteProductionRunRepository>(
+        Assert.IsType<InMemoryProductionRunRepository>(
             serviceProvider.GetRequiredService<IProductionRunRepository>());
         Assert.Contains(
             services,
             descriptor => descriptor.ServiceType == typeof(IProductionRunRunner));
+        Assert.Contains(
+            services,
+            descriptor => descriptor.ServiceType == typeof(IProductionRunCoordinator));
+        Assert.Same(
+            serviceProvider.GetRequiredService<IProductionRunRepository>(),
+            serviceProvider.GetRequiredService<IProductionRunExecutionPlanRepository>());
+        Assert.IsType<InMemoryResourceLeaseRepository>(
+            serviceProvider.GetRequiredService<IResourceLeaseRepository>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<IProductionRunRecoveryService>());
         var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
-        var leaseIndex = Array.FindIndex(
-            hostedServices,
-            service => service is SqliteRuntimeStoreLeaseHostedService);
         var recoveryIndex = Array.FindIndex(
             hostedServices,
             service => service.GetType().Name == "ProductionRunStartupRecoveryHostedService");
-        Assert.True(leaseIndex >= 0);
-        Assert.True(recoveryIndex > leaseIndex);
+        Assert.True(recoveryIndex >= 0);
+        Assert.Contains(
+            hostedServices,
+            service => service is ProductionRunCoordinatorHostedService);
         Assert.IsType<RuntimeDomainEventPublisher>(
             serviceProvider.GetRequiredService<OpenLineOps.Runtime.Application.Events.IRuntimeDomainEventPublisher>());
+    }
+
+    [Fact]
+    public void ExplicitLocalExecutionResolvesOnlyTheInProcessDispatcherAndSafetyController()
+    {
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
+        using var serviceProvider = services.BuildServiceProvider();
+        using var scope = serviceProvider.CreateScope();
+
+        Assert.IsType<InProcessStationOperationDispatcher>(
+            scope.ServiceProvider.GetRequiredService<IStationOperationDispatcher>());
+        Assert.IsType<InProcessStationSafetyController>(
+            scope.ServiceProvider.GetRequiredService<IStationSafetyController>());
     }
 
     [Fact]
@@ -54,7 +77,11 @@ public sealed class RuntimeModuleDependencyInjectionTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["OpenLineOps:Runtime:Persistence:Provider"] = RuntimeSessionPersistenceProviders.Sqlite,
-                ["OpenLineOps:Runtime:Persistence:ConnectionString"] = $"Data Source={databasePath}"
+                ["OpenLineOps:Runtime:Persistence:ConnectionString"] = $"Data Source={databasePath}",
+                ["OpenLineOps:Runtime:Coordination:Provider"] = ProductionCoordinationPersistenceProviders.Sqlite,
+                ["OpenLineOps:Runtime:Coordination:SqliteDatabasePath"] = databasePath + ".production",
+                ["OpenLineOps:Runtime:AgentTransport:Provider"] = "Disabled",
+                ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
             })
             .Build();
         var services = new ServiceCollection();
@@ -132,7 +159,7 @@ public sealed class RuntimeModuleDependencyInjectionTests
     {
         var services = new ServiceCollection();
 
-        services.AddOpenLineOpsRuntimeModule();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
 
         Assert.DoesNotContain(
             services,
@@ -144,7 +171,7 @@ public sealed class RuntimeModuleDependencyInjectionTests
     {
         var services = new ServiceCollection();
 
-        services.AddOpenLineOpsRuntimeModule();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
 
         using var serviceProvider = services.BuildServiceProvider();
         var options = serviceProvider.GetRequiredService<PythonScriptRuntimeOptions>();
@@ -173,7 +200,11 @@ public sealed class RuntimeModuleDependencyInjectionTests
                 ["OpenLineOps:Runtime:Scripting:Python:Sandbox:ContainerImage"] = "openlineops/script-worker:1.0.0",
                 ["OpenLineOps:Runtime:Scripting:Python:Sandbox:ContainerWorkspacePath"] = "/worker",
                 ["OpenLineOps:Runtime:Scripting:Python:Sandbox:LeastPrivilegeIdentity"] = "10001:10001",
-                ["OpenLineOps:Runtime:Scripting:Python:Sandbox:AdditionalContainerRunArguments:0"] = "--pull=never"
+                ["OpenLineOps:Runtime:Scripting:Python:Sandbox:AdditionalContainerRunArguments:0"] = "--pull=never",
+                ["OpenLineOps:Runtime:Persistence:Provider"] = RuntimeSessionPersistenceProviders.InMemory,
+                ["OpenLineOps:Runtime:Coordination:Provider"] = ProductionCoordinationPersistenceProviders.InMemory,
+                ["OpenLineOps:Runtime:AgentTransport:Provider"] = "Disabled",
+                ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
             })
             .Build();
         var services = new ServiceCollection();
@@ -287,4 +318,14 @@ public sealed class RuntimeModuleDependencyInjectionTests
 
         Assert.Contains("exactly 'true' or 'false'", exception.Message, StringComparison.Ordinal);
     }
+
+    private static IConfiguration CreateLocalConfiguration() => new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Runtime:Persistence:Provider"] = RuntimeSessionPersistenceProviders.InMemory,
+            ["OpenLineOps:Runtime:Coordination:Provider"] = ProductionCoordinationPersistenceProviders.InMemory,
+            ["OpenLineOps:Runtime:AgentTransport:Provider"] = "Disabled",
+            ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
+        })
+        .Build();
 }

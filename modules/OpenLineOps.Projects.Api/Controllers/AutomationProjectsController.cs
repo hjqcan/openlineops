@@ -19,7 +19,7 @@ using AppLinkTopologyRequest = OpenLineOps.Projects.Application.Projects.LinkPro
 namespace OpenLineOps.Projects.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.ProjectsV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.AutomationProjects)]
 public sealed class AutomationProjectsController : ControllerBase
 {
@@ -207,14 +207,14 @@ public sealed class AutomationProjectsController : ControllerBase
     }
 
     [HttpPost("{projectId}/snapshots/{snapshotId}/production-runs")]
-    [ProducesResponseType<StartedProjectSnapshotProductionRunResponse>(StatusCodes.Status201Created)]
+    [ProducesResponseType<SubmittedProjectSnapshotProductionRunResponse>(StatusCodes.Status202Accepted)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<StartedProjectSnapshotProductionRunResponse>> StartSnapshotProductionRunAsync(
+    public async Task<ActionResult<SubmittedProjectSnapshotProductionRunResponse>> SubmitSnapshotProductionRunAsync(
         string projectId,
         string snapshotId,
-        StartProjectSnapshotProductionRunRequest? request,
+        SubmitProjectSnapshotProductionRunRequest? request,
         CancellationToken cancellationToken)
     {
         var validationErrors = Validate(request);
@@ -243,80 +243,91 @@ public sealed class AutomationProjectsController : ControllerBase
                 $"Project snapshot {snapshotId} was not found in automation project {projectId}."));
         }
 
-        var startRequest = request!;
-        var startResult = await _productionRunLauncher
-            .StartAsync(
+        var submitRequest = request!;
+        var submitResult = await _productionRunLauncher
+            .SubmitAsync(
                 snapshot,
-                new StartProjectReleaseProductionRunRequest(
-                    startRequest.ProductionRunId!.Value,
-                    startRequest.DutIdentityValue!,
-                    startRequest.ActorId!,
-                    startRequest.BatchId,
-                    startRequest.FixtureId,
-                    startRequest.DeviceId),
+                new SubmitProjectReleaseProductionRunRequest(
+                    submitRequest.ProductionRunId!.Value,
+                    submitRequest.ProductionUnitIdentityValue!,
+                    submitRequest.ActorId!,
+                    submitRequest.LotId,
+                    submitRequest.CarrierId,
+                    submitRequest.SlotId,
+                    submitRequest.FixtureId,
+                    submitRequest.DeviceId),
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (startResult.IsFailure)
+        if (submitResult.IsFailure)
         {
-            return ToProblem(startResult.Error);
+            return ToProblem(submitResult.Error);
         }
 
-        var response = ToProductionRunResponse(startResult.Value.Run);
-        return Created($"/api/runtime/production-runs/{response.ProductionRunId}", response);
+        var response = ToProductionRunResponse(submitResult.Value);
+        return Accepted($"/api/production-runs/{response.ProductionRunId:D}", response);
     }
 
-    private static StartedProjectSnapshotProductionRunResponse ToProductionRunResponse(
+    private static SubmittedProjectSnapshotProductionRunResponse ToProductionRunResponse(
         OpenLineOps.Runtime.Domain.Runs.ProductionRunSnapshot run)
     {
-        var stages = run.Stages.Select(stage => new ProductionStageRunResponse(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId.Value,
-            stage.ProcessDefinitionId.Value,
-            stage.ProcessVersionId.Value,
-            stage.ConfigurationSnapshotId.Value,
-            stage.RecipeSnapshotId.Value,
-            stage.Status.ToString(),
-            stage.RuntimeSessionId?.Value,
-            stage.StartedAtUtc,
-            stage.CompletedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount)).ToArray();
-        return new StartedProjectSnapshotProductionRunResponse(
+        var operations = run.Operations.Select(operation => new ProductionOperationRunResponse(
+            operation.Definition.OperationId,
+            operation.OperationRunId,
+            operation.Attempt,
+            operation.Definition.StationSystemId,
+            operation.Definition.StationId.Value,
+            operation.Definition.ProcessDefinitionId.Value,
+            operation.Definition.ProcessVersionId.Value,
+            operation.Definition.ConfigurationSnapshotId.Value,
+            operation.Definition.RecipeSnapshotId.Value,
+            operation.ExecutionStatus.ToString(),
+            operation.Judgement.ToString(),
+            operation.RuntimeSessionId?.Value,
+            operation.StartedAtUtc,
+            operation.CompletedAtUtc,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount)).ToArray();
+        var decisions = run.RouteDecisions.Select(decision => new ProductionRouteDecisionResponse(
+            decision.SourceOperationRunId,
+            decision.TransitionId,
+            decision.TargetOperationId,
+            decision.SourceJudgement.ToString(),
+            decision.Traversal,
+            decision.DecidedAtUtc)).ToArray();
+        return new SubmittedProjectSnapshotProductionRunResponse(
             run.ProjectSnapshotId,
             run.ProjectId,
             run.ApplicationId,
             run.TopologyId,
             run.ProductionLineDefinitionId,
             run.RunId.Value,
-            run.DutIdentity.ModelId,
-            run.DutIdentity.InputKey,
-            run.DutIdentity.Value,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
             run.ActorId,
-            run.BatchId,
-            run.FixtureId,
-            run.DeviceId,
-            run.Status.ToString(),
-            run.Status is OpenLineOps.Runtime.Domain.Runs.ProductionRunStatus.Completed
-                or OpenLineOps.Runtime.Domain.Runs.ProductionRunStatus.Failed
-                or OpenLineOps.Runtime.Domain.Runs.ProductionRunStatus.Canceled,
+            run.LotId,
+            run.CarrierId,
+            run.ExecutionStatus.ToString(),
+            run.Judgement.ToString(),
+            run.Disposition.ToString(),
+            run.ControlState.ToString(),
+            run.ExecutionStatus is OpenLineOps.Runtime.Contracts.ExecutionStatus.Completed
+                or OpenLineOps.Runtime.Contracts.ExecutionStatus.Failed
+                or OpenLineOps.Runtime.Contracts.ExecutionStatus.TimedOut
+                or OpenLineOps.Runtime.Contracts.ExecutionStatus.Canceled
+                or OpenLineOps.Runtime.Contracts.ExecutionStatus.Rejected,
             run.CreatedAtUtc,
             run.LastTransitionAtUtc,
             run.StartedAtUtc,
             run.CompletedAtUtc,
             run.FailureCode,
             run.FailureReason,
-            run.Stages.Count(stage =>
-                stage.Status == OpenLineOps.Runtime.Domain.Runs.ProductionStageRunStatus.Completed),
-            stages.Sum(stage => stage.CompletedStepCount),
-            stages.Sum(stage => stage.CommandCount),
-            stages.Sum(stage => stage.IncidentCount),
-            stages);
+            operations,
+            decisions);
     }
 
     private static AutomationProjectResponse ToResponse(AutomationProjectDetails project)
@@ -453,7 +464,7 @@ public sealed class AutomationProjectsController : ControllerBase
         return errors;
     }
 
-    private static Dictionary<string, string[]> Validate(StartProjectSnapshotProductionRunRequest? request)
+    private static Dictionary<string, string[]> Validate(SubmitProjectSnapshotProductionRunRequest? request)
     {
         var errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
         if (request is null)
@@ -467,9 +478,14 @@ public sealed class AutomationProjectsController : ControllerBase
             errors[nameof(request.ProductionRunId)] = ["A non-empty Production Run ID is required."];
         }
 
-        AddCanonicalRequired(errors, nameof(request.DutIdentityValue), request.DutIdentityValue);
+        AddCanonicalRequired(
+            errors,
+            nameof(request.ProductionUnitIdentityValue),
+            request.ProductionUnitIdentityValue);
         AddCanonicalRequired(errors, nameof(request.ActorId), request.ActorId);
-        AddCanonicalOptional(errors, nameof(request.BatchId), request.BatchId);
+        AddCanonicalOptional(errors, nameof(request.LotId), request.LotId);
+        AddCanonicalOptional(errors, nameof(request.CarrierId), request.CarrierId);
+        AddCanonicalOptional(errors, nameof(request.SlotId), request.SlotId);
         AddCanonicalOptional(errors, nameof(request.FixtureId), request.FixtureId);
         AddCanonicalOptional(errors, nameof(request.DeviceId), request.DeviceId);
 

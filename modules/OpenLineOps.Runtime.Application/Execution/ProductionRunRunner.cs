@@ -4,293 +4,276 @@ using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
-using OpenLineOps.Runtime.Application.Sessions;
-using OpenLineOps.Runtime.Domain.Operations;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Runs;
-using OpenLineOps.Runtime.Domain.Sessions;
-using OpenLineOps.Runtime.Domain.Steps;
 
 namespace OpenLineOps.Runtime.Application.Execution;
 
-public sealed class ProductionRunRunner : IProductionRunRunner
+public sealed class ProductionRunRunner(
+    IProductionRunRepository runRepository,
+    IProductionRunExecutionPlanRepository planRepository,
+    IResourceLeaseRepository resourceLeases,
+    IStationOperationDispatcher stationDispatcher,
+    IRuntimeDomainEventPublisher domainEventPublisher,
+    IRuntimeIdProvider idProvider,
+    IClock clock) : IProductionRunRunner
 {
-    private readonly IProductionRunRepository _runRepository;
-    private readonly IRuntimeSessionRepository _sessionRepository;
-    private readonly IRuntimeSessionRunner _sessionRunner;
-    private readonly IRuntimeDomainEventPublisher _domainEventPublisher;
-    private readonly IRuntimeIdProvider _idProvider;
-    private readonly IClock _clock;
+    private static readonly TimeSpan ResourceLeaseSafetyMargin = TimeSpan.FromMinutes(5);
 
-    public ProductionRunRunner(
-        IProductionRunRepository runRepository,
-        IRuntimeSessionRepository sessionRepository,
-        IRuntimeSessionRunner sessionRunner,
-        IRuntimeDomainEventPublisher domainEventPublisher,
-        IRuntimeIdProvider idProvider,
-        IClock clock)
-    {
-        _runRepository = runRepository;
-        _sessionRepository = sessionRepository;
-        _sessionRunner = sessionRunner;
-        _domainEventPublisher = domainEventPublisher;
-        _idProvider = idProvider;
-        _clock = clock;
-    }
-
-    public async ValueTask<Result<ProductionRunRunResult>> RunAsync(
-        StartProductionRunRequest request,
+    public async ValueTask<Result<ProductionRunRunResult>> ExecuteAsync(
+        ProductionRunId runId,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var validationError = Validate(request);
-        if (validationError is not null)
+        var entry = await runRepository.GetByIdAsync(runId, cancellationToken).ConfigureAwait(false);
+        if (entry is null)
         {
-            return Result.Failure<ProductionRunRunResult>(validationError);
+            return Failure(ApplicationError.NotFound(
+                "Runtime.ProductionRunNotFound",
+                $"Production Run {runId} does not exist."));
         }
 
-        var run = ProductionRun.Create(
-            request.RunId,
-            request.ProjectId,
-            request.ApplicationId,
-            request.ProjectSnapshotId,
-            request.TopologyId,
-            request.ProductionLineDefinitionId,
-            request.DutIdentity,
-            request.BatchId,
-            request.FixtureId,
-            request.DeviceId,
-            request.ActorId,
-            _clock.UtcNow,
-            request.Stages.Select(ToDefinition));
-        var revision = 0L;
-
-        try
+        var plan = await planRepository.GetByRunIdAsync(runId, cancellationToken)
+            .ConfigureAwait(false);
+        if (plan is null)
         {
-            if (!await TryPersistNewAndPublishAsync(run, cancellationToken).ConfigureAwait(false))
-            {
-                var existing = await _runRepository
-                    .GetByIdAsync(request.RunId, cancellationToken)
-                    .ConfigureAwait(false);
-                if (existing is not null && HasSameImmutableIdentity(existing.Run, request))
-                {
-                    return Result.Success(new ProductionRunRunResult(existing.Run.ToSnapshot()));
-                }
+            return Failure(ApplicationError.Conflict(
+                "Runtime.ProductionRunExecutionPlanMissing",
+                $"Production Run {runId} has no frozen execution plan."));
+        }
 
-                return Result.Failure<ProductionRunRunResult>(ApplicationError.Conflict(
-                    "Runtime.ProductionRunIdIdentityMismatch",
-                    $"Production run id {request.RunId} already belongs to a different immutable run identity."));
-            }
+        var run = entry.Run;
+        var revision = entry.Revision;
+        if (run.IsTerminal || run.ControlState != ProductionRunControlState.Active)
+        {
+            return Result.Success(new ProductionRunRunResult(run.ToSnapshot()));
+        }
 
-            var startResult = run.Start(_clock.UtcNow);
-            if (!startResult.Succeeded)
+        if (run.ExecutionStatus == ExecutionStatus.Pending)
+        {
+            var start = run.Start(clock.UtcNow);
+            if (!start.Succeeded)
             {
-                return ToApplicationFailure(startResult);
+                return Failure(start);
             }
 
             revision = await PersistAndPublishAsync(run, revision, cancellationToken)
                 .ConfigureAwait(false);
+        }
 
-            foreach (var stagePlan in request.Stages)
+        while (!run.IsTerminal && run.ControlState == ProductionRunControlState.Active)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var ready = run.Operations
+                .Where(operation => operation.ExecutionStatus == ExecutionStatus.Pending)
+                .OrderBy(operation => operation.OperationRunId, StringComparer.Ordinal)
+                .ToArray();
+            if (ready.Length == 0)
+            {
+                break;
+            }
+
+            var dispatches = new List<PendingStationDispatch>(ready.Length);
+            foreach (var operation in ready)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                var sessionId = _idProvider.NewSessionId();
-                var stageStartResult = run.StartStage(stagePlan.StageId, sessionId, _clock.UtcNow);
-                if (!stageStartResult.Succeeded)
+                var executionPlan = plan.Operations.Single(candidate => string.Equals(
+                    candidate.Definition.OperationId,
+                    operation.OperationId,
+                    StringComparison.Ordinal));
+                var leases = await resourceLeases.TryAcquireAsync(
+                    run.Id,
+                    operation.OperationRunId,
+                    operation.ResourceRequirements,
+                    clock.UtcNow,
+                    CalculateLeaseDuration(executionPlan),
+                    cancellationToken).ConfigureAwait(false);
+                if (leases is null)
                 {
-                    return ToApplicationFailure(stageStartResult);
-                }
-
-                // The run-to-session link is durable before any device or script execution begins.
-                revision = await PersistAndPublishAsync(run, revision, cancellationToken)
-                    .ConfigureAwait(false);
-
-                Result<RuntimeSessionRunResult> sessionResult;
-                try
-                {
-                    sessionResult = await _sessionRunner.RunAsync(
-                        new StartRuntimeSessionRequest(
-                            sessionId,
-                            stagePlan.StationId,
-                            stagePlan.ConfigurationSnapshotId,
-                            stagePlan.RecipeSnapshotId,
-                            stagePlan.FrozenExecutableProcess,
-                            CreateSessionTraceMetadata(run, stagePlan)),
-                        cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    const string code = "Runtime.ProductionStageExecutionCanceledUnexpectedly";
-                    const string reason =
-                        "Runtime session boundary canceled without a Production Run cancellation request.";
-                    var recovered = await RecoverSessionBoundaryAsync(
-                            sessionId,
-                            code,
-                            reason)
-                        .ConfigureAwait(false);
-                    if (recovered is not null)
-                    {
-                        sessionResult = Result.Success(recovered);
-                    }
-                    else
-                    {
-                        var failure = run.FailStage(
-                            stagePlan.StageId,
-                            code,
-                            reason,
-                            0,
-                            0,
-                            0,
-                            _clock.UtcNow);
-                        if (!failure.Succeeded)
-                        {
-                            return ToApplicationFailure(failure);
-                        }
-
-                        revision = await PersistAndPublishAsync(
-                                run,
-                                revision,
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                        break;
-                    }
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException
-                                                   and not OutOfMemoryException)
-                {
-                    const string code = "Runtime.ProductionStageExecutionFault";
-                    var reason =
-                        $"Runtime session boundary threw {exception.GetType().FullName ?? exception.GetType().Name}.";
-                    var recovered = await RecoverSessionBoundaryAsync(
-                            sessionId,
-                            code,
-                            reason)
-                        .ConfigureAwait(false);
-                    if (recovered is not null)
-                    {
-                        sessionResult = Result.Success(recovered);
-                    }
-                    else
-                    {
-                        var failure = run.FailStage(
-                            stagePlan.StageId,
-                            code,
-                            reason,
-                            0,
-                            0,
-                            0,
-                            _clock.UtcNow);
-                        if (!failure.Succeeded)
-                        {
-                            return ToApplicationFailure(failure);
-                        }
-
-                        revision = await PersistAndPublishAsync(
-                                run,
-                                revision,
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                        break;
-                    }
-                }
-
-                if (sessionResult.IsFailure)
-                {
-                    var failResult = run.FailStage(
-                        stagePlan.StageId,
-                        sessionResult.Error.Code,
-                        sessionResult.Error.Message,
-                        0,
-                        0,
-                        0,
-                        _clock.UtcNow);
-                    if (!failResult.Succeeded)
-                    {
-                        return ToApplicationFailure(failResult);
-                    }
-
-                    revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    break;
-                }
-
-                var sessionStatus = sessionResult.Value.Status;
-                if (sessionStatus == RuntimeSessionStatus.Completed)
-                {
-                    var completeResult = run.CompleteStage(
-                        stagePlan.StageId,
-                        sessionResult.Value.CompletedSteps,
-                        sessionResult.Value.CommandCount,
-                        sessionResult.Value.IncidentCount,
-                        _clock.UtcNow);
-                    if (!completeResult.Succeeded)
-                    {
-                        return ToApplicationFailure(completeResult);
-                    }
-
-                    revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
-                        .ConfigureAwait(false);
                     continue;
                 }
 
-                if (sessionStatus is RuntimeSessionStatus.Canceled or RuntimeSessionStatus.Stopped)
+                var sessionId = idProvider.NewSessionId();
+                var started = run.StartOperation(
+                    operation.OperationRunId,
+                    sessionId,
+                    leases,
+                    clock.UtcNow);
+                if (!started.Succeeded)
                 {
-                    var cancelResult = run.Cancel(
-                        $"Runtime session {sessionResult.Value.SessionId} ended as {sessionStatus}.",
-                        sessionResult.Value.CompletedSteps,
-                        sessionResult.Value.CommandCount,
-                        sessionResult.Value.IncidentCount,
-                        _clock.UtcNow);
-                    if (!cancelResult.Succeeded)
-                    {
-                        return ToApplicationFailure(cancelResult);
-                    }
-
-                    revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    break;
+                    await resourceLeases.ReleaseAsync(
+                        run.Id,
+                        operation.OperationRunId,
+                        CancellationToken.None).ConfigureAwait(false);
+                    return Failure(started);
                 }
 
-                var stageFailure = run.FailStage(
-                    stagePlan.StageId,
-                    "Runtime.ProductionStageSessionFailed",
-                    $"Runtime session {sessionResult.Value.SessionId} ended as {sessionStatus}.",
-                    sessionResult.Value.CompletedSteps,
-                    sessionResult.Value.CommandCount,
-                    sessionResult.Value.IncidentCount,
-                    _clock.UtcNow);
-                if (!stageFailure.Succeeded)
-                {
-                    return ToApplicationFailure(stageFailure);
-                }
-
-                revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
+                // Persist the session link and fencing tokens before publishing a station job.
+                revision = await PersistAndPublishAsync(run, revision, cancellationToken)
                     .ConfigureAwait(false);
+
+                var runSnapshot = run.ToSnapshot();
+                var request = new StationOperationDispatchRequest(
+                    runSnapshot,
+                    runSnapshot.Operations.Single(candidate => string.Equals(
+                        candidate.OperationRunId,
+                        operation.OperationRunId,
+                        StringComparison.Ordinal)),
+                    executionPlan,
+                    sessionId,
+                    leases);
+                // Start every ready Station operation before awaiting any one of them. Route
+                // results are still folded back into the aggregate serially below.
+                dispatches.Add(new PendingStationDispatch(
+                    operation,
+                    DispatchCapturingAsync(request, cancellationToken)));
+            }
+
+            if (dispatches.Count == 0)
+            {
                 break;
             }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            if (!run.IsTerminal)
+
+            await Task.WhenAll(dispatches.Select(static dispatch => dispatch.Outcome))
+                .ConfigureAwait(false);
+
+            RuntimeOperationResult? transitionFailure = null;
+            var uncertainDispatches = new List<PendingStationDispatch>();
+            foreach (var dispatch in dispatches)
             {
-                var cancelResult = run.Cancel(
-                    "Production run execution was canceled.",
-                    0,
-                    0,
-                    0,
-                    _clock.UtcNow);
-                if (cancelResult.Succeeded)
+                var outcome = await dispatch.Outcome.ConfigureAwait(false);
+                if (outcome.Result is not null)
                 {
-                    revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
-                        .ConfigureAwait(false);
+                    var transition = ApplyDispatchResult(run, dispatch.Operation, outcome.Result);
+                    if (!transition.Succeeded && transitionFailure is null)
+                    {
+                        transitionFailure = transition;
+                    }
                 }
+                else
+                {
+                    uncertainDispatches.Add(dispatch);
+                }
+            }
+
+            if (uncertainDispatches.Count > 0 && !run.IsTerminal)
+            {
+                var exceptionNames = uncertainDispatches
+                    .Select(static dispatch => dispatch.Outcome.Result.Exception?.GetType().Name)
+                    .Where(static name => name is not null)
+                    .Distinct(StringComparer.Ordinal)
+                    .Order(StringComparer.Ordinal);
+                var reason = cancellationToken.IsCancellationRequested
+                    ? "Station operation dispatch was interrupted; no hardware command was replayed."
+                    : $"Station dispatcher failed with {string.Join(", ", exceptionNames)}; no hardware command was replayed.";
+                var recovery = run.MarkRecoveryRequired(reason, clock.UtcNow);
+                if (!recovery.Succeeded && transitionFailure is null)
+                {
+                    transitionFailure = recovery;
+                }
+            }
+
+            try
+            {
+                revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                foreach (var dispatch in dispatches)
+                {
+                    await resourceLeases.HoldForRecoveryAsync(
+                        run.Id,
+                        dispatch.Operation.OperationRunId,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                throw;
+            }
+
+            foreach (var dispatch in dispatches)
+            {
+                var outcome = await dispatch.Outcome.ConfigureAwait(false);
+                if (outcome.Result is null)
+                {
+                    await resourceLeases.HoldForRecoveryAsync(
+                        run.Id,
+                        dispatch.Operation.OperationRunId,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                else
+                {
+                    await resourceLeases.ReleaseAsync(
+                        run.Id,
+                        dispatch.Operation.OperationRunId,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (transitionFailure is not null)
+            {
+                return Failure(transitionFailure);
             }
         }
 
         return Result.Success(new ProductionRunRunResult(run.ToSnapshot()));
+    }
+
+    private static RuntimeOperationResult ApplyDispatchResult(
+        ProductionRun run,
+        OperationRun operation,
+        StationOperationDispatchResult result)
+    {
+        if (result.ExecutionStatus == ExecutionStatus.Completed)
+        {
+            return run.CompleteOperation(
+                operation.OperationRunId,
+                result.Judgement,
+                result.Outputs,
+                result.CompletedStepCount,
+                result.CommandCount,
+                result.IncidentCount,
+                result.CompletedAtUtc);
+        }
+
+        if (result.ExecutionStatus == ExecutionStatus.Canceled)
+        {
+            return run.Stop(
+                result.FailureReason ?? "Station operation was canceled.",
+                result.CompletedAtUtc);
+        }
+
+        return run.FailOperation(
+            operation.OperationRunId,
+            result.ExecutionStatus,
+            result.FailureCode ?? "Runtime.StationOperationFailed",
+            result.FailureReason ?? "Station operation failed without a reason.",
+            result.CompletedStepCount,
+            result.CommandCount,
+            result.IncidentCount,
+            result.CompletedAtUtc);
+    }
+
+    private async Task<StationDispatchOutcome> DispatchCapturingAsync(
+        StationOperationDispatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await stationDispatcher.DispatchAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            return new StationDispatchOutcome(result, null);
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            return new StationDispatchOutcome(null, exception);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return new StationDispatchOutcome(null, exception);
+        }
     }
 
     private async ValueTask<long> PersistAndPublishAsync(
@@ -298,216 +281,37 @@ public sealed class ProductionRunRunner : IProductionRunRunner
         long expectedRevision,
         CancellationToken cancellationToken)
     {
-        var domainEvents = run.DomainEvents.ToArray();
-        var nextRevision = await _runRepository
-            .SaveAsync(run, expectedRevision, cancellationToken)
+        var events = run.DomainEvents.ToArray();
+        var revision = await runRepository.SaveAsync(run, expectedRevision, cancellationToken)
             .ConfigureAwait(false);
-
-        if (domainEvents.Length > 0)
+        if (events.Length > 0)
         {
-            await _domainEventPublisher.PublishAsync(domainEvents, cancellationToken).ConfigureAwait(false);
+            await domainEventPublisher.PublishAsync(events, cancellationToken).ConfigureAwait(false);
             run.ClearDomainEvents();
         }
 
-        return nextRevision;
+        return revision;
     }
 
-    private async ValueTask<RuntimeSessionRunResult?> RecoverSessionBoundaryAsync(
-        RuntimeSessionId sessionId,
-        string failureCode,
-        string failureReason)
+    private static TimeSpan CalculateLeaseDuration(OperationExecutionPlan plan)
     {
-        var session = await _sessionRepository
-            .GetByIdAsync(sessionId, CancellationToken.None)
-            .ConfigureAwait(false);
-        if (session is null)
-        {
-            return null;
-        }
-
-        if (!session.IsTerminal)
-        {
-            var transition = session.Fail(_clock.UtcNow, failureCode, failureReason);
-            if (!transition.Succeeded)
-            {
-                throw new InvalidOperationException(
-                    $"Could not terminalize Runtime session {session.Id} after boundary failure: "
-                    + $"{transition.Code} {transition.Message}");
-            }
-
-            var events = session.DomainEvents.ToArray();
-            await _sessionRepository.SaveAsync(session, CancellationToken.None).ConfigureAwait(false);
-            if (events.Length > 0)
-            {
-                await _domainEventPublisher
-                    .PublishAsync(events, CancellationToken.None)
-                    .ConfigureAwait(false);
-                session.ClearDomainEvents();
-            }
-        }
-
-        return new RuntimeSessionRunResult(
-            session.Id,
-            session.ConfigurationSnapshotId,
-            session.Status,
-            session.Steps.Count(step => step.Status == RuntimeStepStatus.Completed),
-            session.Commands.Count,
-            session.Incidents.Count);
+        var commandTicks = plan.FrozenExecutableProcess.Nodes.Aggregate(
+            0L,
+            static (ticks, node) => checked(ticks + node.Timeout.Ticks));
+        return TimeSpan.FromTicks(checked(commandTicks + ResourceLeaseSafetyMargin.Ticks));
     }
 
-    private async ValueTask<bool> TryPersistNewAndPublishAsync(
-        ProductionRun run,
-        CancellationToken cancellationToken)
-    {
-        var domainEvents = run.DomainEvents.ToArray();
-        if (!await _runRepository.TryAddAsync(run, cancellationToken).ConfigureAwait(false))
-        {
-            return false;
-        }
+    private static Result<ProductionRunRunResult> Failure(RuntimeOperationResult result) =>
+        Failure(ApplicationError.Conflict(result.Code, result.Message));
 
-        if (domainEvents.Length > 0)
-        {
-            await _domainEventPublisher.PublishAsync(domainEvents, cancellationToken).ConfigureAwait(false);
-            run.ClearDomainEvents();
-        }
+    private static Result<ProductionRunRunResult> Failure(ApplicationError error) =>
+        Result.Failure<ProductionRunRunResult>(error);
 
-        return true;
-    }
+    private sealed record PendingStationDispatch(
+        OperationRun Operation,
+        Task<StationDispatchOutcome> Outcome);
 
-    private static RuntimeSessionTraceMetadata CreateSessionTraceMetadata(
-        ProductionRun run,
-        ProductionStageExecutionPlan stagePlan)
-    {
-        return new RuntimeSessionTraceMetadata(
-            run.Id,
-            run.ProductionLineDefinitionId,
-            stagePlan.StageId,
-            stagePlan.Sequence,
-            stagePlan.WorkstationId,
-            run.DutIdentity,
-            run.BatchId,
-            run.FixtureId,
-            run.DeviceId,
-            run.ActorId,
-            run.ProjectId,
-            run.ApplicationId,
-            run.ProjectSnapshotId,
-            run.TopologyId);
-    }
-
-    private static ProductionStageRunDefinition ToDefinition(ProductionStageExecutionPlan plan)
-    {
-        return new ProductionStageRunDefinition(
-            plan.StageId,
-            plan.Sequence,
-            plan.WorkstationId,
-            plan.StationId,
-            plan.FrozenExecutableProcess.ProcessDefinitionId,
-            plan.FrozenExecutableProcess.ProcessVersionId,
-            plan.ConfigurationSnapshotId,
-            plan.RecipeSnapshotId);
-    }
-
-    private static ApplicationError? Validate(StartProductionRunRequest request)
-    {
-        if (request.Stages.Count == 0)
-        {
-            return ApplicationError.Validation(
-                "Runtime.ProductionRunHasNoStages",
-                "A production run must contain at least one stage execution plan.");
-        }
-
-        var stageIds = new HashSet<string>(StringComparer.Ordinal);
-        for (var index = 0; index < request.Stages.Count; index++)
-        {
-            var stage = request.Stages[index];
-            var expectedSequence = index + 1;
-            if (stage.Sequence != expectedSequence)
-            {
-                return ApplicationError.Validation(
-                    "Runtime.ProductionStageSequenceInvalid",
-                    $"Stage execution plans must be ordered contiguously from 1; expected {expectedSequence}.");
-            }
-
-            if (!stageIds.Add(stage.StageId))
-            {
-                return ApplicationError.Validation(
-                    "Runtime.ProductionStageIdDuplicate",
-                    $"Production stage id {stage.StageId} is duplicated.");
-            }
-
-            if (!string.Equals(
-                stage.ProductionLineDefinitionId,
-                request.ProductionLineDefinitionId,
-                StringComparison.Ordinal))
-            {
-                return ApplicationError.Validation(
-                    "Runtime.ProductionStageLineMismatch",
-                    $"Production stage {stage.StageId} belongs to line "
-                    + $"{stage.ProductionLineDefinitionId}, not {request.ProductionLineDefinitionId}.");
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasSameImmutableIdentity(
-        ProductionRun existing,
-        StartProductionRunRequest request)
-    {
-        if (!string.Equals(existing.ProjectId, request.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(existing.ApplicationId, request.ApplicationId, StringComparison.Ordinal)
-            || !string.Equals(
-                existing.ProjectSnapshotId,
-                request.ProjectSnapshotId,
-                StringComparison.Ordinal)
-            || !string.Equals(existing.TopologyId, request.TopologyId, StringComparison.Ordinal)
-            || !string.Equals(
-                existing.ProductionLineDefinitionId,
-                request.ProductionLineDefinitionId,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                existing.DutIdentity.ModelId,
-                request.DutIdentity.ModelId,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                existing.DutIdentity.InputKey,
-                request.DutIdentity.InputKey,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                existing.DutIdentity.Value,
-                request.DutIdentity.Value,
-                StringComparison.Ordinal)
-            || !string.Equals(existing.ActorId, request.ActorId, StringComparison.Ordinal)
-            || !string.Equals(existing.BatchId, request.BatchId, StringComparison.Ordinal)
-            || !string.Equals(existing.FixtureId, request.FixtureId, StringComparison.Ordinal)
-            || !string.Equals(existing.DeviceId, request.DeviceId, StringComparison.Ordinal)
-            || existing.Stages.Count != request.Stages.Count)
-        {
-            return false;
-        }
-
-        return existing.Stages
-            .OrderBy(stage => stage.Sequence)
-            .Zip(request.Stages.OrderBy(stage => stage.Sequence))
-            .All(pair => string.Equals(pair.First.StageId, pair.Second.StageId, StringComparison.Ordinal)
-                && pair.First.Sequence == pair.Second.Sequence
-                && string.Equals(
-                    pair.First.WorkstationId,
-                    pair.Second.WorkstationId,
-                    StringComparison.Ordinal)
-                && pair.First.StationId == pair.Second.StationId
-                && pair.First.ProcessDefinitionId
-                    == pair.Second.FrozenExecutableProcess.ProcessDefinitionId
-                && pair.First.ProcessVersionId
-                    == pair.Second.FrozenExecutableProcess.ProcessVersionId
-                && pair.First.ConfigurationSnapshotId == pair.Second.ConfigurationSnapshotId
-                && pair.First.RecipeSnapshotId == pair.Second.RecipeSnapshotId);
-    }
-
-    private static Result<ProductionRunRunResult> ToApplicationFailure(RuntimeOperationResult result)
-    {
-        return Result.Failure<ProductionRunRunResult>(
-            ApplicationError.Conflict(result.Code, result.Message));
-    }
+    private sealed record StationDispatchOutcome(
+        StationOperationDispatchResult? Result,
+        Exception? Exception);
 }

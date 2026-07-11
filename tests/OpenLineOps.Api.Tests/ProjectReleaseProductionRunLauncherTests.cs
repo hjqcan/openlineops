@@ -10,7 +10,9 @@ using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Api.Tests;
@@ -24,212 +26,190 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Guid.Parse("00000000-0000-0000-0000-000000000123");
 
     [Fact]
-    public async Task StartRejectsReleaseMetadataMismatchBeforeResolvingStageConfigurations()
+    public async Task SubmitRejectsReleaseMetadataMismatchBeforeResolvingConfigurations()
     {
         var configurationResolver = new RecordingConfigurationResolver([]);
         var release = OpenedRelease() with
         {
             Metadata = OpenedRelease().Metadata with { TopologyId = "topology.other" }
         };
-        var runner = new RecordingProductionRunRunner();
+        var coordinator = new RecordingProductionRunCoordinator();
         var launcher = CreateLauncher(
             new RecordingScopeResolver(LiveScope()),
             new RecordingReleaseStore(release),
             configurationResolver,
-            runner);
+            coordinator);
 
-        var result = await launcher.StartAsync(Snapshot(), StartRequest());
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
 
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ProjectReleaseMetadataMismatch", result.Error.Code);
         Assert.Equal(0, configurationResolver.CallCount);
-        Assert.Null(runner.LastRequest);
+        Assert.Null(coordinator.LastRequest);
     }
 
     [Fact]
-    public async Task StartRejectsReleaseManifestPathMismatch()
+    public async Task SubmitRejectsReleaseManifestPathMismatch()
     {
-        var configurationResolver = new RecordingConfigurationResolver([]);
-        var runner = new RecordingProductionRunRunner();
+        var coordinator = new RecordingProductionRunCoordinator();
         var launcher = CreateLauncher(
             new RecordingScopeResolver(LiveScope()),
             new RecordingReleaseStore(OpenedRelease()),
-            configurationResolver,
-            runner);
+            new RecordingConfigurationResolver([]),
+            coordinator);
 
-        var result = await launcher.StartAsync(
+        var result = await launcher.SubmitAsync(
             Snapshot(releaseManifestPath: "releases/release-other/release.json"),
-            StartRequest());
+            SubmitRequest());
 
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ProjectReleaseMetadataMismatch", result.Error.Code);
         Assert.Contains("release manifest path", result.Error.Message, StringComparison.Ordinal);
-        Assert.Equal(0, configurationResolver.CallCount);
-        Assert.Null(runner.LastRequest);
+        Assert.Null(coordinator.LastRequest);
     }
 
     [Fact]
-    public async Task StartBuildsEveryStageOnlyFromTheOpenedImmutableRelease()
+    public async Task SubmitBuildsPortableGraphAndFencedResourcesFromImmutableRelease()
     {
-        var release = OpenedRelease(stageCount: 2);
+        var release = OpenedRelease(operationCount: 2, includeCondition: true);
         var configurationResolver = new RecordingConfigurationResolver(
         [
-            RuntimeConfiguration("configuration.main"),
-            RuntimeConfiguration("configuration.secondary")
+            RuntimeConfiguration("configuration.main", "station.main"),
+            RuntimeConfiguration("configuration.secondary", "station.secondary")
         ]);
-        var runner = new RecordingProductionRunRunner();
+        var coordinator = new RecordingProductionRunCoordinator();
         var launcher = CreateLauncher(
             new RecordingScopeResolver(LiveScope()),
             new RecordingReleaseStore(release),
             configurationResolver,
-            runner);
+            coordinator);
 
-        var result = await launcher.StartAsync(Snapshot(), StartRequest());
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
 
         Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
-        Assert.NotNull(configurationResolver.LastScope);
-        Assert.Equal(Path.GetFullPath(release.SourceRootPath), configurationResolver.LastScope.ProjectPath);
-        Assert.Equal("project.main", configurationResolver.LastScope.ProjectId);
-        Assert.Equal("application.main", configurationResolver.LastScope.ApplicationId);
+        Assert.Equal(Path.GetFullPath(release.SourceRootPath), configurationResolver.LastScope?.ProjectPath);
         Assert.Equal(
             ["configuration.main", "configuration.secondary"],
             configurationResolver.RequestedConfigurationIds);
 
-        var runRequest = Assert.IsType<StartProductionRunRequest>(runner.LastRequest);
-        Assert.Equal(RunId, runRequest.RunId.Value);
-        Assert.Equal("project.main", runRequest.ProjectId);
-        Assert.Equal("application.main", runRequest.ApplicationId);
-        Assert.Equal("snapshot.main", runRequest.ProjectSnapshotId);
-        Assert.Equal("topology.main", runRequest.TopologyId);
-        Assert.Equal("line.main", runRequest.ProductionLineDefinitionId);
-        Assert.Equal("dut.main", runRequest.DutIdentity.ModelId);
-        Assert.Equal("serialNumber", runRequest.DutIdentity.InputKey);
-        Assert.Equal("DUT-1", runRequest.DutIdentity.Value);
-        Assert.Equal("operator-1", runRequest.ActorId);
-        Assert.Equal(2, runRequest.Stages.Count);
+        var request = Assert.IsType<SubmitProductionRunRequest>(coordinator.LastRequest);
+        Assert.Equal(RunId, request.RunId.Value);
+        Assert.Equal("project.main", request.ProjectId);
+        Assert.Equal("application.main", request.ApplicationId);
+        Assert.Equal("snapshot.main", request.ProjectSnapshotId);
+        Assert.Equal("topology.main", request.TopologyId);
+        Assert.Equal("line.main", request.ProductionLineDefinitionId);
+        Assert.Equal("product.main", request.ProductionUnitIdentity.ModelId);
+        Assert.Equal("serialNumber", request.ProductionUnitIdentity.InputKey);
+        Assert.Equal("UNIT-1", request.ProductionUnitIdentity.Value);
+        Assert.Equal("lot-1", request.LotId);
+        Assert.Equal("carrier-1", request.CarrierId);
+        Assert.Equal("operation.main", request.EntryOperationId);
+        Assert.Equal(2, request.Operations.Count);
+
         Assert.Collection(
-            runRequest.Stages,
-            stage => AssertStage(stage, "stage.main", 1, "configuration.main"),
-            stage => AssertStage(stage, "stage.secondary", 2, "configuration.secondary"));
+            request.Operations,
+            operation => AssertOperation(operation, "operation.main", "station.main", "configuration.main"),
+            operation => AssertOperation(
+                operation,
+                "operation.secondary",
+                "station.secondary",
+                "configuration.secondary"));
+
+        var transition = Assert.Single(request.RouteTransitions);
+        Assert.Equal(RuntimeRouteTransitionKind.Condition, transition.Kind);
+        Assert.Equal("inspection.accepted", transition.OutputCondition?.OutputKey);
+        Assert.Equal(
+            new ProductionContextValue(ProductionContextValueKind.Boolean, "true"),
+            transition.OutputCondition?.ExpectedValue);
     }
 
     [Fact]
-    public async Task StartRejectsFrozenStageFlowHashMismatchBeforeConfigurationResolution()
+    public async Task SubmitRejectsFrozenOperationFlowHashMismatchBeforeConfigurationResolution()
     {
         var release = OpenedRelease();
-        var stage = Assert.Single(release.Metadata.ProductionLine.Stages);
+        var operation = Assert.Single(release.Metadata.ProductionLine.Operations);
         release = release with
         {
             Metadata = release.Metadata with
             {
                 ProductionLine = release.Metadata.ProductionLine with
                 {
-                    Stages = [stage with { FlowIrSha256 = new string('b', 64) }]
+                    Operations = [operation with { FlowIrSha256 = new string('b', 64) }]
                 }
             }
         };
         var configurationResolver = new RecordingConfigurationResolver([]);
-        var runner = new RecordingProductionRunRunner();
+        var coordinator = new RecordingProductionRunCoordinator();
         var launcher = CreateLauncher(
             new RecordingScopeResolver(LiveScope()),
             new RecordingReleaseStore(release),
             configurationResolver,
-            runner);
+            coordinator);
 
-        var result = await launcher.StartAsync(Snapshot(), StartRequest());
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
 
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ProjectReleaseFlowIrIdentityMismatch", result.Error.Code);
         Assert.Equal(0, configurationResolver.CallCount);
-        Assert.Null(runner.LastRequest);
+        Assert.Null(coordinator.LastRequest);
     }
 
     [Fact]
-    public async Task StartRejectsPaddedDutIdentityWithoutOpeningRelease()
+    public async Task SubmitRejectsPaddedProductionUnitIdentityWithoutOpeningRelease()
     {
         var releaseStore = new RecordingReleaseStore(OpenedRelease());
         var launcher = CreateLauncher(
             new RecordingScopeResolver(LiveScope()),
             releaseStore,
             new RecordingConfigurationResolver([]),
-            new RecordingProductionRunRunner());
+            new RecordingProductionRunCoordinator());
 
-        var result = await launcher.StartAsync(
+        var result = await launcher.SubmitAsync(
             Snapshot(),
-            StartRequest() with { DutIdentityValue = " DUT-1" });
+            SubmitRequest() with { ProductionUnitIdentityValue = " UNIT-1" });
 
         Assert.True(result.IsFailure);
         Assert.Equal("Validation.Projects.ProductionRunIdentityInvalid", result.Error.Code);
         Assert.Equal(0, releaseStore.OpenCallCount);
     }
 
-    [Fact]
-    public async Task StartRejectsProjectAlreadyOwnedByIdeOrRunnerBeforeOpeningRelease()
-    {
-        var releaseStore = new RecordingReleaseStore(OpenedRelease());
-        var launcher = CreateLauncher(
-            new RecordingScopeResolver(LiveScope()),
-            releaseStore,
-            new RecordingConfigurationResolver([]),
-            new RecordingProductionRunRunner(),
-            new StubProjectExecutionCoordinator(isAvailable: false));
-
-        var result = await launcher.StartAsync(Snapshot(), StartRequest());
-
-        Assert.True(result.IsFailure);
-        Assert.Equal("Conflict.Projects.ProjectExecutionAlreadyActive", result.Error.Code);
-        Assert.Equal(0, releaseStore.OpenCallCount);
-    }
-
-    private static void AssertStage(
-        ProductionStageExecutionPlan stage,
-        string stageId,
-        int sequence,
+    private static void AssertOperation(
+        OperationExecutionPlan operation,
+        string operationId,
+        string stationSystemId,
         string configurationSnapshotId)
     {
-        Assert.Equal(stageId, stage.StageId);
-        Assert.Equal(sequence, stage.Sequence);
-        Assert.Equal("workstation.main", stage.WorkstationId);
-        Assert.Equal("station.main", stage.StationId.Value);
-        Assert.Equal(configurationSnapshotId, stage.ConfigurationSnapshotId.Value);
-        Assert.Equal("process.main@1.0.0", stage.FrozenExecutableProcess.ProcessVersionId.Value);
-        Assert.Equal("MoveAbsolute", Assert.Single(stage.FrozenExecutableProcess.Nodes).CommandName);
+        Assert.Equal(operationId, operation.Definition.OperationId);
+        Assert.Equal(stationSystemId, operation.Definition.StationSystemId);
+        Assert.Equal(stationSystemId, operation.Definition.StationId.Value);
+        Assert.Equal(configurationSnapshotId, operation.Definition.ConfigurationSnapshotId.Value);
+        Assert.Equal("process.main@1.0.0", operation.FrozenExecutableProcess.ProcessVersionId.Value);
+        Assert.Equal("MoveAbsolute", Assert.Single(operation.FrozenExecutableProcess.Nodes).CommandName);
+        Assert.Equal(
+            [
+                new ResourceRequirement(ResourceKind.Station, stationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, "slot-1"),
+                new ResourceRequirement(ResourceKind.Fixture, "fixture-1"),
+                new ResourceRequirement(ResourceKind.Device, "device-1")
+            ],
+            operation.Definition.ResourceRequirements);
     }
 
     private static ProjectReleaseProductionRunLauncher CreateLauncher(
         IProjectApplicationWorkspaceScopeResolver scopeResolver,
         IProjectReleaseArtifactStore releaseStore,
         IProjectRuntimeConfigurationSnapshotResolver configurationResolver,
-        IProductionRunRunner productionRunRunner,
-        IProjectExecutionCoordinator? executionCoordinator = null)
+        IProductionRunCoordinator coordinator)
     {
         var serializer = new FlowIrCanonicalSerializer();
         return new ProjectReleaseProductionRunLauncher(
             scopeResolver,
             releaseStore,
             configurationResolver,
-            executionCoordinator ?? new StubProjectExecutionCoordinator(isAvailable: true),
-            productionRunRunner,
+            coordinator,
             serializer,
             new FlowIrExecutableRuntimeProcessMapper(serializer));
-    }
-
-    private sealed class StubProjectExecutionCoordinator(bool isAvailable)
-        : IProjectExecutionCoordinator
-    {
-        public ValueTask<IProjectExecutionLease?> TryAcquireAsync(
-            string projectDirectory,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult<IProjectExecutionLease?>(
-                isAvailable ? new StubProjectExecutionLease() : null);
-        }
-    }
-
-    private sealed class StubProjectExecutionLease : IProjectExecutionLease
-    {
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static PublishedProjectSnapshotDetails Snapshot(
@@ -249,13 +229,18 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 "binding.axis.x",
                 "Driver",
                 "driver.axis.x")],
-            [new ProjectTargetReferenceDetails("System", "station.main")],
+            [
+                new ProjectTargetReferenceDetails("System", "station.main"),
+                new ProjectTargetReferenceDetails("System", "station.secondary")
+            ],
             [],
             releaseManifestPath,
             releaseContentSha256);
     }
 
-    private static OpenedProjectReleaseArtifact OpenedRelease(int stageCount = 1)
+    private static OpenedProjectReleaseArtifact OpenedRelease(
+        int operationCount = 1,
+        bool includeCondition = false)
     {
         var flowIr = FrozenFlowIr();
         var sourceRootPath = Path.Combine(
@@ -263,22 +248,35 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             "releases",
             "release-snapshot.main",
             "source");
-        var stages = new List<ProjectReleaseProductionStage>
+        var operations = new List<ProjectReleaseOperation>
         {
-            ProductionStage(
-                "stage.main",
-                1,
-                "configuration.main",
-                flowIr)
+            Operation("operation.main", "station.main", "configuration.main", flowIr)
         };
-        if (stageCount == 2)
+        if (operationCount == 2)
         {
-            stages.Add(ProductionStage(
-                "stage.secondary",
-                2,
+            operations.Add(Operation(
+                "operation.secondary",
+                "station.secondary",
                 "configuration.secondary",
                 flowIr));
         }
+
+        var transitions = includeCondition
+            ? new ProjectReleaseRouteTransition[]
+            {
+                new(
+                    "transition.accepted",
+                    "operation.main",
+                    "operation.secondary",
+                    "Condition",
+                    RequiredJudgement: null,
+                    MaxTraversals: null,
+                    ParallelGroupId: null,
+                    OutputKey: "inspection.accepted",
+                    ExpectedOutputKind: "Boolean",
+                    ExpectedOutputValue: "true")
+            }
+            : [];
 
         return new OpenedProjectReleaseArtifact(
             "snapshot.main",
@@ -297,40 +295,42 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                     "line.main",
                     "Main Line",
                     "topology.main",
-                    new ProjectReleaseDutModel("dut.main", "MAINBOARD-A", "serialNumber"),
-                    [new ProjectReleaseWorkstation("workstation.main", "Main", "station.main")],
-                    stages,
+                    new ProjectReleaseProductModel("product.main", "MAINBOARD-A", "serialNumber"),
+                    "operation.main",
+                    operations,
+                    transitions,
                     []),
                 [new ProjectReleaseCapabilityBinding(
                     "motion.axis.move",
                     "binding.axis.x",
                     "Driver",
                     "driver.axis.x")],
-                [new ProjectReleaseTargetReference("System", "station.main")],
+                [
+                    new ProjectReleaseTargetReference("System", "station.main"),
+                    new ProjectReleaseTargetReference("System", "station.secondary")
+                ],
                 [],
                 []),
             []);
     }
 
-    private static ProjectReleaseProductionStage ProductionStage(
-        string stageId,
-        int sequence,
+    private static ProjectReleaseOperation Operation(
+        string operationId,
+        string stationSystemId,
         string configurationSnapshotId,
         FlowIrCanonicalArtifact flowIr)
     {
-        return new ProjectReleaseProductionStage(
-            stageId,
-            sequence,
-            stageId,
-            "workstation.main",
+        return new ProjectReleaseOperation(
+            operationId,
+            operationId,
+            stationSystemId,
             "process.main",
             configurationSnapshotId,
             "process.main@1.0.0",
             flowIr.SchemaVersion,
             flowIr.Sha256,
             flowIr.CanonicalJson,
-            [],
-            ExternalTestProgramAdapterId: null);
+            []);
     }
 
     private static FlowIrCanonicalArtifact FrozenFlowIr()
@@ -342,14 +342,16 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         return artifactResult.Value;
     }
 
-    private static RuntimeConfigurationSnapshotDetails RuntimeConfiguration(string id)
+    private static RuntimeConfigurationSnapshotDetails RuntimeConfiguration(
+        string id,
+        string stationSystemId)
     {
         return new RuntimeConfigurationSnapshotDetails(
             id,
             "process.main",
             "process.main@1.0.0",
             "recipe.main@1.0.0",
-            "station.main");
+            stationSystemId);
     }
 
     private static ProjectApplicationWorkspaceScope LiveScope()
@@ -361,13 +363,15 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             "applications/application.main/application.main.oloapp");
     }
 
-    private static StartProjectReleaseProductionRunRequest StartRequest()
+    private static SubmitProjectReleaseProductionRunRequest SubmitRequest()
     {
-        return new StartProjectReleaseProductionRunRequest(
+        return new SubmitProjectReleaseProductionRunRequest(
             RunId,
-            "DUT-1",
+            "UNIT-1",
             "operator-1",
-            "batch-1",
+            "lot-1",
+            "carrier-1",
+            "slot-1",
             "fixture-1",
             "device-1");
     }
@@ -409,6 +413,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             string applicationId,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(scope);
         }
     }
@@ -425,7 +430,8 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             ProjectReleaseSourceMetadata metadata,
             CancellationToken cancellationToken = default)
         {
-            throw new NotSupportedException();
+            return ValueTask.FromException<ProjectReleaseArtifactDescriptor>(
+                new InvalidOperationException("Publish is outside this test fixture."));
         }
 
         public ValueTask<OpenedProjectReleaseArtifact?> OpenAsync(
@@ -434,6 +440,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             string expectedContentSha256,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             OpenCallCount++;
             return ValueTask.FromResult(release);
         }
@@ -454,6 +461,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             string configurationSnapshotId,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CallCount++;
             LastScope = scope;
             RequestedConfigurationIds.Add(configurationSnapshotId);
@@ -468,55 +476,41 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         }
     }
 
-    private sealed class RecordingProductionRunRunner : IProductionRunRunner
+    private sealed class RecordingProductionRunCoordinator : IProductionRunCoordinator
     {
-        public StartProductionRunRequest? LastRequest { get; private set; }
+        public SubmitProductionRunRequest? LastRequest { get; private set; }
 
-        public ValueTask<Result<ProductionRunRunResult>> RunAsync(
-            StartProductionRunRequest request,
+        public ValueTask<Result<ProductionRunSnapshot>> SubmitAsync(
+            SubmitProductionRunRequest request,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             LastRequest = request;
-            var timestamp = PublishedAtUtc.AddMinutes(1);
-            var stages = request.Stages.Select(stage => new ProductionStageRunSnapshot(
-                stage.StageId,
-                stage.Sequence,
-                stage.WorkstationId,
-                stage.StationId,
-                stage.FrozenExecutableProcess.ProcessDefinitionId,
-                stage.FrozenExecutableProcess.ProcessVersionId,
-                stage.ConfigurationSnapshotId,
-                stage.RecipeSnapshotId,
-                ProductionStageRunStatus.Completed,
-                RuntimeSessionId.New(),
-                timestamp,
-                timestamp,
-                FailureCode: null,
-                FailureReason: null,
-                CompletedStepCount: 1,
-                CommandCount: 1,
-                IncidentCount: 0)).ToArray();
-            var snapshot = new ProductionRunSnapshot(
+            var run = ProductionRun.Create(
                 request.RunId,
                 request.ProjectId,
                 request.ApplicationId,
                 request.ProjectSnapshotId,
                 request.TopologyId,
                 request.ProductionLineDefinitionId,
-                request.DutIdentity,
-                request.BatchId,
-                request.FixtureId,
-                request.DeviceId,
+                request.ProductionUnitIdentity,
+                request.LotId,
+                request.CarrierId,
                 request.ActorId,
-                ProductionRunStatus.Completed,
-                timestamp,
-                timestamp,
-                timestamp,
-                timestamp,
-                FailureCode: null,
-                FailureReason: null,
-                stages);
-            return ValueTask.FromResult(Result.Success(new ProductionRunRunResult(snapshot)));
+                request.EntryOperationId,
+                PublishedAtUtc,
+                request.Operations.Select(static operation => operation.Definition),
+                request.RouteTransitions);
+            return ValueTask.FromResult(Result.Success(run.ToSnapshot()));
+        }
+
+        public ValueTask<Result<ProductionRunSnapshot>> CommandAsync(
+            ProductionRunId runId,
+            ProductionRunCommandRequest command,
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromException<Result<ProductionRunSnapshot>>(
+                new InvalidOperationException("Commands are outside this test fixture."));
         }
     }
 }

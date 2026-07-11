@@ -21,7 +21,7 @@ public static partial class RuntimeActionContractValidator
 
         if (!string.Equals(
                 contract.SchemaVersion,
-                RuntimeActionContractSchemaVersions.V1,
+                RuntimeActionContractSchema.Current,
                 StringComparison.Ordinal))
         {
             return Failure($"Schema version '{contract.SchemaVersion}' is not supported.");

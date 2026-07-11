@@ -1,7 +1,9 @@
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
+using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -42,7 +44,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             command.Id,
             "{\"ok\":true}",
             BaseTimeUtc.AddSeconds(6),
-            RuntimeCommandSemanticOutcome.Passed);
+            ResultJudgement.Passed);
         session.CompleteStep(step.Id, BaseTimeUtc.AddSeconds(7));
         var incident = session.RecordIncident(
             RuntimeIncidentSeverity.Warning,
@@ -71,7 +73,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         Assert.Equal(command.Id, restoredCommand.Id);
         Assert.Equal(RuntimeCommandStatus.Completed, restoredCommand.Status);
         Assert.Equal("{\"ok\":true}", restoredCommand.ResultPayload);
-        Assert.Equal(RuntimeCommandSemanticOutcome.Passed, restoredCommand.SemanticOutcome);
+        Assert.Equal(ResultJudgement.Passed, restoredCommand.ResultJudgement);
         Assert.Equal(BaseTimeUtc.AddSeconds(6), restoredCommand.CompletedAtUtc);
 
         var restoredIncident = Assert.Single(restored.Incidents);
@@ -91,11 +93,12 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             new RuntimeSessionTraceMetadata(
                 new ProductionRunId(Guid.Parse("20000000-0000-0000-0000-000000000001")),
                 "LINE-TRACE",
-                "STAGE-TRACE",
+                "OPERATION-TRACE",
                 3,
-                "WORKSTATION-TRACE",
-                new DutIdentity("DUT-MODEL-TRACE", "barcode", "SN-TRACE-001"),
-                "BATCH-TRACE",
+                "STATION-SYSTEM-TRACE",
+                new ProductionUnitIdentity("PRODUCT-MODEL-TRACE", "barcode", "UNIT-TRACE-001"),
+                "LOT-TRACE",
+                "CARRIER-TRACE",
                 "FIXTURE-TRACE",
                 "DEVICE-TRACE",
                 "OPERATOR-TRACE",
@@ -114,13 +117,14 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             Guid.Parse("20000000-0000-0000-0000-000000000001"),
             restored.TraceMetadata.ProductionRunId.Value);
         Assert.Equal("LINE-TRACE", restored.TraceMetadata.ProductionLineDefinitionId);
-        Assert.Equal("STAGE-TRACE", restored.TraceMetadata.ProductionStageId);
-        Assert.Equal(3, restored.TraceMetadata.StageSequence);
-        Assert.Equal("WORKSTATION-TRACE", restored.TraceMetadata.WorkstationId);
-        Assert.Equal("DUT-MODEL-TRACE", restored.TraceMetadata.DutIdentity.ModelId);
-        Assert.Equal("barcode", restored.TraceMetadata.DutIdentity.InputKey);
-        Assert.Equal("SN-TRACE-001", restored.TraceMetadata.DutIdentity.Value);
-        Assert.Equal("BATCH-TRACE", restored.TraceMetadata.BatchId);
+        Assert.Equal("OPERATION-TRACE", restored.TraceMetadata.OperationId);
+        Assert.Equal(3, restored.TraceMetadata.OperationAttempt);
+        Assert.Equal("STATION-SYSTEM-TRACE", restored.TraceMetadata.StationSystemId);
+        Assert.Equal("PRODUCT-MODEL-TRACE", restored.TraceMetadata.ProductionUnitIdentity.ModelId);
+        Assert.Equal("barcode", restored.TraceMetadata.ProductionUnitIdentity.InputKey);
+        Assert.Equal("UNIT-TRACE-001", restored.TraceMetadata.ProductionUnitIdentity.Value);
+        Assert.Equal("LOT-TRACE", restored.TraceMetadata.LotId);
+        Assert.Equal("CARRIER-TRACE", restored.TraceMetadata.CarrierId);
         Assert.Equal("FIXTURE-TRACE", restored.TraceMetadata.FixtureId);
         Assert.Equal("DEVICE-TRACE", restored.TraceMetadata.DeviceId);
         Assert.Equal("OPERATOR-TRACE", restored.TraceMetadata.ActorId);
@@ -240,7 +244,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
     }
 
     [Fact]
-    public void SnapshotMapperRequiresExactSemanticOutcomeToken()
+    public void SnapshotMapperRequiresExactResultJudgementToken()
     {
         var session = CreateRunningSession("canonical-semantic-outcome", BaseTimeUtc);
         var step = session.StartStep(
@@ -263,12 +267,12 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             command.Id,
             "{\"judgement\":\"Passed\"}",
             BaseTimeUtc.AddSeconds(6),
-            RuntimeCommandSemanticOutcome.Passed);
+            ResultJudgement.Passed);
         var snapshot = RuntimeSessionSnapshotMapper.ToSnapshot(session);
         var invalidSnapshot = snapshot with
         {
             Commands = snapshot.Commands
-                .Select(candidate => candidate with { SemanticOutcome = "passed" })
+                .Select(candidate => candidate with { ResultJudgement = "passed" })
                 .ToArray()
         };
 

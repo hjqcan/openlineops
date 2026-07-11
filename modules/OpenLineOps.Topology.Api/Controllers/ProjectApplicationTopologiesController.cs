@@ -27,7 +27,7 @@ using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.Updat
 namespace OpenLineOps.Topology.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.TopologyV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationTopologies)]
 public sealed class ProjectApplicationTopologiesController : ControllerBase
 {

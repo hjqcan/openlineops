@@ -13,7 +13,7 @@ using AppOpenWorkspaceRequest = OpenLineOps.Projects.Application.ProjectWorkspac
 namespace OpenLineOps.Projects.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.ProjectsV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.AutomationProjectWorkspaces)]
 public sealed class AutomationProjectWorkspacesController : ControllerBase
 {

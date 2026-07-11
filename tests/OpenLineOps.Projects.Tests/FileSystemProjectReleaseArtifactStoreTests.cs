@@ -51,12 +51,12 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(["capability.a", "capability.b"], opened.Metadata.CapabilityBindings
             .Select(binding => binding.CapabilityId));
         Assert.Equal(["Slot", "System"], opened.Metadata.TargetReferences.Select(target => target.Kind));
-        var frozenStage = Assert.Single(opened.Metadata.ProductionLine.Stages);
-        Assert.Equal("openlineops.flow-ir/v1", frozenStage.FlowIrSchemaVersion);
-        Assert.Equal("{}", frozenStage.FlowIrCanonicalJson);
+        var frozenOperation = Assert.Single(opened.Metadata.ProductionLine.Operations);
+        Assert.Equal("openlineops.flow-ir", frozenOperation.FlowIrSchema);
+        Assert.Equal("{}", frozenOperation.FlowIrCanonicalJson);
         Assert.Equal(
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-            frozenStage.FlowIrSha256);
+            frozenOperation.FlowIrSha256);
 
         var releaseSourceScope = new ProjectApplicationWorkspaceScope(
             opened.ProjectId,
@@ -74,7 +74,159 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "openlineops.project-release-artifact",
             manifest.RootElement.GetProperty("schema").GetString());
         Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+        var productionLine = manifest.RootElement
+            .GetProperty("metadata")
+            .GetProperty("productionLine");
+        Assert.True(productionLine.TryGetProperty("productModel", out _));
+        Assert.True(productionLine.TryGetProperty("entryOperationId", out _));
+        Assert.True(productionLine.TryGetProperty("operations", out _));
+        Assert.True(productionLine.TryGetProperty("transitions", out _));
+        Assert.False(productionLine.TryGetProperty("dutModel", out _));
+        Assert.False(productionLine.TryGetProperty("workstations", out _));
+        Assert.False(productionLine.TryGetProperty("stages", out _));
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
+    }
+
+    [Fact]
+    public async Task PublishAndOpenRoundTripsDeterministicallyOrderedOperationGraph()
+    {
+        var scope = CreateScope("project.operation-graph", "application.main");
+        var metadata = CreateMetadata();
+        var terminal = Assert.Single(metadata.ProductionLine.Operations);
+        var entry = terminal with
+        {
+            OperationId = "operation.inspect",
+            DisplayName = "Inspect"
+        };
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with
+            {
+                EntryOperationId = entry.OperationId,
+                Operations = [terminal, entry],
+                Transitions =
+                [
+                    new ProjectReleaseRouteTransition(
+                        "transition.inspect-eol",
+                        entry.OperationId,
+                        terminal.OperationId,
+                        "Sequence",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)
+                ]
+            }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.operation-graph",
+            PublishedAtUtc,
+            metadata);
+        var opened = Assert.IsType<OpenedProjectReleaseArtifact>(
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+
+        Assert.Equal("product.main", opened.Metadata.ProductionLine.ProductModel.ProductModelId);
+        Assert.Equal("operation.inspect", opened.Metadata.ProductionLine.EntryOperationId);
+        Assert.Equal(
+            ["operation.eol", "operation.inspect"],
+            opened.Metadata.ProductionLine.Operations.Select(operation => operation.OperationId));
+        var transition = Assert.Single(opened.Metadata.ProductionLine.Transitions);
+        Assert.Equal("transition.inspect-eol", transition.TransitionId);
+        Assert.Equal("Sequence", transition.Kind);
+    }
+
+    [Fact]
+    public async Task OpenRejectsLegacyDutWorkstationStageReleaseShapeWithoutCompatibilityParsing()
+    {
+        var scope = CreateScope("project.legacy-release-shape", "application.main");
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var descriptor = await store.PublishAsync(
+            scope,
+            "snapshot.legacy-release-shape",
+            PublishedAtUtc,
+            CreateMetadata());
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(descriptor.ManifestPath))!.AsObject();
+        var line = document["metadata"]!["productionLine"]!.AsObject();
+        var productModel = line["productModel"]!.DeepClone();
+        line.Remove("productModel");
+        line["dutModel"] = productModel;
+        line["workstations"] = new JsonArray();
+        line["stages"] = line["operations"]!.DeepClone();
+        await File.WriteAllTextAsync(descriptor.ManifestPath, document.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256));
+
+        Assert.Contains("invalid JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PublishRejectsUnreachableOperationGraph()
+    {
+        var scope = CreateScope("project.unreachable-operation", "application.main");
+        var metadata = CreateMetadata();
+        var entry = Assert.Single(metadata.ProductionLine.Operations);
+        var unreachable = entry with { OperationId = "operation.unreachable" };
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with
+            {
+                Operations = [entry, unreachable],
+                Transitions = []
+            }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.PublishAsync(
+                scope,
+                "snapshot.unreachable-operation",
+                PublishedAtUtc,
+                metadata));
+
+        Assert.Contains("not reachable", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishRejectsNonCanonicalRouteTransitionKind()
+    {
+        var scope = CreateScope("project.route-token", "application.main");
+        var metadata = CreateMetadata();
+        var terminal = Assert.Single(metadata.ProductionLine.Operations);
+        var entry = terminal with { OperationId = "operation.entry" };
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with
+            {
+                EntryOperationId = entry.OperationId,
+                Operations = [entry, terminal],
+                Transitions =
+                [
+                    new ProjectReleaseRouteTransition(
+                        "transition.entry-eol",
+                        entry.OperationId,
+                        terminal.OperationId,
+                        "sequence",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)
+                ]
+            }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.PublishAsync(scope, "snapshot.route-token", PublishedAtUtc, metadata));
+
+        Assert.Contains("kind 'sequence' is invalid", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -304,7 +456,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         await File.WriteAllTextAsync(
             releasedLine,
             $$"""
-            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.tampered"}
+            {"schemaVersion":"openlineops.production-line","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.tampered"}
             """);
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
@@ -333,17 +485,17 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task PublishRejectsProductionStageConfigurationMissingFromApplication()
+    public async Task PublishRejectsProductionOperationConfigurationMissingFromApplication()
     {
         var scope = CreateScope("project.stage-configuration-missing", "application.main");
         var metadata = CreateMetadata();
-        var frozenStage = Assert.Single(metadata.ProductionLine.Stages) with
+        var frozenOperation = Assert.Single(metadata.ProductionLine.Operations) with
         {
             ConfigurationSnapshotId = "configuration.missing"
         };
         metadata = metadata with
         {
-            ProductionLine = metadata.ProductionLine with { Stages = [frozenStage] }
+            ProductionLine = metadata.ProductionLine with { Operations = [frozenOperation] }
         };
         var store = new FileSystemProjectReleaseArtifactStore();
 
@@ -364,9 +516,9 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var scope = CreateScope("project.flow-ir-hash", "application.main");
         WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
         var store = new FileSystemProjectReleaseArtifactStore();
-        var metadata = WithStage(
+        var metadata = WithOperation(
             CreateMetadata(),
-            stage => stage with { FlowIrSha256 = new string('a', 64) });
+            operation => operation with { FlowIrSha256 = new string('a', 64) });
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.PublishAsync(
@@ -375,7 +527,10 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 PublishedAtUtc,
                 metadata));
 
-        Assert.Contains("Production stage stage.eol Flow IR SHA-256", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            "Production operation operation.eol Flow IR SHA-256",
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -411,11 +566,11 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             {
                 ProductionLine = metadata.ProductionLine with
                 {
-                    Stages =
+                    Operations =
                     [
-                        Assert.Single(metadata.ProductionLine.Stages) with
+                        Assert.Single(metadata.ProductionLine.Operations) with
                         {
-                            FlowIrSha256 = $" {Assert.Single(metadata.ProductionLine.Stages).FlowIrSha256} "
+                            FlowIrSha256 = $" {Assert.Single(metadata.ProductionLine.Operations).FlowIrSha256} "
                         }
                     ]
                 }
@@ -485,9 +640,9 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var scope = CreateScope("project.flow-ir-json", "application.main");
         WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
         var store = new FileSystemProjectReleaseArtifactStore();
-        var metadata = WithStage(
+        var metadata = WithOperation(
             CreateMetadata(),
-            stage => stage with
+            operation => operation with
             {
                 FlowIrCanonicalJson = invalidJson,
                 FlowIrSha256 = Convert.ToHexString(
@@ -802,14 +957,14 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             []);
     }
 
-    private static ProjectReleaseSourceMetadata WithStage(
+    private static ProjectReleaseSourceMetadata WithOperation(
         ProjectReleaseSourceMetadata metadata,
-        Func<ProjectReleaseProductionStage, ProjectReleaseProductionStage> update)
+        Func<ProjectReleaseOperation, ProjectReleaseOperation> update)
     {
-        var stage = update(Assert.Single(metadata.ProductionLine.Stages));
+        var operation = update(Assert.Single(metadata.ProductionLine.Operations));
         return metadata with
         {
-            ProductionLine = metadata.ProductionLine with { Stages = [stage] }
+            ProductionLine = metadata.ProductionLine with { Operations = [operation] }
         };
     }
 
@@ -821,23 +976,22 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "line.main",
             "Main Line",
             topologyId,
-            new ProjectReleaseDutModel("dut.main", "MAINBOARD-A", "serialNumber"),
-            [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+            new ProjectReleaseProductModel("product.main", "MAINBOARD-A", "serialNumber"),
+            "operation.eol",
             [
-                new ProjectReleaseProductionStage(
-                    "stage.eol",
-                    1,
+                new ProjectReleaseOperation(
+                    "operation.eol",
                     "EOL",
-                    "workstation.eol",
+                    "station.eol",
                     "process.main",
                     "configuration.main.v1",
                     "process.main@1.0.0",
-                    "openlineops.flow-ir/v1",
+                    "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                     "{}",
-                    blockVersionIds,
-                    ExternalTestProgramAdapterId: null)
+                    blockVersionIds)
             ],
+            Transitions: [],
             ExternalTestProgramAdapters: []);
     }
 
@@ -893,14 +1047,14 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         File.WriteAllText(
             Path.Combine(topologyDirectory, "topology.json"),
             $$"""
-            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
+            {"schemaVersion":"openlineops.automation-topology","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
             """);
         foreach (var layoutId in resolvedLayoutIds)
         {
             File.WriteAllText(
                 Path.Combine(layoutDirectory, $"{layoutId}.json"),
                 $$"""
-                {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
+                {"schemaVersion":"openlineops.site-layout","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
                 """);
         }
 
@@ -908,7 +1062,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         File.WriteAllText(
             Path.Combine(productionLineDirectory, "line.json"),
             $$"""
-            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.main"}
+            {"schemaVersion":"openlineops.production-line","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"line.main"}
             """);
         File.WriteAllText(
             Path.Combine(engineeringProjectsDirectory, "project-main.json"),

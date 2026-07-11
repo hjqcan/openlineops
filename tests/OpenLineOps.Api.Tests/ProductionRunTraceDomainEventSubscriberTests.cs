@@ -1,11 +1,12 @@
-using OpenLineOps.Runtime.Domain.Commands;
+using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Traceability.Api.RuntimeIntegration;
-using OpenLineOps.Traceability.Application.Judgements;
 using OpenLineOps.Traceability.Application.Records;
 using OpenLineOps.Traceability.Domain.Records;
 using OpenLineOps.Traceability.Infrastructure.Persistence;
@@ -17,252 +18,176 @@ namespace OpenLineOps.Api.Tests;
 
 public sealed class ProductionRunTraceDomainEventSubscriberTests
 {
-    private static readonly DateTimeOffset BaseTimeUtc = new(2026, 7, 10, 8, 0, 0, TimeSpan.Zero);
-
-    [Theory]
-    [InlineData(RuntimeCommandStatus.Failed)]
-    [InlineData(RuntimeCommandStatus.TimedOut)]
-    [InlineData(RuntimeCommandStatus.Rejected)]
-    public async Task FailedRunCreatesOneTraceWithExactNestedStageCommandMeasurementAndIncident(
-        RuntimeCommandStatus commandStatus)
-    {
-        var runtimeRepository = new InMemoryRuntimeSessionRepository();
-        var traceRepository = new InMemoryTraceRecordRepository();
-        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
-        var run = CreateRunningRun(out var stageSessionId);
-        var session = CreateRunningSession(run, stageSessionId);
-        var step = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("node.inspect.slot"),
-            "Inspect slot",
-            BaseTimeUtc.AddSeconds(2),
-            new RuntimeActionId("action.inspect.slot"),
-            new RuntimeTargetReference(RuntimeTargetKinds.Slot, "slot.fixture.1"));
-        var command = session.CreateCommand(
-            RuntimeCommandId.New(),
-            step.Id,
-            new RuntimeCapabilityId("capability.inspect"),
-            "Inspect",
-            BaseTimeUtc.AddSeconds(3),
-            TimeSpan.FromSeconds(10));
-        Assert.True(session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(4)).Succeeded);
-        Assert.True(session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(5)).Succeeded);
-        var terminalAtUtc = BaseTimeUtc.AddSeconds(6);
-        var commandTransition = commandStatus switch
-        {
-            RuntimeCommandStatus.Failed => session.FailCommand(command.Id, "inspection failed", terminalAtUtc),
-            RuntimeCommandStatus.TimedOut => session.TimeoutCommand(command.Id, terminalAtUtc),
-            RuntimeCommandStatus.Rejected => session.RejectCommand(command.Id, "inspection rejected", terminalAtUtc),
-            _ => throw new InvalidOperationException($"Unsupported command status {commandStatus}.")
-        };
-        Assert.True(commandTransition.Succeeded);
-        Assert.True(session.Fail(BaseTimeUtc.AddSeconds(7), "Runtime.ActionFailed", "Action failed.").Succeeded);
-        await runtimeRepository.SaveAsync(session);
-        Assert.True(run.FailStage(
-            "stage-board-test",
-            "Runtime.ActionFailed",
-            "Action failed.",
-            0,
-            1,
-            1,
-            BaseTimeUtc.AddSeconds(8)).Succeeded);
-        var terminalEvents = run.DomainEvents.ToArray();
-
-        await subscriber.HandleAsync(terminalEvents);
-        await subscriber.HandleAsync(terminalEvents);
-        await subscriber.HandleAsync(run.ToSnapshot());
-
-        var trace = await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value));
-        Assert.NotNull(trace);
-        Assert.Equal(run.Id.Value, trace.ProductionRunId.Value);
-        Assert.Equal(TraceProductionRunStatus.Failed, trace.RunStatus);
-        Assert.Equal(ResultJudgement.Failed, trace.Judgement);
-        Assert.Equal(1, traceRepository.AddCount);
-        var stage = Assert.Single(trace.Stages);
-        Assert.Equal(TraceStageStatus.Failed, stage.Status);
-        Assert.Equal(session.Id.Value, stage.RuntimeSessionId?.Value);
-        Assert.Equal(TraceRuntimeSessionStatus.Failed, stage.RuntimeSessionStatus);
-        Assert.Single(stage.Incidents);
-        var storedCommand = Assert.Single(stage.Commands);
-        Assert.Equal(command.Id.Value, storedCommand.RuntimeCommandId.Value);
-        Assert.Equal("action.inspect.slot", storedCommand.ActionId);
-        Assert.Equal(TraceTargetKind.Slot, storedCommand.TargetKind);
-        Assert.Equal("slot.fixture.1", storedCommand.TargetId);
-        Assert.Equal(commandStatus.ToString(), storedCommand.Status.ToString());
-        var measurement = Assert.Single(stage.Measurements);
-        Assert.Null(measurement.Passed);
-        Assert.Equal(command.Id.Value, measurement.RuntimeCommandId?.Value);
-        Assert.Equal(session.CompletedAtUtc, stage.CompletedAtUtc);
-        Assert.Contains(trace.AuditEntries, entry => entry.Id.Value == run.Id.Value);
-        Assert.Contains(trace.AuditEntries, entry => entry.Action == "ProductionRun.Failed");
-    }
+    private static readonly DateTimeOffset BaseTimeUtc =
+        new(2026, 7, 10, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task CanceledRunPreservesInProgressStageEvidenceAsAbortedTrace()
-    {
-        var runtimeRepository = new InMemoryRuntimeSessionRepository();
-        var traceRepository = new InMemoryTraceRecordRepository();
-        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
-        var run = CreateRunningRun(out var stageSessionId);
-        var session = CreateRunningSession(run, stageSessionId);
-        var step = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("node.external.test"),
-            "External test",
-            BaseTimeUtc.AddSeconds(2),
-            new RuntimeActionId("action.external.test"),
-            new RuntimeTargetReference(RuntimeTargetKinds.Dut, "dut.board.current"));
-        var command = session.CreateCommand(
-            RuntimeCommandId.New(),
-            step.Id,
-            new RuntimeCapabilityId("capability.external.test"),
-            "RunExternalTest",
-            BaseTimeUtc.AddSeconds(3),
-            TimeSpan.FromMinutes(2));
-        Assert.True(session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(4)).Succeeded);
-        Assert.True(session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(5)).Succeeded);
-        Assert.True(session.Cancel(BaseTimeUtc.AddSeconds(6), "Operator canceled the DUT run.").Succeeded);
-        await runtimeRepository.SaveAsync(session);
-        Assert.True(run.Cancel("Operator canceled the DUT run.", 0, 1, 0, BaseTimeUtc.AddSeconds(7)).Succeeded);
-
-        await subscriber.HandleAsync(run.DomainEvents.ToArray());
-
-        var trace = await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value));
-        Assert.NotNull(trace);
-        Assert.Equal(TraceProductionRunStatus.Canceled, trace.RunStatus);
-        Assert.Equal(ResultJudgement.Aborted, trace.Judgement);
-        var stage = Assert.Single(trace.Stages);
-        Assert.Equal(TraceStageStatus.Canceled, stage.Status);
-        Assert.Equal(TraceRuntimeSessionStatus.Canceled, stage.RuntimeSessionStatus);
-        var measurement = Assert.Single(stage.Measurements);
-        Assert.Equal(TraceCommandStatus.InProgress, measurement.CommandStatus);
-        Assert.Null(measurement.Passed);
-        Assert.Equal("action.external.test", measurement.ActionId);
-        Assert.Equal(TraceTargetKind.Dut, measurement.TargetKind);
-    }
-
-    [Theory]
-    [InlineData(RuntimeCommandSemanticOutcome.Passed, true)]
-    [InlineData(RuntimeCommandSemanticOutcome.Failed, false)]
-    [InlineData(RuntimeCommandSemanticOutcome.Aborted, null)]
-    public async Task ExplicitCommandSemanticOutcomeControlsTraceMeasurement(
-        RuntimeCommandSemanticOutcome semanticOutcome,
-        bool? expectedPassed)
-    {
-        var runtimeRepository = new InMemoryRuntimeSessionRepository();
-        var traceRepository = new InMemoryTraceRecordRepository();
-        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
-        var run = CreateRunningRun(out var stageSessionId);
-        var session = CreateRunningSession(run, stageSessionId);
-        var step = session.StartStep(
-            RuntimeStepId.New(),
-            new RuntimeNodeId("node.vendor.test"),
-            "Vendor test",
-            BaseTimeUtc.AddSeconds(2),
-            new RuntimeActionId("action.vendor.test"),
-            new RuntimeTargetReference(RuntimeTargetKinds.System, "station.functional-test"));
-        var command = session.CreateCommand(
-            RuntimeCommandId.New(),
-            step.Id,
-            new RuntimeCapabilityId("capability.vendor.test"),
-            "RunVendorTest",
-            BaseTimeUtc.AddSeconds(3),
-            TimeSpan.FromSeconds(10));
-        Assert.True(session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(4)).Succeeded);
-        Assert.True(session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(5)).Succeeded);
-        var vendorPayload = $"{{\"judgement\":\"{semanticOutcome}\"}}";
-        switch (semanticOutcome)
-        {
-            case RuntimeCommandSemanticOutcome.Passed:
-                Assert.True(session.CompleteCommand(
-                    command.Id,
-                    vendorPayload,
-                    BaseTimeUtc.AddSeconds(6),
-                    semanticOutcome).Succeeded);
-                Assert.True(session.CompleteStep(step.Id, BaseTimeUtc.AddSeconds(7)).Succeeded);
-                Assert.True(session.Complete(BaseTimeUtc.AddSeconds(8)).Succeeded);
-                Assert.True(run.CompleteStage(
-                    "stage-board-test",
-                    1,
-                    1,
-                    0,
-                    BaseTimeUtc.AddSeconds(9)).Succeeded);
-                break;
-            case RuntimeCommandSemanticOutcome.Failed:
-                Assert.True(session.FailCommand(
-                    command.Id,
-                    "Vendor judgement failed.",
-                    BaseTimeUtc.AddSeconds(6),
-                    vendorPayload,
-                    semanticOutcome).Succeeded);
-                Assert.True(session.Fail(
-                    BaseTimeUtc.AddSeconds(7),
-                    "Runtime.CommandFailed",
-                    "Vendor judgement failed.").Succeeded);
-                Assert.True(run.FailStage(
-                    "stage-board-test",
-                    "Runtime.CommandFailed",
-                    "Vendor judgement failed.",
-                    0,
-                    1,
-                    1,
-                    BaseTimeUtc.AddSeconds(8)).Succeeded);
-                break;
-            case RuntimeCommandSemanticOutcome.Aborted:
-                Assert.True(session.CancelCommand(
-                    command.Id,
-                    BaseTimeUtc.AddSeconds(6),
-                    "Vendor judgement aborted.",
-                    vendorPayload,
-                    semanticOutcome).Succeeded);
-                Assert.True(session.Cancel(
-                    BaseTimeUtc.AddSeconds(7),
-                    "Vendor judgement aborted.").Succeeded);
-                Assert.True(run.Cancel(
-                    "Vendor judgement aborted.",
-                    0,
-                    1,
-                    0,
-                    BaseTimeUtc.AddSeconds(8)).Succeeded);
-                break;
-            default:
-                throw new InvalidOperationException(
-                    $"Unsupported semantic outcome {semanticOutcome}.");
-        }
-
-        await runtimeRepository.SaveAsync(session);
-        await subscriber.HandleAsync(run.ToSnapshot());
-
-        var trace = Assert.IsType<TraceRecord>(await traceRepository.GetByIdAsync(
-            new StoredTraceRecordId(run.Id.Value)));
-        var stage = Assert.Single(trace.Stages);
-        var storedCommand = Assert.Single(stage.Commands);
-        var measurement = Assert.Single(stage.Measurements);
-        Assert.Equal(semanticOutcome.ToString(), storedCommand.SemanticOutcome?.ToString());
-        Assert.Equal(vendorPayload, storedCommand.ResultPayload);
-        Assert.Equal(expectedPassed, measurement.Passed);
-    }
-
-    [Fact]
-    public async Task CanceledBeforeExecutionCreatesTraceWithHonestSkippedStageAndNoSessionEvidence()
+    public async Task ProductFailureKeepsCompletedExecutionAndNonconformingDisposition()
     {
         var runtimeRepository = new InMemoryRuntimeSessionRepository();
         var traceRepository = new InMemoryTraceRecordRepository();
         var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
         var run = CreateRun();
-        Assert.True(run.Cancel("Canceled before execution.", 0, 0, 0, BaseTimeUtc.AddSeconds(1)).Succeeded);
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            "{\"outcome\":\"Failed\"}",
+            BaseTimeUtc.AddSeconds(4),
+            ResultJudgement.Failed).Succeeded);
+        Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
+        await runtimeRepository.SaveAsync(session);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Failed,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["test.outcome"] = new(ProductionContextValueKind.Text, "Failed")
+            },
+            1,
+            1,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
 
-        await subscriber.HandleAsync(run.DomainEvents.ToArray());
+        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(run.ToSnapshot());
 
-        var trace = await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value));
-        Assert.NotNull(trace);
-        Assert.Null(trace.StartedAtUtc);
-        Assert.Equal(TraceProductionRunStatus.Canceled, trace.RunStatus);
-        var stage = Assert.Single(trace.Stages);
-        Assert.Equal(TraceStageStatus.Skipped, stage.Status);
-        Assert.Null(stage.RuntimeSessionId);
-        Assert.Empty(stage.Commands);
-        Assert.Empty(stage.Incidents);
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Completed, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Failed, trace.Judgement);
+        Assert.Equal(ProductDisposition.Nonconforming, trace.Disposition);
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(ExecutionStatus.Completed, storedOperation.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Failed, storedOperation.Judgement);
+        Assert.Empty(storedOperation.Incidents);
+        Assert.Single(storedOperation.Outputs);
+        var storedCommand = Assert.Single(storedOperation.Commands);
+        Assert.Equal(TraceCommandStatus.Completed, storedCommand.Status);
+        Assert.Equal(ResultJudgement.Failed, storedCommand.ResultJudgement);
+        Assert.False(Assert.Single(storedOperation.Measurements).Passed);
+        Assert.Equal(1, traceRepository.AddCount);
+    }
+
+    [Fact]
+    public async Task SystemFailureKeepsUnknownJudgementAndIncident()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        Assert.True(session.FailCommand(
+            command.Id,
+            "Vendor process exited with code 7.",
+            BaseTimeUtc.AddSeconds(4)).Succeeded);
+        Assert.True(session.Fail(
+            BaseTimeUtc.AddSeconds(5),
+            "Vendor.ProcessCrashed",
+            "Vendor process exited with code 7.").Succeeded);
+        await runtimeRepository.SaveAsync(session);
+        Assert.True(run.FailOperation(
+            operation.OperationRunId,
+            ExecutionStatus.Failed,
+            "Runtime.OperationSessionFailed",
+            "Vendor process exited with code 7.",
+            0,
+            1,
+            1,
+            BaseTimeUtc.AddSeconds(6)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Failed, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, trace.Judgement);
+        Assert.Equal(ProductDisposition.Held, trace.Disposition);
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(ExecutionStatus.Failed, storedOperation.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, storedOperation.Judgement);
+        Assert.Single(storedOperation.Incidents);
+        Assert.Equal(TraceCommandStatus.Failed, Assert.Single(storedOperation.Commands).Status);
+    }
+
+    [Fact]
+    public async Task CommandEvidenceFreezesExternalProgramArtifactHash()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        var payload = RuntimeCommandEvidencePayload.Attach(
+            "{\"outcome\":\"Passed\"}",
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            [
+                new RuntimeCommandArtifactEvidence(
+                    "vendor-report.pdf",
+                    "Report",
+                    $"external-programs/{run.Id.Value:N}/{command.Id.Value:N}/vendor-report.pdf",
+                    "application/pdf",
+                    512,
+                    new string('a', 64))
+            ]);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            payload,
+            BaseTimeUtc.AddSeconds(4),
+            ResultJudgement.Passed).Succeeded);
+        Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
+        await runtimeRepository.SaveAsync(session);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        var artifact = Assert.Single(Assert.Single(trace.Operations).Artifacts);
+        Assert.Equal(ArtifactKind.Report, artifact.Kind);
+        Assert.Equal("application/pdf", artifact.MediaType);
+        Assert.Equal(new string('a', 64), artifact.Sha256);
+        Assert.Contains(run.Id.Value.ToString("N"), artifact.StorageKey, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CancellationBeforeDispatchCreatesHonestOperationWithoutSessionEvidence()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        Assert.True(run.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
+        Assert.True(run.Stop("Operator stopped before dispatch.", BaseTimeUtc.AddSeconds(2)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Canceled, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, trace.Judgement);
+        Assert.Equal(ProductDisposition.Held, trace.Disposition);
+        var operation = Assert.Single(trace.Operations);
+        Assert.Equal(ExecutionStatus.Canceled, operation.ExecutionStatus);
+        Assert.Null(operation.RuntimeSessionId);
+        Assert.Null(operation.StartedAtUtc);
+        Assert.Empty(operation.Commands);
+        Assert.Empty(operation.FencingTokens);
     }
 
     private static ProductionRunTraceDomainEventSubscriber CreateSubscriber(
@@ -271,13 +196,25 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
     {
         var service = new TraceRecordService(
             traceRepository,
-            new SystemClock(),
-            new ConfiguredTraceJudgementGenerator(new TraceJudgementOptions()));
+            new SystemClock());
         return new ProductionRunTraceDomainEventSubscriber(runtimeRepository, service);
     }
 
     private static ProductionRun CreateRun()
     {
+        var operation = new OperationRunDefinition(
+            "operation.board-test",
+            "station.functional-test",
+            new RuntimeStationId("station.functional-test"),
+            new ProcessDefinitionId("process.board-test"),
+            new ProcessVersionId("process.board-test@1.0.0"),
+            new ConfigurationSnapshotId("configuration.board-test"),
+            new RecipeSnapshotId("recipe.board-test"),
+            [
+                new ResourceRequirement(ResourceKind.Station, "station.functional-test"),
+                new ResourceRequirement(ResourceKind.Fixture, "fixture.board-test"),
+                new ResourceRequirement(ResourceKind.Device, "tester.board-test")
+            ]);
         return ProductionRun.Create(
             ProductionRunId.New(),
             "project-board",
@@ -285,54 +222,64 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             "snapshot-board-test",
             "topology-board-test",
             "line-board-test",
-            new DutIdentity("board-model", "serialNumber", "SN-BOARD-0001"),
-            "batch-board",
-            "fixture-board",
-            "tester-board",
+            new ProductionUnitIdentity("board-model", "serialNumber", "UNIT-BOARD-0001"),
+            "lot-board",
+            "carrier-board",
             "operator-board",
+            operation.OperationId,
             BaseTimeUtc,
-            [
-                new ProductionStageRunDefinition(
-                    "stage-board-test",
-                    1,
-                    "workstation-board-test",
-                    new RuntimeStationId("station.functional-test"),
-                    new ProcessDefinitionId("process.board-test"),
-                    new ProcessVersionId("process.board-test@1.0.0"),
-                    new ConfigurationSnapshotId("configuration.board-test"),
-                    new RecipeSnapshotId("recipe.board-test"))
-            ]);
+            [operation],
+            []);
     }
 
-    private static ProductionRun CreateRunningRun(out RuntimeSessionId sessionId)
+    private static OperationRun StartOperation(
+        ProductionRun run,
+        out RuntimeSessionId sessionId)
     {
-        var run = CreateRun();
         Assert.True(run.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
+        var operation = Assert.Single(run.Operations);
         sessionId = RuntimeSessionId.New();
-        Assert.True(run.StartStage("stage-board-test", sessionId, BaseTimeUtc.AddSeconds(1)).Succeeded);
-        return run;
+        var leases = operation.ResourceRequirements
+            .Select((resource, index) => new ResourceLease(
+                resource,
+                run.Id,
+                operation.OperationRunId,
+                index + 1,
+                BaseTimeUtc,
+                BaseTimeUtc.AddMinutes(5)))
+            .ToArray();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            sessionId,
+            leases,
+            BaseTimeUtc.AddSeconds(1)).Succeeded);
+        return operation;
     }
 
-    private static RuntimeSession CreateRunningSession(ProductionRun run, RuntimeSessionId sessionId)
+    private static RuntimeSession CreateRunningSession(
+        ProductionRun run,
+        OperationRun operation,
+        RuntimeSessionId sessionId)
     {
         var session = RuntimeSession.Create(
             sessionId,
-            new RuntimeStationId("station.functional-test"),
-            new ProcessDefinitionId("process.board-test"),
-            new ProcessVersionId("process.board-test@1.0.0"),
-            new ConfigurationSnapshotId("configuration.board-test"),
-            new RecipeSnapshotId("recipe.board-test"),
+            operation.StationId,
+            operation.ProcessDefinitionId,
+            operation.ProcessVersionId,
+            operation.ConfigurationSnapshotId,
+            operation.RecipeSnapshotId,
             BaseTimeUtc,
             new RuntimeSessionTraceMetadata(
                 run.Id,
                 run.ProductionLineDefinitionId,
-                "stage-board-test",
-                1,
-                "workstation-board-test",
-                run.DutIdentity,
-                run.BatchId,
-                run.FixtureId,
-                run.DeviceId,
+                operation.OperationId,
+                operation.Attempt,
+                operation.StationSystemId,
+                run.ProductionUnitIdentity,
+                run.LotId,
+                run.CarrierId,
+                "fixture.board-test",
+                "tester.board-test",
                 run.ActorId,
                 run.ProjectId,
                 run.ApplicationId,
@@ -340,5 +287,26 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                 run.TopologyId));
         Assert.True(session.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
         return session;
+    }
+
+    private static OpenLineOps.Runtime.Domain.Commands.RuntimeCommand StartCommand(RuntimeSession session)
+    {
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("node.board-test"),
+            "Execute vendor program",
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("action.board-test"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "station.functional-test"));
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("test.external"),
+            "ExecuteProgram",
+            BaseTimeUtc.AddSeconds(2),
+            TimeSpan.FromSeconds(30));
+        Assert.True(session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(2)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(3)).Succeeded);
+        return command;
     }
 }

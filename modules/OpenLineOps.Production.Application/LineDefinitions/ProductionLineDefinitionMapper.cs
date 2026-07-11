@@ -6,32 +6,37 @@ public static class ProductionLineDefinitionMapper
 {
     public static ProductionLineDefinitionDetails ToDetails(ProductionLineDefinition definition)
     {
-        var orderedStages = definition.Stages.OrderBy(stage => stage.Sequence).ToArray();
         return new ProductionLineDefinitionDetails(
             definition.Id.Value,
             definition.DisplayName,
             definition.TopologyId,
-            new DutModelDetails(
-                definition.DutModel.Id.Value,
-                definition.DutModel.ModelCode,
-                definition.DutModel.IdentityInputKey),
-            definition.Workstations
-                .OrderBy(workstation => workstation.Id.Value, StringComparer.Ordinal)
-                .Select(workstation => new WorkstationDetails(
-                    workstation.Id.Value,
-                    workstation.DisplayName,
-                    workstation.StationSystemId))
+            new ProductModelDetails(
+                definition.ProductModel.Id.Value,
+                definition.ProductModel.ModelCode,
+                definition.ProductModel.IdentityInputKey),
+            definition.EntryOperationId.Value,
+            definition.Operations
+                .OrderBy(operation => operation.Id.Value, StringComparer.Ordinal)
+                .Select(operation => new OperationDefinitionDetails(
+                    operation.Id.Value,
+                    operation.DisplayName,
+                    operation.StationSystemId,
+                    operation.FlowDefinitionId,
+                    operation.ConfigurationSnapshotId))
                 .ToArray(),
-            orderedStages
-                .Select((stage, index) => new ProcessStageDetails(
-                    stage.Id.Value,
-                    stage.Sequence,
-                    stage.DisplayName,
-                    stage.WorkstationId.Value,
-                    stage.FlowDefinitionId,
-                    stage.ConfigurationSnapshotId,
-                    stage.ExternalTestProgramAdapterId?.Value,
-                    index + 1 < orderedStages.Length ? orderedStages[index + 1].Id.Value : null))
+            definition.Transitions
+                .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
+                .Select(transition => new RouteTransitionDetails(
+                    transition.Id.Value,
+                    transition.SourceOperationId.Value,
+                    transition.TargetOperationId.Value,
+                    transition.Kind.ToString(),
+                    transition.RequiredJudgement?.ToString(),
+                    transition.MaxTraversals,
+                    transition.ParallelGroupId,
+                    transition.OutputCondition?.OutputKey,
+                    transition.OutputCondition?.ExpectedValue.Kind.ToString(),
+                    transition.OutputCondition?.ExpectedValue.CanonicalValue))
                 .ToArray(),
             definition.ExternalTestProgramAdapters
                 .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
@@ -65,8 +70,8 @@ public static class ProductionLineDefinitionMapper
             definition.Id.Value,
             definition.DisplayName,
             definition.TopologyId,
-            definition.DutModel.ModelCode,
-            definition.Stages.Count,
+            definition.ProductModel.ModelCode,
+            definition.Operations.Count,
             definition.UpdatedAtUtc);
     }
 }

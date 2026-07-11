@@ -12,7 +12,7 @@ using AppCreateRequest = OpenLineOps.Traceability.Application.Records.CreateTrac
 namespace OpenLineOps.Traceability.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.TraceabilityV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Traceability)]
 [Route(OpenLineOpsApiRoutes.Traceability + "/records")]
 public sealed class TraceRecordsController : ControllerBase
 {
@@ -48,27 +48,30 @@ public sealed class TraceRecordsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<PagedTraceRecordSummaryResponse>> QueryAsync(
         [FromQuery] Guid? productionRunId,
-        [FromQuery] string? dutModelId,
-        [FromQuery] string? dutIdentityInputKey,
-        [FromQuery] string? dutIdentityValue,
-        [FromQuery] string? batchId,
-        [FromQuery] string? fixtureId,
-        [FromQuery] string? deviceId,
+        [FromQuery] string? productModelId,
+        [FromQuery] string? productionUnitIdentityInputKey,
+        [FromQuery] string? productionUnitIdentityValue,
+        [FromQuery] string? lotId,
+        [FromQuery] string? carrierId,
         [FromQuery] string? actorId,
-        [FromQuery] string? runStatus,
+        [FromQuery] string? executionStatus,
         [FromQuery] string? judgement,
+        [FromQuery] string? disposition,
         [FromQuery] string? projectId,
         [FromQuery] string? applicationId,
         [FromQuery] string? projectSnapshotId,
         [FromQuery] string? topologyId,
         [FromQuery] string? productionLineDefinitionId,
-        [FromQuery] string? stageId,
-        [FromQuery] string? workstationId,
+        [FromQuery] string? operationId,
+        [FromQuery] string? stationSystemId,
         [FromQuery] string? stationId,
         [FromQuery] string? processDefinitionId,
         [FromQuery] string? processVersionId,
         [FromQuery] string? configurationSnapshotId,
         [FromQuery] string? recipeSnapshotId,
+        [FromQuery] string? resourceKind,
+        [FromQuery] string? resourceId,
+        [FromQuery] string? deviceId,
         [FromQuery] DateTimeOffset? completedFromUtc,
         [FromQuery] DateTimeOffset? completedToUtc,
         [FromQuery] int pageNumber = 1,
@@ -78,27 +81,30 @@ public sealed class TraceRecordsController : ControllerBase
         var result = await _traceRecordService.QueryAsync(
             new TraceRecordQuery(
                 productionRunId,
-                dutModelId,
-                dutIdentityInputKey,
-                dutIdentityValue,
-                batchId,
-                fixtureId,
-                deviceId,
+                productModelId,
+                productionUnitIdentityInputKey,
+                productionUnitIdentityValue,
+                lotId,
+                carrierId,
                 actorId,
-                runStatus,
+                executionStatus,
                 judgement,
+                disposition,
                 projectId,
                 applicationId,
                 projectSnapshotId,
                 topologyId,
                 productionLineDefinitionId,
-                stageId,
-                workstationId,
+                operationId,
+                stationSystemId,
                 stationId,
                 processDefinitionId,
                 processVersionId,
                 configurationSnapshotId,
                 recipeSnapshotId,
+                resourceKind,
+                resourceId,
+                deviceId,
                 completedFromUtc,
                 completedToUtc,
                 new PagedRequest(pageNumber, pageSize)),
@@ -139,7 +145,7 @@ public sealed class TraceRecordsController : ControllerBase
         return result.IsFailure
             ? ToProblem(result.Error)
             : Ok(new TraceRecordExportPackageResponse(
-                result.Value.PackageFormatVersion,
+                result.Value.PackageFormat,
                 result.Value.ExportedAtUtc,
                 ToResponse(result.Value.TraceRecord)));
     }
@@ -153,31 +159,33 @@ public sealed class TraceRecordsController : ControllerBase
             request.ProjectSnapshotId,
             request.TopologyId,
             request.ProductionLineDefinitionId,
-            request.DutModelId,
-            request.DutIdentityInputKey,
-            request.DutIdentityValue,
-            request.BatchId,
-            request.FixtureId,
-            request.DeviceId,
+            request.ProductModelId,
+            request.ProductionUnitIdentityInputKey,
+            request.ProductionUnitIdentityValue,
+            request.LotId,
+            request.CarrierId,
             request.ActorId,
-            request.RunStatus,
+            request.ExecutionStatus,
             request.Judgement,
+            request.Disposition,
             request.CreatedAtUtc,
             request.StartedAtUtc,
             request.CompletedAtUtc,
             request.FailureCode,
             request.FailureReason,
-            request.Stages?.Select(ToApplicationRequest).ToArray(),
+            request.Operations?.Select(ToApplicationRequest).ToArray(),
+            request.RouteDecisions?.Select(ToApplicationRequest).ToArray(),
             request.AuditEntries?.Select(ToApplicationRequest).ToArray());
     }
 
-    private static Application.Records.CreateTraceStageExecutionRequest ToApplicationRequest(
-        Models.CreateTraceStageExecutionRequest request)
+    private static Application.Records.CreateTraceOperationExecutionRequest ToApplicationRequest(
+        Models.CreateTraceOperationExecutionRequest request)
     {
-        return new Application.Records.CreateTraceStageExecutionRequest(
-            request.StageId,
-            request.Sequence,
-            request.WorkstationId,
+        return new Application.Records.CreateTraceOperationExecutionRequest(
+            request.OperationRunId,
+            request.OperationId,
+            request.Attempt,
+            request.StationSystemId,
             request.StationId,
             request.ProcessDefinitionId,
             request.ProcessVersionId,
@@ -185,7 +193,8 @@ public sealed class TraceRecordsController : ControllerBase
             request.RecipeSnapshotId,
             request.RuntimeSessionId,
             request.RuntimeSessionStatus,
-            request.Status,
+            request.ExecutionStatus,
+            request.Judgement,
             request.StartedAtUtc,
             request.CompletedAtUtc,
             request.FailureCode,
@@ -196,8 +205,28 @@ public sealed class TraceRecordsController : ControllerBase
             request.Commands?.Select(ToApplicationRequest).ToArray(),
             request.Measurements?.Select(ToApplicationRequest).ToArray(),
             request.Artifacts?.Select(ToApplicationRequest).ToArray(),
-            request.Incidents?.Select(ToApplicationRequest).ToArray());
+            request.Incidents?.Select(ToApplicationRequest).ToArray(),
+            request.Outputs?.Select(ToApplicationRequest).ToArray(),
+            request.FencingTokens?.Select(ToApplicationRequest).ToArray());
     }
+
+    private static Application.Records.CreateTraceRouteDecisionRequest ToApplicationRequest(
+        Models.CreateTraceRouteDecisionRequest request) =>
+        new(
+            request.SourceOperationRunId,
+            request.TransitionId,
+            request.TargetOperationId,
+            request.SourceJudgement,
+            request.Traversal,
+            request.DecidedAtUtc);
+
+    private static Application.Records.CreateTraceOperationOutputRequest ToApplicationRequest(
+        Models.CreateTraceOperationOutputRequest request) =>
+        new(request.Key, request.ValueKind, request.CanonicalJson);
+
+    private static Application.Records.CreateTraceResourceFencingTokenRequest ToApplicationRequest(
+        Models.CreateTraceResourceFencingTokenRequest request) =>
+        new(request.ResourceKind, request.ResourceId, request.FencingToken);
 
     private static Application.Records.CreateTraceCommandRequest ToApplicationRequest(
         Models.CreateTraceCommandRequest request) =>
@@ -210,7 +239,7 @@ public sealed class TraceRecordsController : ControllerBase
             request.TargetCapabilityId,
             request.CommandName,
             request.Status,
-            request.SemanticOutcome,
+            request.ResultJudgement,
             request.CreatedAtUtc,
             request.DeadlineAtUtc,
             request.AcceptedAtUtc,
@@ -266,21 +295,22 @@ public sealed class TraceRecordsController : ControllerBase
             details.ProjectSnapshotId,
             details.TopologyId,
             details.ProductionLineDefinitionId,
-            details.DutModelId,
-            details.DutIdentityInputKey,
-            details.DutIdentityValue,
-            details.BatchId,
-            details.FixtureId,
-            details.DeviceId,
+            details.ProductModelId,
+            details.ProductionUnitIdentityInputKey,
+            details.ProductionUnitIdentityValue,
+            details.LotId,
+            details.CarrierId,
             details.ActorId,
-            details.RunStatus,
+            details.ExecutionStatus,
             details.Judgement,
+            details.Disposition,
             details.CreatedAtUtc,
             details.StartedAtUtc,
             details.CompletedAtUtc,
             details.FailureCode,
             details.FailureReason,
-            details.Stages.Select(ToResponse).ToArray(),
+            details.Operations.Select(ToResponse).ToArray(),
+            details.RouteDecisions.Select(ToResponse).ToArray(),
             details.AuditEntries.Select(ToResponse).ToArray());
 
     private static TraceRecordSummaryResponse ToSummaryResponse(TraceRecordSummary summary) =>
@@ -292,47 +322,67 @@ public sealed class TraceRecordsController : ControllerBase
             summary.ProjectSnapshotId,
             summary.TopologyId,
             summary.ProductionLineDefinitionId,
-            summary.DutModelId,
-            summary.DutIdentityInputKey,
-            summary.DutIdentityValue,
-            summary.BatchId,
-            summary.FixtureId,
-            summary.DeviceId,
+            summary.ProductModelId,
+            summary.ProductionUnitIdentityInputKey,
+            summary.ProductionUnitIdentityValue,
+            summary.LotId,
+            summary.CarrierId,
             summary.ActorId,
-            summary.RunStatus,
+            summary.ExecutionStatus,
             summary.Judgement,
+            summary.Disposition,
             summary.CompletedAtUtc,
-            summary.StageCount,
-            summary.FailedStageCount,
+            summary.OperationCount,
+            summary.FailedOperationCount,
             summary.CommandCount,
             summary.MeasurementCount,
             summary.ArtifactCount,
-            summary.IncidentCount);
+            summary.IncidentCount,
+            summary.RouteDecisionCount);
 
-    private static TraceStageExecutionResponse ToResponse(TraceStageExecutionDetails stage) =>
+    private static TraceOperationExecutionResponse ToResponse(TraceOperationExecutionDetails operation) =>
         new(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId,
-            stage.ProcessDefinitionId,
-            stage.ProcessVersionId,
-            stage.ConfigurationSnapshotId,
-            stage.RecipeSnapshotId,
-            stage.RuntimeSessionId,
-            stage.RuntimeSessionStatus,
-            stage.Status,
-            stage.StartedAtUtc,
-            stage.CompletedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount,
-            stage.Commands.Select(ToResponse).ToArray(),
-            stage.Measurements.Select(ToResponse).ToArray(),
-            stage.Artifacts.Select(ToResponse).ToArray(),
-            stage.Incidents.Select(ToResponse).ToArray());
+            operation.OperationRunId,
+            operation.OperationId,
+            operation.Attempt,
+            operation.StationSystemId,
+            operation.StationId,
+            operation.ProcessDefinitionId,
+            operation.ProcessVersionId,
+            operation.ConfigurationSnapshotId,
+            operation.RecipeSnapshotId,
+            operation.RuntimeSessionId,
+            operation.RuntimeSessionStatus,
+            operation.ExecutionStatus,
+            operation.Judgement,
+            operation.StartedAtUtc,
+            operation.CompletedAtUtc,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount,
+            operation.Commands.Select(ToResponse).ToArray(),
+            operation.Measurements.Select(ToResponse).ToArray(),
+            operation.Artifacts.Select(ToResponse).ToArray(),
+            operation.Incidents.Select(ToResponse).ToArray(),
+            operation.Outputs.Select(ToResponse).ToArray(),
+            operation.FencingTokens.Select(ToResponse).ToArray());
+
+    private static TraceRouteDecisionResponse ToResponse(TraceRouteDecisionDetails decision) =>
+        new(
+            decision.SourceOperationRunId,
+            decision.TransitionId,
+            decision.TargetOperationId,
+            decision.SourceJudgement,
+            decision.Traversal,
+            decision.DecidedAtUtc);
+
+    private static TraceOperationOutputResponse ToResponse(TraceOperationOutputDetails output) =>
+        new(output.Key, output.ValueKind, output.CanonicalJson);
+
+    private static TraceResourceFencingTokenResponse ToResponse(TraceResourceFencingTokenDetails token) =>
+        new(token.ResourceKind, token.ResourceId, token.FencingToken);
 
     private static TraceCommandResponse ToResponse(TraceCommandDetails command) =>
         new(
@@ -344,7 +394,7 @@ public sealed class TraceRecordsController : ControllerBase
             command.TargetCapabilityId,
             command.CommandName,
             command.Status,
-            command.SemanticOutcome,
+            command.ResultJudgement,
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,

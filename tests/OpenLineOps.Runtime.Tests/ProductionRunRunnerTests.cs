@@ -1,16 +1,12 @@
-using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Processes;
-using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
-using OpenLineOps.Runtime.Application.Sessions;
-using OpenLineOps.Runtime.Domain.Events;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
-using OpenLineOps.Runtime.Domain.Sessions;
-using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -18,466 +14,375 @@ namespace OpenLineOps.Runtime.Tests;
 
 public sealed class ProductionRunRunnerTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 10, 9, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset Now = new(2026, 7, 11, 4, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task RunAsyncPersistsPreallocatedSessionBeforeEachStrictlySequentialStage()
+    public async Task SubmissionIsAsynchronousAndRunnerDispatchesPersistedFencedStationJob()
     {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var observedSequences = new List<int>();
-        var sessionRunner = new RecordingRuntimeSessionRunner(async request =>
-        {
-            var persisted = Assert.IsType<ProductionRunPersistenceEntry>(
-                await repository.GetByIdAsync(request.TraceMetadata.ProductionRunId)).Run;
-            var runningStage = Assert.Single(
-                persisted.Stages,
-                stage => stage.Status == ProductionStageRunStatus.Running);
-            Assert.Equal(request.TraceMetadata.ProductionStageId, runningStage.StageId);
-            Assert.Equal(request.SessionId, runningStage.RuntimeSessionId);
-            Assert.All(
-                persisted.Stages.Where(stage => stage.Sequence < runningStage.Sequence),
-                stage => Assert.Equal(ProductionStageRunStatus.Completed, stage.Status));
-            Assert.All(
-                persisted.Stages.Where(stage => stage.Sequence > runningStage.Sequence),
-                stage => Assert.Equal(ProductionStageRunStatus.Pending, stage.Status));
-            observedSequences.Add(runningStage.Sequence);
-
-            return Result.Success(new RuntimeSessionRunResult(
-                request.SessionId,
-                request.ConfigurationSnapshotId,
-                RuntimeSessionStatus.Completed,
-                runningStage.Sequence,
-                runningStage.Sequence + 1,
-                runningStage.Sequence - 1));
-        });
-        var runner = CreateRunner(repository, publisher, sessionRunner);
+        var fixture = new Fixture(new StationOperationDispatchResult(
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            null,
+            1,
+            2,
+            0,
+            Now.AddSeconds(2)));
         var request = CreateRequest();
 
-        var result = await runner.RunAsync(request);
+        var submitted = await fixture.Coordinator.SubmitAsync(request);
+        Assert.True(submitted.IsSuccess);
+        Assert.Equal(ExecutionStatus.Pending, submitted.Value.ExecutionStatus);
+        Assert.Empty(fixture.Dispatcher.Requests);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Completed, result.Value.Run.Status);
-        Assert.Equal([1, 2], observedSequences);
-        Assert.Equal(2, sessionRunner.Requests.Count);
-        Assert.Equal(6, repository.SaveCount);
-        Assert.Collection(
-            result.Value.Run.Stages,
-            first =>
-            {
-                Assert.Equal(1, first.CompletedStepCount);
-                Assert.Equal(2, first.CommandCount);
-                Assert.Equal(0, first.IncidentCount);
-            },
-            second =>
-            {
-                Assert.Equal(2, second.CompletedStepCount);
-                Assert.Equal(3, second.CommandCount);
-                Assert.Equal(1, second.IncidentCount);
-            });
+        var executed = await fixture.Runner.ExecuteAsync(request.RunId);
 
-        var firstMetadata = sessionRunner.Requests[0].TraceMetadata;
-        Assert.Equal(request.RunId, firstMetadata.ProductionRunId);
-        Assert.Equal("line.main", firstMetadata.ProductionLineDefinitionId);
-        Assert.Equal("stage.scan", firstMetadata.ProductionStageId);
-        Assert.Equal(1, firstMetadata.StageSequence);
-        Assert.Equal("workstation.scan", firstMetadata.WorkstationId);
-        Assert.Equal("dut.model", firstMetadata.DutIdentity.ModelId);
-        Assert.Equal("dut.serial", firstMetadata.DutIdentity.InputKey);
-        Assert.Equal("SN-100", firstMetadata.DutIdentity.Value);
-        Assert.Equal("operator.1", firstMetadata.ActorId);
-        Assert.Equal("SN-100", firstMetadata.DutIdentity.Value);
-        Assert.IsType<ProductionRunTerminalDomainEvent>(publisher.Events.Last());
+        Assert.True(executed.IsSuccess);
+        Assert.Equal(ExecutionStatus.Completed, executed.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, executed.Value.Run.Judgement);
+        var dispatched = Assert.Single(fixture.Dispatcher.Requests);
+        Assert.Equal($"{request.RunId.Value:D}/operation.main@0001", dispatched.IdempotencyKey);
+        Assert.All(dispatched.ResourceLeases, lease => Assert.True(lease.FencingToken > 0));
     }
 
     [Fact]
-    public async Task FailedSessionStopsLineAndSkipsRemainingStagesWithExactMetrics()
+    public async Task VendorProductFailureDoesNotBecomeSystemExecutionFailure()
     {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var sessionRunner = new RecordingRuntimeSessionRunner(request =>
-            ValueTask.FromResult(Result.Success(new RuntimeSessionRunResult(
-                request.SessionId,
-                request.ConfigurationSnapshotId,
-                RuntimeSessionStatus.Failed,
-                2,
-                3,
-                1))));
-        var runner = CreateRunner(repository, publisher, sessionRunner);
+        var fixture = new Fixture(new StationOperationDispatchResult(
+            ExecutionStatus.Completed,
+            ResultJudgement.Failed,
+            null,
+            1,
+            1,
+            0,
+            Now.AddSeconds(2)));
+        var request = CreateRequest();
+        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
 
-        var result = await runner.RunAsync(CreateRequest());
+        var result = await fixture.Runner.ExecuteAsync(request.RunId);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Failed, result.Value.Run.Status);
-        Assert.Single(sessionRunner.Requests);
-        Assert.Collection(
-            result.Value.Run.Stages,
-            failed =>
-            {
-                Assert.Equal(ProductionStageRunStatus.Failed, failed.Status);
-                Assert.Equal(2, failed.CompletedStepCount);
-                Assert.Equal(3, failed.CommandCount);
-                Assert.Equal(1, failed.IncidentCount);
-            },
-            skipped =>
-            {
-                Assert.Equal(ProductionStageRunStatus.Skipped, skipped.Status);
-                Assert.Null(skipped.RuntimeSessionId);
-                Assert.Equal(0, skipped.CommandCount);
-            });
-        var terminalEvent = Assert.IsType<ProductionRunTerminalDomainEvent>(publisher.Events.Last());
-        Assert.Equal(ProductionRunStatus.Failed, terminalEvent.Run.Status);
-        Assert.Equal(ProductionStageRunStatus.Skipped, terminalEvent.Run.Stages[1].Status);
+        Assert.Equal(ExecutionStatus.Completed, result.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Failed, result.Value.Run.Judgement);
+        Assert.Equal(ProductDisposition.Nonconforming, result.Value.Run.Disposition);
+        Assert.Null(result.Value.Run.FailureCode);
     }
 
     [Fact]
-    public async Task ExistingCallerAllocatedRunIdReturnsStoredRunWithoutExecutingAStage()
+    public async Task DispatcherBoundaryFaultRequiresRecoveryAndIsNotAutomaticallyReplayed()
     {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var sessionRunner = new RecordingRuntimeSessionRunner(request =>
-            throw new InvalidOperationException($"Session {request.SessionId} must not execute."));
+        var fixture = new Fixture(new InvalidOperationException("Broker disconnected."));
         var request = CreateRequest();
-        var existing = CreateAggregate(request);
-        Assert.True(await repository.TryAddAsync(existing));
-        var runner = CreateRunner(repository, publisher, sessionRunner);
+        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
 
-        var result = await runner.RunAsync(request);
+        var result = await fixture.Runner.ExecuteAsync(request.RunId);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Created, result.Value.Run.Status);
-        Assert.Equal(request.RunId, result.Value.Run.RunId);
-        Assert.Empty(sessionRunner.Requests);
-        Assert.Equal(1, repository.SaveCount);
+        Assert.Equal(ProductionRunControlState.RecoveryRequired, result.Value.Run.ControlState);
+        Assert.Equal(ExecutionStatus.Running, result.Value.Run.ExecutionStatus);
+        Assert.Single(fixture.Dispatcher.Requests);
+        _ = await fixture.Runner.ExecuteAsync(request.RunId);
+        Assert.Single(fixture.Dispatcher.Requests);
     }
 
     [Fact]
-    public async Task ExistingRunIdWithDifferentImmutableIdentityReturnsConflict()
+    public async Task SafeStopIsNotPersistedUntilIndependentSafetyChannelAcknowledges()
     {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var sessionRunner = new RecordingRuntimeSessionRunner(request =>
-            throw new InvalidOperationException($"Session {request.SessionId} must not execute."));
+        var fixture = new Fixture(
+            new StationOperationDispatchResult(
+                ExecutionStatus.Completed,
+                ResultJudgement.Passed,
+                null,
+                0,
+                0,
+                0,
+                Now),
+            new RejectingSafetyController());
         var request = CreateRequest();
-        Assert.True(await repository.TryAddAsync(CreateAggregate(request)));
-        var mismatched = new StartProductionRunRequest(
+        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
+
+        var result = await fixture.Coordinator.CommandAsync(
             request.RunId,
-            request.ProjectId,
-            request.ApplicationId,
-            request.ProjectSnapshotId,
-            request.TopologyId,
-            request.ProductionLineDefinitionId,
-            new DutIdentity(
-                request.DutIdentity.ModelId,
-                request.DutIdentity.InputKey,
-                "SN-DIFFERENT"),
-            request.ActorId,
-            request.Stages,
-            request.BatchId,
-            request.FixtureId,
-            request.DeviceId);
-        var runner = CreateRunner(repository, publisher, sessionRunner);
-
-        var result = await runner.RunAsync(mismatched);
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.SafeStop,
+                "operator.safety",
+                "Guard door opened."));
 
         Assert.True(result.IsFailure);
-        Assert.Equal("Conflict.Runtime.ProductionRunIdIdentityMismatch", result.Error.Code);
-        Assert.Empty(sessionRunner.Requests);
+        Assert.Equal(
+            ExecutionStatus.Pending,
+            (await fixture.Repository.GetByIdAsync(request.RunId))!.Run.ExecutionStatus);
     }
 
     [Fact]
-    public async Task ConcurrentCallsWithSameRunIdExecuteExactlyOneProductionRun()
+    public async Task ParallelForkDispatchesIndependentStationsBeforeEitherBranchCompletes()
     {
         var repository = new InMemoryProductionRunRepository();
+        var leases = new InMemoryResourceLeaseRepository();
+        var clock = new FixedClock(Now);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var firstStageEntered = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseFirstStage = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var sessionRunner = new RecordingRuntimeSessionRunner(async request =>
-        {
-            firstStageEntered.TrySetResult();
-            await releaseFirstStage.Task;
-            return Result.Success(new RuntimeSessionRunResult(
-                request.SessionId,
-                request.ConfigurationSnapshotId,
-                RuntimeSessionStatus.Completed,
-                CompletedSteps: 1,
-                CommandCount: 1,
-                IncidentCount: 0));
-        });
-        var runner = CreateRunner(repository, publisher, sessionRunner);
-        var request = CreateRequest();
-
-        var acceptedTask = runner.RunAsync(request).AsTask();
-        await firstStageEntered.Task;
-        var replay = await runner.RunAsync(request);
-        releaseFirstStage.SetResult();
-        var accepted = await acceptedTask;
-
-        Assert.True(accepted.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Completed, accepted.Value.Run.Status);
-        Assert.True(replay.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Running, replay.Value.Run.Status);
-        Assert.Equal(2, sessionRunner.Requests.Count);
-        Assert.Equal(6, repository.SaveCount);
-    }
-
-    [Fact]
-    public async Task UnexpectedSessionBoundaryExceptionBecomesPersistedTerminalFailure()
-    {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var sessionRunner = new RecordingRuntimeSessionRunner(_ =>
-            throw new InvalidOperationException("driver transport fault"));
-        var runner = CreateRunner(repository, publisher, sessionRunner);
-        var request = CreateRequest();
-
-        var result = await runner.RunAsync(request);
-
-        Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Failed, result.Value.Run.Status);
-        Assert.Equal("Runtime.ProductionStageExecutionFault", result.Value.Run.FailureCode);
-        Assert.Contains(
-            typeof(InvalidOperationException).FullName!,
-            result.Value.Run.FailureReason,
-            StringComparison.Ordinal);
-        Assert.Collection(
-            result.Value.Run.Stages,
-            failed => Assert.Equal(ProductionStageRunStatus.Failed, failed.Status),
-            skipped => Assert.Equal(ProductionStageRunStatus.Skipped, skipped.Status));
-        var persisted = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(request.RunId)).Run;
-        Assert.True(persisted.IsTerminal);
-        Assert.IsType<ProductionRunTerminalDomainEvent>(publisher.Events.Last());
-    }
-
-    [Fact]
-    public async Task PersistedTerminalSessionIsReconciledWhenSessionBoundaryThrowsAfterSave()
-    {
-        var repository = new InMemoryProductionRunRepository();
-        var sessionRepository = new InMemoryRuntimeSessionRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var sessionRunner = new RecordingRuntimeSessionRunner(async request =>
-        {
-            var session = RuntimeSession.Create(
-                request.SessionId,
-                request.StationId,
-                request.Process.ProcessDefinitionId,
-                request.Process.ProcessVersionId,
-                request.ConfigurationSnapshotId,
-                request.RecipeSnapshotId,
-                Now,
-                request.TraceMetadata);
-            Assert.True(session.Start(Now.AddSeconds(1)).Succeeded);
-            Assert.True(session.Complete(Now.AddSeconds(2)).Succeeded);
-            await sessionRepository.SaveAsync(session);
-            throw new InvalidOperationException("subscriber failed after terminal save");
-        });
-        var runner = CreateRunner(
+        var dispatcher = new ParallelBranchDispatcher();
+        var coordinator = new ProductionRunCoordinator(
             repository,
+            leases,
+            new AcceptingSafetyController(),
             publisher,
-            sessionRunner,
-            sessionRepository);
+            clock);
+        var runner = new ProductionRunRunner(
+            repository,
+            repository,
+            leases,
+            dispatcher,
+            publisher,
+            new GuidRuntimeIdProvider(),
+            clock);
+        var request = CreateParallelRequest();
+        Assert.True((await coordinator.SubmitAsync(request)).IsSuccess);
 
-        var result = await runner.RunAsync(CreateRequest());
+        var execution = runner.ExecuteAsync(request.RunId).AsTask();
+        await dispatcher.BothBranchesStarted.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Completed, result.Value.Run.Status);
-        Assert.All(
-            result.Value.Run.Stages,
-            stage => Assert.Equal(ProductionStageRunStatus.Completed, stage.Status));
-        Assert.Equal(2, sessionRunner.Requests.Count);
-    }
-
-    [Fact]
-    public async Task CanceledSessionTerminalStatePersistsEvenWhenCallerTokenCancelsConcurrently()
-    {
-        var repository = new InMemoryProductionRunRepository();
-        var publisher = new InMemoryRuntimeDomainEventPublisher();
-        using var cancellation = new CancellationTokenSource();
-        var sessionRunner = new RecordingRuntimeSessionRunner(request =>
-        {
-            cancellation.Cancel();
-            return ValueTask.FromResult(Result.Success(new RuntimeSessionRunResult(
-                request.SessionId,
-                request.ConfigurationSnapshotId,
-                RuntimeSessionStatus.Canceled,
-                CompletedSteps: 1,
-                CommandCount: 2,
-                IncidentCount: 0)));
-        });
-        var runner = CreateRunner(repository, publisher, sessionRunner);
-        var request = CreateRequest();
-
-        var result = await runner.RunAsync(request, cancellation.Token);
+        Assert.False(execution.IsCompleted);
+        Assert.Contains(dispatcher.OperationIds, id => id == "operation.left");
+        Assert.Contains(dispatcher.OperationIds, id => id == "operation.right");
+        dispatcher.ReleaseBranches();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(result.IsSuccess);
-        Assert.Equal(ProductionRunStatus.Canceled, result.Value.Run.Status);
-        var persisted = Assert.IsType<ProductionRunPersistenceEntry>(
-            await repository.GetByIdAsync(request.RunId)).Run;
-        Assert.Equal(ProductionRunStatus.Canceled, persisted.Status);
-        Assert.Collection(
-            persisted.Stages,
-            canceled =>
-            {
-                Assert.Equal(ProductionStageRunStatus.Canceled, canceled.Status);
-                Assert.Equal(1, canceled.CompletedStepCount);
-                Assert.Equal(2, canceled.CommandCount);
-            },
-            skipped => Assert.Equal(ProductionStageRunStatus.Skipped, skipped.Status));
+        Assert.Equal(ExecutionStatus.Completed, result.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, result.Value.Run.Judgement);
+        Assert.Equal(4, dispatcher.OperationIds.Count);
+        Assert.Equal("operation.join", dispatcher.OperationIds[^1]);
     }
 
-    [Fact]
-    public void StagePlanDefensivelyFreezesExecutableProcess()
+    private static SubmitProductionRunRequest CreateRequest()
     {
-        var nodes = new List<ExecutableRuntimeNode> { Node("node.one") };
         var process = new ExecutableRuntimeProcess(
-            new ProcessDefinitionId("process.one"),
-            new ProcessVersionId("process.one@1.0.0"),
-            nodes);
-        var plan = Plan("stage.one", 1, "workstation.one", process);
-
-        nodes.Add(Node("node.two"));
-
-        Assert.Single(plan.FrozenExecutableProcess.Nodes);
-        Assert.Equal("node.one", plan.FrozenExecutableProcess.Nodes[0].NodeId.Value);
-    }
-
-    private static ProductionRunRunner CreateRunner(
-        InMemoryProductionRunRepository repository,
-        InMemoryRuntimeDomainEventPublisher publisher,
-        IRuntimeSessionRunner sessionRunner,
-        InMemoryRuntimeSessionRepository? sessionRepository = null)
-    {
-        return new ProductionRunRunner(
-            repository,
-            sessionRepository ?? new InMemoryRuntimeSessionRepository(),
-            sessionRunner,
-            publisher,
-            new DeterministicRuntimeIdProvider(),
-            new FixedClock(Now));
-    }
-
-    private static StartProductionRunRequest CreateRequest()
-    {
-        return new StartProductionRunRequest(
-            new ProductionRunId(Guid.Parse("40000000-0000-0000-0000-000000000001")),
+            new ProcessDefinitionId("process.main"),
+            new ProcessVersionId("process-version.main"),
+            []);
+        var operation = new OperationExecutionPlan(
+            "operation.main",
+            "station.main",
+            new StationId("station.main"),
+            new ConfigurationSnapshotId("configuration.main"),
+            new RecipeSnapshotId("recipe.main"),
+            process,
+            [
+                new ResourceRequirement(ResourceKind.Station, "station.main"),
+                new ResourceRequirement(ResourceKind.Slot, "slot.01"),
+                new ResourceRequirement(ResourceKind.Device, "device.tester")
+            ]);
+        return new SubmitProductionRunRequest(
+            ProductionRunId.New(),
             "project.main",
             "application.main",
-            "snapshot.release",
+            "snapshot.main",
             "topology.main",
             "line.main",
-            new DutIdentity("dut.model", "dut.serial", "SN-100"),
-            "operator.1",
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
+            "operator.main",
+            operation.Definition.OperationId,
+            [operation],
+            [],
+            "lot-001",
+            "carrier-001");
+    }
+
+    private static SubmitProductionRunRequest CreateParallelRequest()
+    {
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.parallel"),
+            new ProcessVersionId("process-version.parallel"),
+            []);
+        OperationExecutionPlan Operation(string operationId, string stationId) => new(
+            operationId,
+            stationId,
+            new StationId(stationId),
+            new ConfigurationSnapshotId($"configuration.{operationId}"),
+            new RecipeSnapshotId($"recipe.{operationId}"),
+            process,
+            [new ResourceRequirement(ResourceKind.Station, stationId)]);
+        return new SubmitProductionRunRequest(
+            ProductionRunId.New(),
+            "project.parallel",
+            "application.parallel",
+            "snapshot.parallel",
+            "topology.parallel",
+            "line.parallel",
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-PARALLEL"),
+            "operator.parallel",
+            "operation.entry",
             [
-                Plan("stage.scan", 1, "workstation.scan", Process("scan")),
-                Plan("stage.test", 2, "workstation.test", Process("test"))
+                Operation("operation.entry", "station.entry"),
+                Operation("operation.left", "station.left"),
+                Operation("operation.right", "station.right"),
+                Operation("operation.join", "station.join")
             ],
-            "batch.1",
-            "fixture.1",
-            "device.1");
+            [
+                new RouteTransitionDefinition(
+                    "fork.left",
+                    "operation.entry",
+                    "operation.left",
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: "parallel.work"),
+                new RouteTransitionDefinition(
+                    "fork.right",
+                    "operation.entry",
+                    "operation.right",
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: "parallel.work"),
+                new RouteTransitionDefinition(
+                    "join.left",
+                    "operation.left",
+                    "operation.join",
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: "parallel.work"),
+                new RouteTransitionDefinition(
+                    "join.right",
+                    "operation.right",
+                    "operation.join",
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: "parallel.work")
+            ]);
     }
 
-    private static ProductionRun CreateAggregate(StartProductionRunRequest request)
+    private sealed class Fixture
     {
-        return ProductionRun.Create(
-            request.RunId,
-            request.ProjectId,
-            request.ApplicationId,
-            request.ProjectSnapshotId,
-            request.TopologyId,
-            request.ProductionLineDefinitionId,
-            request.DutIdentity,
-            request.BatchId,
-            request.FixtureId,
-            request.DeviceId,
-            request.ActorId,
-            Now,
-            request.Stages.Select(plan => new ProductionStageRunDefinition(
-                plan.StageId,
-                plan.Sequence,
-                plan.WorkstationId,
-                plan.StationId,
-                plan.FrozenExecutableProcess.ProcessDefinitionId,
-                plan.FrozenExecutableProcess.ProcessVersionId,
-                plan.ConfigurationSnapshotId,
-                plan.RecipeSnapshotId)));
+        private readonly InMemoryProductionRunRepository _repository = new();
+        private readonly InMemoryResourceLeaseRepository _leases = new();
+        private readonly FixedClock _clock = new(Now);
+        private readonly InMemoryRuntimeDomainEventPublisher _publisher = new();
+
+        public Fixture(
+            StationOperationDispatchResult result,
+            IStationSafetyController? safetyController = null)
+            : this(new RecordingDispatcher(result), safetyController ?? new AcceptingSafetyController())
+        {
+        }
+
+        public Fixture(Exception exception)
+            : this(new RecordingDispatcher(exception), new AcceptingSafetyController())
+        {
+        }
+
+        private Fixture(
+            RecordingDispatcher dispatcher,
+            IStationSafetyController safetyController)
+        {
+            Dispatcher = dispatcher;
+            Coordinator = new ProductionRunCoordinator(
+                _repository,
+                _leases,
+                safetyController,
+                _publisher,
+                _clock);
+            Runner = new ProductionRunRunner(
+                _repository,
+                _repository,
+                _leases,
+                dispatcher,
+                _publisher,
+                new GuidRuntimeIdProvider(),
+                _clock);
+        }
+
+        public RecordingDispatcher Dispatcher { get; }
+
+        public InMemoryProductionRunRepository Repository => _repository;
+
+        public ProductionRunCoordinator Coordinator { get; }
+
+        public ProductionRunRunner Runner { get; }
     }
 
-    private static ProductionStageExecutionPlan Plan(
-        string stageId,
-        int sequence,
-        string workstationId,
-        ExecutableRuntimeProcess process)
+    private sealed class RecordingDispatcher : IStationOperationDispatcher
     {
-        return new ProductionStageExecutionPlan(
-            "line.main",
-            stageId,
-            sequence,
-            workstationId,
-            new StationId($"station.{sequence}"),
-            new ConfigurationSnapshotId($"configuration.{sequence}"),
-            new RecipeSnapshotId($"recipe.{sequence}"),
-            process);
-    }
+        private readonly StationOperationDispatchResult? _result;
+        private readonly Exception? _exception;
 
-    private static ExecutableRuntimeProcess Process(string suffix)
-    {
-        return new ExecutableRuntimeProcess(
-            new ProcessDefinitionId($"process.{suffix}"),
-            new ProcessVersionId($"process.{suffix}@1.0.0"),
-            [Node($"node.{suffix}")]);
-    }
+        public RecordingDispatcher(StationOperationDispatchResult result) => _result = result;
 
-    private static ExecutableRuntimeNode Node(string nodeId)
-    {
-        return new ExecutableRuntimeNode(
-            new RuntimeNodeId(nodeId),
-            nodeId,
-            new RuntimeCapabilityId("capability.execute"),
-            "Execute",
-            TimeSpan.FromSeconds(1),
-            null,
-            new RuntimeActionId($"{nodeId}:action"),
-            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.main"));
-    }
+        public RecordingDispatcher(Exception exception) => _exception = exception;
 
-    private sealed class RecordingRuntimeSessionRunner(
-        Func<StartRuntimeSessionRequest, ValueTask<Result<RuntimeSessionRunResult>>> execute)
-        : IRuntimeSessionRunner
-    {
-        public List<StartRuntimeSessionRequest> Requests { get; } = [];
+        public List<StationOperationDispatchRequest> Requests { get; } = [];
 
-        public ValueTask<Result<RuntimeSessionRunResult>> RunAsync(
-            StartRuntimeSessionRequest request,
+        public ValueTask<StationOperationDispatchResult> DispatchAsync(
+            StationOperationDispatchRequest request,
             CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             Requests.Add(request);
-            return execute(request);
+            return _exception is null
+                ? ValueTask.FromResult(_result!)
+                : ValueTask.FromException<StationOperationDispatchResult>(_exception);
         }
     }
 
-    private sealed class DeterministicRuntimeIdProvider : IRuntimeIdProvider
+    private sealed class ParallelBranchDispatcher : IStationOperationDispatcher
     {
-        private int _value;
+        private readonly Lock _sync = new();
+        private readonly TaskCompletionSource _bothBranchesStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseBranches = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _branchCount;
 
-        public RuntimeSessionId NewSessionId() => new(NextGuid());
+        public Task BothBranchesStarted => _bothBranchesStarted.Task;
 
-        public RuntimeStepId NewStepId() => new(NextGuid());
+        public List<string> OperationIds { get; } = [];
 
-        public RuntimeCommandId NewCommandId() => new(NextGuid());
-
-        private Guid NextGuid()
+        public async ValueTask<StationOperationDispatchResult> DispatchAsync(
+            StationOperationDispatchRequest request,
+            CancellationToken cancellationToken = default)
         {
-            _value++;
-            return Guid.Parse($"50000000-0000-0000-0000-{_value:000000000000}");
+            lock (_sync)
+            {
+                OperationIds.Add(request.Operation.Definition.OperationId);
+            }
+
+            if (request.Operation.Definition.OperationId is "operation.left" or "operation.right")
+            {
+                if (Interlocked.Increment(ref _branchCount) == 2)
+                {
+                    _bothBranchesStarted.TrySetResult();
+                }
+
+                await _releaseBranches.Task.WaitAsync(cancellationToken);
+            }
+
+            return new StationOperationDispatchResult(
+                ExecutionStatus.Completed,
+                request.Operation.Definition.OperationId == "operation.entry"
+                    ? ResultJudgement.NotApplicable
+                    : ResultJudgement.Passed,
+                null,
+                0,
+                0,
+                0,
+                Now.AddSeconds(1));
         }
+
+        public void ReleaseBranches() => _releaseBranches.TrySetResult();
     }
 
-    private sealed class FixedClock(DateTimeOffset utcNow) : IClock
+    private sealed class FixedClock(DateTimeOffset value) : IClock
     {
-        public DateTimeOffset UtcNow { get; } = utcNow;
+        public DateTimeOffset UtcNow { get; } = value;
+    }
+
+    private sealed class AcceptingSafetyController : IStationSafetyController
+    {
+        public ValueTask<StationSafetyResult> RequestSafeStopAsync(
+            StationSafetyRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(StationSafetyResult.Success());
+    }
+
+    private sealed class RejectingSafetyController : IStationSafetyController
+    {
+        public ValueTask<StationSafetyResult> RequestSafeStopAsync(
+            StationSafetyRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(StationSafetyResult.Failure(
+                "Safety.AgentUnavailable",
+                "Station Agent did not acknowledge Safe Stop."));
     }
 }

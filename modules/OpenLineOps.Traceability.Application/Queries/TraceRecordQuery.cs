@@ -1,7 +1,7 @@
 using OpenLineOps.Application.Abstractions.Paging;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Domain.Abstractions.Serialization;
-using OpenLineOps.Traceability.Domain.Records;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Traceability.Application.Queries;
 
@@ -11,80 +11,89 @@ public sealed record TraceRecordQuery
 
     public TraceRecordQuery(
         Guid? productionRunId = null,
-        string? dutModelId = null,
-        string? dutIdentityInputKey = null,
-        string? dutIdentityValue = null,
-        string? batchId = null,
-        string? fixtureId = null,
-        string? deviceId = null,
+        string? productModelId = null,
+        string? productionUnitIdentityInputKey = null,
+        string? productionUnitIdentityValue = null,
+        string? lotId = null,
+        string? carrierId = null,
         string? actorId = null,
-        string? runStatus = null,
+        string? executionStatus = null,
         string? judgement = null,
+        string? disposition = null,
         string? projectId = null,
         string? applicationId = null,
         string? projectSnapshotId = null,
         string? topologyId = null,
         string? productionLineDefinitionId = null,
-        string? stageId = null,
-        string? workstationId = null,
+        string? operationId = null,
+        string? stationSystemId = null,
         string? stationId = null,
         string? processDefinitionId = null,
         string? processVersionId = null,
         string? configurationSnapshotId = null,
         string? recipeSnapshotId = null,
+        string? resourceKind = null,
+        string? resourceId = null,
+        string? deviceId = null,
         DateTimeOffset? completedFromUtc = null,
         DateTimeOffset? completedToUtc = null,
         PagedRequest? paging = null)
     {
         ProductionRunId = productionRunId;
-        DutModelId = dutModelId;
-        DutIdentityInputKey = dutIdentityInputKey;
-        DutIdentityValue = dutIdentityValue;
-        BatchId = batchId;
-        FixtureId = fixtureId;
-        DeviceId = deviceId;
+        ProductModelId = productModelId;
+        ProductionUnitIdentityInputKey = productionUnitIdentityInputKey;
+        ProductionUnitIdentityValue = productionUnitIdentityValue;
+        LotId = lotId;
+        CarrierId = carrierId;
         ActorId = actorId;
-        RunStatus = runStatus;
+        ExecutionStatus = executionStatus;
         Judgement = judgement;
+        Disposition = disposition;
         ProjectId = projectId;
         ApplicationId = applicationId;
         ProjectSnapshotId = projectSnapshotId;
         TopologyId = topologyId;
         ProductionLineDefinitionId = productionLineDefinitionId;
-        StageId = stageId;
-        WorkstationId = workstationId;
+        OperationId = operationId;
+        StationSystemId = stationSystemId;
         StationId = stationId;
         ProcessDefinitionId = processDefinitionId;
         ProcessVersionId = processVersionId;
         ConfigurationSnapshotId = configurationSnapshotId;
         RecipeSnapshotId = recipeSnapshotId;
+        ResourceKind = resourceKind;
+        ResourceId = resourceId;
+        DeviceId = deviceId;
         CompletedFromUtc = completedFromUtc;
         CompletedToUtc = completedToUtc;
         Paging = (paging ?? new PagedRequest()).Normalize(MaxPageSize);
     }
 
     public Guid? ProductionRunId { get; }
-    public string? DutModelId { get; }
-    public string? DutIdentityInputKey { get; }
-    public string? DutIdentityValue { get; }
-    public string? BatchId { get; }
-    public string? FixtureId { get; }
-    public string? DeviceId { get; }
+    public string? ProductModelId { get; }
+    public string? ProductionUnitIdentityInputKey { get; }
+    public string? ProductionUnitIdentityValue { get; }
+    public string? LotId { get; }
+    public string? CarrierId { get; }
     public string? ActorId { get; }
-    public string? RunStatus { get; }
+    public string? ExecutionStatus { get; }
     public string? Judgement { get; }
+    public string? Disposition { get; }
     public string? ProjectId { get; }
     public string? ApplicationId { get; }
     public string? ProjectSnapshotId { get; }
     public string? TopologyId { get; }
     public string? ProductionLineDefinitionId { get; }
-    public string? StageId { get; }
-    public string? WorkstationId { get; }
+    public string? OperationId { get; }
+    public string? StationSystemId { get; }
     public string? StationId { get; }
     public string? ProcessDefinitionId { get; }
     public string? ProcessVersionId { get; }
     public string? ConfigurationSnapshotId { get; }
     public string? RecipeSnapshotId { get; }
+    public string? ResourceKind { get; }
+    public string? ResourceId { get; }
+    public string? DeviceId { get; }
     public DateTimeOffset? CompletedFromUtc { get; }
     public DateTimeOffset? CompletedToUtc { get; }
     public PagedRequest Paging { get; }
@@ -120,49 +129,57 @@ public sealed record TraceRecordQuery
             }
         }
 
-        if (RunStatus is not null
-            && !CanonicalEnumToken.TryParse<TraceProductionRunStatus>(RunStatus, out _))
+        var executionStatusError = ValidateEnum<ExecutionStatus>(ExecutionStatus, nameof(ExecutionStatus));
+        if (executionStatusError is not null)
         {
-            return ApplicationError.Validation(
-                "Traceability.InvalidRunStatus",
-                $"RunStatus must be an exact, case-sensitive token: "
-                + CanonicalEnumToken.ExpectedTokens<TraceProductionRunStatus>());
+            return executionStatusError;
         }
 
-        if (Judgement is not null
-            && !CanonicalEnumToken.TryParse<ResultJudgement>(Judgement, out _))
+        var judgementError = ValidateEnum<ResultJudgement>(Judgement, nameof(Judgement));
+        if (judgementError is not null)
         {
-            return ApplicationError.Validation(
-                "Traceability.InvalidJudgement",
-                $"Judgement must be an exact, case-sensitive token: "
-                + CanonicalEnumToken.ExpectedTokens<ResultJudgement>());
+            return judgementError;
         }
 
-        return null;
+        return ValidateEnum<ProductDisposition>(Disposition, nameof(Disposition));
+    }
+
+    private static ApplicationError? ValidateEnum<TEnum>(string? value, string fieldName)
+        where TEnum : struct, Enum
+    {
+        return value is not null && !CanonicalEnumToken.TryParse<TEnum>(value, out _)
+            ? ApplicationError.Validation(
+                $"Traceability.Invalid{fieldName}",
+                $"{fieldName} must be an exact, case-sensitive token: "
+                + CanonicalEnumToken.ExpectedTokens<TEnum>())
+            : null;
     }
 
     private IEnumerable<(string Name, string? Value)> TextFilters()
     {
-        yield return (nameof(DutModelId), DutModelId);
-        yield return (nameof(DutIdentityInputKey), DutIdentityInputKey);
-        yield return (nameof(DutIdentityValue), DutIdentityValue);
-        yield return (nameof(BatchId), BatchId);
-        yield return (nameof(FixtureId), FixtureId);
-        yield return (nameof(DeviceId), DeviceId);
+        yield return (nameof(ProductModelId), ProductModelId);
+        yield return (nameof(ProductionUnitIdentityInputKey), ProductionUnitIdentityInputKey);
+        yield return (nameof(ProductionUnitIdentityValue), ProductionUnitIdentityValue);
+        yield return (nameof(LotId), LotId);
+        yield return (nameof(CarrierId), CarrierId);
         yield return (nameof(ActorId), ActorId);
-        yield return (nameof(RunStatus), RunStatus);
+        yield return (nameof(ExecutionStatus), ExecutionStatus);
         yield return (nameof(Judgement), Judgement);
+        yield return (nameof(Disposition), Disposition);
         yield return (nameof(ProjectId), ProjectId);
         yield return (nameof(ApplicationId), ApplicationId);
         yield return (nameof(ProjectSnapshotId), ProjectSnapshotId);
         yield return (nameof(TopologyId), TopologyId);
         yield return (nameof(ProductionLineDefinitionId), ProductionLineDefinitionId);
-        yield return (nameof(StageId), StageId);
-        yield return (nameof(WorkstationId), WorkstationId);
+        yield return (nameof(OperationId), OperationId);
+        yield return (nameof(StationSystemId), StationSystemId);
         yield return (nameof(StationId), StationId);
         yield return (nameof(ProcessDefinitionId), ProcessDefinitionId);
         yield return (nameof(ProcessVersionId), ProcessVersionId);
         yield return (nameof(ConfigurationSnapshotId), ConfigurationSnapshotId);
         yield return (nameof(RecipeSnapshotId), RecipeSnapshotId);
+        yield return (nameof(ResourceKind), ResourceKind);
+        yield return (nameof(ResourceId), ResourceId);
+        yield return (nameof(DeviceId), DeviceId);
     }
 }

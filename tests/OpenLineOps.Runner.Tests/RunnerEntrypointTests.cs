@@ -8,25 +8,51 @@ public sealed class RunnerEntrypointTests
     [Fact]
     public async Task RunWithMissingProjectBuildsModuleProviderAndReturnsProjectOpenFailure()
     {
-        var currentDirectory = Path.GetTempPath();
-        var missingProject = $"openlineops-missing-project-{Guid.NewGuid():N}";
-        var writer = new StringWriter();
+        var missingProject = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-missing-project-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(missingProject);
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(missingProject, "appsettings.json"),
+                """
+                {
+                  "OpenLineOps": {
+                    "Runtime": {
+                      "Persistence": { "Provider": "InMemory" },
+                      "Coordination": { "Provider": "InMemory" },
+                      "AgentTransport": { "Provider": "Disabled" },
+                      "StationExecution": { "Provider": "InProcess" }
+                    },
+                    "Traceability": { "Persistence": { "Provider": "InMemory" } },
+                    "Devices": { "Persistence": { "Provider": "InMemory" } },
+                    "Plugins": { "EventLog": { "Provider": "InMemory" } }
+                  }
+                }
+                """);
+            var writer = new StringWriter();
 
-        var exitCode = await RunnerEntrypoint.RunAsync(
-            ["run", missingProject, "--dut", "DUT-001", "--actor", "runner-test"],
-            currentDirectory,
-            writer);
+            var exitCode = await RunnerEntrypoint.RunAsync(
+                ["run", missingProject, "--production-unit", "UNIT-001", "--actor", "runner-test"],
+                Path.GetTempPath(),
+                writer);
 
-        Assert.True(
-            exitCode == RunnerExitCodes.ProjectOpenFailed,
-            $"Runner returned {exitCode}: {writer}");
-        using var document = JsonDocument.Parse(writer.ToString());
-        Assert.Equal(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
-        Assert.False(document.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal(3, document.RootElement.GetProperty("exitCode").GetInt32());
-        Assert.Equal(
-            "NotFound.Projects.ManifestNotFound",
-            document.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.True(
+                exitCode == RunnerExitCodes.ProjectOpenFailed,
+                $"Runner returned {exitCode}: {writer}");
+            using var document = JsonDocument.Parse(writer.ToString());
+            Assert.False(document.RootElement.TryGetProperty("schemaVersion", out _));
+            Assert.False(document.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal(3, document.RootElement.GetProperty("exitCode").GetInt32());
+            Assert.Equal(
+                "NotFound.Projects.ManifestNotFound",
+                document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            Directory.Delete(missingProject, recursive: true);
+        }
     }
 
     [Fact]

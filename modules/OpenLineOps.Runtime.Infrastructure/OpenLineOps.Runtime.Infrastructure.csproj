@@ -8,12 +8,16 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="RabbitMQ.Client" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\lib\pythonscript\PythonScript\PythonScript.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Domain.Abstractions\OpenLineOps.Domain.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />

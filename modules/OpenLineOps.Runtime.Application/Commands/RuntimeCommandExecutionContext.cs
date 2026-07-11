@@ -9,11 +9,14 @@ public sealed record RuntimeCommandExecutionContext
         RuntimeSessionId sessionId,
         ProductionRunId productionRunId,
         string productionLineDefinitionId,
-        string productionStageId,
-        int stageSequence,
-        string workstationId,
-        DutIdentity dutIdentity,
-        StationId stationId,
+        string operationId,
+        int operationAttempt,
+        string stationSystemId,
+        ProductionUnitIdentity productionUnitIdentity,
+        string? lotId,
+        string? carrierId,
+        string? fixtureId,
+        string? deviceId,
         ConfigurationSnapshotId configurationSnapshotId,
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
@@ -38,16 +41,22 @@ public sealed record RuntimeCommandExecutionContext
         ProductionLineDefinitionId = Required(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
-        ProductionStageId = Required(productionStageId, nameof(productionStageId));
-        if (stageSequence <= 0)
+        OperationId = Required(operationId, nameof(operationId));
+        if (operationAttempt <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(stageSequence), "Stage sequence must be positive.");
+            throw new ArgumentOutOfRangeException(
+                nameof(operationAttempt),
+                "Operation attempt must be positive.");
         }
 
-        StageSequence = stageSequence;
-        WorkstationId = Required(workstationId, nameof(workstationId));
-        DutIdentity = dutIdentity ?? throw new ArgumentNullException(nameof(dutIdentity));
-        StationId = stationId ?? throw new ArgumentNullException(nameof(stationId));
+        OperationAttempt = operationAttempt;
+        StationSystemId = Required(stationSystemId, nameof(stationSystemId));
+        ProductionUnitIdentity = productionUnitIdentity
+            ?? throw new ArgumentNullException(nameof(productionUnitIdentity));
+        LotId = Optional(lotId, nameof(lotId));
+        CarrierId = Optional(carrierId, nameof(carrierId));
+        FixtureId = Optional(fixtureId, nameof(fixtureId));
+        DeviceId = Optional(deviceId, nameof(deviceId));
         ConfigurationSnapshotId = configurationSnapshotId
             ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
         StepId = stepId.Value == Guid.Empty
@@ -60,7 +69,9 @@ public sealed record RuntimeCommandExecutionContext
         TargetCapability = targetCapability ?? throw new ArgumentNullException(nameof(targetCapability));
         CommandName = Required(commandName, nameof(commandName));
         InputPayload = inputPayload;
-        Timeout = timeout;
+        Timeout = timeout > TimeSpan.Zero
+            ? timeout
+            : throw new ArgumentOutOfRangeException(nameof(timeout));
         ActionId = actionId ?? throw new ArgumentNullException(nameof(actionId));
         TargetKind = Required(targetKind, nameof(targetKind));
         TargetId = Required(targetId, nameof(targetId));
@@ -75,15 +86,21 @@ public sealed record RuntimeCommandExecutionContext
 
     public string ProductionLineDefinitionId { get; }
 
-    public string ProductionStageId { get; }
+    public string OperationId { get; }
 
-    public int StageSequence { get; }
+    public int OperationAttempt { get; }
 
-    public string WorkstationId { get; }
+    public string StationSystemId { get; }
 
-    public DutIdentity DutIdentity { get; }
+    public ProductionUnitIdentity ProductionUnitIdentity { get; }
 
-    public StationId StationId { get; }
+    public string? LotId { get; }
+
+    public string? CarrierId { get; }
+
+    public string? FixtureId { get; }
+
+    public string? DeviceId { get; }
 
     public ConfigurationSnapshotId ConfigurationSnapshotId { get; }
 
@@ -112,6 +129,11 @@ public sealed record RuntimeCommandExecutionContext
     public string ApplicationId { get; }
 
     public string ProjectSnapshotId { get; }
+
+    private static string? Optional(string? value, string parameterName)
+    {
+        return value is null ? null : Required(value, parameterName);
+    }
 
     private static string Required(string value, string parameterName)
     {

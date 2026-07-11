@@ -2,12 +2,18 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
-public sealed class SqliteProductionRunRepository : IProductionRunRepository, IDisposable
+public sealed class SqliteProductionRunRepository :
+    IProductionRunRepository,
+    IProductionRunExecutionPlanRepository,
+    IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = RuntimePersistenceJson.CreateOptions();
 
@@ -22,13 +28,15 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
 
     public async ValueTask<bool> TryAddAsync(
         ProductionRun run,
+        ProductionRunExecutionPlan executionPlan,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
-        if (run.Status != ProductionRunStatus.Created)
+        ArgumentNullException.ThrowIfNull(executionPlan);
+        if (run.ExecutionStatus != ExecutionStatus.Pending || executionPlan.RunId != run.Id)
         {
             throw new ArgumentException(
-                "A new production run must be persisted in Created status.",
+                "A new Production Run must be Pending and own its execution plan.",
                 nameof(run));
         }
 
@@ -37,6 +45,9 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
         var documentJson = JsonSerializer.Serialize(
             ProductionRunSnapshotMapper.ToSnapshot(run),
             JsonOptions);
+        var executionPlanJson = JsonSerializer.Serialize(
+            ProductionRunExecutionPlanSnapshotMapper.ToSnapshot(executionPlan),
+            JsonOptions);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -44,30 +55,33 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
             INSERT INTO production_runs (
                 run_id,
                 document_json,
+                execution_plan_json,
                 revision,
-                status,
+                execution_status,
                 project_snapshot_id,
                 production_line_definition_id,
-                dut_model_id,
-                dut_identity_input_key,
-                dut_identity_value,
+                product_model_id,
+                identity_input_key,
+                identity_value,
                 last_transition_at_utc,
                 updated_at_utc)
             VALUES (
                 $run_id,
                 $document_json,
+                $execution_plan_json,
                 0,
-                $status,
+                $execution_status,
                 $project_snapshot_id,
                 $production_line_definition_id,
-                $dut_model_id,
-                $dut_identity_input_key,
-                $dut_identity_value,
+                $product_model_id,
+                $identity_input_key,
+                $identity_value,
                 $last_transition_at_utc,
                 $updated_at_utc)
             ON CONFLICT(run_id) DO NOTHING;
             """;
         AddParameters(command, run, documentJson);
+        command.Parameters.AddWithValue("$execution_plan_json", executionPlanJson);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -94,12 +108,12 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
             UPDATE production_runs
             SET document_json = $document_json,
                 revision = $next_revision,
-                status = $status,
+                execution_status = $execution_status,
                 project_snapshot_id = $project_snapshot_id,
                 production_line_definition_id = $production_line_definition_id,
-                dut_model_id = $dut_model_id,
-                dut_identity_input_key = $dut_identity_input_key,
-                dut_identity_value = $dut_identity_value,
+                product_model_id = $product_model_id,
+                identity_input_key = $identity_input_key,
+                identity_value = $identity_value,
                 last_transition_at_utc = $last_transition_at_utc,
                 updated_at_utc = $updated_at_utc
             WHERE run_id = $run_id
@@ -168,7 +182,7 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
         command.CommandText = """
             SELECT document_json, revision
             FROM production_runs
-            WHERE status IN ('Created', 'Running')
+            WHERE execution_status IN ('Pending', 'Running')
             ORDER BY last_transition_at_utc, run_id;
             """;
         var runs = new List<ProductionRunPersistenceEntry>();
@@ -181,6 +195,89 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
         }
 
         return runs;
+    }
+
+    public async ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+        string? productionLineDefinitionId = null,
+        string? stationSystemId = null,
+        string? slotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT document_json, revision
+            FROM production_runs
+            WHERE execution_status IN ('Pending', 'Running')
+            ORDER BY last_transition_at_utc, run_id;
+            """;
+        var runs = new List<ProductionRunPersistenceEntry>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var entry = new ProductionRunPersistenceEntry(
+                DeserializeRun(reader.GetString(0)),
+                reader.GetInt64(1));
+            if (productionLineDefinitionId is not null
+                && !string.Equals(
+                    entry.Run.ProductionLineDefinitionId,
+                    productionLineDefinitionId,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (stationSystemId is not null
+                && entry.Run.OperationDefinitions.All(definition =>
+                    !string.Equals(
+                        definition.StationSystemId,
+                        stationSystemId,
+                        StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            if (slotId is not null
+                && entry.Run.OperationDefinitions.All(definition =>
+                    definition.ResourceRequirements.All(requirement =>
+                        requirement.Kind != ResourceKind.Slot
+                        || !string.Equals(requirement.ResourceId, slotId, StringComparison.Ordinal))))
+            {
+                continue;
+            }
+
+            runs.Add(entry);
+        }
+
+        return runs;
+    }
+
+    public async ValueTask<ProductionRunExecutionPlan?> GetByRunIdAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT execution_plan_json
+            FROM production_runs
+            WHERE run_id = $run_id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (value is not string json)
+        {
+            return null;
+        }
+
+        var snapshot = JsonSerializer.Deserialize<PersistedProductionRunExecutionPlan>(json, JsonOptions)
+            ?? throw new InvalidDataException("Persisted Production Run execution plan is empty.");
+        return ProductionRunExecutionPlanSnapshotMapper.ToAggregate(snapshot);
     }
 
     public async ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
@@ -284,19 +381,20 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
                 CREATE TABLE IF NOT EXISTS production_runs (
                     run_id TEXT NOT NULL PRIMARY KEY,
                     document_json TEXT NOT NULL,
+                    execution_plan_json TEXT NOT NULL,
                     revision INTEGER NOT NULL,
-                    status TEXT NOT NULL,
+                    execution_status TEXT NOT NULL,
                     project_snapshot_id TEXT NOT NULL,
                     production_line_definition_id TEXT NOT NULL,
-                    dut_model_id TEXT NOT NULL,
-                    dut_identity_input_key TEXT NOT NULL,
-                    dut_identity_value TEXT NOT NULL,
+                    product_model_id TEXT NOT NULL,
+                    identity_input_key TEXT NOT NULL,
+                    identity_value TEXT NOT NULL,
                     last_transition_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_production_runs_recovery
-                    ON production_runs(status, last_transition_at_utc);
+                    ON production_runs(execution_status, last_transition_at_utc);
 
                 CREATE TABLE IF NOT EXISTS production_run_terminal_outbox (
                     run_id TEXT NOT NULL PRIMARY KEY,
@@ -432,14 +530,14 @@ public sealed class SqliteProductionRunRepository : IProductionRunRepository, ID
     {
         command.Parameters.AddWithValue("$run_id", run.Id.Value.ToString("D"));
         command.Parameters.AddWithValue("$document_json", documentJson);
-        command.Parameters.AddWithValue("$status", run.Status.ToString());
+        command.Parameters.AddWithValue("$execution_status", run.ExecutionStatus.ToString());
         command.Parameters.AddWithValue("$project_snapshot_id", run.ProjectSnapshotId);
         command.Parameters.AddWithValue(
             "$production_line_definition_id",
             run.ProductionLineDefinitionId);
-        command.Parameters.AddWithValue("$dut_model_id", run.DutIdentity.ModelId);
-        command.Parameters.AddWithValue("$dut_identity_input_key", run.DutIdentity.InputKey);
-        command.Parameters.AddWithValue("$dut_identity_value", run.DutIdentity.Value);
+        command.Parameters.AddWithValue("$product_model_id", run.ProductionUnitIdentity.ModelId);
+        command.Parameters.AddWithValue("$identity_input_key", run.ProductionUnitIdentity.InputKey);
+        command.Parameters.AddWithValue("$identity_value", run.ProductionUnitIdentity.Value);
         command.Parameters.AddWithValue(
             "$last_transition_at_utc",
             FormatTimestamp(run.LastTransitionAtUtc));

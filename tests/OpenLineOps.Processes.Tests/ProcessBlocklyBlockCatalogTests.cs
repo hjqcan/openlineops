@@ -24,7 +24,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
             && block.BlockType == "openlineops_move_axis"
             && block.Version == 1
             && block.ExecutionMode == ProcessBlocklyBlockExecutionModes.DeclarativeActionContract
-            && block.RuntimeActionContractSchemaVersion == RuntimeActionContractSchemaVersions.V1
+            && block.RuntimeActionContractSchemaVersion == RuntimeActionContractSchema.Current
             && block.RuntimeActionContractSha256 is { Length: 64 });
         Assert.Contains(result.Value, block =>
             block.IsBuiltIn
@@ -42,7 +42,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
                 Assert.Equal(
                     ProcessBlocklyBlockExecutionModes.DeclarativeActionContract,
                     block.ExecutionMode);
-                Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+                Assert.Equal(RuntimeActionContractSchema.Current, block.RuntimeActionContractSchemaVersion);
                 Assert.NotNull(block.RuntimeActionContractJson);
                 Assert.NotNull(block.RuntimeActionContractSha256);
                 var contract = serializer.Deserialize(block.RuntimeActionContractJson);
@@ -216,7 +216,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
             && block.DisplayName == generatedBlock.DisplayName
             && block.IsBuiltIn
             && block.ExecutionMode == ProcessBlocklyBlockExecutionModes.DeclarativeActionContract
-            && block.RuntimeActionContractSchemaVersion == RuntimeActionContractSchemaVersions.V1
+            && block.RuntimeActionContractSchemaVersion == RuntimeActionContractSchema.Current
             && block.RuntimeActionContractJson is not null
             && block.RuntimeActionContractSha256 is { Length: 64 });
     }
@@ -317,7 +317,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
         }
 
         var result = new RuntimeActionContractCanonicalSerializer().Serialize(new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             actionType,
             fields,
             new RuntimeDelayEmit(new RuntimeActionLiteralValue(JsonSerializer.SerializeToElement(1)))));
@@ -331,7 +331,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
         string expectedActionType)
     {
         Assert.Equal(ProcessBlocklyBlockExecutionModes.DeclarativeActionContract, block.ExecutionMode);
-        Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+        Assert.Equal(RuntimeActionContractSchema.Current, block.RuntimeActionContractSchemaVersion);
         Assert.NotNull(block.RuntimeActionContractJson);
         Assert.NotNull(block.RuntimeActionContractSha256);
         var serializer = new RuntimeActionContractCanonicalSerializer();
@@ -349,7 +349,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
         string expectedActionType)
     {
         Assert.Equal(ProcessBlocklyBlockExecutionModes.DeclarativeActionContract, block.ExecutionMode);
-        Assert.Equal(RuntimeActionContractSchemaVersions.V1, block.RuntimeActionContractSchemaVersion);
+        Assert.Equal(RuntimeActionContractSchema.Current, block.RuntimeActionContractSchemaVersion);
         var serializer = new RuntimeActionContractCanonicalSerializer();
         var parsed = serializer.Deserialize(block.RuntimeActionContractJson);
         Assert.True(parsed.IsSuccess, parsed.Error.Message);

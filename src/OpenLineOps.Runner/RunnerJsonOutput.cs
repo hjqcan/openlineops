@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner;
@@ -15,15 +16,27 @@ public sealed record RunnerProjectOutput(
     string SnapshotId,
     string ReleaseContentSha256);
 
-public sealed record RunnerProductionStageOutput(
-    string StageId,
-    int Sequence,
-    string WorkstationId,
+public sealed record RunnerResourceOutput(
+    string Kind,
+    string ResourceId,
+    long? FencingToken);
+
+public sealed record RunnerProductionContextOutput(
+    string Kind,
+    string CanonicalValue);
+
+public sealed record RunnerOperationOutput(
+    string OperationId,
+    string OperationRunId,
+    int Attempt,
+    string StationSystemId,
     string StationId,
     string ProcessDefinitionId,
     string ProcessVersionId,
     string ConfigurationSnapshotId,
-    string Status,
+    string RecipeSnapshotId,
+    string ExecutionStatus,
+    string ResultJudgement,
     Guid? RuntimeSessionId,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
@@ -31,33 +44,45 @@ public sealed record RunnerProductionStageOutput(
     string? FailureReason,
     int CompletedStepCount,
     int CommandCount,
-    int IncidentCount);
+    int IncidentCount,
+    IReadOnlyList<RunnerResourceOutput> Resources,
+    IReadOnlyDictionary<string, RunnerProductionContextOutput> Outputs);
+
+public sealed record RunnerRouteDecisionOutput(
+    string SourceOperationRunId,
+    string TransitionId,
+    string TargetOperationId,
+    string SourceJudgement,
+    int Traversal,
+    DateTimeOffset DecidedAtUtc);
 
 public sealed record RunnerProductionRunOutput(
     Guid ProductionRunId,
     string ProductionLineDefinitionId,
-    string DutModelId,
-    string DutIdentityInputKey,
-    string DutIdentityValue,
+    string ProductModelId,
+    string ProductionUnitIdentityInputKey,
+    string ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string ActorId,
-    string? BatchId,
-    string? FixtureId,
-    string? DeviceId,
-    string Status,
+    string ExecutionStatus,
+    string ResultJudgement,
+    string ProductDisposition,
+    string ControlState,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
     string? FailureCode,
     string? FailureReason,
-    int CompletedStageCount,
-    int StageCount,
+    int CompletedOperationCount,
+    int OperationCount,
     int CompletedStepCount,
     int CommandCount,
     int IncidentCount,
-    IReadOnlyList<RunnerProductionStageOutput> Stages);
+    IReadOnlyList<RunnerOperationOutput> Operations,
+    IReadOnlyList<RunnerRouteDecisionOutput> RouteDecisions);
 
 public sealed record RunnerJsonOutput(
-    int SchemaVersion,
     bool Success,
     string Command,
     int ExitCode,
@@ -66,8 +91,6 @@ public sealed record RunnerJsonOutput(
     RunnerProductionRunOutput? ProductionRun,
     RunnerErrorOutput? Error)
 {
-    public const int CurrentSchemaVersion = 1;
-
     public static RunnerJsonOutput Succeeded(
         string target,
         AutomationProjectWorkspaceDetails workspace,
@@ -75,7 +98,6 @@ public sealed record RunnerJsonOutput(
         ProductionRunSnapshot productionRun)
     {
         return new RunnerJsonOutput(
-            CurrentSchemaVersion,
             Success: true,
             Command: "run",
             RunnerExitCodes.Success,
@@ -95,7 +117,6 @@ public sealed record RunnerJsonOutput(
         ProductionRunSnapshot? productionRun = null)
     {
         return new RunnerJsonOutput(
-            CurrentSchemaVersion,
             Success: false,
             Command: "run",
             exitCode,
@@ -121,52 +142,81 @@ public sealed record RunnerJsonOutput(
 
     private static RunnerProductionRunOutput ToProductionRun(ProductionRunSnapshot productionRun)
     {
-        var stages = productionRun.Stages
-            .OrderBy(stage => stage.Sequence)
-            .Select(stage => new RunnerProductionStageOutput(
-                stage.StageId,
-                stage.Sequence,
-                stage.WorkstationId,
-                stage.StationId.Value,
-                stage.ProcessDefinitionId.Value,
-                stage.ProcessVersionId.Value,
-                stage.ConfigurationSnapshotId.Value,
-                stage.Status.ToString(),
-                stage.RuntimeSessionId?.Value,
-                stage.StartedAtUtc,
-                stage.CompletedAtUtc,
-                stage.FailureCode,
-                stage.FailureReason,
-                stage.CompletedStepCount,
-                stage.CommandCount,
-                stage.IncidentCount))
+        var operations = productionRun.Operations
+            .OrderBy(operation => operation.OperationRunId, StringComparer.Ordinal)
+            .Select(operation => new RunnerOperationOutput(
+                operation.Definition.OperationId,
+                operation.OperationRunId,
+                operation.Attempt,
+                operation.Definition.StationSystemId,
+                operation.Definition.StationId.Value,
+                operation.Definition.ProcessDefinitionId.Value,
+                operation.Definition.ProcessVersionId.Value,
+                operation.Definition.ConfigurationSnapshotId.Value,
+                operation.Definition.RecipeSnapshotId.Value,
+                operation.ExecutionStatus.ToString(),
+                operation.Judgement.ToString(),
+                operation.RuntimeSessionId?.Value,
+                operation.StartedAtUtc,
+                operation.CompletedAtUtc,
+                operation.FailureCode,
+                operation.FailureReason,
+                operation.CompletedStepCount,
+                operation.CommandCount,
+                operation.IncidentCount,
+                operation.Definition.ResourceRequirements
+                    .Select(requirement => new RunnerResourceOutput(
+                        requirement.Kind.ToString(),
+                        requirement.ResourceId,
+                        operation.FencingTokens.TryGetValue(requirement, out var token)
+                            ? token
+                            : null))
+                    .ToArray(),
+                operation.Outputs.ToDictionary(
+                    static pair => pair.Key,
+                    static pair => new RunnerProductionContextOutput(
+                        pair.Value.Kind.ToString(),
+                        pair.Value.CanonicalValue),
+                    StringComparer.Ordinal)))
+            .ToArray();
+        var routeDecisions = productionRun.RouteDecisions
+            .Select(decision => new RunnerRouteDecisionOutput(
+                decision.SourceOperationRunId,
+                decision.TransitionId,
+                decision.TargetOperationId,
+                decision.SourceJudgement.ToString(),
+                decision.Traversal,
+                decision.DecidedAtUtc))
             .ToArray();
 
         return new RunnerProductionRunOutput(
             productionRun.RunId.Value,
             productionRun.ProductionLineDefinitionId,
-            productionRun.DutIdentity.ModelId,
-            productionRun.DutIdentity.InputKey,
-            productionRun.DutIdentity.Value,
+            productionRun.ProductionUnitIdentity.ModelId,
+            productionRun.ProductionUnitIdentity.InputKey,
+            productionRun.ProductionUnitIdentity.Value,
+            productionRun.LotId,
+            productionRun.CarrierId,
             productionRun.ActorId,
-            productionRun.BatchId,
-            productionRun.FixtureId,
-            productionRun.DeviceId,
-            productionRun.Status.ToString(),
+            productionRun.ExecutionStatus.ToString(),
+            productionRun.Judgement.ToString(),
+            productionRun.Disposition.ToString(),
+            productionRun.ControlState.ToString(),
             productionRun.CreatedAtUtc,
             productionRun.StartedAtUtc,
             productionRun.CompletedAtUtc,
             productionRun.FailureCode,
             productionRun.FailureReason,
-            stages.Count(stage => string.Equals(
-                stage.Status,
-                ProductionStageRunStatus.Completed.ToString(),
+            operations.Count(operation => string.Equals(
+                operation.ExecutionStatus,
+                ExecutionStatus.Completed.ToString(),
                 StringComparison.Ordinal)),
-            stages.Length,
-            stages.Sum(stage => stage.CompletedStepCount),
-            stages.Sum(stage => stage.CommandCount),
-            stages.Sum(stage => stage.IncidentCount),
-            stages);
+            operations.Length,
+            operations.Sum(operation => operation.CompletedStepCount),
+            operations.Sum(operation => operation.CommandCount),
+            operations.Sum(operation => operation.IncidentCount),
+            operations,
+            routeDecisions);
     }
 }
 

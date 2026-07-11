@@ -5,14 +5,12 @@ namespace OpenLineOps.Projects.Tests;
 public sealed class ProjectReleaseExternalTestProgramContractTests
 {
     [Theory]
-    [InlineData("$dut.identity")]
-    [InlineData("$dut.model")]
-    [InlineData("$dut.inputKey")]
+    [InlineData("$product.identity")]
+    [InlineData("$product.model")]
+    [InlineData("$product.inputKey")]
     [InlineData("$run.id")]
     [InlineData("$line.id")]
-    [InlineData("$stage.id")]
-    [InlineData("$stage.sequence")]
-    [InlineData("$workstation.id")]
+    [InlineData("$operation.id")]
     [InlineData("$session.id")]
     [InlineData("$station.id")]
     [InlineData("$configuration.id")]
@@ -34,11 +32,22 @@ public sealed class ProjectReleaseExternalTestProgramContractTests
         Assert.False(ProjectReleaseExternalTestProgramContract.IsSupportedInputSource($" {source}"));
     }
 
+    [Theory]
+    [InlineData("$dut.identity")]
+    [InlineData("$dut.model")]
+    [InlineData("$stage.id")]
+    [InlineData("$stage.sequence")]
+    [InlineData("$workstation.id")]
+    public void LegacyProductionInputSourcesAreRejected(string source)
+    {
+        Assert.False(ProjectReleaseExternalTestProgramContract.IsSupportedInputSource(source));
+    }
+
     [Fact]
     public void ArgumentTemplatesAcceptOnlyFrozenRuntimeOrMappedInputPlaceholders()
     {
         Assert.True(ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
-            "--dut={{dut.identity}}",
+            "--product={{product.identity}}",
             ["serial"]));
         Assert.True(ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
             "{{input.serial}}",
@@ -50,7 +59,7 @@ public sealed class ProjectReleaseExternalTestProgramContractTests
             "{{unknown.value}}",
             ["serial"]));
         Assert.False(ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
-            "{{dut.identity}",
+            "{{product.identity}",
             ["serial"]));
     }
 

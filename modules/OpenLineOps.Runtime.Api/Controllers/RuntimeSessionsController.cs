@@ -10,7 +10,7 @@ using OpenLineOps.Runtime.Domain.Sessions;
 namespace OpenLineOps.Runtime.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.RuntimeV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.RuntimeSessions)]
 public sealed class RuntimeSessionsController : ControllerBase
 {
@@ -85,14 +85,14 @@ public sealed class RuntimeSessionsController : ControllerBase
             session.TraceMetadata.TopologyId,
             session.TraceMetadata.ProductionRunId.Value,
             session.TraceMetadata.ProductionLineDefinitionId,
-            session.TraceMetadata.ProductionStageId,
-            session.TraceMetadata.StageSequence,
-            session.TraceMetadata.WorkstationId,
-            new RuntimeDutIdentityResponse(
-                session.TraceMetadata.DutIdentity.ModelId,
-                session.TraceMetadata.DutIdentity.InputKey,
-                session.TraceMetadata.DutIdentity.Value),
-            session.TraceMetadata.BatchId,
+            session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationAttempt,
+            new RuntimeProductionUnitIdentityResponse(
+                session.TraceMetadata.ProductionUnitIdentity.ModelId,
+                session.TraceMetadata.ProductionUnitIdentity.InputKey,
+                session.TraceMetadata.ProductionUnitIdentity.Value),
+            session.TraceMetadata.LotId,
+            session.TraceMetadata.CarrierId,
             session.TraceMetadata.FixtureId,
             session.TraceMetadata.DeviceId,
             session.TraceMetadata.ActorId,
@@ -126,7 +126,7 @@ public sealed class RuntimeSessionsController : ControllerBase
                     command.CompletedAtUtc,
                     command.ResultPayload,
                     command.FailureReason,
-                    command.SemanticOutcome?.ToString(),
+                    command.ResultJudgement?.ToString(),
                     command.ActionId.Value,
                     command.TargetKind,
                     command.TargetId))

@@ -9,7 +9,7 @@ using CreateApiDefinitionRequest = OpenLineOps.Processes.Api.Models.CreateProces
 namespace OpenLineOps.Processes.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.ProcessesV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Processes)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProcesses)]
 public sealed class ProjectApplicationProcessDefinitionsController : ControllerBase
 {

@@ -14,6 +14,7 @@ using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
 using OpenLineOps.Topology.Domain.Systems;
+using OpenLineOps.Topology.Domain.Topology;
 
 namespace OpenLineOps.Production.Application.LineDefinitions;
 
@@ -218,20 +219,37 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
     {
-        ArgumentNullException.ThrowIfNull(request.DutModel);
-        ArgumentNullException.ThrowIfNull(request.Workstations);
-        ArgumentNullException.ThrowIfNull(request.Stages);
+        ArgumentNullException.ThrowIfNull(request.ProductModel);
+        ArgumentNullException.ThrowIfNull(request.Operations);
+        ArgumentNullException.ThrowIfNull(request.Transitions);
         ArgumentNullException.ThrowIfNull(request.ExternalTestProgramAdapters);
         EnsureRequestItemsAreComplete(request);
 
-        var dutModel = DutModelDefinition.Create(
-            new DutModelId(request.DutModel.DutModelId),
-            request.DutModel.ModelCode,
-            request.DutModel.IdentityInputKey);
-        var workstations = request.Workstations.Select(workstation => WorkstationDefinition.Create(
-            new WorkstationId(workstation.WorkstationId),
-            workstation.DisplayName,
-            workstation.StationSystemId));
+        var productModel = ProductModelDefinition.Create(
+            new ProductModelId(request.ProductModel.ProductModelId),
+            request.ProductModel.ModelCode,
+            request.ProductModel.IdentityInputKey);
+        var operations = request.Operations.Select(operation => OperationDefinition.Create(
+            new OperationDefinitionId(operation.OperationId),
+            operation.DisplayName,
+            operation.StationSystemId,
+            operation.FlowDefinitionId,
+            operation.ConfigurationSnapshotId));
+        var transitions = request.Transitions.Select(transition => RouteTransition.Create(
+            new RouteTransitionId(transition.TransitionId),
+            new OperationDefinitionId(transition.SourceOperationId),
+            new OperationDefinitionId(transition.TargetOperationId),
+            transition.Kind,
+            transition.RequiredJudgement,
+            transition.MaxTraversals,
+            transition.ParallelGroupId,
+            transition.OutputKey is null
+                ? null
+                : new RouteOutputCondition(
+                    transition.OutputKey,
+                    new OpenLineOps.Runtime.Contracts.ProductionContextValue(
+                        transition.ExpectedOutputKind!.Value,
+                        transition.ExpectedOutputValue!))));
         var adapters = request.ExternalTestProgramAdapters.Select(adapter =>
             ExternalTestProgramAdapter.Create(
                 new ExternalTestProgramAdapterId(adapter.AdapterId),
@@ -251,24 +269,14 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
                     adapter.OutcomeMapping.FailedToken,
                     adapter.OutcomeMapping.AbortedToken),
                 MillisecondsToTimeout(adapter.TimeoutMilliseconds)));
-        var stages = request.Stages.Select(stage => ProcessStage.Create(
-            new ProcessStageId(stage.StageId),
-            stage.Sequence,
-            stage.DisplayName,
-            new WorkstationId(stage.WorkstationId),
-            stage.FlowDefinitionId,
-            stage.ConfigurationSnapshotId,
-            stage.ExternalTestProgramAdapterId is null
-                ? null
-                : new ExternalTestProgramAdapterId(stage.ExternalTestProgramAdapterId)));
-
         return ProductionLineDefinition.Restore(
             new ProductionLineDefinitionId(request.LineDefinitionId),
             request.DisplayName,
             request.TopologyId,
-            dutModel,
-            workstations,
-            stages,
+            productModel,
+            new OperationDefinitionId(request.EntryOperationId),
+            operations,
+            transitions,
             adapters,
             createdAtUtc,
             updatedAtUtc);
@@ -276,13 +284,30 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
 
     private static void EnsureRequestItemsAreComplete(SaveProductionLineDefinitionRequest request)
     {
-        if (request.Workstations.Any(static workstation => workstation is null)
-            || request.Stages.Any(static stage => stage is null)
+        if (request.Operations.Any(static operation => operation is null)
+            || request.Transitions.Any(static transition => transition is null)
             || request.ExternalTestProgramAdapters.Any(static adapter => adapter is null))
         {
             throw new ArgumentException(
                 "Production line semantic collections cannot contain null items.",
                 nameof(request));
+        }
+
+        foreach (var transition in request.Transitions)
+        {
+            var hasAllConditionFields = transition.OutputKey is not null
+                && transition.ExpectedOutputKind is not null
+                && transition.ExpectedOutputValue is not null;
+            var hasAnyConditionField = transition.OutputKey is not null
+                || transition.ExpectedOutputKind is not null
+                || transition.ExpectedOutputValue is not null;
+            if (hasAnyConditionField != hasAllConditionFields
+                || (transition.Kind == RouteTransitionKind.Condition) != hasAllConditionFields)
+            {
+                throw new ArgumentException(
+                    $"Route transition {transition.TransitionId} has an incomplete or inapplicable output condition.",
+                    nameof(request));
+            }
         }
 
         foreach (var adapter in request.ExternalTestProgramAdapters)
@@ -327,15 +352,15 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             return Validation("TopologyNotFound", $"Topology {definition.TopologyId} was not found.");
         }
 
-        foreach (var workstation in definition.Workstations)
+        foreach (var operation in definition.Operations)
         {
             var stationSystem = topology.Systems.SingleOrDefault(system =>
-                system.Id.Value == workstation.StationSystemId);
+                system.Id.Value == operation.StationSystemId);
             if (stationSystem is not StationSystem)
             {
                 return Validation(
-                    "WorkstationStationSystemInvalid",
-                    $"Workstation {workstation.Id} must reference an existing Station system.");
+                    "OperationStationSystemInvalid",
+                    $"Operation {operation.Id} must reference an existing Station system.");
             }
         }
 
@@ -379,66 +404,110 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         if (blockCatalogResult.IsFailure)
         {
             return Validation(
-                "StageFlowBlockCatalogUnavailable",
+                "OperationFlowBlockCatalogUnavailable",
                 $"Application Blockly block catalog cannot be loaded: {blockCatalogResult.Error.Message}");
         }
 
         var compiledFlows = new Dictionary<string, FlowIrDocument>(StringComparer.Ordinal);
-        foreach (var stage in definition.Stages)
+        var usedAdapterIds = new HashSet<ExternalTestProgramAdapterId>();
+        foreach (var operation in definition.Operations)
         {
             var flow = await _processRepository
-                .GetByIdAsync(scope, new ProcessDefinitionId(stage.FlowDefinitionId), cancellationToken)
+                .GetByIdAsync(scope, new ProcessDefinitionId(operation.FlowDefinitionId), cancellationToken)
                 .ConfigureAwait(false);
             if (flow is null || !flow.IsPublished)
             {
                 return Validation(
-                    "StageFlowNotPublished",
-                    $"Process stage {stage.Id} must reference an existing published flow.");
+                    "OperationFlowNotPublished",
+                    $"Operation {operation.Id} must reference an existing published flow.");
             }
 
-            if (!compiledFlows.TryGetValue(stage.FlowDefinitionId, out var flowIr))
+            if (!compiledFlows.TryGetValue(operation.FlowDefinitionId, out var flowIr))
             {
                 var compilation = _flowIrCompiler.Compile(flow, blockCatalogResult.Value);
                 if (compilation.IsFailure)
                 {
                     return Validation(
-                        "StageFlowCompilationFailed",
-                        $"Process stage {stage.Id} flow cannot compile to the standard Flow IR: "
+                        "OperationFlowCompilationFailed",
+                        $"Operation {operation.Id} flow cannot compile to the standard Flow IR: "
                         + $"{compilation.Error.Code}: {compilation.Error.Message}");
                 }
 
                 flowIr = compilation.Value.Document;
-                compiledFlows.Add(stage.FlowDefinitionId, flowIr);
+                compiledFlows.Add(operation.FlowDefinitionId, flowIr);
             }
 
-            if (stage.ExternalTestProgramAdapterId is null)
+            var stationSystem = topology.Systems.Single(system =>
+                system.Id.Value == operation.StationSystemId);
+            foreach (var action in flowIr.Nodes.SelectMany(node => node.Actions))
             {
-                continue;
-            }
+                if (!IsWithinOperationStation(action.Target, operation, topology))
+                {
+                    return Validation(
+                        "OperationFlowTargetOutsideStation",
+                        $"Operation {operation.Id} Flow action target {action.Target.Kind}:{action.Target.Reference} is outside Station {operation.StationSystemId}.");
+                }
 
-            var adapter = definition.ExternalTestProgramAdapters.Single(candidate =>
-                candidate.Id == stage.ExternalTestProgramAdapterId);
-            var workstation = definition.Workstations.Single(candidate => candidate.Id == stage.WorkstationId);
-            var stationSystem = topology.Systems.Single(candidate =>
-                candidate.Id.Value == workstation.StationSystemId);
-            if (stationSystem.ProvidedCapabilities.All(capability => capability.Value != adapter.CapabilityId))
-            {
-                return Validation(
-                    "ExternalTestCapabilityNotProvidedByWorkstation",
-                    $"Workstation {workstation.Id} Station system does not provide capability {adapter.CapabilityId}.");
-            }
+                var adapterReference = ReadExternalAdapterReference(action);
+                if (adapterReference.IsMalformed)
+                {
+                    return Validation(
+                        "ExternalTestActionResourceInvalid",
+                        $"Operation {operation.Id} contains an invalid external test program resource reference.");
+                }
 
-            var matchingActions = flowIr.Nodes
-                .SelectMany(node => node.Actions)
-                .Where(action => IsExternalTestAction(action, adapter, workstation))
-                .Take(2)
-                .ToArray();
-            if (matchingActions.Length != 1)
-            {
-                return Validation(
-                    "ExternalTestActionMissing",
-                    $"Process stage {stage.Id} flow must contain exactly one matching external test command action.");
+                if (adapterReference.AdapterId is null)
+                {
+                    continue;
+                }
+
+                ExternalTestProgramAdapterId adapterId;
+                try
+                {
+                    adapterId = new ExternalTestProgramAdapterId(adapterReference.AdapterId);
+                }
+                catch (ArgumentException)
+                {
+                    return Validation(
+                        "ExternalTestActionResourceInvalid",
+                        $"Operation {operation.Id} contains a non-canonical external test program resource id.");
+                }
+
+                var adapter = definition.ExternalTestProgramAdapters.SingleOrDefault(candidate =>
+                    candidate.Id == adapterId);
+                if (adapter is null)
+                {
+                    return Validation(
+                        "ExternalTestActionResourceNotFound",
+                        $"Operation {operation.Id} references missing external test program resource {adapterId}.");
+                }
+
+                if (stationSystem.ProvidedCapabilities.All(capability =>
+                        capability.Value != adapter.CapabilityId))
+                {
+                    return Validation(
+                        "ExternalTestCapabilityNotProvidedByStation",
+                        $"Operation {operation.Id} Station system does not provide capability {adapter.CapabilityId}.");
+                }
+
+                if (!IsExternalTestAction(action, adapter, operation))
+                {
+                    return Validation(
+                        "ExternalTestActionContractMismatch",
+                        $"Operation {operation.Id} external test action does not match resource {adapter.Id} and its Station target.");
+                }
+
+                usedAdapterIds.Add(adapter.Id);
             }
+        }
+
+        var unusedAdapter = definition.ExternalTestProgramAdapters.FirstOrDefault(adapter =>
+            !usedAdapterIds.Contains(adapter.Id));
+        if (unusedAdapter is not null)
+        {
+            return Validation(
+                "ExternalTestActionMissing",
+                $"External test program resource {unusedAdapter.Id} must be referenced by at least one operation Flow action.");
         }
 
         return null;
@@ -463,7 +532,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
     private static bool IsExternalTestAction(
         FlowIrAction action,
         ExternalTestProgramAdapter adapter,
-        WorkstationDefinition workstation)
+        OperationDefinition operation)
     {
         var expectedTimeoutMilliseconds = checked(
             adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond);
@@ -471,7 +540,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             || !string.Equals(action.RequiredCapability, adapter.CapabilityId, StringComparison.Ordinal)
             || !string.Equals(action.CommandName, adapter.CommandName, StringComparison.Ordinal)
             || action.Execution.TimeoutMilliseconds != expectedTimeoutMilliseconds
-            || !IsWorkstationSystemTarget(action.Target, workstation)
+            || !IsOperationStationTarget(action.Target, operation)
             || string.IsNullOrWhiteSpace(action.InputPayload))
         {
             return false;
@@ -506,16 +575,106 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         }
     }
 
-    private static bool IsWorkstationSystemTarget(
+    private static (string? AdapterId, bool IsMalformed) ReadExternalAdapterReference(
+        FlowIrAction action)
+    {
+        if (string.IsNullOrWhiteSpace(action.InputPayload))
+        {
+            return (null, false);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(action.InputPayload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return (null, false);
+            }
+
+            var properties = document.RootElement
+                .EnumerateObject()
+                .Where(property => string.Equals(
+                    property.Name,
+                    ExternalTestProgramAdapter.InvocationPayloadAdapterIdProperty,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (properties.Length == 0)
+            {
+                return (null, false);
+            }
+
+            return properties.Length == 1 && properties[0].Value.ValueKind == JsonValueKind.String
+                ? (properties[0].Value.GetString(), false)
+                : (null, true);
+        }
+        catch (JsonException)
+        {
+            return (null, false);
+        }
+    }
+
+    private static bool IsOperationStationTarget(
         FlowIrTargetReference target,
-        WorkstationDefinition workstation)
+        OperationDefinition operation)
     {
         return target.Kind == FlowIrTargetReferenceKind.System
             && string.Equals(
                 target.Reference,
-                workstation.StationSystemId,
+                operation.StationSystemId,
                 StringComparison.Ordinal);
     }
+
+    private static bool IsWithinOperationStation(
+        FlowIrTargetReference target,
+        OperationDefinition operation,
+        AutomationTopology topology)
+    {
+        return target.Kind switch
+        {
+            FlowIrTargetReferenceKind.System => topology.Systems.Any(system =>
+                string.Equals(system.Id.Value, target.Reference, StringComparison.Ordinal)
+                && (string.Equals(
+                        system.Id.Value,
+                        operation.StationSystemId,
+                        StringComparison.Ordinal)
+                    || string.Equals(
+                        system.ParentSystemId?.Value,
+                        operation.StationSystemId,
+                        StringComparison.Ordinal))),
+            FlowIrTargetReferenceKind.SlotGroup => topology.SlotGroups.Any(group =>
+                string.Equals(group.Id.Value, target.Reference, StringComparison.Ordinal)
+                && string.Equals(
+                    group.ParentSystemId.Value,
+                    operation.StationSystemId,
+                    StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.Slot => topology.Slots.Any(slot =>
+                string.Equals(slot.Id.Value, target.Reference, StringComparison.Ordinal)
+                && string.Equals(
+                    slot.ParentSystemId.Value,
+                    operation.StationSystemId,
+                    StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.ProductionUnit => true,
+            FlowIrTargetReferenceKind.Capability => topology.Systems.Any(system =>
+                IsStationOrDirectChild(system, operation.StationSystemId)
+                && system.ProvidedCapabilities.Any(capability => string.Equals(
+                    capability.Value,
+                    target.Reference,
+                    StringComparison.Ordinal))),
+            FlowIrTargetReferenceKind.Driver => topology.DriverBindings.Any(binding =>
+                string.Equals(binding.Id.Value, target.Reference, StringComparison.Ordinal)
+                && topology.Systems.Any(system =>
+                    IsStationOrDirectChild(system, operation.StationSystemId)
+                    && system.ProvidedCapabilities.Contains(binding.CapabilityId))),
+            _ => false
+        };
+    }
+
+    private static bool IsStationOrDirectChild(
+        OpenLineOps.Topology.Domain.Systems.AutomationSystem system,
+        string stationSystemId) =>
+        string.Equals(system.Id.Value, stationSystemId, StringComparison.Ordinal)
+        || string.Equals(system.ParentSystemId?.Value, stationSystemId, StringComparison.Ordinal);
 
     private static string ResolveApplicationFile(
         ProjectApplicationWorkspaceScope scope,

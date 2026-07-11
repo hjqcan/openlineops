@@ -53,12 +53,12 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.Equal(RuntimeSessionStatus.Failed, stationStatus.SessionStatus);
         Assert.Equal(MonitoringProductionRunId, stationStatus.ProductionRunId);
         Assert.Equal("line.main", stationStatus.ProductionLineDefinitionId);
-        Assert.Equal("stage.main", stationStatus.StageId);
-        Assert.Equal(1, stationStatus.StageSequence);
-        Assert.Equal("workstation.main", stationStatus.WorkstationId);
-        Assert.Equal("dut.default", stationStatus.DutIdentity.ModelId);
-        Assert.Equal("serialNumber", stationStatus.DutIdentity.InputKey);
-        Assert.Equal("DUT-DEFAULT", stationStatus.DutIdentity.Value);
+        Assert.Equal("operation.main", stationStatus.OperationId);
+        Assert.Equal(1, stationStatus.OperationAttempt);
+        Assert.Equal("station-monitoring", stationStatus.StationSystemId);
+        Assert.Equal("product.default", stationStatus.ProductionUnitIdentity.ModelId);
+        Assert.Equal("serialNumber", stationStatus.ProductionUnitIdentity.InputKey);
+        Assert.Equal("UNIT-DEFAULT", stationStatus.ProductionUnitIdentity.Value);
         Assert.Equal(1, stationStatus.IncidentCount);
         Assert.True(stationStatus.IsTerminal);
 
@@ -74,10 +74,10 @@ public sealed class RuntimeMonitoringProjectionTests
         {
             Assert.Equal(MonitoringProductionRunId, entry.ProductionRunId);
             Assert.Equal("line.main", entry.ProductionLineDefinitionId);
-            Assert.Equal("stage.main", entry.StageId);
-            Assert.Equal(1, entry.StageSequence);
-            Assert.Equal("workstation.main", entry.WorkstationId);
-            Assert.Equal("DUT-DEFAULT", entry.DutIdentity.Value);
+            Assert.Equal("operation.main", entry.OperationId);
+            Assert.Equal(1, entry.OperationAttempt);
+            Assert.Equal("station-monitoring", entry.StationSystemId);
+            Assert.Equal("UNIT-DEFAULT", entry.ProductionUnitIdentity.Value);
         });
         Assert.Empty(await projection.GetSessionTimelineAsync(
             result.Value.SessionId,
@@ -383,6 +383,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessVersionId("process-monitoring@1.0.0"),
                 executableNodes),
             RuntimeTestReleaseIdentity.TraceMetadata(
+                stationSystemId: stationSystemId,
                 actorId: "runtime-monitoring-tests",
                 projectId: "project-monitoring",
                 applicationId: "application-monitoring",
@@ -405,6 +406,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessVersionId($"process-{scope.ApplicationId}@1.0.0"),
                 nodes),
             RuntimeTestReleaseIdentity.TraceMetadata(
+                stationSystemId: stationSystemId,
                 actorId: "runtime-monitoring-tests",
                 projectId: scope.ProjectId,
                 applicationId: scope.ApplicationId,
@@ -431,10 +433,14 @@ public sealed class RuntimeMonitoringProjectionTests
             new RuntimeSessionTraceMetadata(
                 productionRunId,
                 "line-run-scope",
-                "stage-run-scope",
+                "operation-run-scope",
                 1,
-                "workstation-run-scope",
-                new DutIdentity("dut-run-scope", "serialNumber", productionRunId.Value.ToString("D")),
+                stationSystemId,
+                new ProductionUnitIdentity(
+                    "product-run-scope",
+                    "serialNumber",
+                    productionRunId.Value.ToString("D")),
+                null,
                 null,
                 null,
                 null,
@@ -471,10 +477,10 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.Equal(targetId, status.TargetId);
         Assert.Equal(MonitoringProductionRunId, status.ProductionRunId);
         Assert.Equal("line.main", status.ProductionLineDefinitionId);
-        Assert.Equal("stage.main", status.StageId);
-        Assert.Equal(1, status.StageSequence);
-        Assert.Equal("workstation.main", status.WorkstationId);
-        Assert.Equal("DUT-DEFAULT", status.DutIdentity.Value);
+        Assert.Equal("operation.main", status.OperationId);
+        Assert.Equal(1, status.OperationAttempt);
+        Assert.Equal("Station.System", status.StationSystemId);
+        Assert.Equal("UNIT-DEFAULT", status.ProductionUnitIdentity.Value);
         Assert.Equal(RuntimeCommandStatus.InProgress, status.CommandStatus);
         Assert.False(status.IsTerminal);
         Assert.Null(status.FailureReason);
@@ -493,10 +499,10 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.Equal(expectedStatus, status.CommandStatus);
         Assert.Equal(MonitoringProductionRunId, status.ProductionRunId);
         Assert.Equal("line.main", status.ProductionLineDefinitionId);
-        Assert.Equal("stage.main", status.StageId);
-        Assert.Equal(1, status.StageSequence);
-        Assert.Equal("workstation.main", status.WorkstationId);
-        Assert.Equal("DUT-DEFAULT", status.DutIdentity.Value);
+        Assert.Equal("operation.main", status.OperationId);
+        Assert.Equal(1, status.OperationAttempt);
+        Assert.Equal("Station.System", status.StationSystemId);
+        Assert.Equal("UNIT-DEFAULT", status.ProductionUnitIdentity.Value);
         Assert.Equal(expectedFailureReason, status.FailureReason);
         Assert.True(status.IsTerminal);
         Assert.Equal(StartedAtUtc, status.LastTransitionAtUtc);
@@ -576,7 +582,7 @@ public sealed class RuntimeMonitoringProjectionTests
             var current = Assert.Single(
                 await _projection.GetTargetStatusesAsync(
                     MonitoringScope,
-                    context.StationId.Value,
+                    context.StationSystemId,
                     cancellationToken),
                 status => status.TargetKind == context.TargetKind
                     && status.TargetId == context.TargetId);

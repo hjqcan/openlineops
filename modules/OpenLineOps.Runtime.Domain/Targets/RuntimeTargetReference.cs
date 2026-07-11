@@ -7,7 +7,7 @@ public static class RuntimeTargetKinds
     public const string Driver = "Driver";
     public const string SlotGroup = "SlotGroup";
     public const string Slot = "Slot";
-    public const string Dut = "Dut";
+    public const string ProductionUnit = "ProductionUnit";
 
     public static IReadOnlySet<string> All { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -16,7 +16,7 @@ public static class RuntimeTargetKinds
         Driver,
         SlotGroup,
         Slot,
-        Dut
+        ProductionUnit
     };
 }
 

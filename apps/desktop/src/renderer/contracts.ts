@@ -41,7 +41,7 @@ export interface RuntimeMonitoringScope {
   productionRunId: string;
 }
 
-export interface RuntimeDutIdentity {
+export interface RuntimeProductionUnitIdentity {
   modelId: string;
   inputKey: string;
   value: string;
@@ -54,17 +54,18 @@ export interface RuntimeStationStatus {
   topologyId: string;
   productionRunId: string;
   productionLineDefinitionId: string;
-  stageId: string;
-  stageSequence: number;
-  workstationId: string;
-  dutIdentity: RuntimeDutIdentity;
+  operationId: string;
+  operationAttempt: number;
   stationSystemId: string;
+  productionUnitIdentity: RuntimeProductionUnitIdentity;
+  runtimeStationId: string;
   latestSessionId: string;
   processDefinitionId: string;
   processVersionId: string;
   configurationSnapshotId: string;
   recipeSnapshotId: string;
-  batchId: string | null;
+  lotId: string | null;
+  carrierId: string | null;
   fixtureId: string | null;
   deviceId: string | null;
   sessionStatus: RuntimeSessionStatus;
@@ -88,11 +89,11 @@ export interface RuntimeTargetStatus {
   topologyId: string;
   productionRunId: string;
   productionLineDefinitionId: string;
-  stageId: string;
-  stageSequence: number;
-  workstationId: string;
-  dutIdentity: RuntimeDutIdentity;
+  operationId: string;
+  operationAttempt: number;
   stationSystemId: string;
+  productionUnitIdentity: RuntimeProductionUnitIdentity;
+  runtimeStationId: string;
   sessionId: string;
   actionId: string;
   targetKind: string;
@@ -119,11 +120,11 @@ export interface RuntimeTimelineEntry {
   topologyId: string;
   productionRunId: string;
   productionLineDefinitionId: string;
-  stageId: string;
-  stageSequence: number;
-  workstationId: string;
-  dutIdentity: RuntimeDutIdentity;
+  operationId: string;
+  operationAttempt: number;
   stationSystemId: string;
+  productionUnitIdentity: RuntimeProductionUnitIdentity;
+  runtimeStationId: string;
   entityKind: string;
   entityId: string | null;
   fromStatus: string | null;
@@ -163,22 +164,23 @@ export interface TraceRecordSummary {
   projectSnapshotId: string;
   topologyId: string;
   productionLineDefinitionId: string;
-  dutModelId: string;
-  dutIdentityInputKey: string;
-  dutIdentityValue: string;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
+  productModelId: string;
+  productionUnitIdentityInputKey: string;
+  productionUnitIdentityValue: string;
+  lotId: string | null;
+  carrierId: string | null;
   actorId: string;
-  runStatus: string;
-  judgement: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  disposition: ProductionDisposition;
   completedAtUtc: string;
-  stageCount: number;
-  failedStageCount: number;
+  operationCount: number;
+  failedOperationCount: number;
   commandCount: number;
   measurementCount: number;
   artifactCount: number;
   incidentCount: number;
+  routeDecisionCount: number;
 }
 
 export interface TraceRecordQueryResponse {
@@ -197,28 +199,30 @@ export interface TraceRecordResponse {
   projectSnapshotId: string;
   topologyId: string;
   productionLineDefinitionId: string;
-  dutModelId: string;
-  dutIdentityInputKey: string;
-  dutIdentityValue: string;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
+  productModelId: string;
+  productionUnitIdentityInputKey: string;
+  productionUnitIdentityValue: string;
+  lotId: string | null;
+  carrierId: string | null;
   actorId: string;
-  runStatus: string;
-  judgement: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  disposition: ProductionDisposition;
   createdAtUtc: string;
   startedAtUtc: string | null;
   completedAtUtc: string;
   failureCode: string | null;
   failureReason: string | null;
-  stages: TraceStageExecutionResponse[];
+  operations: TraceOperationExecutionResponse[];
+  routeDecisions: TraceRouteDecisionResponse[];
   auditEntries: AuditEntryResponse[];
 }
 
-export interface TraceStageExecutionResponse {
-  stageId: string;
-  sequence: number;
-  workstationId: string;
+export interface TraceOperationExecutionResponse {
+  operationRunId: string;
+  operationId: string;
+  attempt: number;
+  stationSystemId: string;
   stationId: string;
   processDefinitionId: string;
   processVersionId: string;
@@ -226,7 +230,8 @@ export interface TraceStageExecutionResponse {
   recipeSnapshotId: string;
   runtimeSessionId: string | null;
   runtimeSessionStatus: string | null;
-  status: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
   startedAtUtc: string | null;
   completedAtUtc: string;
   failureCode: string | null;
@@ -238,6 +243,29 @@ export interface TraceStageExecutionResponse {
   measurements: MeasurementRecordResponse[];
   artifacts: ArtifactRecordResponse[];
   incidents: TraceIncidentResponse[];
+  outputs: TraceOperationOutputResponse[];
+  fencingTokens: TraceResourceFencingTokenResponse[];
+}
+
+export interface TraceRouteDecisionResponse {
+  sourceOperationRunId: string;
+  transitionId: string;
+  targetOperationId: string;
+  sourceJudgement: ProductionResultJudgement;
+  traversal: number;
+  decidedAtUtc: string;
+}
+
+export interface TraceOperationOutputResponse {
+  key: string;
+  valueKind: ProductionContextValueKind;
+  canonicalJson: string;
+}
+
+export interface TraceResourceFencingTokenResponse {
+  resourceKind: string;
+  resourceId: string;
+  fencingToken: number;
 }
 
 export interface TraceCommandResponse {
@@ -249,7 +277,7 @@ export interface TraceCommandResponse {
   targetCapabilityId: string;
   commandName: string;
   status: string;
-  semanticOutcome: string | null;
+  resultJudgement: ProductionResultJudgement | null;
   createdAtUtc: string;
   deadlineAtUtc: string;
   acceptedAtUtc: string | null;
@@ -304,34 +332,37 @@ export interface AuditEntryResponse {
 }
 
 export interface TraceRecordExportPackageResponse {
-  packageFormatVersion: string;
+  packageFormat: string;
   exportedAtUtc: string;
   traceRecord: TraceRecordResponse;
 }
 
 export interface EngineeringTraceSearchQuery {
   productionRunId?: string;
-  dutModelId?: string;
-  dutIdentityInputKey?: string;
-  dutIdentityValue?: string;
-  batchId?: string;
-  fixtureId?: string;
-  deviceId?: string;
+  productModelId?: string;
+  productionUnitIdentityInputKey?: string;
+  productionUnitIdentityValue?: string;
+  lotId?: string;
+  carrierId?: string;
   actorId?: string;
-  runStatus?: string;
+  executionStatus?: string;
   judgement?: string;
+  disposition?: string;
   projectId?: string;
   applicationId?: string;
   projectSnapshotId?: string;
   topologyId?: string;
   productionLineDefinitionId?: string;
-  stageId?: string;
-  workstationId?: string;
+  operationId?: string;
+  stationSystemId?: string;
   stationId?: string;
   processDefinitionId?: string;
   processVersionId?: string;
   configurationSnapshotId?: string;
   recipeSnapshotId?: string;
+  resourceKind?: string;
+  resourceId?: string;
+  deviceId?: string;
   completedFromUtc?: string;
   completedToUtc?: string;
   pageNumber?: number;
@@ -360,32 +391,34 @@ export interface EngineeringTraceSearchRowResponse {
   projectSnapshotId: string;
   topologyId: string;
   productionLineDefinitionId: string;
-  dutModelId: string;
-  dutIdentityInputKey: string;
-  dutIdentityValue: string;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
+  productModelId: string;
+  productionUnitIdentityInputKey: string;
+  productionUnitIdentityValue: string;
+  lotId: string | null;
+  carrierId: string | null;
   actorId: string;
-  runStatus: string;
-  judgement: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  disposition: ProductionDisposition;
   createdAtUtc: string;
   startedAtUtc: string | null;
   completedAtUtc: string;
-  stageCount: number;
-  failedStageCount: number;
+  operationCount: number;
+  failedOperationCount: number;
   commandCount: number;
   failedCommandCount: number;
   measurementCount: number;
   failedMeasurementCount: number;
   artifactCount: number;
   incidentCount: number;
+  routeDecisionCount: number;
 }
 
 export interface EngineeringTraceSearchFacetsResponse {
   judgements: TraceFacetCountResponse[];
-  runStatuses: TraceFacetCountResponse[];
-  stations: TraceFacetCountResponse[];
+  executionStatuses: TraceFacetCountResponse[];
+  dispositions: TraceFacetCountResponse[];
+  stationSystems: TraceFacetCountResponse[];
   devices: TraceFacetCountResponse[];
   productionLines: TraceFacetCountResponse[];
   processVersions: TraceFacetCountResponse[];
@@ -532,34 +565,34 @@ export interface ProjectTargetReferenceRequest {
   targetId: string;
 }
 
-export type ProductionRunStatus = 'Created' | 'Running' | 'Completed' | 'Failed' | 'Canceled';
-
-export type ProductionStageRunStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Canceled' | 'Skipped';
-
-export interface StartProjectSnapshotProductionRunRequest {
+export interface SubmitProjectSnapshotProductionRunRequest {
   productionRunId: string;
-  dutIdentityValue: string;
+  productionUnitIdentityValue: string;
   actorId: string;
-  batchId?: string | null;
+  lotId?: string | null;
+  carrierId?: string | null;
+  slotId?: string | null;
   fixtureId?: string | null;
   deviceId?: string | null;
 }
 
-export interface StartedProjectSnapshotProductionRunResponse {
+export interface SubmittedProjectSnapshotProductionRunResponse {
   snapshotId: string;
   projectId: string;
   applicationId: string;
   topologyId: string;
   productionLineDefinitionId: string;
   productionRunId: string;
-  dutModelId: string;
-  dutIdentityInputKey: string;
-  dutIdentityValue: string;
+  productModelId: string;
+  productionUnitIdentityInputKey: string;
+  productionUnitIdentityValue: string;
   actorId: string;
-  batchId: string | null;
-  fixtureId: string | null;
-  deviceId: string | null;
-  status: ProductionRunStatus;
+  lotId: string | null;
+  carrierId: string | null;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  disposition: ProductionDisposition;
+  controlState: ProductionRunControlState;
   isTerminal: boolean;
   createdAtUtc: string;
   lastTransitionAtUtc: string;
@@ -567,23 +600,22 @@ export interface StartedProjectSnapshotProductionRunResponse {
   completedAtUtc: string | null;
   failureCode: string | null;
   failureReason: string | null;
-  completedStageCount: number;
-  completedStepCount: number;
-  commandCount: number;
-  incidentCount: number;
-  stages: ProductionStageRunResponse[];
+  operations: SubmittedProductionOperationRunResponse[];
+  routeDecisions: ProductionRouteDecisionReadModel[];
 }
 
-export interface ProductionStageRunResponse {
-  stageId: string;
-  sequence: number;
-  workstationId: string;
+export interface SubmittedProductionOperationRunResponse {
+  operationId: string;
+  operationRunId: string;
+  attempt: number;
   stationSystemId: string;
+  runtimeStationId: string;
   processDefinitionId: string;
   processVersionId: string;
   configurationSnapshotId: string;
   recipeSnapshotId: string;
-  status: ProductionStageRunStatus;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
   runtimeSessionId: string | null;
   startedAtUtc: string | null;
   completedAtUtc: string | null;
@@ -592,6 +624,152 @@ export interface ProductionStageRunResponse {
   completedStepCount: number;
   commandCount: number;
   incidentCount: number;
+}
+
+export type ProductionExecutionStatus =
+  | 'Pending'
+  | 'Running'
+  | 'Completed'
+  | 'Failed'
+  | 'TimedOut'
+  | 'Canceled'
+  | 'Rejected';
+
+export type ProductionResultJudgement =
+  | 'Passed'
+  | 'Failed'
+  | 'Aborted'
+  | 'Unknown'
+  | 'NotApplicable';
+
+export type ProductionDisposition =
+  | 'InProcess'
+  | 'Completed'
+  | 'Nonconforming'
+  | 'Held'
+  | 'Scrapped';
+
+export type ProductionRunControlState =
+  | 'Active'
+  | 'Paused'
+  | 'Held'
+  | 'RecoveryRequired'
+  | 'SafeStopped';
+
+export type OperatorProductionRunCommand =
+  | 'Pause'
+  | 'Continue'
+  | 'Stop'
+  | 'Hold'
+  | 'Release'
+  | 'Rework'
+  | 'Scrap'
+  | 'SafeStop';
+
+export interface RuntimeProductionUnitIdentityResponse {
+  modelId: string;
+  inputKey: string;
+  value: string;
+}
+
+export interface ProductionRunReadModel {
+  productionRunId: string;
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId: string;
+  topologyId: string;
+  productionLineDefinitionId: string;
+  productionUnitIdentity: RuntimeProductionUnitIdentityResponse;
+  lotId: string | null;
+  carrierId: string | null;
+  actorId: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  disposition: ProductionDisposition;
+  controlState: ProductionRunControlState;
+  isTerminal: boolean;
+  createdAtUtc: string;
+  lastTransitionAtUtc: string;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+  failureCode: string | null;
+  failureReason: string | null;
+  entryOperationId: string;
+  completedOperationCount: number;
+  completedStepCount: number;
+  commandCount: number;
+  incidentCount: number;
+  operations: ProductionOperationRunReadModel[];
+  routeDecisions: ProductionRouteDecisionReadModel[];
+}
+
+export interface ProductionOperationRunReadModel {
+  operationRunId: string;
+  operationId: string;
+  attempt: number;
+  stationSystemId: string;
+  runtimeStationId: string;
+  processDefinitionId: string;
+  processVersionId: string;
+  configurationSnapshotId: string;
+  recipeSnapshotId: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  isTerminal: boolean;
+  runtimeSessionId: string | null;
+  startedAtUtc: string | null;
+  completedAtUtc: string | null;
+  failureCode: string | null;
+  failureReason: string | null;
+  completedStepCount: number;
+  commandCount: number;
+  incidentCount: number;
+  resources: ProductionRunResourceReadModel[];
+  outputs: ProductionRunOutputReadModel[];
+}
+
+export interface ProductionRunResourceReadModel {
+  kind: string;
+  resourceId: string;
+  fencingToken: number | null;
+}
+
+export interface ProductionRunOutputReadModel {
+  key: string;
+  kind: string;
+  canonicalValue: string;
+}
+
+export interface ProductionRouteDecisionReadModel {
+  sourceOperationRunId: string;
+  transitionId: string;
+  targetOperationId: string;
+  sourceJudgement: ProductionResultJudgement;
+  traversal: number;
+  decidedAtUtc: string;
+}
+
+export interface ActiveProductionRunsResponse {
+  runs: ProductionRunReadModel[];
+}
+
+export interface ProductionLineRuntimeStateResponse {
+  productionLineDefinitionId: string;
+  generatedAtUtc: string;
+  activeRunCount: number;
+  activeRuns: ProductionRunReadModel[];
+}
+
+export interface ProductionOperationsFilters {
+  productionLineDefinitionId: string;
+  stationSystemId: string;
+  slotId: string;
+}
+
+export interface ProductionRunCommandRequest {
+  actorId: string;
+  reason: string | null;
+  operationId: string | null;
 }
 
 export interface AutomationProjectWorkspaceResponse {
@@ -859,8 +1037,8 @@ export interface ProductionLineSummaryResponse {
   lineDefinitionId: string;
   displayName: string;
   topologyId: string;
-  dutModelCode: string;
-  stageCount: number;
+  productModelCode: string;
+  operationCount: number;
   updatedAtUtc: string;
 }
 
@@ -868,35 +1046,62 @@ export interface ProductionLineResponse {
   lineDefinitionId: string;
   displayName: string;
   topologyId: string;
-  dutModel: DutModelResponse;
-  workstations: ProductionWorkstationResponse[];
-  stages: ProductionStageResponse[];
+  productModel: ProductModelResponse;
+  entryOperationId: string;
+  operations: ProductionOperationResponse[];
+  transitions: RouteTransitionResponse[];
   externalTestProgramAdapters: ExternalTestProgramAdapterResponse[];
   createdAtUtc: string;
   updatedAtUtc: string;
 }
 
-export interface DutModelResponse {
-  dutModelId: string;
+export interface ProductModelResponse {
+  productModelId: string;
   modelCode: string;
   identityInputKey: string;
 }
 
-export interface ProductionWorkstationResponse {
-  workstationId: string;
+export interface ProductionOperationResponse {
+  operationId: string;
   displayName: string;
   stationSystemId: string;
-}
-
-export interface ProductionStageResponse {
-  stageId: string;
-  sequence: number;
-  displayName: string;
-  workstationId: string;
   flowDefinitionId: string;
   configurationSnapshotId: string;
-  externalTestProgramAdapterId: string | null;
-  nextStageId: string | null;
+}
+
+export type RouteTransitionKind =
+  | 'Sequence'
+  | 'Judgement'
+  | 'Condition'
+  | 'Rework'
+  | 'ParallelFork'
+  | 'ParallelJoin';
+
+export type ProductionContextValueKind =
+  | 'Text'
+  | 'Boolean'
+  | 'WholeNumber'
+  | 'FixedPoint'
+  | 'DateTimeUtc';
+
+export type RouteJudgement =
+  | 'Passed'
+  | 'Failed'
+  | 'Aborted'
+  | 'Unknown'
+  | 'NotApplicable';
+
+export interface RouteTransitionResponse {
+  transitionId: string;
+  sourceOperationId: string;
+  targetOperationId: string;
+  kind: RouteTransitionKind;
+  requiredJudgement: RouteJudgement | null;
+  maxTraversals: number | null;
+  parallelGroupId: string | null;
+  outputKey: string | null;
+  expectedOutputKind: ProductionContextValueKind | null;
+  expectedOutputValue: string | null;
 }
 
 export interface ExternalTestProgramAdapterResponse {
@@ -935,32 +1140,38 @@ export interface SaveProductionLineRequest {
   lineDefinitionId: string;
   displayName: string;
   topologyId: string;
-  dutModel: DutModelRequest;
-  workstations: ProductionWorkstationRequest[];
-  stages: ProductionStageRequest[];
+  productModel: ProductModelRequest;
+  entryOperationId: string;
+  operations: ProductionOperationRequest[];
+  transitions: RouteTransitionRequest[];
   externalTestProgramAdapters: ExternalTestProgramAdapterRequest[];
 }
 
-export interface DutModelRequest {
-  dutModelId: string;
+export interface ProductModelRequest {
+  productModelId: string;
   modelCode: string;
   identityInputKey: string;
 }
 
-export interface ProductionWorkstationRequest {
-  workstationId: string;
+export interface ProductionOperationRequest {
+  operationId: string;
   displayName: string;
   stationSystemId: string;
-}
-
-export interface ProductionStageRequest {
-  stageId: string;
-  sequence: number;
-  displayName: string;
-  workstationId: string;
   flowDefinitionId: string;
   configurationSnapshotId: string;
-  externalTestProgramAdapterId: string | null;
+}
+
+export interface RouteTransitionRequest {
+  transitionId: string;
+  sourceOperationId: string;
+  targetOperationId: string;
+  kind: RouteTransitionKind;
+  requiredJudgement: RouteJudgement | null;
+  maxTraversals: number | null;
+  parallelGroupId: string | null;
+  outputKey: string | null;
+  expectedOutputKind: ProductionContextValueKind | null;
+  expectedOutputValue: string | null;
 }
 
 export interface ExternalTestProgramAdapterRequest {

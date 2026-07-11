@@ -1,4 +1,4 @@
-using OpenLineOps.Runtime.Domain.Commands;
+using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Runtime.Application.Commands;
 
@@ -8,12 +8,12 @@ public sealed record RuntimeCommandExecutionResult
         RuntimeCommandExecutionOutcome outcome,
         string? payload,
         string? reason,
-        RuntimeCommandSemanticOutcome? semanticOutcome)
+        CommandResultJudgement resultJudgement)
     {
         Outcome = outcome;
         Payload = payload;
         Reason = reason;
-        SemanticOutcome = semanticOutcome;
+        ResultJudgement = resultJudgement;
     }
 
     public RuntimeCommandExecutionOutcome Outcome { get; }
@@ -22,42 +22,35 @@ public sealed record RuntimeCommandExecutionResult
 
     public string? Reason { get; }
 
-    public RuntimeCommandSemanticOutcome? SemanticOutcome { get; }
+    public CommandResultJudgement ResultJudgement { get; }
 
-    public static RuntimeCommandExecutionResult Completed(string? payload = null)
+    public static RuntimeCommandExecutionResult Completed(
+        string? payload = null,
+        CommandResultJudgement resultJudgement = CommandResultJudgement.NotApplicable)
     {
+        if (!Enum.IsDefined(resultJudgement)
+            || resultJudgement == CommandResultJudgement.Unknown)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(resultJudgement),
+                resultJudgement,
+                "Completed execution requires a definite or not-applicable result judgement.");
+        }
+
         return new RuntimeCommandExecutionResult(
             RuntimeCommandExecutionOutcome.Completed,
             payload,
             null,
-            null);
+            resultJudgement);
     }
 
-    public static RuntimeCommandExecutionResult SemanticPassed(string payload)
-    {
-        return new RuntimeCommandExecutionResult(
-            RuntimeCommandExecutionOutcome.Completed,
-            RequiredPayload(payload),
-            null,
-            RuntimeCommandSemanticOutcome.Passed);
-    }
-
-    public static RuntimeCommandExecutionResult Failed(string reason)
+    public static RuntimeCommandExecutionResult Failed(string reason, string? payload = null)
     {
         return new RuntimeCommandExecutionResult(
             RuntimeCommandExecutionOutcome.Failed,
-            null,
+            payload,
             RequiredReason(reason),
-            null);
-    }
-
-    public static RuntimeCommandExecutionResult SemanticFailed(string reason, string payload)
-    {
-        return new RuntimeCommandExecutionResult(
-            RuntimeCommandExecutionOutcome.Failed,
-            RequiredPayload(payload),
-            RequiredReason(reason),
-            RuntimeCommandSemanticOutcome.Failed);
+            CommandResultJudgement.Unknown);
     }
 
     public static RuntimeCommandExecutionResult Rejected(string reason)
@@ -66,34 +59,29 @@ public sealed record RuntimeCommandExecutionResult
             RuntimeCommandExecutionOutcome.Rejected,
             null,
             RequiredReason(reason),
-            null);
+            CommandResultJudgement.Unknown);
     }
 
-    public static RuntimeCommandExecutionResult TimedOut(string reason = "Command timed out.")
+    public static RuntimeCommandExecutionResult TimedOut(
+        string reason = "Command timed out.",
+        string? payload = null)
     {
         return new RuntimeCommandExecutionResult(
             RuntimeCommandExecutionOutcome.TimedOut,
-            null,
+            payload,
             RequiredReason(reason),
-            null);
+            CommandResultJudgement.Unknown);
     }
 
-    public static RuntimeCommandExecutionResult Canceled(string reason = "Command canceled.")
+    public static RuntimeCommandExecutionResult Canceled(
+        string reason = "Command canceled.",
+        string? payload = null)
     {
         return new RuntimeCommandExecutionResult(
             RuntimeCommandExecutionOutcome.Canceled,
-            null,
+            payload,
             RequiredReason(reason),
-            null);
-    }
-
-    public static RuntimeCommandExecutionResult SemanticAborted(string reason, string payload)
-    {
-        return new RuntimeCommandExecutionResult(
-            RuntimeCommandExecutionOutcome.Canceled,
-            RequiredPayload(payload),
-            RequiredReason(reason),
-            RuntimeCommandSemanticOutcome.Aborted);
+            CommandResultJudgement.Unknown);
     }
 
     private static string RequiredReason(string reason)
@@ -107,9 +95,4 @@ public sealed record RuntimeCommandExecutionResult
             : reason;
     }
 
-    private static string RequiredPayload(string payload)
-    {
-        ArgumentNullException.ThrowIfNull(payload);
-        return payload;
-    }
 }

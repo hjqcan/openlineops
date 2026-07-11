@@ -1,13 +1,19 @@
 using OpenLineOps.Domain.Abstractions.Entities;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
+using OpenLineOps.Runtime.Domain.Resources;
 
 namespace OpenLineOps.Runtime.Domain.Runs;
 
 public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 {
-    private readonly List<ProductionStageRun> _stages = [];
+    private readonly List<OperationRunDefinition> _operationDefinitions;
+    private readonly List<RouteTransitionDefinition> _routeTransitions;
+    private readonly List<OperationRun> _operations = [];
+    private readonly List<RouteDecisionSnapshot> _routeDecisions = [];
+    private readonly Dictionary<string, int> _transitionTraversals = new(StringComparer.Ordinal);
 
     private ProductionRun(
         ProductionRunId id,
@@ -16,17 +22,19 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         string projectSnapshotId,
         string topologyId,
         string productionLineDefinitionId,
-        DutIdentity dutIdentity,
-        string? batchId,
-        string? fixtureId,
-        string? deviceId,
+        ProductionUnitIdentity productionUnitIdentity,
+        string? lotId,
+        string? carrierId,
         string actorId,
+        string entryOperationId,
+        IEnumerable<OperationRunDefinition> operationDefinitions,
+        IEnumerable<RouteTransitionDefinition> routeTransitions,
         DateTimeOffset createdAtUtc)
         : base(id)
     {
         if (id.Value == Guid.Empty)
         {
-            throw new ArgumentException("Production run id cannot be empty.", nameof(id));
+            throw new ArgumentException("Production Run id cannot be empty.", nameof(id));
         }
 
         ProjectId = ProductionRunText.Required(projectId, nameof(projectId));
@@ -36,14 +44,24 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         ProductionLineDefinitionId = ProductionRunText.Required(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
-        DutIdentity = dutIdentity ?? throw new ArgumentNullException(nameof(dutIdentity));
-        BatchId = ProductionRunText.Optional(batchId, nameof(batchId));
-        FixtureId = ProductionRunText.Optional(fixtureId, nameof(fixtureId));
-        DeviceId = ProductionRunText.Optional(deviceId, nameof(deviceId));
+        ProductionUnitIdentity = productionUnitIdentity
+            ?? throw new ArgumentNullException(nameof(productionUnitIdentity));
+        LotId = ProductionRunText.Optional(lotId, nameof(lotId));
+        CarrierId = ProductionRunText.Optional(carrierId, nameof(carrierId));
         ActorId = ProductionRunText.Required(actorId, nameof(actorId));
+        EntryOperationId = ProductionRunText.Required(entryOperationId, nameof(entryOperationId));
+        _operationDefinitions = operationDefinitions?.ToList()
+            ?? throw new ArgumentNullException(nameof(operationDefinitions));
+        _routeTransitions = routeTransitions?.ToList()
+            ?? throw new ArgumentNullException(nameof(routeTransitions));
+        ValidateDefinitionGraph();
+        RequireUtc(createdAtUtc, nameof(createdAtUtc));
         CreatedAtUtc = createdAtUtc;
         LastTransitionAtUtc = createdAtUtc;
-        Status = ProductionRunStatus.Created;
+        ExecutionStatus = ExecutionStatus.Pending;
+        Judgement = ResultJudgement.Unknown;
+        Disposition = ProductDisposition.InProcess;
+        ControlState = ProductionRunControlState.Active;
     }
 
     public string ProjectId { get; }
@@ -56,17 +74,23 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 
     public string ProductionLineDefinitionId { get; }
 
-    public DutIdentity DutIdentity { get; }
+    public ProductionUnitIdentity ProductionUnitIdentity { get; }
 
-    public string? BatchId { get; }
+    public string? LotId { get; }
 
-    public string? FixtureId { get; }
-
-    public string? DeviceId { get; }
+    public string? CarrierId { get; }
 
     public string ActorId { get; }
 
-    public ProductionRunStatus Status { get; private set; }
+    public string EntryOperationId { get; }
+
+    public ExecutionStatus ExecutionStatus { get; private set; }
+
+    public ResultJudgement Judgement { get; private set; }
+
+    public ProductDisposition Disposition { get; private set; }
+
+    public ProductionRunControlState ControlState { get; private set; }
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -80,11 +104,21 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 
     public string? FailureReason { get; private set; }
 
-    public IReadOnlyList<ProductionStageRun> Stages => _stages.AsReadOnly();
+    public IReadOnlyList<OperationRunDefinition> OperationDefinitions =>
+        _operationDefinitions.AsReadOnly();
 
-    public bool IsTerminal => Status is ProductionRunStatus.Completed
-        or ProductionRunStatus.Failed
-        or ProductionRunStatus.Canceled;
+    public IReadOnlyList<RouteTransitionDefinition> RouteTransitions =>
+        _routeTransitions.AsReadOnly();
+
+    public IReadOnlyList<OperationRun> Operations => _operations.AsReadOnly();
+
+    public IReadOnlyList<RouteDecisionSnapshot> RouteDecisions => _routeDecisions.AsReadOnly();
+
+    public bool IsTerminal => ExecutionStatus is ExecutionStatus.Completed
+        or ExecutionStatus.Failed
+        or ExecutionStatus.TimedOut
+        or ExecutionStatus.Canceled
+        or ExecutionStatus.Rejected;
 
     public static ProductionRun Create(
         ProductionRunId id,
@@ -93,18 +127,15 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         string projectSnapshotId,
         string topologyId,
         string productionLineDefinitionId,
-        DutIdentity dutIdentity,
-        string? batchId,
-        string? fixtureId,
-        string? deviceId,
+        ProductionUnitIdentity productionUnitIdentity,
+        string? lotId,
+        string? carrierId,
         string actorId,
+        string entryOperationId,
         DateTimeOffset createdAtUtc,
-        IEnumerable<ProductionStageRunDefinition> stages)
+        IEnumerable<OperationRunDefinition> operationDefinitions,
+        IEnumerable<RouteTransitionDefinition> routeTransitions)
     {
-        ArgumentNullException.ThrowIfNull(stages);
-        var definitions = stages.OrderBy(stage => stage.Sequence).ToArray();
-        ValidateDefinitions(definitions);
-
         var run = new ProductionRun(
             id,
             projectId,
@@ -112,22 +143,21 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             projectSnapshotId,
             topologyId,
             productionLineDefinitionId,
-            dutIdentity,
-            batchId,
-            fixtureId,
-            deviceId,
+            productionUnitIdentity,
+            lotId,
+            carrierId,
             actorId,
+            entryOperationId,
+            operationDefinitions,
+            routeTransitions,
             createdAtUtc);
-        run._stages.AddRange(definitions.Select(ProductionStageRun.Create));
-        run.RaiseDomainEvent(new ProductionRunCreatedDomainEvent(id));
+        run.RaiseDomainEvent(new ProductionRunCreatedDomainEvent(run.Id));
         return run;
     }
 
     public static ProductionRun Restore(ProductionRunSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        ArgumentNullException.ThrowIfNull(snapshot.Stages);
-
         var run = new ProductionRun(
             snapshot.RunId,
             snapshot.ProjectId,
@@ -135,30 +165,32 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             snapshot.ProjectSnapshotId,
             snapshot.TopologyId,
             snapshot.ProductionLineDefinitionId,
-            snapshot.DutIdentity,
-            snapshot.BatchId,
-            snapshot.FixtureId,
-            snapshot.DeviceId,
+            snapshot.ProductionUnitIdentity,
+            snapshot.LotId,
+            snapshot.CarrierId,
             snapshot.ActorId,
+            snapshot.EntryOperationId,
+            snapshot.OperationDefinitions,
+            snapshot.RouteTransitions,
             snapshot.CreatedAtUtc)
         {
-            Status = snapshot.Status,
+            ExecutionStatus = snapshot.ExecutionStatus,
+            Judgement = snapshot.Judgement,
+            Disposition = snapshot.Disposition,
+            ControlState = snapshot.ControlState,
             LastTransitionAtUtc = snapshot.LastTransitionAtUtc,
             StartedAtUtc = snapshot.StartedAtUtc,
             CompletedAtUtc = snapshot.CompletedAtUtc,
             FailureCode = ProductionRunText.Optional(snapshot.FailureCode, nameof(snapshot.FailureCode)),
             FailureReason = ProductionRunText.Optional(snapshot.FailureReason, nameof(snapshot.FailureReason))
         };
-        run._stages.AddRange(snapshot.Stages.Select(ProductionStageRun.Restore));
-        ValidateDefinitions(run._stages.Select(stage => new ProductionStageRunDefinition(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId,
-            stage.ProcessDefinitionId,
-            stage.ProcessVersionId,
-            stage.ConfigurationSnapshotId,
-            stage.RecipeSnapshotId)).ToArray());
+        run._operations.AddRange(snapshot.Operations.Select(OperationRun.Restore));
+        run._routeDecisions.AddRange(snapshot.RouteDecisions);
+        foreach (var traversal in snapshot.TransitionTraversals)
+        {
+            run._transitionTraversals.Add(traversal.Key, traversal.Value);
+        }
+
         run.ValidateState();
         run.ClearDomainEvents();
         return run;
@@ -166,88 +198,79 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 
     public RuntimeOperationResult Start(DateTimeOffset startedAtUtc)
     {
-        if (Status != ProductionRunStatus.Created)
+        if (ExecutionStatus != ExecutionStatus.Pending)
         {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionRunStartRejected",
-                $"Production run {Id} cannot start from {Status}.");
+            return Reject("Runtime.ProductionRunStartRejected", "start");
         }
 
-        var fromStatus = Status;
-        Status = ProductionRunStatus.Running;
+        RequireUtc(startedAtUtc, nameof(startedAtUtc));
+        var from = ExecutionStatus;
+        ExecutionStatus = ExecutionStatus.Running;
         StartedAtUtc = startedAtUtc;
         LastTransitionAtUtc = startedAtUtc;
-        RaiseDomainEvent(new ProductionRunStatusChangedDomainEvent(
-            Id,
-            fromStatus,
-            Status,
-            "Production run started."));
+        ActivateOperation(EntryOperationId);
+        RaiseStatusChanged(from, "Production Run started.");
         return RuntimeOperationResult.Accepted();
     }
 
-    public RuntimeOperationResult StartStage(
-        string stageId,
+    public RuntimeOperationResult StartOperation(
+        string operationRunId,
         RuntimeSessionId runtimeSessionId,
+        IReadOnlyCollection<ResourceLease> leases,
         DateTimeOffset startedAtUtc)
     {
-        if (Status != ProductionRunStatus.Running)
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.Active)
         {
             return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionRunNotRunning",
-                $"Production run {Id} must be running before a stage can start.");
+                "Runtime.ProductionRunNotDispatchable",
+                $"Production Run {Id} cannot dispatch operations while {ExecutionStatus}/{ControlState}.");
         }
 
-        if (_stages.Any(stage => stage.Status == ProductionStageRunStatus.Running))
+        var operation = FindOperationRun(operationRunId);
+        if (operation is null)
+        {
+            return OperationNotFound(operationRunId);
+        }
+
+        if (leases.Any(lease => lease.ProductionRunId != Id
+            || !string.Equals(lease.OperationRunId, operationRunId, StringComparison.Ordinal)))
         {
             return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionStageAlreadyRunning",
-                $"Production run {Id} already has a running stage.");
+                "Runtime.OperationResourceLeaseOwnerMismatch",
+                $"Every resource lease must belong to Operation Run {operationRunId}.");
         }
 
-        var nextStage = _stages.FirstOrDefault(stage => stage.Status == ProductionStageRunStatus.Pending);
-        if (nextStage is null || !string.Equals(nextStage.StageId, stageId, StringComparison.Ordinal))
+        var from = operation.ExecutionStatus;
+        var result = operation.Start(runtimeSessionId, leases, startedAtUtc);
+        if (result.Succeeded)
         {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionStageOutOfOrder",
-                $"Production stage {stageId} is not the next pending stage in run {Id}.");
+            LastTransitionAtUtc = startedAtUtc;
+            RaiseOperationStatusChanged(operation, from, "Operation execution started.");
         }
 
-        if (_stages.TakeWhile(stage => stage != nextStage)
-            .Any(stage => stage.Status != ProductionStageRunStatus.Completed))
-        {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionStagePredecessorIncomplete",
-                $"Production stage {stageId} has an incomplete predecessor.");
-        }
-
-        var result = nextStage.Start(runtimeSessionId, startedAtUtc);
-        if (!result.Succeeded)
-        {
-            return result;
-        }
-
-        LastTransitionAtUtc = startedAtUtc;
-        RaiseStageStatusChanged(
-            nextStage,
-            ProductionStageRunStatus.Pending,
-            "Production stage started.");
         return result;
     }
 
-    public RuntimeOperationResult CompleteStage(
-        string stageId,
+    public RuntimeOperationResult CompleteOperation(
+        string operationRunId,
+        ResultJudgement judgement,
+        IReadOnlyDictionary<string, ProductionContextValue>? outputs,
         int completedStepCount,
         int commandCount,
         int incidentCount,
         DateTimeOffset completedAtUtc)
     {
-        var stage = FindStage(stageId);
-        if (stage is null)
+        var operation = FindOperationRun(operationRunId);
+        if (operation is null)
         {
-            return StageNotFound(stageId);
+            return OperationNotFound(operationRunId);
         }
 
-        var result = stage.Complete(
+        var from = operation.ExecutionStatus;
+        var result = operation.Complete(
+            judgement,
+            outputs,
             completedStepCount,
             commandCount,
             incidentCount,
@@ -258,23 +281,15 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         }
 
         LastTransitionAtUtc = completedAtUtc;
-        RaiseStageStatusChanged(stage, ProductionStageRunStatus.Running, "Production stage completed.");
-
-        if (_stages.All(candidate => candidate.Status == ProductionStageRunStatus.Completed))
-        {
-            TransitionToTerminal(
-                ProductionRunStatus.Completed,
-                completedAtUtc,
-                "Production run completed.",
-                null,
-                null);
-        }
-
+        RaiseOperationStatusChanged(operation, from, "Operation execution completed.");
+        ApplyRoute(operation, completedAtUtc);
+        TryCompleteRun(completedAtUtc);
         return result;
     }
 
-    public RuntimeOperationResult FailStage(
-        string stageId,
+    public RuntimeOperationResult FailOperation(
+        string operationRunId,
+        ExecutionStatus terminalStatus,
         string code,
         string reason,
         int completedStepCount,
@@ -282,17 +297,17 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         int incidentCount,
         DateTimeOffset failedAtUtc)
     {
-        var stage = FindStage(stageId);
-        if (stage is null)
+        var operation = FindOperationRun(operationRunId);
+        if (operation is null)
         {
-            return StageNotFound(stageId);
+            return OperationNotFound(operationRunId);
         }
 
-        var normalizedCode = ProductionRunText.Required(code, nameof(code));
-        var normalizedReason = ProductionRunText.Required(reason, nameof(reason));
-        var result = stage.Fail(
-            normalizedCode,
-            normalizedReason,
+        var from = operation.ExecutionStatus;
+        var result = operation.Fail(
+            terminalStatus,
+            code,
+            reason,
             completedStepCount,
             commandCount,
             incidentCount,
@@ -303,302 +318,671 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         }
 
         LastTransitionAtUtc = failedAtUtc;
-        RaiseStageStatusChanged(stage, ProductionStageRunStatus.Running, normalizedReason);
-        SkipPendingStages("Skipped because an earlier production stage failed.", failedAtUtc);
+        RaiseOperationStatusChanged(operation, from, reason);
         TransitionToTerminal(
-            ProductionRunStatus.Failed,
+            terminalStatus,
+            ResultJudgement.Unknown,
+            ProductDisposition.Held,
             failedAtUtc,
-            normalizedReason,
-            normalizedCode,
-            normalizedReason);
+            code,
+            reason);
         return result;
     }
 
-    public RuntimeOperationResult MarkInterrupted(
-        string reason,
-        int completedStepCount,
-        int commandCount,
-        int incidentCount,
-        DateTimeOffset interruptedAtUtc)
+    public RuntimeOperationResult Pause(DateTimeOffset pausedAtUtc)
     {
-        if (Status != ProductionRunStatus.Running)
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.Active)
         {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionRunInterruptRejected",
-                $"Production run {Id} cannot be interrupted from {Status}.");
+            return Reject("Runtime.ProductionRunPauseRejected", "pause");
         }
 
-        var normalizedReason = ProductionRunText.Required(reason, nameof(reason));
-        var runningStage = _stages.SingleOrDefault(
-            stage => stage.Status == ProductionStageRunStatus.Running);
-        if (runningStage is not null)
-        {
-            var failResult = runningStage.Fail(
-                "Runtime.ProductionRunInterrupted",
-                normalizedReason,
-                completedStepCount,
-                commandCount,
-                incidentCount,
-                interruptedAtUtc);
-            if (!failResult.Succeeded)
-            {
-                return failResult;
-            }
-
-            RaiseStageStatusChanged(
-                runningStage,
-                ProductionStageRunStatus.Running,
-                normalizedReason);
-        }
-
-        SkipPendingStages(
-            "Skipped because the production run was interrupted.",
-            interruptedAtUtc);
-        TransitionToTerminal(
-            ProductionRunStatus.Failed,
-            interruptedAtUtc,
-            normalizedReason,
-            "Runtime.ProductionRunInterrupted",
-            normalizedReason);
+        ControlState = ProductionRunControlState.Paused;
+        LastTransitionAtUtc = pausedAtUtc;
         return RuntimeOperationResult.Accepted();
     }
 
-    public RuntimeOperationResult Cancel(
+    public RuntimeOperationResult Continue(DateTimeOffset continuedAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.Paused)
+        {
+            return Reject("Runtime.ProductionRunContinueRejected", "continue");
+        }
+
+        ControlState = ProductionRunControlState.Active;
+        LastTransitionAtUtc = continuedAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult Hold(string reason, DateTimeOffset heldAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running || ControlState == ProductionRunControlState.Held)
+        {
+            return Reject("Runtime.ProductionRunHoldRejected", "hold");
+        }
+
+        _ = ProductionRunText.Required(reason, nameof(reason));
+        ControlState = ProductionRunControlState.Held;
+        Disposition = ProductDisposition.Held;
+        LastTransitionAtUtc = heldAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult Release(DateTimeOffset releasedAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.Held)
+        {
+            return Reject("Runtime.ProductionRunReleaseRejected", "release");
+        }
+
+        ControlState = ProductionRunControlState.Active;
+        Disposition = Judgement == ResultJudgement.Failed
+            ? ProductDisposition.Nonconforming
+            : ProductDisposition.InProcess;
+        LastTransitionAtUtc = releasedAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult Rework(string operationId, DateTimeOffset requestedAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.Held
+            || _operations.Any(operation => operation.ExecutionStatus == ExecutionStatus.Running))
+        {
+            return Reject("Runtime.ProductionRunReworkRejected", "rework");
+        }
+
+        if (_operationDefinitions.All(definition =>
+                !string.Equals(definition.OperationId, operationId, StringComparison.Ordinal)))
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.OperationNotFound",
+                $"Operation {operationId} is not part of Production Run {Id}.");
+        }
+
+        ActivateOperation(operationId);
+        ControlState = ProductionRunControlState.Active;
+        Disposition = ProductDisposition.InProcess;
+        LastTransitionAtUtc = requestedAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult MarkRecoveryRequired(string reason, DateTimeOffset detectedAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running)
+        {
+            return Reject("Runtime.ProductionRunRecoveryRejected", "enter recovery");
+        }
+
+        FailureCode = "Runtime.RecoveryRequired";
+        FailureReason = ProductionRunText.Required(reason, nameof(reason));
+        ControlState = ProductionRunControlState.RecoveryRequired;
+        Disposition = ProductDisposition.Held;
+        LastTransitionAtUtc = detectedAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult RetryRecovery(
+        string operationId,
         string reason,
-        int completedStepCount,
-        int commandCount,
-        int incidentCount,
-        DateTimeOffset canceledAtUtc)
+        DateTimeOffset retriedAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running
+            || ControlState != ProductionRunControlState.RecoveryRequired)
+        {
+            return Reject("Runtime.ProductionRunRetryRejected", "retry recovery");
+        }
+
+        if (_operationDefinitions.All(definition =>
+                !string.Equals(definition.OperationId, operationId, StringComparison.Ordinal)))
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.OperationNotFound",
+                $"Operation {operationId} is not part of Production Run {Id}.");
+        }
+
+        CancelOpenOperations(
+            $"Operator explicitly closed interrupted execution before retry: {reason}",
+            retriedAtUtc);
+        ActivateOperation(operationId);
+        FailureCode = null;
+        FailureReason = null;
+        ControlState = ProductionRunControlState.Active;
+        Disposition = ProductDisposition.InProcess;
+        LastTransitionAtUtc = retriedAtUtc;
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public RuntimeOperationResult Stop(string reason, DateTimeOffset stoppedAtUtc)
     {
         if (IsTerminal)
         {
-            return RuntimeOperationResult.Rejected(
-                "Runtime.ProductionRunCancelRejected",
-                $"Production run {Id} cannot be canceled from {Status}.");
+            return Reject("Runtime.ProductionRunStopRejected", "stop");
         }
 
-        var normalizedReason = ProductionRunText.Required(reason, nameof(reason));
-        var runningStage = _stages.SingleOrDefault(
-            stage => stage.Status == ProductionStageRunStatus.Running);
-        if (runningStage is not null)
-        {
-            runningStage.Cancel(
-                normalizedReason,
-                completedStepCount,
-                commandCount,
-                incidentCount,
-                canceledAtUtc);
-            RaiseStageStatusChanged(
-                runningStage,
-                ProductionStageRunStatus.Running,
-                normalizedReason);
-        }
-
-        SkipPendingStages("Skipped because the production run was canceled.", canceledAtUtc);
+        CancelOpenOperations(reason, stoppedAtUtc);
         TransitionToTerminal(
-            ProductionRunStatus.Canceled,
-            canceledAtUtc,
-            normalizedReason,
-            "Runtime.ProductionRunCanceled",
-            normalizedReason);
+            ExecutionStatus.Canceled,
+            ResultJudgement.Aborted,
+            ProductDisposition.Held,
+            stoppedAtUtc,
+            "Runtime.ProductionRunStopped",
+            reason);
         return RuntimeOperationResult.Accepted();
     }
 
-    public ProductionRunSnapshot ToSnapshot()
+    public RuntimeOperationResult SafeStop(string reason, DateTimeOffset stoppedAtUtc)
     {
-        return new ProductionRunSnapshot(
-            Id,
-            ProjectId,
-            ApplicationId,
-            ProjectSnapshotId,
-            TopologyId,
-            ProductionLineDefinitionId,
-            DutIdentity,
-            BatchId,
-            FixtureId,
-            DeviceId,
-            ActorId,
-            Status,
-            CreatedAtUtc,
-            LastTransitionAtUtc,
-            StartedAtUtc,
-            CompletedAtUtc,
-            FailureCode,
-            FailureReason,
-            _stages.Select(stage => stage.ToSnapshot()).ToArray());
+        if (IsTerminal)
+        {
+            return Reject("Runtime.ProductionRunSafeStopRejected", "safe-stop");
+        }
+
+        CancelOpenOperations(reason, stoppedAtUtc);
+        ControlState = ProductionRunControlState.SafeStopped;
+        TransitionToTerminal(
+            ExecutionStatus.Canceled,
+            ResultJudgement.Aborted,
+            ProductDisposition.Held,
+            stoppedAtUtc,
+            "Runtime.ProductionRunSafeStopped",
+            reason,
+            preserveControlState: true);
+        return RuntimeOperationResult.Accepted();
     }
 
-    private static void ValidateDefinitions(ProductionStageRunDefinition[] definitions)
+    public RuntimeOperationResult Scrap(string reason, DateTimeOffset scrappedAtUtc)
     {
-        if (definitions.Length == 0)
+        if (IsTerminal)
         {
-            throw new ArgumentException("A production run must contain at least one stage.", nameof(definitions));
+            return Reject("Runtime.ProductionRunScrapRejected", "scrap");
         }
 
-        if (definitions.Select(stage => stage.StageId).Distinct(StringComparer.Ordinal).Count()
-            != definitions.Length)
+        CancelOpenOperations(reason, scrappedAtUtc);
+        TransitionToTerminal(
+            ExecutionStatus.Completed,
+            ResultJudgement.Failed,
+            ProductDisposition.Scrapped,
+            scrappedAtUtc,
+            null,
+            null);
+        return RuntimeOperationResult.Accepted();
+    }
+
+    public ProductionRunSnapshot ToSnapshot() => new(
+        Id,
+        ProjectId,
+        ApplicationId,
+        ProjectSnapshotId,
+        TopologyId,
+        ProductionLineDefinitionId,
+        ProductionUnitIdentity,
+        LotId,
+        CarrierId,
+        ActorId,
+        ExecutionStatus,
+        Judgement,
+        Disposition,
+        ControlState,
+        CreatedAtUtc,
+        LastTransitionAtUtc,
+        StartedAtUtc,
+        CompletedAtUtc,
+        FailureCode,
+        FailureReason,
+        EntryOperationId,
+        _operationDefinitions.ToArray(),
+        _routeTransitions.ToArray(),
+        _operations.Select(static operation => operation.ToSnapshot()).ToArray(),
+        _routeDecisions.ToArray(),
+        new Dictionary<string, int>(_transitionTraversals, StringComparer.Ordinal));
+
+    private void ApplyRoute(OperationRun source, DateTimeOffset decidedAtUtc)
+    {
+        var outgoing = _routeTransitions
+            .Where(transition => string.Equals(
+                transition.SourceOperationId,
+                source.OperationId,
+                StringComparison.Ordinal))
+            .ToArray();
+        if (outgoing.Length == 0)
         {
-            throw new ArgumentException("Production stage ids must be unique.", nameof(definitions));
+            return;
         }
 
-        for (var index = 0; index < definitions.Length; index++)
+        var joins = outgoing
+            .Where(transition => transition.Kind == RuntimeRouteTransitionKind.ParallelJoin)
+            .GroupBy(transition => transition.ParallelGroupId!, StringComparer.Ordinal)
+            .ToArray();
+        if (joins.Length > 0)
         {
-            var expectedSequence = index + 1;
-            if (definitions[index].Sequence != expectedSequence)
+            foreach (var join in joins)
+            {
+                ProcessParallelJoin(source, join.Key, decidedAtUtc);
+            }
+
+            return;
+        }
+
+        var forks = outgoing
+            .Where(transition => transition.Kind == RuntimeRouteTransitionKind.ParallelFork)
+            .ToArray();
+        if (forks.Length > 0)
+        {
+            foreach (var fork in forks)
+            {
+                TakeTransition(source, fork, decidedAtUtc, activateTarget: true);
+            }
+
+            return;
+        }
+
+        var conditional = outgoing
+            .Where(transition => transition.Kind is RuntimeRouteTransitionKind.Judgement
+                or RuntimeRouteTransitionKind.Rework)
+            .FirstOrDefault(transition => transition.RequiredJudgement == source.Judgement
+                && CanTraverse(transition));
+        if (conditional is not null)
+        {
+            TakeTransition(source, conditional, decidedAtUtc, activateTarget: true);
+            return;
+        }
+
+        var outputCondition = outgoing
+            .Where(transition => transition.Kind == RuntimeRouteTransitionKind.Condition
+                && transition.OutputCondition!.Matches(source.Outputs))
+            .ToArray();
+        if (outputCondition.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"Operation {source.OperationId} matched multiple typed output transitions.");
+        }
+
+        if (outputCondition.Length == 1)
+        {
+            TakeTransition(source, outputCondition[0], decidedAtUtc, activateTarget: true);
+            return;
+        }
+
+        var sequence = outgoing.SingleOrDefault(transition =>
+            transition.Kind == RuntimeRouteTransitionKind.Sequence);
+        if (sequence is not null)
+        {
+            TakeTransition(source, sequence, decidedAtUtc, activateTarget: true);
+        }
+    }
+
+    private void ProcessParallelJoin(
+        OperationRun source,
+        string parallelGroupId,
+        DateTimeOffset decidedAtUtc)
+    {
+        var joins = _routeTransitions.Where(transition =>
+            transition.Kind == RuntimeRouteTransitionKind.ParallelJoin
+            && string.Equals(transition.ParallelGroupId, parallelGroupId, StringComparison.Ordinal))
+            .ToArray();
+        var sourceJoin = joins.Single(transition => string.Equals(
+            transition.SourceOperationId,
+            source.OperationId,
+            StringComparison.Ordinal));
+        TakeTransition(source, sourceJoin, decidedAtUtc, activateTarget: false);
+
+        var completedWaveCount = joins
+            .Select(join => _operations.Count(operation =>
+                string.Equals(operation.OperationId, join.SourceOperationId, StringComparison.Ordinal)
+                && operation.ExecutionStatus == ExecutionStatus.Completed))
+            .Min();
+        var targetOperationId = sourceJoin.TargetOperationId;
+        var targetActivationCount = _operations.Count(operation => string.Equals(
+            operation.OperationId,
+            targetOperationId,
+            StringComparison.Ordinal));
+        if (completedWaveCount > targetActivationCount)
+        {
+            ActivateOperation(targetOperationId);
+        }
+    }
+
+    private void TakeTransition(
+        OperationRun source,
+        RouteTransitionDefinition transition,
+        DateTimeOffset decidedAtUtc,
+        bool activateTarget)
+    {
+        if (_routeDecisions.Any(decision =>
+                string.Equals(decision.SourceOperationRunId, source.OperationRunId, StringComparison.Ordinal)
+                && string.Equals(decision.TransitionId, transition.TransitionId, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        var traversal = _transitionTraversals.GetValueOrDefault(transition.TransitionId) + 1;
+        _transitionTraversals[transition.TransitionId] = traversal;
+        _routeDecisions.Add(new RouteDecisionSnapshot(
+            source.OperationRunId,
+            transition.TransitionId,
+            transition.TargetOperationId,
+            source.Judgement,
+            traversal,
+            decidedAtUtc));
+        if (activateTarget)
+        {
+            ActivateOperation(transition.TargetOperationId);
+        }
+    }
+
+    private bool CanTraverse(RouteTransitionDefinition transition) =>
+        transition.MaxTraversals is null
+        || _transitionTraversals.GetValueOrDefault(transition.TransitionId)
+            < transition.MaxTraversals.Value;
+
+    private OperationRun ActivateOperation(string operationId)
+    {
+        var definition = _operationDefinitions.Single(candidate => string.Equals(
+            candidate.OperationId,
+            operationId,
+            StringComparison.Ordinal));
+        var attempt = _operations.Count(operation => string.Equals(
+            operation.OperationId,
+            operationId,
+            StringComparison.Ordinal)) + 1;
+        var operation = OperationRun.Create(definition, attempt);
+        _operations.Add(operation);
+        return operation;
+    }
+
+    private void TryCompleteRun(DateTimeOffset completedAtUtc)
+    {
+        if (_operations.Any(operation => !operation.IsTerminal))
+        {
+            return;
+        }
+
+        var judgement = AggregateJudgement();
+        var disposition = judgement switch
+        {
+            ResultJudgement.Passed or ResultJudgement.NotApplicable => ProductDisposition.Completed,
+            ResultJudgement.Failed => ProductDisposition.Nonconforming,
+            ResultJudgement.Aborted or ResultJudgement.Unknown => ProductDisposition.Held,
+            _ => throw new InvalidOperationException($"Unsupported result judgement {judgement}.")
+        };
+        TransitionToTerminal(
+            ExecutionStatus.Completed,
+            judgement,
+            disposition,
+            completedAtUtc,
+            null,
+            null);
+    }
+
+    private ResultJudgement AggregateJudgement()
+    {
+        var judgements = _operations.Select(operation => operation.Judgement).ToArray();
+        if (judgements.Contains(ResultJudgement.Aborted))
+        {
+            return ResultJudgement.Aborted;
+        }
+
+        if (judgements.Contains(ResultJudgement.Unknown))
+        {
+            return ResultJudgement.Unknown;
+        }
+
+        if (judgements.Contains(ResultJudgement.Failed))
+        {
+            return ResultJudgement.Failed;
+        }
+
+        return judgements.Contains(ResultJudgement.Passed)
+            ? ResultJudgement.Passed
+            : ResultJudgement.NotApplicable;
+    }
+
+    private void TransitionToTerminal(
+        ExecutionStatus status,
+        ResultJudgement judgement,
+        ProductDisposition disposition,
+        DateTimeOffset completedAtUtc,
+        string? failureCode,
+        string? failureReason,
+        bool preserveControlState = false)
+    {
+        var from = ExecutionStatus;
+        ExecutionStatus = status;
+        Judgement = judgement;
+        Disposition = disposition;
+        if (!preserveControlState)
+        {
+            ControlState = ProductionRunControlState.Active;
+        }
+
+        CompletedAtUtc = completedAtUtc;
+        LastTransitionAtUtc = completedAtUtc;
+        FailureCode = ProductionRunText.Optional(failureCode, nameof(failureCode));
+        FailureReason = ProductionRunText.Optional(failureReason, nameof(failureReason));
+        RaiseStatusChanged(from, failureReason ?? "Production Run reached a terminal state.");
+        RaiseDomainEvent(new ProductionRunTerminalDomainEvent(ToSnapshot()));
+    }
+
+    private void CancelOpenOperations(string reason, DateTimeOffset atUtc)
+    {
+        foreach (var operation in _operations.Where(operation => !operation.IsTerminal))
+        {
+            var from = operation.ExecutionStatus;
+            operation.Cancel(reason, atUtc);
+            RaiseOperationStatusChanged(operation, from, reason);
+        }
+    }
+
+    private void ValidateDefinitionGraph()
+    {
+        if (_operationDefinitions.Count == 0)
+        {
+            throw new ArgumentException("A Production Run requires at least one operation.");
+        }
+
+        EnsureUnique(_operationDefinitions.Select(static definition => definition.OperationId),
+            "operation ids");
+        EnsureUnique(_routeTransitions.Select(static transition => transition.TransitionId),
+            "route transition ids");
+        var operationIds = _operationDefinitions
+            .Select(static definition => definition.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!operationIds.Contains(EntryOperationId))
+        {
+            throw new ArgumentException(
+                $"Entry operation {EntryOperationId} is not declared by the Production Run.");
+        }
+
+        foreach (var transition in _routeTransitions)
+        {
+            if (!operationIds.Contains(transition.SourceOperationId)
+                || !operationIds.Contains(transition.TargetOperationId))
             {
                 throw new ArgumentException(
-                    $"Production stage sequence must be contiguous from 1; expected {expectedSequence}.",
-                    nameof(definitions));
+                    $"Route transition {transition.TransitionId} references an unknown operation.");
             }
+        }
+
+        foreach (var source in _routeTransitions.GroupBy(
+                     static transition => transition.SourceOperationId,
+                     StringComparer.Ordinal))
+        {
+            var conditional = source.Where(transition =>
+                transition.Kind is RuntimeRouteTransitionKind.Judgement
+                    or RuntimeRouteTransitionKind.Rework).ToArray();
+            if (conditional.GroupBy(static transition => transition.RequiredJudgement).Any(group => group.Count() > 1))
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} has ambiguous transitions for one result judgement.");
+            }
+
+            var outputConditions = source
+                .Where(transition => transition.Kind == RuntimeRouteTransitionKind.Condition)
+                .Select(transition => transition.OutputCondition!)
+                .ToArray();
+            if (outputConditions.Select(condition => condition.OutputKey)
+                    .Distinct(StringComparer.Ordinal).Count() > 1
+                || outputConditions
+                    .GroupBy(condition => (
+                        condition.ExpectedValue.Kind,
+                        condition.ExpectedValue.CanonicalValue))
+                    .Any(group => group.Count() > 1))
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} typed output routes must compare one output key against unique exact values.");
+            }
+
+            if (outputConditions.Length > 0 && conditional.Length > 0)
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} cannot mix judgement routing with typed output routing.");
+            }
+
+            var sequences = source.Count(transition =>
+                transition.Kind == RuntimeRouteTransitionKind.Sequence);
+            if (sequences > 1)
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} has multiple sequence transitions; use an explicit parallel fork.");
+            }
+
+            if (source.Any(transition => transition.Kind == RuntimeRouteTransitionKind.ParallelFork)
+                && source.Any(transition => transition.Kind is not RuntimeRouteTransitionKind.ParallelFork))
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} cannot mix a parallel fork with other transition kinds.");
+            }
+        }
+
+        var reachable = new HashSet<string>(StringComparer.Ordinal) { EntryOperationId };
+        var queue = new Queue<string>();
+        queue.Enqueue(EntryOperationId);
+        while (queue.TryDequeue(out var operationId))
+        {
+            foreach (var target in _routeTransitions
+                         .Where(transition => string.Equals(
+                             transition.SourceOperationId,
+                             operationId,
+                             StringComparison.Ordinal))
+                         .Select(static transition => transition.TargetOperationId))
+            {
+                if (reachable.Add(target))
+                {
+                    queue.Enqueue(target);
+                }
+            }
+        }
+
+        var unreachable = operationIds.FirstOrDefault(operationId => !reachable.Contains(operationId));
+        if (unreachable is not null)
+        {
+            throw new ArgumentException($"Operation {unreachable} is unreachable from {EntryOperationId}.");
         }
     }
 
     private void ValidateState()
     {
-        if (LastTransitionAtUtc < CreatedAtUtc)
+        RequireUtc(CreatedAtUtc, nameof(CreatedAtUtc));
+        RequireUtc(LastTransitionAtUtc, nameof(LastTransitionAtUtc));
+        if (StartedAtUtc is { } started)
         {
-            throw new InvalidOperationException("Production run transition time precedes creation time.");
+            RequireUtc(started, nameof(StartedAtUtc));
         }
 
-        var runningCount = _stages.Count(stage => stage.Status == ProductionStageRunStatus.Running);
-        if (runningCount > 1)
+        if (CompletedAtUtc is { } completed)
         {
-            throw new InvalidOperationException("A production run cannot contain more than one running stage.");
+            RequireUtc(completed, nameof(CompletedAtUtc));
         }
 
-        switch (Status)
+        if (ExecutionStatus == ExecutionStatus.Pending)
         {
-            case ProductionRunStatus.Created:
-                Require(StartedAtUtc is null && CompletedAtUtc is null && FailureCode is null && FailureReason is null,
-                    "Created production run contains lifecycle state.");
-                Require(_stages.All(stage => stage.Status == ProductionStageRunStatus.Pending),
-                    "Created production run contains a non-pending stage.");
-                break;
-            case ProductionRunStatus.Running:
-                Require(StartedAtUtc is not null && CompletedAtUtc is null && FailureCode is null && FailureReason is null,
-                    "Running production run has invalid lifecycle state.");
-                Require(_stages.All(stage => stage.Status is ProductionStageRunStatus.Completed
-                    or ProductionStageRunStatus.Running
-                    or ProductionStageRunStatus.Pending),
-                    "Running production run contains a terminal failure stage.");
-                ValidateStageOrder();
-                break;
-            case ProductionRunStatus.Completed:
-                Require(StartedAtUtc is not null && CompletedAtUtc is not null
-                    && FailureCode is null && FailureReason is null,
-                    "Completed production run has invalid lifecycle state.");
-                Require(_stages.All(stage => stage.Status == ProductionStageRunStatus.Completed),
-                    "Completed production run contains an incomplete stage.");
-                break;
-            case ProductionRunStatus.Failed:
-                Require(StartedAtUtc is not null && CompletedAtUtc is not null
-                    && FailureCode is not null && FailureReason is not null,
-                    "Failed production run has invalid lifecycle state.");
-                Require(_stages.Count(stage => stage.Status == ProductionStageRunStatus.Failed) <= 1,
-                    "Failed production run contains more than one failed stage.");
-                Require(_stages.All(stage => stage.Status is ProductionStageRunStatus.Completed
-                    or ProductionStageRunStatus.Failed
-                    or ProductionStageRunStatus.Skipped),
-                    "Failed production run contains invalid stage state.");
-                ValidateStageOrder();
-                break;
-            case ProductionRunStatus.Canceled:
-                Require(CompletedAtUtc is not null && FailureCode is not null && FailureReason is not null,
-                    "Canceled production run has invalid lifecycle state.");
-                Require(_stages.Count(stage => stage.Status == ProductionStageRunStatus.Canceled) <= 1,
-                    "Canceled production run contains more than one canceled stage.");
-                Require(_stages.All(stage => stage.Status is ProductionStageRunStatus.Completed
-                    or ProductionStageRunStatus.Canceled
-                    or ProductionStageRunStatus.Skipped),
-                    "Canceled production run contains invalid stage state.");
-                ValidateStageOrder();
-                break;
-            default:
-                throw new InvalidOperationException($"Unsupported production run status {Status}.");
+            Require(StartedAtUtc is null && CompletedAtUtc is null && _operations.Count == 0,
+                "Pending Production Run contains execution state.");
+        }
+        else if (ExecutionStatus == ExecutionStatus.Running)
+        {
+            Require(StartedAtUtc is not null && CompletedAtUtc is null,
+                "Running Production Run has invalid timestamps.");
+            Require(_operations.Count > 0, "Running Production Run has no activated operation.");
+        }
+        else
+        {
+            Require(CompletedAtUtc is not null, "Terminal Production Run has no completion timestamp.");
+            Require(_operations.All(operation => operation.IsTerminal),
+                "Terminal Production Run contains an open operation.");
+        }
+
+        if (ControlState == ProductionRunControlState.RecoveryRequired)
+        {
+            Require(ExecutionStatus == ExecutionStatus.Running
+                && Disposition == ProductDisposition.Held
+                && FailureCode is not null
+                && FailureReason is not null,
+                "Recovery-required Production Run must be running, held, and explain the interruption.");
+        }
+
+        foreach (var traversal in _transitionTraversals)
+        {
+            Require(traversal.Value > 0
+                && _routeTransitions.Any(transition => string.Equals(
+                    transition.TransitionId,
+                    traversal.Key,
+                    StringComparison.Ordinal)),
+                "Production Run contains an invalid transition traversal counter.");
         }
     }
 
-    private void ValidateStageOrder()
-    {
-        var encounteredOpenOrTerminal = false;
-        foreach (var stage in _stages)
-        {
-            if (stage.Status == ProductionStageRunStatus.Completed)
-            {
-                Require(!encounteredOpenOrTerminal,
-                    "A completed production stage appears after a non-completed stage.");
-                continue;
-            }
+    private OperationRun? FindOperationRun(string operationRunId) =>
+        _operations.SingleOrDefault(operation => string.Equals(
+            operation.OperationRunId,
+            operationRunId,
+            StringComparison.Ordinal));
 
-            encounteredOpenOrTerminal = true;
-        }
-    }
+    private RuntimeOperationResult OperationNotFound(string operationRunId) =>
+        RuntimeOperationResult.Rejected(
+            "Runtime.OperationRunNotFound",
+            $"Operation Run {operationRunId} does not exist in Production Run {Id}.");
 
-    private void SkipPendingStages(string reason, DateTimeOffset skippedAtUtc)
-    {
-        foreach (var pendingStage in _stages.Where(
-            stage => stage.Status == ProductionStageRunStatus.Pending))
-        {
-            pendingStage.Skip(reason, skippedAtUtc);
-            RaiseStageStatusChanged(
-                pendingStage,
-                ProductionStageRunStatus.Pending,
-                reason);
-        }
-    }
+    private RuntimeOperationResult Reject(string code, string action) =>
+        RuntimeOperationResult.Rejected(
+            code,
+            $"Production Run {Id} cannot {action} from {ExecutionStatus}/{ControlState}.");
 
-    private void TransitionToTerminal(
-        ProductionRunStatus targetStatus,
-        DateTimeOffset completedAtUtc,
-        string reason,
-        string? failureCode,
-        string? failureReason)
-    {
-        var fromStatus = Status;
-        Status = targetStatus;
-        LastTransitionAtUtc = completedAtUtc;
-        CompletedAtUtc = completedAtUtc;
-        FailureCode = failureCode;
-        FailureReason = failureReason;
-        RaiseDomainEvent(new ProductionRunStatusChangedDomainEvent(
+    private void RaiseStatusChanged(ExecutionStatus from, string reason) =>
+        RaiseDomainEvent(new ProductionRunStatusChangedDomainEvent(Id, from, ExecutionStatus, reason));
+
+    private void RaiseOperationStatusChanged(
+        OperationRun operation,
+        ExecutionStatus from,
+        string reason) =>
+        RaiseDomainEvent(new OperationRunStatusChangedDomainEvent(
             Id,
-            fromStatus,
-            targetStatus,
+            operation.OperationRunId,
+            operation.OperationId,
+            from,
+            operation.ExecutionStatus,
+            operation.RuntimeSessionId,
             reason));
-        RaiseDomainEvent(new ProductionRunTerminalDomainEvent(ToSnapshot()));
-    }
 
-    private void RaiseStageStatusChanged(
-        ProductionStageRun stage,
-        ProductionStageRunStatus fromStatus,
-        string reason)
+    private static void EnsureUnique(IEnumerable<string> values, string description)
     {
-        RaiseDomainEvent(new ProductionStageRunStatusChangedDomainEvent(
-            Id,
-            stage.StageId,
-            stage.Sequence,
-            fromStatus,
-            stage.Status,
-            stage.RuntimeSessionId,
-            reason));
-    }
-
-    private ProductionStageRun? FindStage(string stageId)
-    {
-        if (string.IsNullOrWhiteSpace(stageId))
+        var materialized = values.ToArray();
+        if (materialized.Distinct(StringComparer.Ordinal).Count() != materialized.Length
+            || materialized.Distinct(StringComparer.OrdinalIgnoreCase).Count() != materialized.Length)
         {
-            return null;
+            throw new ArgumentException($"Production Run {description} must be unique, including case.");
         }
-
-        return _stages.SingleOrDefault(
-            stage => string.Equals(stage.StageId, stageId, StringComparison.Ordinal));
     }
 
-    private static RuntimeOperationResult StageNotFound(string stageId)
+    private static void RequireUtc(DateTimeOffset value, string parameterName)
     {
-        return RuntimeOperationResult.Rejected(
-            "Runtime.ProductionStageNotFound",
-            $"Production stage {stageId} was not found.");
+        if (value.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException($"{parameterName} must use UTC offset zero.", parameterName);
+        }
     }
 
     private static void Require(bool condition, string message)

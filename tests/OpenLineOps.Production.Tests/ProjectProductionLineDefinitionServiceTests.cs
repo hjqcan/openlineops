@@ -11,6 +11,7 @@ using OpenLineOps.Processes.Domain.Transitions;
 using OpenLineOps.Processes.Infrastructure.Persistence;
 using OpenLineOps.Production.Application.LineDefinitions;
 using OpenLineOps.Production.Domain.Identifiers;
+using OpenLineOps.Production.Domain.Models;
 using OpenLineOps.Production.Infrastructure.Persistence;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
@@ -30,7 +31,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public async Task CreateValidatesTopologyPublishedFlowsAndStandardExternalAction()
+    public async Task CreateValidatesTopologyPublishedFlowsRouteAndExternalActionResource()
     {
         var fixture = await CreateFixtureAsync(externalActionMatches: true);
 
@@ -40,12 +41,17 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             Request());
 
         Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
-        Assert.Equal(["stage.load", "stage.test"], result.Value.Stages.Select(stage => stage.StageId));
+        Assert.Equal("product.model-a", result.Value.ProductModel.ProductModelId);
+        Assert.Equal("operation.load", result.Value.EntryOperationId);
+        Assert.Equal(
+            ["operation.load", "operation.test"],
+            result.Value.Operations.Select(operation => operation.OperationId));
         Assert.Equal(
             ["configuration.load", "configuration.test"],
-            result.Value.Stages.Select(stage => stage.ConfigurationSnapshotId));
-        Assert.Equal("stage.test", result.Value.Stages.First().NextStageId);
-        Assert.Null(result.Value.Stages.Last().NextStageId);
+            result.Value.Operations.Select(operation => operation.ConfigurationSnapshotId));
+        var transition = Assert.Single(result.Value.Transitions);
+        Assert.Equal("Sequence", transition.Kind);
+        Assert.Equal("operation.test", transition.TargetOperationId);
         Assert.Equal("Provider", Assert.Single(result.Value.ExternalTestProgramAdapters).LaunchKind);
         Assert.True(File.Exists(Path.Combine(
             fixture.Scope.ApplicationRootPath,
@@ -55,52 +61,22 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "line.json")));
     }
 
-    [Fact]
-    public async Task RepositoryRejectsLegacyStageResourceWithoutConfigurationSnapshotId()
-    {
-        var fixture = await CreateFixtureAsync(externalActionMatches: true);
-        var createResult = await fixture.Service.CreateAsync(
-            fixture.Scope.ProjectId,
-            fixture.Scope.ApplicationId,
-            Request());
-        Assert.True(createResult.IsSuccess, createResult.IsFailure ? createResult.Error.Message : string.Empty);
-
-        var path = Path.Combine(
-            fixture.Scope.ApplicationRootPath,
-            "production",
-            "lines",
-            "line.main",
-            "line.json");
-        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        Assert.True(document["stages"]![0]!.AsObject().Remove("configurationSnapshotId"));
-        await File.WriteAllTextAsync(
-            path,
-            document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-
-        var repository = new FileSystemProjectProductionLineDefinitionRepository();
-        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
-            await repository.GetByIdAsync(
-                fixture.Scope,
-                new ProductionLineDefinitionId("line.main")));
-        Assert.Contains("required semantic collections", exception.Message, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData(" configuration.load")]
     [InlineData("configuration.load ")]
-    public async Task ServiceRejectsMissingOrNonCanonicalStageConfigurationSnapshotId(
+    public async Task ServiceRejectsMissingOrNonCanonicalOperationConfigurationSnapshotId(
         string? configurationSnapshotId)
     {
         var fixture = await CreateFixtureAsync(externalActionMatches: true);
         var request = Request() with
         {
-            Stages = Request().Stages
-                .Select(stage => stage.Sequence == 1
-                    ? stage with { ConfigurationSnapshotId = configurationSnapshotId! }
-                    : stage)
+            Operations = Request().Operations
+                .Select(operation => operation.OperationId == "operation.load"
+                    ? operation with { ConfigurationSnapshotId = configurationSnapshotId! }
+                    : operation)
                 .ToArray()
         };
 
@@ -114,7 +90,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateRejectsExternalStageWithoutMatchingCommandAction()
+    public async Task CreateRejectsFlowReferenceToUnknownExternalResource()
     {
         var fixture = await CreateFixtureAsync(externalActionMatches: false);
 
@@ -124,15 +100,47 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             Request());
 
         Assert.True(result.IsFailure);
-        Assert.Equal("Validation.Production.ExternalTestActionMissing", result.Error.Code);
+        Assert.Equal("Validation.Production.ExternalTestActionResourceNotFound", result.Error.Code);
     }
 
     [Fact]
-    public async Task CreateRejectsCapabilityTargetCommandThatBypassesWorkstationTargetLock()
+    public async Task CreateRejectsExternalActionThatBypassesOperationStationTarget()
     {
         var fixture = await CreateFixtureAsync(
             externalActionMatches: true,
             externalActionUsesBlockly: false);
+
+        var result = await fixture.Service.CreateAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            Request());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Production.OperationFlowTargetOutsideStation", result.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateRejectsOrdinaryFlowActionTargetingAnotherStation()
+    {
+        var fixture = await CreateFixtureAsync(
+            externalActionMatches: true,
+            loadTargetId: "station.other");
+
+        var result = await fixture.Service.CreateAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            Request());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Production.OperationFlowTargetOutsideStation", result.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateRejectsDeclaredExternalResourceUnusedByEveryFlow()
+    {
+        var fixture = await CreateFixtureAsync(
+            externalActionMatches: true,
+            flowContainsExternalAction: false);
 
         var result = await fixture.Service.CreateAsync(
             fixture.Scope.ProjectId,
@@ -162,6 +170,36 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.Null(adapter.ProviderKey);
     }
 
+    [Fact]
+    public async Task RepositoryRejectsFormerStageResourceShape()
+    {
+        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var createResult = await fixture.Service.CreateAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            Request());
+        Assert.True(createResult.IsSuccess, createResult.IsFailure ? createResult.Error.Message : string.Empty);
+
+        var path = Path.Combine(
+            fixture.Scope.ApplicationRootPath,
+            "production",
+            "lines",
+            "line.main",
+            "line.json");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document["stages"] = new JsonArray();
+        await File.WriteAllTextAsync(
+            path,
+            document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+        var repository = new FileSystemProjectProductionLineDefinitionRepository();
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(
+                fixture.Scope,
+                new ProductionLineDefinitionId("line.main")));
+        Assert.Contains("invalid JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))
@@ -173,7 +211,9 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
     private async Task<ServiceFixture> CreateFixtureAsync(
         bool externalActionMatches,
         bool externalActionUsesBlockly = true,
-        bool executableAdapter = false)
+        bool executableAdapter = false,
+        bool flowContainsExternalAction = true,
+        string loadTargetId = "station.eol")
     {
         var scope = new ProjectApplicationWorkspaceScope(
             "project.main",
@@ -201,12 +241,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "native.inspect",
             "Inspect",
             adapterId: null,
-            useBlockly: false));
+            useBlockly: false,
+            directSystemTargetId: loadTargetId));
         await processRepository.SaveAsync(scope, PublishedFlow(
             "flow.test",
             "test.external",
             "ExecuteTestProgram",
-            externalActionMatches ? "adapter.test" : "wrong.adapter",
+            flowContainsExternalAction
+                ? externalActionMatches ? "adapter.test" : "wrong.adapter"
+                : null,
             externalActionUsesBlockly));
         var service = new ProjectProductionLineDefinitionService(
             new FixedScopeResolver(scope),
@@ -228,26 +271,33 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "line.main",
             "Main Line",
             "topology.main",
-            new DutModelRequest("dut.model-a", "MODEL-A", "serialNumber"),
-            [new WorkstationRequest("workstation.eol", "EOL", "station.eol")],
+            new ProductModelRequest("product.model-a", "MODEL-A", "serialNumber"),
+            "operation.load",
             [
-                new ProcessStageRequest(
-                    "stage.load",
-                    1,
+                new OperationDefinitionRequest(
+                    "operation.load",
                     "Load",
-                    "workstation.eol",
+                    "station.eol",
                     "flow.load",
-                    "configuration.load",
-                    null),
-                new ProcessStageRequest(
-                    "stage.test",
-                    2,
+                    "configuration.load"),
+                new OperationDefinitionRequest(
+                    "operation.test",
                     "External Test",
-                    "workstation.eol",
+                    "station.eol",
                     "flow.test",
-                    "configuration.test",
-                    "adapter.test")
+                    "configuration.test")
             ],
+            [new RouteTransitionRequest(
+                "load-test",
+                "operation.load",
+                "operation.test",
+                RouteTransitionKind.Sequence,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null)],
             [new ExternalTestProgramAdapterRequest(
                 "adapter.test",
                 "External EOL",
@@ -255,10 +305,10 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                 "ExecuteTestProgram",
                 useExecutable ? "programs/eol/test.exe" : null,
                 useExecutable ? null : "provider.test",
-                ["--serial", "{{dut.identity}}"],
+                ["--serial", "{{product.identity}}"],
                 [
-                    new ExternalTestProgramInputMappingRequest("$dut.identity", "serial"),
-                    new ExternalTestProgramInputMappingRequest("$dut.model", "model")
+                    new ExternalTestProgramInputMappingRequest("$product.identity", "serial"),
+                    new ExternalTestProgramInputMappingRequest("$product.model", "model")
                 ],
                 [new ExternalTestProgramResultMappingRequest("$.outcome", "test.outcome")],
                 new ExternalTestProgramOutcomeMappingRequest(
@@ -290,6 +340,13 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "Tester",
             providedCapabilities: [new CapabilityContractId("test.external")],
             metadata: new Dictionary<string, string>())).Succeeded);
+        Assert.True(topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("station.other"),
+            null,
+            SystemKind.Station,
+            "OtherSystem",
+            "Other Station",
+            metadata: new Dictionary<string, string>())).Succeeded);
         Assert.True(topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.external"),
             new CapabilityContractId("test.external"),
@@ -303,7 +360,8 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         string capabilityId,
         string commandName,
         string? adapterId,
-        bool useBlockly)
+        bool useBlockly,
+        string directSystemTargetId = "station.eol")
     {
         var flow = ProcessDefinition.Create(
             new ProcessDefinitionId(flowId),
@@ -316,8 +374,10 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                 new ProcessNodeId("action"),
                 "Action",
                 new ProcessCapabilityId(capabilityId),
-                ProcessActionTargetKind.Capability,
-                capabilityId,
+                adapterId is null
+                    ? ProcessActionTargetKind.System
+                    : ProcessActionTargetKind.Capability,
+                adapterId is null ? directSystemTargetId : capabilityId,
                 commandName,
                 TimeSpan.FromSeconds(30),
                 adapterId is null

@@ -23,7 +23,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
         Assert.True(secondResult.IsSuccess, secondResult.Error.Message);
         Assert.Equal(firstResult.Value.CanonicalJson, secondResult.Value.CanonicalJson);
         Assert.Equal(firstResult.Value.Sha256, secondResult.Value.Sha256);
-        Assert.Equal(RuntimeActionContractSchemaVersions.V1, firstResult.Value.SchemaVersion);
+        Assert.Equal(RuntimeActionContractSchema.Current, firstResult.Value.SchemaVersion);
         Assert.Equal(64, firstResult.Value.Sha256.Length);
         Assert.Equal(firstResult.Value.Sha256, firstResult.Value.Sha256.ToLowerInvariant());
         Assert.Equal(
@@ -31,7 +31,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
                 .ToLowerInvariant(),
             firstResult.Value.Sha256);
         Assert.StartsWith(
-            "{\"schemaVersion\":\"openlineops.runtime-action-contract/v1\",\"actionType\":\"motion.axis.move\",\"fields\":{\"AXIS\"",
+            "{\"schemaVersion\":\"openlineops.runtime-action-contract\",\"actionType\":\"motion.axis.move\",\"fields\":{\"AXIS\"",
             firstResult.Value.CanonicalJson,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -101,12 +101,12 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
     public void SerializeRejectsHostileNullsInvalidRangesAndNestedLiteralObjects()
     {
         var missingFields = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "test.action",
             null!,
             new RuntimeDelayEmit(Field("DURATION_MS")));
         var invalidRange = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "test.action",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
@@ -118,7 +118,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             },
             new RuntimeDelayEmit(Field("DURATION_MS")));
         var objectLiteral = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "test.action",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal),
             new RuntimeDeviceCommandEmit(
@@ -153,7 +153,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
     public void SerializeSupportsSafeDelayResultPatchContextObjectAndArrayVocabulary()
     {
         var delay = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "flow.wait",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
@@ -164,7 +164,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             },
             new RuntimeDelayEmit(Field("DURATION_MS")));
         var resultPatch = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "result.patch",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
@@ -202,7 +202,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
     {
         const string validFields = "\"fields\":{\"VALUE\":{\"type\":\"string\",\"required\":true}}";
         const string validInput = "\"input\":{\"source\":\"field\",\"name\":\"VALUE\"}";
-        var prefix = "{\"schemaVersion\":\"openlineops.runtime-action-contract/v1\",\"actionType\":\"test.action\",";
+        var prefix = "{\"schemaVersion\":\"openlineops.runtime-action-contract\",\"actionType\":\"test.action\",";
 
         return new TheoryData<string>
         {
@@ -215,7 +215,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             prefix + validFields + ",\"emit\":{\"kind\":\"deviceCommand\",\"capability\":\"test.capability\",\"commandName\":\"Execute\",\"input\":{\"source\":\"field\",\"name\":\"VALUE\",\"template\":\"{{VALUE}}\"},\"timeoutMilliseconds\":1000,\"retryLimit\":0}}",
             prefix + validFields + ",\"emit\":{\"kind\":\"deviceCommand\",\"capability\":\"test.capability\",\"commandName\":\"Execute\",\"input\":{\"source\":\"literal\",\"value\":NaN},\"timeoutMilliseconds\":1000,\"retryLimit\":0}}",
             prefix + validFields + ",\"emit\":{\"kind\":\"deviceCommand\",\"capability\":\"test.capability\",\"commandName\":\"Execute\"," + validInput + ",\"timeoutMilliseconds\":1000,\"retryLimit\":1}}",
-            "{\"schemaVersion\":\"openlineops.runtime-action-contract/v1\",\"actionType\":\"test.action\",\"actionType\":\"duplicate.action\",\"fields\":{},\"emit\":{\"kind\":\"delay\",\"durationMilliseconds\":{\"source\":\"literal\",\"value\":1}}}"
+            "{\"schemaVersion\":\"openlineops.runtime-action-contract\",\"actionType\":\"test.action\",\"actionType\":\"duplicate.action\",\"fields\":{},\"emit\":{\"kind\":\"delay\",\"durationMilliseconds\":{\"source\":\"literal\",\"value\":1}}}"
         };
     }
 
@@ -261,7 +261,7 @@ public sealed class RuntimeActionContractCanonicalSerializerTests
             };
 
         return new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "motion.axis.move",
             fields,
             new RuntimeDeviceCommandEmit(

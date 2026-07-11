@@ -1036,7 +1036,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
     {
         var result = new RuntimeActionContractCanonicalSerializer().Serialize(
             new RuntimeActionContract(
-                RuntimeActionContractSchemaVersions.V1,
+                RuntimeActionContractSchema.Current,
                 "fixture.wait",
                 new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
                 {

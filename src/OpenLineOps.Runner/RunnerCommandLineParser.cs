@@ -11,8 +11,10 @@ public sealed record RunnerRunOptions(
     string ProjectTarget,
     string Snapshot,
     Guid ProductionRunId,
-    string DutIdentityValue,
-    string? BatchId,
+    string ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
+    string? SlotId,
     string? FixtureId,
     string? DeviceId,
     string ActorId);
@@ -25,7 +27,17 @@ public sealed record RunnerParseResult(
 public static class RunnerCommandLineParser
 {
     private static readonly HashSet<string> ValueOptions = new(
-        ["snapshot", "run-id", "dut", "batch", "fixture", "device", "actor"],
+        [
+            "snapshot",
+            "run-id",
+            "production-unit",
+            "lot",
+            "carrier",
+            "slot",
+            "fixture",
+            "device",
+            "actor"
+        ],
         StringComparer.Ordinal);
 
     public static RunnerParseResult Parse(IReadOnlyList<string> arguments)
@@ -134,10 +146,10 @@ public static class RunnerCommandLineParser
             return Error("A project directory or .oloproj path is required.");
         }
 
-        var dutIdentityValue = GetOption(optionValues, "dut");
-        if (dutIdentityValue is null)
+        var productionUnitIdentityValue = GetOption(optionValues, "production-unit");
+        if (productionUnitIdentityValue is null)
         {
-            return Error("Option '--dut' is required.");
+            return Error("Option '--production-unit' is required.");
         }
 
         var actorId = GetOption(optionValues, "actor");
@@ -161,8 +173,10 @@ public static class RunnerCommandLineParser
                 projectTarget,
                 GetOption(optionValues, "snapshot") ?? "active",
                 productionRunId,
-                dutIdentityValue,
-                GetOption(optionValues, "batch"),
+                productionUnitIdentityValue,
+                GetOption(optionValues, "lot"),
+                GetOption(optionValues, "carrier"),
+                GetOption(optionValues, "slot"),
                 GetOption(optionValues, "fixture"),
                 GetOption(optionValues, "device"),
                 actorId),

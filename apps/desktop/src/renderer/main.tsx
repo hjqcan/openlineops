@@ -1,18 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Activity,
-  AlertTriangle,
   Blocks,
-  CheckCircle2,
   CirclePlay,
   Code2,
-  Database,
   FileSearch,
   Factory,
   FolderKanban,
   GitBranch,
-  Gauge,
   Layers3,
   LayoutDashboard,
   MonitorCog,
@@ -37,13 +32,12 @@ import type {
   RuntimeStationStatus,
   RuntimeTargetStatus,
   RuntimeTimelineEntry,
-  StartProjectSnapshotProductionRunRequest,
-  StartedProjectSnapshotProductionRunResponse,
+  SubmitProjectSnapshotProductionRunRequest,
+  SubmittedProjectSnapshotProductionRunResponse,
   TraceRecordSummary
 } from './contracts';
 import { desktop } from './desktop-bridge';
 import {
-  acknowledgeAlarm,
   createRuntimeHubConnection,
   getAlarms,
   getHealth,
@@ -52,14 +46,18 @@ import {
   getTargetStatuses,
   getTimeline,
   getTraceRecords,
-  startProjectSnapshotProductionRun
+  submitProjectSnapshotProductionRun
 } from './api';
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
 import { PluginsWorkbench } from './plugins-workbench';
 import { ProjectsWorkbench } from './projects-workbench';
 import { TraceWorkbench } from './trace-workbench';
+import type { ProductionDesignerProblem } from './production-route-validation';
+import { useProductionOperations } from './use-production-operations';
 import './styles.css';
+import './production.css';
+import './operations.css';
 import './topology.css';
 
 const ProcessWorkbench = React.lazy(async () => {
@@ -70,6 +68,11 @@ const ProcessWorkbench = React.lazy(async () => {
 const ProductionWorkbench = React.lazy(async () => {
   const module = await import('./production-workbench');
   return { default: module.ProductionWorkbench };
+});
+
+const OperationsWorkbench = React.lazy(async () => {
+  const module = await import('./operations-workbench');
+  return { default: module.OperationsWorkbench };
 });
 
 const TopologyDesigner = React.lazy(async () => {
@@ -93,17 +96,21 @@ type NavId = (typeof navItems)[number]['id'];
 type HubState = 'Disconnected' | 'Connecting' | 'Connected' | 'Reconnecting';
 
 interface ProductionRunFormState {
-  dutIdentityValue: string;
+  productionUnitIdentityValue: string;
   actorId: string;
-  batchId: string;
+  lotId: string;
+  carrierId: string;
+  slotId: string;
   fixtureId: string;
   deviceId: string;
 }
 
 const emptyProductionRunForm: ProductionRunFormState = {
-  dutIdentityValue: '',
+  productionUnitIdentityValue: '',
   actorId: '',
-  batchId: '',
+  lotId: '',
+  carrierId: '',
+  slotId: '',
   fixtureId: '',
   deviceId: ''
 };
@@ -128,7 +135,7 @@ function App(): React.ReactElement {
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
   const [lastProjectRun, setLastProjectRun] =
-    useState<StartedProjectSnapshotProductionRunResponse | null>(null);
+    useState<SubmittedProjectSnapshotProductionRunResponse | null>(null);
   const [activeProductionRunId, setActiveProductionRunId] = useState<string | null>(null);
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [productionRunForm, setProductionRunForm] =
@@ -137,6 +144,7 @@ function App(): React.ReactElement {
   const [activeApplicationId, setActiveApplicationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('Ready');
+  const [productionProblems, setProductionProblems] = useState<ProductionDesignerProblem[]>([]);
 
   const activeApplication = useMemo(
     () => activeWorkspace?.project.applications.find(
@@ -161,6 +169,13 @@ function App(): React.ReactElement {
       }
       : null,
     [activeApplicationSnapshot, activeProductionRunId, activeWorkspace, workspaceMode]);
+  const operationsProjection = useProductionOperations({
+    isBackendHealthy: backendStatus?.health === 'Healthy',
+    projectId: activeWorkspace?.project.projectId ?? null,
+    applicationId: activeApplication?.applicationId ?? null,
+    preferredLineId: activeApplicationSnapshot?.productionLineDefinitionId ?? null,
+    onMessage: setMessage
+  });
   const runtimeHubConnectionRef =
     useRef<ReturnType<typeof createRuntimeHubConnection> | null>(null);
   const runDialogRef = useRef<HTMLDialogElement>(null);
@@ -174,7 +189,7 @@ function App(): React.ReactElement {
   const latestStation = stations[0] ?? null;
   const activeNavLabel = navItems.find(item => item.id === activeNav)?.label ?? 'Explorer';
   const activeTitle = activeNav === 'dashboard'
-    ? 'Station Runtime Dashboard'
+    ? 'Line Operations'
     : activeNav === 'projects'
       ? activeWorkspace?.project.displayName ?? 'Automation Projects'
       : activeNavLabel;
@@ -466,14 +481,6 @@ function App(): React.ReactElement {
     }
   }, []);
 
-  const acknowledge = useCallback(async (alarmId: string) => {
-    const alarm = await acknowledgeAlarm(alarmId, 'desktop-operator');
-    if (alarm) {
-      setAlarms(current => upsertBy(current, alarm, item => item.alarmId));
-      setMessage(`Alarm ${alarm.code} acknowledged`);
-    }
-  }, []);
-
   const selectWorkspace = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
     setActiveWorkspace(workspace);
     setWorkspaceMode('edit');
@@ -574,9 +581,11 @@ function App(): React.ReactElement {
     };
     const request = {
       productionRunId,
-      dutIdentityValue: productionRunForm.dutIdentityValue,
+      productionUnitIdentityValue: productionRunForm.productionUnitIdentityValue,
       actorId: productionRunForm.actorId,
-      batchId: optionalRunIdentity(productionRunForm.batchId),
+      lotId: optionalRunIdentity(productionRunForm.lotId),
+      carrierId: optionalRunIdentity(productionRunForm.carrierId),
+      slotId: optionalRunIdentity(productionRunForm.slotId),
       fixtureId: optionalRunIdentity(productionRunForm.fixtureId),
       deviceId: optionalRunIdentity(productionRunForm.deviceId)
     };
@@ -596,7 +605,7 @@ function App(): React.ReactElement {
       setTargetStatuses([]);
       setTimeline([]);
 
-      const response = await startProjectSnapshotProductionRun(
+      const response = await submitProjectSnapshotProductionRun(
         activeWorkspace.project.projectId,
         snapshotId,
         request);
@@ -608,7 +617,7 @@ function App(): React.ReactElement {
 
       setLastProjectRun(response.body);
       setRunDialogOpen(false);
-      setMessage(`Production run ${response.body.status}: ${response.body.productionRunId}`);
+      setMessage(`Production run ${response.body.executionStatus}: ${response.body.productionRunId}`);
       const stationRows = (await getStationStatuses(runScope))
         .filter(status => runtimeStatusMatchesScope(status, runScope)
           && isRuntimeSessionStatus(status.sessionStatus));
@@ -665,12 +674,10 @@ function App(): React.ReactElement {
             activeWorkspace={activeWorkspace}
             activeApplicationId={activeApplication?.applicationId ?? null}
             projectSnapshotId={activeApplicationSnapshot?.snapshotId ?? null}
-            activeProductionRunId={activeMonitoringScope?.productionRunId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             workspaceMode={workspaceMode}
-            runtimeConnected={hubState === 'Connected'}
-            stations={stations}
-            targetStatuses={targetStatuses}
+            projectionConnected={operationsProjection.connected}
+            runtimeProjection={operationsProjection.lineState}
             onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
           />
@@ -680,14 +687,26 @@ function App(): React.ReactElement {
 
     if (activeNav === 'dashboard') {
       return (
-        <DashboardView
-          stations={stations}
-          timeline={timeline}
-          alarms={alarms}
-          traceRows={traceRows}
-          latestStation={latestStation}
-          onAcknowledge={acknowledge}
-        />
+        <React.Suspense fallback={<WorkbenchLoading label="line operations" />}>
+          <OperationsWorkbench
+            activeRuns={operationsProjection.activeRuns}
+            lineState={operationsProjection.lineState}
+            filters={operationsProjection.filters}
+            selectedLineId={operationsProjection.selectedLineId}
+            connected={operationsProjection.connected}
+            refreshing={operationsProjection.refreshing}
+            isBackendHealthy={backendStatus?.health === 'Healthy'}
+            lastSynchronizedAtUtc={operationsProjection.lastSynchronizedAtUtc}
+            onFilterChanged={operationsProjection.setFilter}
+            onRefresh={operationsProjection.refresh}
+            onOpenTopology={() => {
+              setWorkspaceMode('run');
+              setActiveNav('topology');
+            }}
+            onActiveRunChanged={setActiveProductionRunId}
+            onMessage={setMessage}
+          />
+        </React.Suspense>
       );
     }
 
@@ -713,6 +732,7 @@ function App(): React.ReactElement {
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
+            onProblemsChanged={setProductionProblems}
           />
         </React.Suspense>
       );
@@ -773,7 +793,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [acknowledge, activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeMonitoringScope?.productionRunId, activeNav, activeWorkspace, alarms, backendStatus?.health, hubState, latestStation, message, selectApplication, selectWorkspace, stations, targetStatuses, timeline, traceRows, workspaceMode]);
+  }, [activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeNav, activeWorkspace, backendStatus?.health, message, operationsProjection, selectApplication, selectWorkspace, stations, traceRows, workspaceMode]);
 
   return (
     <main
@@ -953,27 +973,32 @@ function App(): React.ReactElement {
             <div className={`ide-bottom-panel ${workspaceMode === 'run' ? 'expanded' : ''}`}>
           <div className="ide-bottom-panel-title">
             <PanelBottom size={14} />
-            <strong>{workspaceMode === 'run' ? 'Runtime Output' : 'Problems · Output · Terminal'}</strong>
+            <strong>
+              {workspaceMode === 'run'
+                ? 'Runtime Output'
+                : `Problems${activeNav === 'production' ? ` (${productionProblems.length})` : ''} · Output · Terminal`}
+            </strong>
             <span>{message}</span>
           </div>
           {workspaceMode === 'run' ? (
             <div className="ide-runtime-summary">
               <InfoCell label="Production Run" value={lastProjectRun?.productionRunId ?? 'waiting'} />
-              <InfoCell label="Status" value={lastProjectRun?.status ?? 'Idle'} />
+              <InfoCell label="Execution" value={lastProjectRun?.executionStatus ?? 'Idle'} />
               <InfoCell
-                label="DUT"
+                label="Production Unit"
                 value={lastProjectRun
-                  ? `${lastProjectRun.dutModelId} / ${lastProjectRun.dutIdentityInputKey}=${lastProjectRun.dutIdentityValue}`
+                  ? `${lastProjectRun.productModelId} / ${lastProjectRun.productionUnitIdentityInputKey}=${lastProjectRun.productionUnitIdentityValue}`
                   : 'waiting'}
               />
+              <InfoCell label="Judgement" value={lastProjectRun?.judgement ?? 'Unknown'} />
+              <InfoCell label="Disposition" value={lastProjectRun?.disposition ?? 'InProcess'} />
               <InfoCell label="Actor" value={lastProjectRun?.actorId ?? 'waiting'} />
-              <InfoCell label="Batch" value={lastProjectRun?.batchId ?? 'none'} />
-              <InfoCell label="Fixture" value={lastProjectRun?.fixtureId ?? 'none'} />
-              <InfoCell label="Device" value={lastProjectRun?.deviceId ?? 'none'} />
+              <InfoCell label="Lot" value={lastProjectRun?.lotId ?? 'none'} />
+              <InfoCell label="Carrier" value={lastProjectRun?.carrierId ?? 'none'} />
               <InfoCell
-                label="Stages"
+                label="Operations"
                 value={lastProjectRun
-                  ? `${lastProjectRun.completedStageCount}/${lastProjectRun.stages.length}`
+                  ? `${lastProjectRun.operations.filter(operation => operation.executionStatus === 'Completed').length}/${lastProjectRun.operations.length}`
                   : 'waiting'}
               />
               <InfoCell label="Runtime Session" value={lastProjectRunSessionId ?? 'waiting'} />
@@ -1037,17 +1062,17 @@ function App(): React.ReactElement {
             <small>{activeWorkspace?.project.projectId} / {activeApplication?.applicationId}</small>
           </div>
           <label>
-            <span>DUT identity</span>
+            <span>Production Unit identity</span>
             <input
-              value={productionRunForm.dutIdentityValue}
+              value={productionRunForm.productionUnitIdentityValue}
               onChange={event => setProductionRunForm(current => ({
                 ...current,
-                dutIdentityValue: event.target.value
+                productionUnitIdentityValue: event.target.value
               }))}
               autoFocus
               required
               autoComplete="off"
-              data-testid="production-run-dut-identity"
+              data-testid="production-run-unit-identity"
             />
           </label>
           <label>
@@ -1065,15 +1090,33 @@ function App(): React.ReactElement {
           </label>
           <div className="production-run-optional-grid">
             <label>
-              <span>Batch (optional)</span>
+              <span>Lot (optional)</span>
               <input
-                value={productionRunForm.batchId}
+                value={productionRunForm.lotId}
                 onChange={event => setProductionRunForm(current => ({
                   ...current,
-                  batchId: event.target.value
+                  lotId: event.target.value
                 }))}
                 autoComplete="off"
-                data-testid="production-run-batch"
+                data-testid="production-run-lot"
+              />
+            </label>
+            <label>
+              <span>Carrier (optional)</span>
+              <input
+                value={productionRunForm.carrierId}
+                onChange={event => setProductionRunForm(current => ({ ...current, carrierId: event.target.value }))}
+                autoComplete="off"
+                data-testid="production-run-carrier"
+              />
+            </label>
+            <label>
+              <span>Slot (optional)</span>
+              <input
+                value={productionRunForm.slotId}
+                onChange={event => setProductionRunForm(current => ({ ...current, slotId: event.target.value }))}
+                autoComplete="off"
+                data-testid="production-run-slot"
               />
             </label>
             <label>
@@ -1159,7 +1202,7 @@ function ProjectExplorer({
     icon: React.ComponentType<{ size?: number }>;
   }> = [
     { nav: 'topology', label: 'Systems & Layout', detail: application?.topologyId ?? 'not configured', icon: LayoutDashboard },
-    { nav: 'production', label: 'Production Lines', detail: 'DUT · workstations · stages', icon: Factory },
+    { nav: 'production', label: 'Production Lines', detail: 'product models · operations · routes', icon: Factory },
     { nav: 'processes', label: 'Flows & Scripts', detail: `${application?.processDefinitionIds.length ?? 0} linked`, icon: Blocks },
     { nav: 'engineering', label: 'Configuration', detail: 'recipes · stations', icon: MonitorCog },
     { nav: 'devices', label: 'Devices & Drivers', detail: 'capability providers', icon: PlugZap }
@@ -1171,7 +1214,7 @@ function ProjectExplorer({
     icon: React.ComponentType<{ size?: number }>;
   }> = [
     { nav: 'dashboard', label: 'Run & Monitor', detail: applicationSnapshot?.snapshotId ?? 'publish required', icon: Play },
-    { nav: 'trace', label: 'Trace Evidence', detail: 'production runs · stages', icon: FileSearch },
+    { nav: 'trace', label: 'Trace Evidence', detail: 'production runs · Operations', icon: FileSearch },
     { nav: 'plugins', label: 'Extensions', detail: 'blocks · drivers', icon: Package }
   ];
 
@@ -1289,109 +1332,6 @@ function selectApplicationSnapshot(
     ?? null;
 }
 
-interface DashboardViewProps {
-  stations: RuntimeStationStatus[];
-  timeline: RuntimeTimelineEntry[];
-  alarms: RuntimeAlarm[];
-  traceRows: TraceRecordSummary[];
-  latestStation: RuntimeStationStatus | null;
-  onAcknowledge(alarmId: string): void;
-}
-
-function DashboardView({
-  stations,
-  timeline,
-  alarms,
-  traceRows,
-  latestStation,
-  onAcknowledge
-}: DashboardViewProps): React.ReactElement {
-  return (
-    <div className="dashboard-grid">
-      <section className="panel station-panel">
-        <PanelTitle icon={Gauge} title="Stations" action={`${stations.length} active`} />
-        <div className="station-table">
-          <div className="table-head">
-            <span>Station</span>
-            <span>Status</span>
-            <span>Steps</span>
-            <span>Incidents</span>
-          </div>
-          {stations.length === 0 ? (
-            <EmptyState text="No runtime station state yet" />
-          ) : stations.map(station => (
-            <div className="table-row" key={station.stationSystemId}>
-              <strong>{station.stationSystemId}</strong>
-              <StatusPill label={station.sessionStatus} tone={station.sessionStatus === 'Completed' ? 'good' : station.sessionStatus === 'Failed' ? 'bad' : 'warn'} />
-              <span>{station.completedStepCount}/{station.stepCount}</span>
-              <span>{station.incidentCount}</span>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel timeline-panel">
-        <PanelTitle icon={Activity} title="Runtime Timeline" action={latestStation?.processVersionId ?? 'waiting'} />
-        <div className="timeline-list">
-          {timeline.length === 0 ? (
-            <EmptyState text="No runtime events received" />
-          ) : timeline.slice(-14).reverse().map(entry => (
-            <article className="timeline-entry" key={`${entry.sequence}-${entry.eventId}`}>
-              <span className={entry.severity === 'Error' ? 'event-dot bad' : 'event-dot'} />
-              <div>
-                <div className="timeline-row">
-                  <strong>{entry.eventName}</strong>
-                  <time>{formatTime(entry.occurredAtUtc)}</time>
-                </div>
-                <p>{entry.entityKind} {entry.toStatus ? `${entry.fromStatus ?? 'None'} -> ${entry.toStatus}` : entry.code ?? entry.entityId}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel alarm-panel">
-        <PanelTitle icon={AlertTriangle} title="Alarms" action={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
-        <div className="alarm-list">
-          {alarms.length === 0 ? (
-            <EmptyState text="No open alarms" />
-          ) : alarms.map(alarm => (
-            <article className={alarm.isAcknowledged ? 'alarm acknowledged' : 'alarm'} key={alarm.alarmId}>
-              <div>
-                <strong>{alarm.code}</strong>
-                <p>{alarm.message}</p>
-                <span>{alarm.stationSystemId} - {formatTime(alarm.occurredAtUtc)}</span>
-              </div>
-              {alarm.isAcknowledged ? (
-                <CheckCircle2 size={19} />
-              ) : (
-                <button type="button" className="icon-button" onClick={() => onAcknowledge(alarm.alarmId)} title="Acknowledge alarm">
-                  <CheckCircle2 size={17} />
-                </button>
-              )}
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel trace-panel">
-        <PanelTitle icon={Database} title="Trace Rows" action={`${traceRows.length} shown`} />
-        <div className="trace-strip">
-          {traceRows.slice(0, 5).map(trace => (
-            <div className="trace-row" key={trace.traceRecordId}>
-              <span>{trace.dutIdentityValue}</span>
-              <strong>{trace.judgement}</strong>
-              <span>{trace.productionLineDefinitionId}</span>
-              <time>{formatTime(trace.completedAtUtc)}</time>
-            </div>
-          ))}
-          {traceRows.length === 0 ? <EmptyState text="No trace records yet" /> : null}
-        </div>
-      </section>
-    </div>
-  );
-}
-
 function SecondaryView({
   activeNav,
   traceRows,
@@ -1421,7 +1361,7 @@ function SecondaryView({
             ))}
             {traceRows.slice(0, 3).map(trace => (
               <div className="surface-row" key={trace.traceRecordId}>
-                <span>{trace.dutIdentityValue}</span>
+                <span>{trace.productionUnitIdentityValue}</span>
                 <strong>{trace.judgement}</strong>
               </div>
             ))}
@@ -1446,7 +1386,7 @@ const secondaryCopy: Record<NavId, string> = {
   dashboard: '',
   projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
   topology: 'The same semantic 2D layout is used for engineering and live production monitoring.',
-  production: 'Production lines compose DUT models, topology-bound workstations, ordered stages and external test adapters.',
+  production: 'Production lines compose Product Models, Station-bound Operations, typed route graphs and portable program resources.',
   engineering: 'Engineering workspaces, recipes, stations and snapshots use Application-scoped backend contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',
   devices: 'Device configuration is read from backend APIs and never from local databases.',
@@ -1521,14 +1461,14 @@ function upsertRuntimeTargetStatus(
 }
 
 function latestProductionRunSessionId(
-  run: StartedProjectSnapshotProductionRunResponse | null
+  run: SubmittedProjectSnapshotProductionRunResponse | null
 ): string | null {
   if (!run) {
     return null;
   }
 
-  for (let index = run.stages.length - 1; index >= 0; index -= 1) {
-    const runtimeSessionId = run.stages[index]?.runtimeSessionId;
+  for (let index = run.operations.length - 1; index >= 0; index -= 1) {
+    const runtimeSessionId = run.operations[index]?.runtimeSessionId;
     if (runtimeSessionId) {
       return runtimeSessionId;
     }
@@ -1545,9 +1485,9 @@ function runtimeTargetStatusKey(status: RuntimeTargetStatus): string {
     status.topologyId,
     status.productionRunId,
     status.productionLineDefinitionId,
-    status.stageId,
-    status.stageSequence,
-    status.workstationId,
+    status.operationId,
+    status.operationAttempt,
+    status.runtimeStationId,
     status.stationSystemId,
     status.targetKind,
     status.targetId
@@ -1562,9 +1502,9 @@ function runtimeStationStatusKey(status: RuntimeStationStatus): string {
     status.topologyId,
     status.productionRunId,
     status.productionLineDefinitionId,
-    status.stageId,
-    status.stageSequence,
-    status.workstationId,
+    status.operationId,
+    status.operationAttempt,
+    status.runtimeStationId,
     status.stationSystemId
   ]);
 }
@@ -1603,9 +1543,9 @@ function sameRuntimeStationScope(
     && target.topologyId === station.topologyId
     && target.productionRunId === station.productionRunId
     && target.productionLineDefinitionId === station.productionLineDefinitionId
-    && target.stageId === station.stageId
-    && target.stageSequence === station.stageSequence
-    && target.workstationId === station.workstationId
+    && target.operationId === station.operationId
+    && target.operationAttempt === station.operationAttempt
+    && target.runtimeStationId === station.runtimeStationId
     && target.stationSystemId === station.stationSystemId;
 }
 
@@ -1661,8 +1601,8 @@ async function synchronizeRuntimeProductionRunGroup(
 }
 
 function validateProductionRunForm(form: ProductionRunFormState): string | null {
-  if (!isCanonicalRunIdentity(form.dutIdentityValue)) {
-    return 'DUT identity is required and cannot start or end with whitespace.';
+  if (!isCanonicalRunIdentity(form.productionUnitIdentityValue)) {
+    return 'Production Unit identity is required and cannot start or end with whitespace.';
   }
 
   if (!isCanonicalRunIdentity(form.actorId)) {
@@ -1670,7 +1610,9 @@ function validateProductionRunForm(form: ProductionRunFormState): string | null 
   }
 
   for (const [label, value] of [
-    ['Batch', form.batchId],
+    ['Lot', form.lotId],
+    ['Carrier', form.carrierId],
+    ['Slot', form.slotId],
     ['Fixture', form.fixtureId],
     ['Device', form.deviceId]
   ] as const) {
@@ -1693,22 +1635,23 @@ function optionalRunIdentity(value: string): string | null {
 }
 
 function assertProductionRunResponseIdentity(
-  response: StartedProjectSnapshotProductionRunResponse,
+  response: SubmittedProjectSnapshotProductionRunResponse,
   scope: RuntimeMonitoringScope,
-  request: StartProjectSnapshotProductionRunRequest
+  request: SubmitProjectSnapshotProductionRunRequest
 ): void {
+  const terminalExecutionStatuses = new Set(['Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected']);
   if (response.productionRunId !== scope.productionRunId
       || response.projectId !== scope.projectId
       || response.applicationId !== scope.applicationId
       || response.snapshotId !== scope.projectSnapshotId
       || response.topologyId !== scope.topologyId
-      || response.dutIdentityValue !== request.dutIdentityValue
+      || response.productionLineDefinitionId.length === 0
+      || response.productionUnitIdentityValue !== request.productionUnitIdentityValue
       || response.actorId !== request.actorId
-      || response.batchId !== (request.batchId ?? null)
-      || response.fixtureId !== (request.fixtureId ?? null)
-      || response.deviceId !== (request.deviceId ?? null)
-      || response.isTerminal !== ['Completed', 'Failed', 'Canceled'].includes(response.status)) {
-    throw new Error('Production run response identity did not exactly match the start request.');
+      || response.lotId !== (request.lotId ?? null)
+      || response.carrierId !== (request.carrierId ?? null)
+      || response.isTerminal !== terminalExecutionStatuses.has(response.executionStatus)) {
+    throw new Error('Production run response identity did not exactly match the submit request.');
   }
 }
 

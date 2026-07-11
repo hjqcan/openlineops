@@ -19,14 +19,15 @@ public static class RunnerEntrypoint
         OpenLineOps Runner - one-shot immutable Production Line execution
 
         Usage:
-          OpenLineOps.Runner run <project-directory-or-.oloproj> --dut <identity> --actor <actor-id> [--snapshot <id|active>] [--run-id <guid>] [--batch <value>] [--fixture <value>] [--device <value>]
+          OpenLineOps.Runner run <project-directory-or-.oloproj> --production-unit <identity> --actor <actor-id> [--snapshot <id|active>] [--run-id <guid>] [--lot <value>] [--carrier <value>] [--slot <value>] [--fixture <value>] [--device <value>]
 
         Notes:
           --snapshot defaults to "active".
           --run-id defaults to a newly generated Production Run id; provide it to make retries idempotent.
           Runtime configuration uses appsettings.json, appsettings.<environment>.json, and environment variables.
-          Every Production stage executes from the immutable release; editable application source is never a fallback.
-          The IDE and Runner share one project execution lease; interrupted Runs are terminalized before the next launch.
+          Every Operation executes through its Station Agent from the signed immutable package.
+          Concurrent products coordinate through Station, Slot, Fixture, and Device fencing leases.
+          Interrupted non-idempotent hardware work enters RecoveryRequired and is never replayed automatically.
 
         Stable exit codes:
           0   completed successfully
@@ -169,11 +170,6 @@ public static class RunnerEntrypoint
             .AddEnvironmentVariables()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OpenLineOps:Runtime:Persistence:Provider"] = "Sqlite",
-                ["OpenLineOps:Runtime:Persistence:ConnectionString"] = null,
-                ["OpenLineOps:Runtime:Persistence:DatabasePath"] = Path.Combine(
-                    runnerDataDirectory,
-                    "openlineops-runtime.sqlite"),
                 ["OpenLineOps:Traceability:Persistence:Provider"] = "Sqlite",
                 ["OpenLineOps:Traceability:Persistence:ConnectionString"] = null,
                 ["OpenLineOps:Traceability:Persistence:DatabasePath"] = Path.Combine(

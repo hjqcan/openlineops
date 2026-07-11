@@ -1,22 +1,16 @@
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using OpenLineOps.Devices.Application.Execution;
+using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Devices.Infrastructure.Execution;
 
 public static class ProjectReleaseExternalTestProgramCommandExecutor
 {
-    private const int MaximumCapturedOutputCharacters = 4 * 1024 * 1024;
-    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
-        ? StringComparison.OrdinalIgnoreCase
-        : StringComparison.Ordinal;
-
     public static async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
         RuntimeCommandExecutionContext context,
         ProjectReleaseExternalTestProgramCommandRoute route,
@@ -25,11 +19,13 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             ProjectReleaseRuntimeCommandRoute,
             CancellationToken,
             ValueTask<RuntimeCommandExecutionResult>> providerExecutor,
+        IExternalProgramHost externalProgramHost,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(providerExecutor);
+        ArgumentNullException.ThrowIfNull(externalProgramHost);
 
         if (cancellationToken.IsCancellationRequested)
         {
@@ -44,6 +40,7 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
         }
 
         RuntimeCommandExecutionResult executionResult;
+        IReadOnlyCollection<ExternalProgramArtifact>? externalArtifacts = null;
         if (string.Equals(
                 route.LaunchKind,
                 ProjectReleaseExternalTestProgramLaunchKinds.ApplicationExecutable,
@@ -58,12 +55,22 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                     $"External test program '{route.AdapterId}' has an invalid executable route.");
             }
 
-            executionResult = await ExecuteApplicationAsync(
-                    route,
-                    invocation.Payload!,
-                    invocation.Arguments!,
+            var hostResult = await externalProgramHost.ExecuteAsync(
+                    new ExternalProgramExecutionRequest(
+                        route.AdapterId,
+                        context.ProductionRunId.Value,
+                        context.CommandId.Value,
+                        route.ReleaseApplicationRootPath,
+                        route.Executable,
+                        route.ExecutableSizeBytes.Value,
+                        route.ExecutableSha256,
+                        invocation.Arguments!,
+                        invocation.Payload!,
+                        TimeSpan.FromMilliseconds(route.TimeoutMilliseconds)),
                     cancellationToken)
                 .ConfigureAwait(false);
+            externalArtifacts = hostResult.Artifacts;
+            executionResult = ToRuntimeResult(hostResult);
         }
         else if (string.Equals(
                      route.LaunchKind,
@@ -95,173 +102,23 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                 $"External test program '{route.AdapterId}' has unsupported launch kind '{route.LaunchKind}'.");
         }
 
-        if (executionResult.SemanticOutcome is not null)
+        var resultAxisIsValid = executionResult.Outcome == RuntimeCommandExecutionOutcome.Completed
+            ? executionResult.ResultJudgement == ResultJudgement.NotApplicable
+            : executionResult.ResultJudgement == ResultJudgement.Unknown;
+        if (!resultAxisIsValid)
         {
             return RuntimeCommandExecutionResult.Failed(
-                $"External test program '{route.AdapterId}' provider returned a semantic outcome before the frozen adapter mapping was applied.");
+                $"External test program '{route.AdapterId}' provider returned a result judgement before the frozen adapter mapping was applied.");
         }
 
-        return executionResult.Outcome == RuntimeCommandExecutionOutcome.Completed
-            ? MapCompletedResult(route, executionResult.Payload)
-            : executionResult;
-    }
-
-    private static async ValueTask<RuntimeCommandExecutionResult> ExecuteApplicationAsync(
-        ProjectReleaseExternalTestProgramCommandRoute route,
-        string invocationPayload,
-        IReadOnlyCollection<string> arguments,
-        CancellationToken cancellationToken)
-    {
-        string executablePath;
-        try
+        if (executionResult.Outcome == RuntimeCommandExecutionOutcome.Completed)
         {
-            executablePath = ResolveExecutablePath(
-                route.ReleaseApplicationRootPath,
-                route.Executable!);
-        }
-        catch (Exception exception) when (exception is ArgumentException
-                                          or InvalidDataException
-                                          or IOException
-                                          or UnauthorizedAccessException
-                                          or NotSupportedException)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                $"External test program '{route.AdapterId}' executable route is invalid: {exception.Message}");
+            executionResult = MapCompletedResult(route, executionResult.Payload);
         }
 
-        if (route.TimeoutMilliseconds <= 0 || route.TimeoutMilliseconds > int.MaxValue)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                $"External test program '{route.AdapterId}' timeout is outside the supported range.");
-        }
-
-        try
-        {
-            var verificationError = await VerifyFrozenExecutableAsync(
-                    executablePath,
-                    route.ExecutableSizeBytes!.Value,
-                    route.ExecutableSha256!,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (verificationError is not null)
-            {
-                return RuntimeCommandExecutionResult.Rejected(
-                    $"External test program '{route.AdapterId}' frozen executable is invalid: "
-                    + verificationError);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            return RuntimeCommandExecutionResult.Canceled(
-                $"External test program '{route.AdapterId}' was canceled before launch.");
-        }
-        catch (Exception exception) when (exception is IOException
-                                          or UnauthorizedAccessException
-                                          or NotSupportedException)
-        {
-            return RuntimeCommandExecutionResult.Rejected(
-                $"External test program '{route.AdapterId}' frozen executable could not be verified: "
-                + exception.Message);
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = executablePath,
-            WorkingDirectory = Path.GetFullPath(route.ReleaseApplicationRootPath),
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using var process = new Process { StartInfo = startInfo };
-        try
-        {
-            if (!process.Start())
-            {
-                return RuntimeCommandExecutionResult.Failed(
-                    $"External test program '{route.AdapterId}' could not be started.");
-            }
-        }
-        catch (Exception exception) when (exception is Win32Exception
-                                          or InvalidOperationException
-                                          or IOException
-                                          or UnauthorizedAccessException)
-        {
-            return RuntimeCommandExecutionResult.Failed(
-                $"External test program '{route.AdapterId}' could not be started: {exception.Message}");
-        }
-
-        var standardOutputTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-        var standardErrorTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
-        using var timeoutCancellation = new CancellationTokenSource(
-            TimeSpan.FromMilliseconds(route.TimeoutMilliseconds));
-        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            timeoutCancellation.Token);
-
-        try
-        {
-            await process.StandardInput
-                .WriteAsync(invocationPayload.AsMemory(), executionCancellation.Token)
-                .ConfigureAwait(false);
-            process.StandardInput.Close();
-            await process.WaitForExitAsync(executionCancellation.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            TryTerminate(process);
-            await WaitForTerminationAsync(process).ConfigureAwait(false);
-            var canceledOutput = await standardOutputTask.ConfigureAwait(false);
-            var canceledError = await standardErrorTask.ConfigureAwait(false);
-            _ = canceledOutput;
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return RuntimeCommandExecutionResult.Canceled(
-                    $"External test program '{route.AdapterId}' was canceled."
-                    + FormatStandardError(canceledError));
-            }
-
-            return RuntimeCommandExecutionResult.TimedOut(
-                $"External test program '{route.AdapterId}' exceeded its frozen timeout of "
-                + $"{route.TimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)} ms."
-                + FormatStandardError(canceledError));
-        }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
-        {
-            TryTerminate(process);
-            await WaitForTerminationAsync(process).ConfigureAwait(false);
-            return RuntimeCommandExecutionResult.Failed(
-                $"External test program '{route.AdapterId}' execution failed: {exception.Message}");
-        }
-
-        var standardOutput = await standardOutputTask.ConfigureAwait(false);
-        var standardError = await standardErrorTask.ConfigureAwait(false);
-        if (standardOutput.Length > MaximumCapturedOutputCharacters
-            || standardError.Length > MaximumCapturedOutputCharacters)
-        {
-            return RuntimeCommandExecutionResult.Failed(
-                $"External test program '{route.AdapterId}' exceeded the captured output limit.");
-        }
-
-        if (process.ExitCode != 0)
-        {
-            return RuntimeCommandExecutionResult.Failed(
-                $"External test program '{route.AdapterId}' exited with code "
-                + $"{process.ExitCode.ToString(CultureInfo.InvariantCulture)}."
-                + FormatStandardError(standardError));
-        }
-
-        return RuntimeCommandExecutionResult.Completed(standardOutput);
+        return externalArtifacts is null
+            ? executionResult
+            : AttachEvidence(executionResult, externalArtifacts);
     }
 
     private static ExternalTestInvocation CreateInvocation(
@@ -272,16 +129,16 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             || !IsCanonical(route.LaunchKind)
             || !IsCanonical(route.ProviderKind)
             || !IsCanonical(route.ProviderKey)
-            || !IsCanonical(route.DutModelId)
-            || !IsCanonical(route.DutModelCode)
-            || !IsCanonical(route.DutIdentityInputKey)
+            || !IsCanonical(route.ProductModelId)
+            || !IsCanonical(route.ProductModelCode)
+            || !IsCanonical(route.ProductionUnitIdentityInputKey)
             || !string.Equals(
-                context.DutIdentity.ModelId,
-                route.DutModelId,
+                context.ProductionUnitIdentity.ModelId,
+                route.ProductModelId,
                 StringComparison.Ordinal)
             || !string.Equals(
-                context.DutIdentity.InputKey,
-                route.DutIdentityInputKey,
+                context.ProductionUnitIdentity.InputKey,
+                route.ProductionUnitIdentityInputKey,
                 StringComparison.Ordinal)
             || route.ArgumentTemplates is null
             || route.InputMappings is null
@@ -321,15 +178,15 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
 
         if (!route.InputMappings.Any(mapping => string.Equals(
                 mapping.Source,
-                "$dut.identity",
+                "$product.identity",
                 StringComparison.Ordinal))
             || !route.InputMappings.Any(mapping => string.Equals(
                 mapping.Source,
-                "$dut.model",
+                "$product.model",
                 StringComparison.Ordinal)))
         {
             return ExternalTestInvocation.Failure(
-                $"External test program '{route.AdapterId}' must map DUT identity and model.");
+                $"External test program '{route.AdapterId}' must map Production Unit identity and product model.");
         }
 
         foreach (var input in mappedInputs)
@@ -371,14 +228,17 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                 ProjectReleaseExternalTestProgramContract.InvocationSchema);
             writer.WriteString("productionRunId", context.ProductionRunId.ToString());
             writer.WriteString("productionLineDefinitionId", context.ProductionLineDefinitionId);
-            writer.WriteString("productionStageId", context.ProductionStageId);
-            writer.WriteNumber("stageSequence", context.StageSequence);
-            writer.WriteString("workstationId", context.WorkstationId);
+            writer.WriteString("operationId", context.OperationId);
+            writer.WriteNumber("operationAttempt", context.OperationAttempt);
+            writer.WriteString("stationSystemId", context.StationSystemId);
             writer.WriteString("runtimeSessionId", context.SessionId.ToString());
             writer.WriteString("projectId", context.ProjectId);
             writer.WriteString("applicationId", context.ApplicationId);
             writer.WriteString("projectSnapshotId", context.ProjectSnapshotId);
-            writer.WriteString("stationId", context.StationId.Value);
+            writer.WriteString("lotId", context.LotId);
+            writer.WriteString("carrierId", context.CarrierId);
+            writer.WriteString("fixtureId", context.FixtureId);
+            writer.WriteString("deviceId", context.DeviceId);
             writer.WriteString("configurationSnapshotId", context.ConfigurationSnapshotId.Value);
             writer.WriteString("runtimeStepId", context.StepId.ToString());
             writer.WriteString("runtimeCommandId", context.CommandId.ToString());
@@ -390,11 +250,11 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             writer.WriteString("kind", context.TargetKind);
             writer.WriteString("id", context.TargetId);
             writer.WriteEndObject();
-            writer.WriteStartObject("dut");
-            writer.WriteString("modelId", context.DutIdentity.ModelId);
-            writer.WriteString("modelCode", route.DutModelCode);
-            writer.WriteString("identityInputKey", context.DutIdentity.InputKey);
-            writer.WriteString("identityValue", context.DutIdentity.Value);
+            writer.WriteStartObject("productionUnit");
+            writer.WriteString("modelId", context.ProductionUnitIdentity.ModelId);
+            writer.WriteString("modelCode", route.ProductModelCode);
+            writer.WriteString("identityInputKey", context.ProductionUnitIdentity.InputKey);
+            writer.WriteString("identityValue", context.ProductionUnitIdentity.Value);
             writer.WriteEndObject();
             writer.WriteStartObject("inputs");
             foreach (var input in mappedInputs.OrderBy(item => item.Key, StringComparer.Ordinal))
@@ -422,18 +282,17 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
         RuntimeCommandExecutionContext context,
         ProjectReleaseExternalTestProgramCommandRoute route)
     {
-        return new Dictionary<string, TokenValue>(StringComparer.Ordinal)
+        var values = new Dictionary<string, TokenValue>(StringComparer.Ordinal)
         {
-            ["dut.identity"] = TokenValue.Text(context.DutIdentity.Value),
-            ["dut.model"] = TokenValue.Text(route.DutModelCode),
-            ["dut.inputKey"] = TokenValue.Text(context.DutIdentity.InputKey),
+            ["product.identity"] = TokenValue.Text(context.ProductionUnitIdentity.Value),
+            ["product.model"] = TokenValue.Text(route.ProductModelCode),
+            ["product.inputKey"] = TokenValue.Text(context.ProductionUnitIdentity.InputKey),
             ["run.id"] = TokenValue.Text(context.ProductionRunId.ToString()),
             ["line.id"] = TokenValue.Text(context.ProductionLineDefinitionId),
-            ["stage.id"] = TokenValue.Text(context.ProductionStageId),
-            ["stage.sequence"] = TokenValue.Number(context.StageSequence),
-            ["workstation.id"] = TokenValue.Text(context.WorkstationId),
+            ["operation.id"] = TokenValue.Text(context.OperationId),
+            ["operation.attempt"] = TokenValue.Number(context.OperationAttempt),
             ["session.id"] = TokenValue.Text(context.SessionId.ToString()),
-            ["station.id"] = TokenValue.Text(context.StationId.Value),
+            ["station.id"] = TokenValue.Text(context.StationSystemId),
             ["configuration.id"] = TokenValue.Text(context.ConfigurationSnapshotId.Value),
             ["step.id"] = TokenValue.Text(context.StepId.ToString()),
             ["command.id"] = TokenValue.Text(context.CommandId.ToString()),
@@ -447,6 +306,22 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             ["target.kind"] = TokenValue.Text(context.TargetKind),
             ["target.id"] = TokenValue.Text(context.TargetId)
         };
+        AddOptional(values, "lot.id", context.LotId);
+        AddOptional(values, "carrier.id", context.CarrierId);
+        AddOptional(values, "fixture.id", context.FixtureId);
+        AddOptional(values, "device.id", context.DeviceId);
+        return values;
+    }
+
+    private static void AddOptional(
+        IDictionary<string, TokenValue> values,
+        string key,
+        string? value)
+    {
+        if (value is not null)
+        {
+            values.Add(key, TokenValue.Text(value));
+        }
     }
 
     private static RenderedArgument RenderArgument(
@@ -527,6 +402,10 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             foreach (var mapping in route.ResultMappings)
             {
                 if (!IsCanonical(mapping.TargetKey)
+                    || string.Equals(
+                        mapping.TargetKey,
+                        RuntimeCommandEvidencePayload.PropertyName,
+                        StringComparison.Ordinal)
                     || !targetKeys.Add(mapping.TargetKey)
                     || !TryResolveResultPath(
                         document.RootElement,
@@ -568,7 +447,7 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                     route.OutcomeMapping.PassedToken,
                     StringComparison.Ordinal))
             {
-                return RuntimeCommandExecutionResult.SemanticPassed(mappedPayload);
+                return RuntimeCommandExecutionResult.Completed(mappedPayload, ResultJudgement.Passed);
             }
 
             if (string.Equals(
@@ -576,9 +455,7 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                     route.OutcomeMapping.FailedToken,
                     StringComparison.Ordinal))
             {
-                return RuntimeCommandExecutionResult.SemanticFailed(
-                    $"External test program '{route.AdapterId}' reported a failed judgement.",
-                    mappedPayload);
+                return RuntimeCommandExecutionResult.Completed(mappedPayload, ResultJudgement.Failed);
             }
 
             if (string.Equals(
@@ -586,9 +463,7 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
                     route.OutcomeMapping.AbortedToken,
                     StringComparison.Ordinal))
             {
-                return RuntimeCommandExecutionResult.SemanticAborted(
-                    $"External test program '{route.AdapterId}' reported an aborted judgement.",
-                    mappedPayload);
+                return RuntimeCommandExecutionResult.Completed(mappedPayload, ResultJudgement.Aborted);
             }
 
             return RuntimeCommandExecutionResult.Failed(
@@ -676,11 +551,14 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             context.SessionId,
             context.ProductionRunId,
             context.ProductionLineDefinitionId,
-            context.ProductionStageId,
-            context.StageSequence,
-            context.WorkstationId,
-            context.DutIdentity,
-            context.StationId,
+            context.OperationId,
+            context.OperationAttempt,
+            context.StationSystemId,
+            context.ProductionUnitIdentity,
+            context.LotId,
+            context.CarrierId,
+            context.FixtureId,
+            context.DeviceId,
             context.ConfigurationSnapshotId,
             context.StepId,
             context.CommandId,
@@ -697,103 +575,100 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             context.ProjectSnapshotId);
     }
 
-    private static string ResolveExecutablePath(string applicationRootPath, string executable)
+    private static RuntimeCommandExecutionResult ToRuntimeResult(
+        ExternalProgramExecutionResult result)
     {
-        if (!IsCanonical(applicationRootPath)
-            || !Path.IsPathFullyQualified(applicationRootPath)
-            || !IsCanonical(executable)
-            || Path.IsPathRooted(executable)
-            || executable.Contains('\\')
-            || executable.Split('/').Length < 2
-            || !string.Equals(executable.Split('/')[0], "programs", StringComparison.Ordinal)
-            || executable.Split('/').Any(segment => segment is "" or "." or ".."))
+        return result.ExecutionStatus switch
         {
-            throw new InvalidDataException(
-                "External test executable must be a canonical programs/ Application-relative path.");
-        }
-
-        var root = Path.GetFullPath(applicationRootPath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (!Directory.Exists(root))
-        {
-            throw new DirectoryNotFoundException(
-                $"Frozen Application directory '{root}' does not exist.");
-        }
-
-        var rootPrefix = root + Path.DirectorySeparatorChar;
-        var executablePath = Path.GetFullPath(Path.Combine(
-            root,
-            executable.Replace('/', Path.DirectorySeparatorChar)));
-        if (!executablePath.StartsWith(rootPrefix, PathComparison)
-            || !File.Exists(executablePath))
-        {
-            throw new FileNotFoundException(
-                "Frozen external test executable does not exist inside the release Application.",
-                executablePath);
-        }
-
-        RejectReparsePoints(root, executablePath);
-        return executablePath;
+            ExecutionStatus.Completed =>
+                RuntimeCommandExecutionResult.Completed(result.StandardOutput),
+            ExecutionStatus.Failed =>
+                RuntimeCommandExecutionResult.Failed(
+                    result.FailureReason ?? "External program execution failed."),
+            ExecutionStatus.TimedOut =>
+                RuntimeCommandExecutionResult.TimedOut(
+                    result.FailureReason ?? "External program execution timed out."),
+            ExecutionStatus.Canceled =>
+                RuntimeCommandExecutionResult.Canceled(
+                    result.FailureReason ?? "External program execution was canceled."),
+            ExecutionStatus.Rejected =>
+                RuntimeCommandExecutionResult.Rejected(
+                    result.FailureReason ?? "External program execution was rejected."),
+            _ => RuntimeCommandExecutionResult.Failed(
+                $"External program host returned non-terminal status '{result.ExecutionStatus}'.")
+        };
     }
 
-    private static async ValueTask<string?> VerifyFrozenExecutableAsync(
-        string executablePath,
-        long expectedSizeBytes,
-        string expectedSha256,
-        CancellationToken cancellationToken)
+    private static RuntimeCommandExecutionResult AttachEvidence(
+        RuntimeCommandExecutionResult result,
+        IReadOnlyCollection<ExternalProgramArtifact> artifacts)
     {
-        if (expectedSizeBytes < 0 || !IsLowercaseSha256(expectedSha256))
+        if (result.Outcome == RuntimeCommandExecutionOutcome.Rejected && artifacts.Count == 0)
         {
-            return "release file identity is not canonical";
+            return result;
         }
 
-        var fileInfo = new FileInfo(executablePath);
-        if (fileInfo.Length != expectedSizeBytes)
+        string payload;
+        try
         {
-            return $"size is {fileInfo.Length.ToString(CultureInfo.InvariantCulture)} bytes, expected "
-                   + $"{expectedSizeBytes.ToString(CultureInfo.InvariantCulture)} bytes";
+            payload = RuntimeCommandEvidencePayload.Attach(
+                result.Payload,
+                ToExecutionStatus(result.Outcome),
+                result.ResultJudgement,
+                artifacts.Select(artifact => new RuntimeCommandArtifactEvidence(
+                        artifact.Name,
+                        artifact.Kind.ToString(),
+                        artifact.StorageKey,
+                        artifact.MediaType,
+                        artifact.SizeBytes,
+                        artifact.Sha256))
+                    .ToArray());
+        }
+        catch (Exception exception) when (exception is ArgumentException
+                                          or InvalidDataException
+                                          or JsonException)
+        {
+            return RuntimeCommandExecutionResult.Failed(
+                $"External program evidence is invalid: {exception.Message}");
         }
 
-        await using var stream = new FileStream(
-            executablePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            bufferSize: 64 * 1024,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var actualSha256 = Convert.ToHexString(
-                await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false))
-            .ToLowerInvariant();
-        return string.Equals(actualSha256, expectedSha256, StringComparison.Ordinal)
-            ? null
-            : "SHA-256 does not match the immutable release manifest";
-    }
-
-    private static bool IsLowercaseSha256(string value)
-    {
-        return value.Length == 64
-               && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
-    }
-
-    private static void RejectReparsePoints(string root, string filePath)
-    {
-        if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
+        return result.Outcome switch
         {
-            throw new InvalidDataException("Frozen Application root cannot be a reparse point.");
-        }
-
-        var currentPath = root;
-        foreach (var segment in Path.GetRelativePath(root, filePath).Split(
-                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            currentPath = Path.Combine(currentPath, segment);
-            if ((File.GetAttributes(currentPath) & FileAttributes.ReparsePoint) != 0)
+            RuntimeCommandExecutionOutcome.Completed => result.ResultJudgement switch
             {
-                throw new InvalidDataException(
-                    "Frozen external test executable cannot traverse a reparse point.");
-            }
-        }
+                ResultJudgement.Passed =>
+                    RuntimeCommandExecutionResult.Completed(payload, ResultJudgement.Passed),
+                ResultJudgement.Failed =>
+                    RuntimeCommandExecutionResult.Completed(payload, ResultJudgement.Failed),
+                ResultJudgement.Aborted =>
+                    RuntimeCommandExecutionResult.Completed(payload, ResultJudgement.Aborted),
+                ResultJudgement.NotApplicable => RuntimeCommandExecutionResult.Completed(payload),
+                _ => RuntimeCommandExecutionResult.Failed("External program judgement is unsupported.", payload)
+            },
+            RuntimeCommandExecutionOutcome.Failed => RuntimeCommandExecutionResult.Failed(
+                result.Reason ?? "External program execution failed.",
+                payload),
+            RuntimeCommandExecutionOutcome.TimedOut => RuntimeCommandExecutionResult.TimedOut(
+                result.Reason ?? "External program execution timed out.",
+                payload),
+            RuntimeCommandExecutionOutcome.Canceled => RuntimeCommandExecutionResult.Canceled(
+                result.Reason ?? "External program execution was canceled.",
+                payload),
+            _ => result
+        };
+    }
+
+    private static ExecutionStatus ToExecutionStatus(RuntimeCommandExecutionOutcome outcome)
+    {
+        return outcome switch
+        {
+            RuntimeCommandExecutionOutcome.Completed => ExecutionStatus.Completed,
+            RuntimeCommandExecutionOutcome.Failed => ExecutionStatus.Failed,
+            RuntimeCommandExecutionOutcome.Rejected => ExecutionStatus.Rejected,
+            RuntimeCommandExecutionOutcome.TimedOut => ExecutionStatus.TimedOut,
+            RuntimeCommandExecutionOutcome.Canceled => ExecutionStatus.Canceled,
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "Unsupported execution status.")
+        };
     }
 
     private static bool IsCanonical(string? value)
@@ -812,49 +687,6 @@ public static class ProjectReleaseExternalTestProgramCommandExecutor
             && !string.Equals(mapping.PassedToken, mapping.FailedToken, StringComparison.Ordinal)
             && !string.Equals(mapping.PassedToken, mapping.AbortedToken, StringComparison.Ordinal)
             && !string.Equals(mapping.FailedToken, mapping.AbortedToken, StringComparison.Ordinal);
-    }
-
-    private static string FormatStandardError(string standardError)
-    {
-        if (string.IsNullOrWhiteSpace(standardError))
-        {
-            return string.Empty;
-        }
-
-        var captured = standardError.Length <= 2048
-            ? standardError
-            : standardError[..2048];
-        return $" Standard error: {captured}";
-    }
-
-    private static void TryTerminate(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-                                          or Win32Exception
-                                          or NotSupportedException)
-        {
-            _ = exception;
-        }
-    }
-
-    private static async Task WaitForTerminationAsync(Process process)
-    {
-        try
-        {
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-                                          or Win32Exception)
-        {
-            _ = exception;
-        }
     }
 
     private sealed record ExternalTestInvocation(

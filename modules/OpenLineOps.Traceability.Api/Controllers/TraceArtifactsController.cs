@@ -8,7 +8,7 @@ using OpenLineOps.Traceability.Application.Artifacts;
 namespace OpenLineOps.Traceability.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.TraceabilityV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Traceability)]
 [Route(OpenLineOpsApiRoutes.Traceability + "/artifacts")]
 public sealed class TraceArtifactsController : ControllerBase
 {

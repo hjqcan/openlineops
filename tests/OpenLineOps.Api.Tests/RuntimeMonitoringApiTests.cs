@@ -68,22 +68,22 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
                 "actionId",
                 "applicationId",
                 "commandStatus",
-                "dutIdentity",
                 "failureReason",
                 "isTerminal",
                 "lastTransitionAtUtc",
+                "operationAttempt",
+                "operationId",
                 "productionLineDefinitionId",
                 "productionRunId",
+                "productionUnitIdentity",
                 "projectId",
                 "projectSnapshotId",
+                "runtimeStationId",
                 "sessionId",
-                "stageId",
-                "stageSequence",
                 "stationSystemId",
                 "targetId",
                 "targetKind",
-                "topologyId",
-                "workstationId"
+                "topologyId"
             ],
             target.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal)));
         AssertTargetResponse(
@@ -127,10 +127,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal($"topology-{suffix}", station.GetProperty("topologyId").GetString());
         Assert.Equal(ProductionRunGuid(suffix), station.GetProperty("productionRunId").GetGuid());
         Assert.Equal($"line-{suffix}", station.GetProperty("productionLineDefinitionId").GetString());
-        Assert.Equal($"stage-{suffix}", station.GetProperty("stageId").GetString());
-        Assert.Equal(1, station.GetProperty("stageSequence").GetInt32());
-        Assert.Equal($"workstation-{suffix}", station.GetProperty("workstationId").GetString());
-        AssertDutIdentity(station.GetProperty("dutIdentity"), suffix);
+        Assert.Equal($"operation-{suffix}", station.GetProperty("operationId").GetString());
+        Assert.Equal(1, station.GetProperty("operationAttempt").GetInt32());
+        Assert.Equal(stationSystemId, station.GetProperty("runtimeStationId").GetString());
+        AssertProductionUnitIdentity(station.GetProperty("productionUnitIdentity"), suffix);
         Assert.False(station.TryGetProperty("stationId", out _));
         Assert.False(station.TryGetProperty("serialNumber", out _));
 
@@ -157,10 +157,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal(stationSystemId, timelineEntry.GetProperty("stationSystemId").GetString());
         Assert.Equal(ProductionRunGuid(suffix), timelineEntry.GetProperty("productionRunId").GetGuid());
         Assert.Equal($"line-{suffix}", timelineEntry.GetProperty("productionLineDefinitionId").GetString());
-        Assert.Equal($"stage-{suffix}", timelineEntry.GetProperty("stageId").GetString());
-        Assert.Equal(1, timelineEntry.GetProperty("stageSequence").GetInt32());
-        Assert.Equal($"workstation-{suffix}", timelineEntry.GetProperty("workstationId").GetString());
-        AssertDutIdentity(timelineEntry.GetProperty("dutIdentity"), suffix);
+        Assert.Equal($"operation-{suffix}", timelineEntry.GetProperty("operationId").GetString());
+        Assert.Equal(1, timelineEntry.GetProperty("operationAttempt").GetInt32());
+        Assert.Equal(stationSystemId, timelineEntry.GetProperty("runtimeStationId").GetString());
+        AssertProductionUnitIdentity(timelineEntry.GetProperty("productionUnitIdentity"), suffix);
         Assert.False(timelineEntry.TryGetProperty("stationId", out _));
         Assert.False(timelineEntry.TryGetProperty("serialNumber", out _));
 
@@ -263,12 +263,12 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal($"topology-{suffix}", stationStatus.TopologyId);
         Assert.Equal(ProductionRunGuid(suffix), stationStatus.ProductionRunId);
         Assert.Equal($"line-{suffix}", stationStatus.ProductionLineDefinitionId);
-        Assert.Equal($"stage-{suffix}", stationStatus.StageId);
-        Assert.Equal(1, stationStatus.StageSequence);
-        Assert.Equal($"workstation-{suffix}", stationStatus.WorkstationId);
-        Assert.Equal($"dut-model-{suffix}", stationStatus.DutIdentity.ModelId);
-        Assert.Equal("serialNumber", stationStatus.DutIdentity.InputKey);
-        Assert.Equal($"DUT-{suffix}", stationStatus.DutIdentity.Value);
+        Assert.Equal($"operation-{suffix}", stationStatus.OperationId);
+        Assert.Equal(1, stationStatus.OperationAttempt);
+        Assert.Equal(stationSystemId, stationStatus.RuntimeStationId);
+        Assert.Equal($"product-model-{suffix}", stationStatus.ProductionUnitIdentity.ModelId);
+        Assert.Equal("serialNumber", stationStatus.ProductionUnitIdentity.InputKey);
+        Assert.Equal($"UNIT-{suffix}", stationStatus.ProductionUnitIdentity.Value);
         Assert.Equal(stationSystemId, failedTarget.StationSystemId);
         Assert.Equal(sessionId, failedTarget.SessionId);
         Assert.Equal(stationStatus.ProjectId, failedTarget.ProjectId);
@@ -277,10 +277,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal(stationStatus.TopologyId, failedTarget.TopologyId);
         Assert.Equal(stationStatus.ProductionRunId, failedTarget.ProductionRunId);
         Assert.Equal(stationStatus.ProductionLineDefinitionId, failedTarget.ProductionLineDefinitionId);
-        Assert.Equal(stationStatus.StageId, failedTarget.StageId);
-        Assert.Equal(stationStatus.StageSequence, failedTarget.StageSequence);
-        Assert.Equal(stationStatus.WorkstationId, failedTarget.WorkstationId);
-        Assert.Equal(stationStatus.DutIdentity, failedTarget.DutIdentity);
+        Assert.Equal(stationStatus.OperationId, failedTarget.OperationId);
+        Assert.Equal(stationStatus.OperationAttempt, failedTarget.OperationAttempt);
+        Assert.Equal(stationStatus.RuntimeStationId, failedTarget.RuntimeStationId);
+        Assert.Equal(stationStatus.ProductionUnitIdentity, failedTarget.ProductionUnitIdentity);
         Assert.Equal("slot execution failed", failedTarget.FailureReason);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.System
@@ -349,7 +349,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             new ConfigurationSnapshotId($"configuration-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
             DateTimeOffset.UtcNow,
-            CreateTraceMetadata(suffix));
+            CreateTraceMetadata(stationSystemId, suffix));
         var transitionAtUtc = DateTimeOffset.UtcNow;
         session.Start(transitionAtUtc);
 
@@ -405,7 +405,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             new ConfigurationSnapshotId($"configuration-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
             DateTimeOffset.UtcNow,
-            CreateTraceMetadata(suffix));
+            CreateTraceMetadata(stationSystemId, suffix));
         var transitionAtUtc = DateTimeOffset.UtcNow;
         session.Start(transitionAtUtc);
         var step = session.StartStep(
@@ -497,10 +497,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Equal(commandStatus, target.GetProperty("commandStatus").GetString());
         Assert.Equal(ProductionRunGuid(suffix), target.GetProperty("productionRunId").GetGuid());
         Assert.Equal($"line-{suffix}", target.GetProperty("productionLineDefinitionId").GetString());
-        Assert.Equal($"stage-{suffix}", target.GetProperty("stageId").GetString());
-        Assert.Equal(1, target.GetProperty("stageSequence").GetInt32());
-        Assert.Equal($"workstation-{suffix}", target.GetProperty("workstationId").GetString());
-        AssertDutIdentity(target.GetProperty("dutIdentity"), suffix);
+        Assert.Equal($"operation-{suffix}", target.GetProperty("operationId").GetString());
+        Assert.Equal(1, target.GetProperty("operationAttempt").GetInt32());
+        Assert.Equal(target.GetProperty("stationSystemId").GetString(), target.GetProperty("runtimeStationId").GetString());
+        AssertProductionUnitIdentity(target.GetProperty("productionUnitIdentity"), suffix);
         Assert.True(target.GetProperty("isTerminal").GetBoolean());
         Assert.Equal(failureReason, target.GetProperty("failureReason").GetString());
     }
@@ -511,15 +511,18 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         return await JsonDocument.ParseAsync(stream);
     }
 
-    private static RuntimeSessionTraceMetadata CreateTraceMetadata(string suffix)
+    private static RuntimeSessionTraceMetadata CreateTraceMetadata(
+        string stationSystemId,
+        string suffix)
     {
         return new RuntimeSessionTraceMetadata(
             new ProductionRunId(ProductionRunGuid(suffix)),
             $"line-{suffix}",
-            $"stage-{suffix}",
+            $"operation-{suffix}",
             1,
-            $"workstation-{suffix}",
-            new DutIdentity($"dut-model-{suffix}", "serialNumber", $"DUT-{suffix}"),
+            stationSystemId,
+            new ProductionUnitIdentity($"product-model-{suffix}", "serialNumber", $"UNIT-{suffix}"),
+            null,
             null,
             null,
             null,
@@ -539,10 +542,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         return Guid.ParseExact(guidText, "N");
     }
 
-    private static void AssertDutIdentity(JsonElement dutIdentity, string suffix)
+    private static void AssertProductionUnitIdentity(JsonElement productionUnitIdentity, string suffix)
     {
-        Assert.Equal($"dut-model-{suffix}", dutIdentity.GetProperty("modelId").GetString());
-        Assert.Equal("serialNumber", dutIdentity.GetProperty("inputKey").GetString());
-        Assert.Equal($"DUT-{suffix}", dutIdentity.GetProperty("value").GetString());
+        Assert.Equal($"product-model-{suffix}", productionUnitIdentity.GetProperty("modelId").GetString());
+        Assert.Equal("serialNumber", productionUnitIdentity.GetProperty("inputKey").GetString());
+        Assert.Equal($"UNIT-{suffix}", productionUnitIdentity.GetProperty("value").GetString());
     }
 }

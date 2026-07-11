@@ -1,8 +1,14 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using OpenLineOps.Domain.Abstractions.Events;
+using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
@@ -49,30 +55,39 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
         ProductionRunSnapshot run,
         CancellationToken cancellationToken)
     {
-        if (run.Status is not (ProductionRunStatus.Completed
-            or ProductionRunStatus.Failed
-            or ProductionRunStatus.Canceled)
-            || run.CompletedAtUtc is null)
+        if (!IsTerminal(run.ExecutionStatus) || run.CompletedAtUtc is null)
         {
             throw new InvalidOperationException(
-                $"Production run terminal event {run.RunId} does not contain terminal state.");
+                $"Production Run terminal event {run.RunId} does not contain terminal state.");
         }
 
-        var stages = new List<CreateTraceStageExecutionRequest>(run.Stages.Count);
-        foreach (var stage in run.Stages.OrderBy(stage => stage.Sequence))
+        var operations = new List<CreateTraceOperationExecutionRequest>(run.Operations.Count);
+        foreach (var operation in run.Operations
+                     .OrderBy(candidate => candidate.StartedAtUtc)
+                     .ThenBy(candidate => candidate.OperationRunId, StringComparer.Ordinal))
         {
             RuntimeSession? session = null;
-            if (stage.RuntimeSessionId is not null)
+            if (operation.RuntimeSessionId is not null)
             {
                 session = await _runtimeSessionRepository
-                    .GetByIdAsync(stage.RuntimeSessionId.Value, cancellationToken)
+                    .GetByIdAsync(operation.RuntimeSessionId.Value, cancellationToken)
                     .ConfigureAwait(false);
             }
 
-            ValidateStageEvidence(run, stage, session);
-            stages.Add(ToStageRequest(run, stage, session));
+            ValidateOperationEvidence(run, operation, session);
+            operations.Add(ToOperationRequest(run, operation, session));
         }
 
+        var routeDecisions = run.RouteDecisions
+            .Select(decision => new CreateTraceRouteDecisionRequest(
+                decision.SourceOperationRunId,
+                decision.TransitionId,
+                decision.TargetOperationId,
+                decision.SourceJudgement.ToString(),
+                decision.Traversal,
+                decision.DecidedAtUtc))
+            .ToArray();
+        var completedAtUtc = run.CompletedAtUtc.Value;
         var result = await _traceRecordService.CreateAsync(
             new CreateTraceRecordRequest(
                 run.RunId.Value,
@@ -81,34 +96,29 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
                 run.ProjectSnapshotId,
                 run.TopologyId,
                 run.ProductionLineDefinitionId,
-                run.DutIdentity.ModelId,
-                run.DutIdentity.InputKey,
-                run.DutIdentity.Value,
-                run.BatchId,
-                run.FixtureId,
-                run.DeviceId,
+                run.ProductionUnitIdentity.ModelId,
+                run.ProductionUnitIdentity.InputKey,
+                run.ProductionUnitIdentity.Value,
+                run.LotId,
+                run.CarrierId,
                 run.ActorId,
-                run.Status.ToString(),
-                run.Status switch
-                {
-                    ProductionRunStatus.Completed => "Passed",
-                    ProductionRunStatus.Failed => "Failed",
-                    ProductionRunStatus.Canceled => "Aborted",
-                    _ => throw new InvalidOperationException($"Unsupported terminal run status {run.Status}.")
-                },
+                run.ExecutionStatus.ToString(),
+                run.Judgement.ToString(),
+                run.Disposition.ToString(),
                 run.CreatedAtUtc,
                 run.StartedAtUtc,
-                run.CompletedAtUtc.Value,
+                completedAtUtc,
                 run.FailureCode,
                 run.FailureReason,
-                stages,
+                operations,
+                routeDecisions,
                 [
                     new CreateAuditEntryRequest(
                         run.RunId.Value,
                         run.ActorId,
-                        $"ProductionRun.{run.Status}",
-                        $"Trace record generated from terminal production run {run.RunId}.",
-                        run.CompletedAtUtc.Value)
+                        $"ProductionRun.{run.ExecutionStatus}",
+                        $"Trace record generated from terminal Production Run {run.RunId}.",
+                        completedAtUtc)
                 ]),
             cancellationToken).ConfigureAwait(false);
 
@@ -122,17 +132,18 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
         }
     }
 
-    private static CreateTraceStageExecutionRequest ToStageRequest(
+    private static CreateTraceOperationExecutionRequest ToOperationRequest(
         ProductionRunSnapshot run,
-        ProductionStageRunSnapshot stage,
+        OperationRunSnapshot operation,
         RuntimeSession? session)
     {
-        var completedAtUtc = session is { IsTerminal: true, CompletedAtUtc: { } sessionCompletedAtUtc }
-            ? sessionCompletedAtUtc
-            : stage.CompletedAtUtc ?? run.CompletedAtUtc!.Value;
+        var completedAtUtc = operation.CompletedAtUtc
+            ?? throw new InvalidOperationException(
+                $"Terminal Operation Run {operation.OperationRunId} has no completion timestamp.");
+        var deviceId = session?.TraceMetadata.DeviceId;
         var commands = session?.Commands.Select(ToCommandRequest).ToArray() ?? [];
         var measurements = session?.Commands
-            .Select(command => ToMeasurementRequest(command, run.DeviceId, completedAtUtc))
+            .Select(command => ToMeasurementRequest(command, deviceId, completedAtUtc))
             .ToArray() ?? [];
         var incidents = session?.Incidents
             .Select(incident => new CreateTraceIncidentRequest(
@@ -142,30 +153,52 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
                 incident.Message,
                 incident.OccurredAtUtc))
             .ToArray() ?? [];
+        var artifacts = session?.Commands
+            .SelectMany(command => ToArtifactRequests(command, deviceId, completedAtUtc))
+            .ToArray() ?? [];
+        var outputs = operation.Outputs
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => new CreateTraceOperationOutputRequest(
+                pair.Key,
+                pair.Value.Kind.ToString(),
+                ToCanonicalJson(pair.Value)))
+            .ToArray();
+        var fencingTokens = operation.FencingTokens
+            .OrderBy(pair => pair.Key.Kind)
+            .ThenBy(pair => pair.Key.ResourceId, StringComparer.Ordinal)
+            .Select(pair => new CreateTraceResourceFencingTokenRequest(
+                pair.Key.Kind.ToString(),
+                pair.Key.ResourceId,
+                pair.Value))
+            .ToArray();
 
-        return new CreateTraceStageExecutionRequest(
-            stage.StageId,
-            stage.Sequence,
-            stage.WorkstationId,
-            stage.StationId.Value,
-            stage.ProcessDefinitionId.Value,
-            stage.ProcessVersionId.Value,
-            stage.ConfigurationSnapshotId.Value,
-            stage.RecipeSnapshotId.Value,
-            stage.RuntimeSessionId?.Value,
+        return new CreateTraceOperationExecutionRequest(
+            operation.OperationRunId,
+            operation.Definition.OperationId,
+            operation.Attempt,
+            operation.Definition.StationSystemId,
+            operation.Definition.StationId.Value,
+            operation.Definition.ProcessDefinitionId.Value,
+            operation.Definition.ProcessVersionId.Value,
+            operation.Definition.ConfigurationSnapshotId.Value,
+            operation.Definition.RecipeSnapshotId.Value,
+            operation.RuntimeSessionId?.Value,
             session?.Status.ToString(),
-            stage.Status.ToString(),
-            stage.StartedAtUtc,
+            operation.ExecutionStatus.ToString(),
+            operation.Judgement.ToString(),
+            operation.StartedAtUtc,
             completedAtUtc,
-            stage.FailureCode,
-            stage.FailureReason,
-            stage.CompletedStepCount,
-            stage.CommandCount,
-            stage.IncidentCount,
+            operation.FailureCode,
+            operation.FailureReason,
+            operation.CompletedStepCount,
+            operation.CommandCount,
+            operation.IncidentCount,
             commands,
             measurements,
-            [],
-            incidents);
+            artifacts,
+            incidents,
+            outputs,
+            fencingTokens);
     }
 
     private static CreateTraceCommandRequest ToCommandRequest(RuntimeCommand command)
@@ -179,7 +212,7 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
             command.TargetCapability.Value,
             command.CommandName,
             command.Status.ToString(),
-            command.SemanticOutcome?.ToString(),
+            command.ResultJudgement?.ToString(),
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,
@@ -192,7 +225,7 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
     private static CreateMeasurementRecordRequest ToMeasurementRequest(
         RuntimeCommand command,
         string? deviceId,
-        DateTimeOffset stageCompletedAtUtc)
+        DateTimeOffset operationCompletedAtUtc)
     {
         return new CreateMeasurementRecordRequest(
             command.Id.Value,
@@ -206,95 +239,192 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
             command.TargetKind,
             command.TargetId,
             command.Status.ToString(),
-            command.SemanticOutcome switch
+            command.ResultJudgement switch
             {
-                RuntimeCommandSemanticOutcome.Passed => true,
-                RuntimeCommandSemanticOutcome.Failed => false,
-                RuntimeCommandSemanticOutcome.Aborted => null,
+                ResultJudgement.Passed => true,
+                ResultJudgement.Failed => false,
                 _ => null
             },
-            command.CompletedAtUtc ?? stageCompletedAtUtc);
+            command.CompletedAtUtc ?? operationCompletedAtUtc);
     }
 
-    private static void ValidateStageEvidence(
+    private static IEnumerable<CreateArtifactRecordRequest> ToArtifactRequests(
+        RuntimeCommand command,
+        string? deviceId,
+        DateTimeOffset operationCompletedAtUtc)
+    {
+        var evidence = RuntimeCommandEvidencePayload.Read(command.ResultPayload);
+        if (evidence is null)
+        {
+            return [];
+        }
+
+        var capturedAtUtc = command.CompletedAtUtc ?? operationCompletedAtUtc;
+        return evidence.Artifacts.Select(artifact => new CreateArtifactRecordRequest(
+            CreateArtifactRecordId(command.Id.Value, artifact.StorageKey),
+            artifact.Name,
+            artifact.Kind,
+            artifact.StorageKey,
+            artifact.MediaType,
+            artifact.SizeBytes,
+            artifact.Sha256,
+            deviceId,
+            capturedAtUtc));
+    }
+
+    private static Guid CreateArtifactRecordId(Guid commandId, string storageKey)
+    {
+        var input = Encoding.UTF8.GetBytes(commandId.ToString("N") + ":" + storageKey);
+        var hash = SHA256.HashData(input);
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    private static string ToCanonicalJson(ProductionContextValue value)
+    {
+        return value.Kind is ProductionContextValueKind.Text or ProductionContextValueKind.DateTimeUtc
+            ? JsonSerializer.Serialize(value.CanonicalValue)
+            : value.CanonicalValue;
+    }
+
+    private static void ValidateOperationEvidence(
         ProductionRunSnapshot run,
-        ProductionStageRunSnapshot stage,
+        OperationRunSnapshot operation,
         RuntimeSession? session)
     {
-        if (stage.RuntimeSessionId is null)
+        if (!IsTerminal(operation.ExecutionStatus) || operation.CompletedAtUtc is null)
         {
-            if (session is not null
-                || stage.CompletedStepCount != 0
-                || stage.CommandCount != 0
-                || stage.IncidentCount != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Production stage {stage.StageId} contains evidence without a runtime session.");
-            }
+            throw new InvalidOperationException(
+                $"Production Run {run.RunId} contains non-terminal Operation Run {operation.OperationRunId}.");
+        }
 
+        if (operation.RuntimeSessionId is null)
+        {
+            Require(
+                session is null
+                && operation.ExecutionStatus == ExecutionStatus.Canceled
+                && operation.StartedAtUtc is null
+                && operation.CompletedStepCount == 0
+                && operation.CommandCount == 0
+                && operation.IncidentCount == 0
+                && operation.Outputs.Count == 0
+                && operation.FencingTokens.Count == 0,
+                operation,
+                "pre-dispatch cancellation evidence");
             return;
         }
 
         if (session is null)
         {
-            if (stage.Status == ProductionStageRunStatus.Completed
-                || stage.CompletedStepCount != 0
-                || stage.CommandCount != 0
-                || stage.IncidentCount != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Runtime session {stage.RuntimeSessionId} for production stage {stage.StageId} was not found.");
-            }
-
-            return;
+            throw new InvalidOperationException(
+                $"Runtime Session {operation.RuntimeSessionId} for Operation Run "
+                + $"{operation.OperationRunId} was not found.");
         }
 
         var metadata = session.TraceMetadata;
-        Require(session.Id == stage.RuntimeSessionId.Value, stage, "runtime session id");
-        Require(metadata.ProductionRunId == run.RunId, stage, "production run id");
-        RequireEqual(metadata.ProductionLineDefinitionId, run.ProductionLineDefinitionId, stage, "production line");
-        RequireEqual(metadata.ProductionStageId, stage.StageId, stage, "stage id");
-        Require(metadata.StageSequence == stage.Sequence, stage, "stage sequence");
-        RequireEqual(metadata.WorkstationId, stage.WorkstationId, stage, "workstation");
-        RequireEqual(metadata.ProjectId, run.ProjectId, stage, "project");
-        RequireEqual(metadata.ApplicationId, run.ApplicationId, stage, "application");
-        RequireEqual(metadata.ProjectSnapshotId, run.ProjectSnapshotId, stage, "project snapshot");
-        RequireEqual(metadata.TopologyId, run.TopologyId, stage, "topology");
-        RequireEqual(metadata.DutIdentity.ModelId, run.DutIdentity.ModelId, stage, "DUT model");
-        RequireEqual(metadata.DutIdentity.InputKey, run.DutIdentity.InputKey, stage, "DUT identity input");
-        RequireEqual(metadata.DutIdentity.Value, run.DutIdentity.Value, stage, "DUT identity value");
-        RequireEqual(metadata.ActorId, run.ActorId, stage, "actor");
-        RequireEqual(metadata.BatchId, run.BatchId, stage, "batch");
-        RequireEqual(metadata.FixtureId, run.FixtureId, stage, "fixture");
-        RequireEqual(metadata.DeviceId, run.DeviceId, stage, "device");
-        Require(session.StationId == stage.StationId, stage, "station");
-        Require(session.ProcessDefinitionId == stage.ProcessDefinitionId, stage, "process definition");
-        Require(session.ProcessVersionId == stage.ProcessVersionId, stage, "process version");
-        Require(session.ConfigurationSnapshotId == stage.ConfigurationSnapshotId, stage, "configuration snapshot");
-        Require(session.RecipeSnapshotId == stage.RecipeSnapshotId, stage, "recipe snapshot");
+        Require(session.IsTerminal && session.CompletedAtUtc is not null, operation, "terminal Runtime Session");
+        Require(session.Id == operation.RuntimeSessionId.Value, operation, "Runtime Session id");
+        Require(metadata.ProductionRunId == run.RunId, operation, "Production Run id");
+        RequireEqual(
+            metadata.ProductionLineDefinitionId,
+            run.ProductionLineDefinitionId,
+            operation,
+            "production line");
+        RequireEqual(metadata.OperationId, operation.Definition.OperationId, operation, "Operation id");
+        Require(metadata.OperationAttempt == operation.Attempt, operation, "Operation attempt");
+        RequireEqual(
+            metadata.StationSystemId,
+            operation.Definition.StationSystemId,
+            operation,
+            "Station System");
+        RequireEqual(metadata.ProjectId, run.ProjectId, operation, "project");
+        RequireEqual(metadata.ApplicationId, run.ApplicationId, operation, "Application");
+        RequireEqual(metadata.ProjectSnapshotId, run.ProjectSnapshotId, operation, "project snapshot");
+        RequireEqual(metadata.TopologyId, run.TopologyId, operation, "topology");
+        RequireEqual(
+            metadata.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.ModelId,
+            operation,
+            "product model");
+        RequireEqual(
+            metadata.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.InputKey,
+            operation,
+            "Production Unit identity input");
+        RequireEqual(
+            metadata.ProductionUnitIdentity.Value,
+            run.ProductionUnitIdentity.Value,
+            operation,
+            "Production Unit identity value");
+        RequireEqual(metadata.ActorId, run.ActorId, operation, "actor");
+        RequireEqual(metadata.LotId, run.LotId, operation, "lot");
+        RequireEqual(metadata.CarrierId, run.CarrierId, operation, "Carrier");
+        RequireEqual(
+            metadata.FixtureId,
+            FindResourceId(operation.Definition, ResourceKind.Fixture),
+            operation,
+            "fixture resource");
+        RequireEqual(
+            metadata.DeviceId,
+            FindResourceId(operation.Definition, ResourceKind.Device),
+            operation,
+            "device resource");
+        Require(session.StationId == operation.Definition.StationId, operation, "station");
         Require(
-            session.Steps.Count(step => step.Status == RuntimeStepStatus.Completed) == stage.CompletedStepCount,
-            stage,
+            session.ProcessDefinitionId == operation.Definition.ProcessDefinitionId,
+            operation,
+            "process definition");
+        Require(
+            session.ProcessVersionId == operation.Definition.ProcessVersionId,
+            operation,
+            "process version");
+        Require(
+            session.ConfigurationSnapshotId == operation.Definition.ConfigurationSnapshotId,
+            operation,
+            "configuration snapshot");
+        Require(
+            session.RecipeSnapshotId == operation.Definition.RecipeSnapshotId,
+            operation,
+            "recipe snapshot");
+        Require(
+            session.Steps.Count(step => step.Status == RuntimeStepStatus.Completed)
+                == operation.CompletedStepCount,
+            operation,
             "completed step count");
-        Require(session.Commands.Count == stage.CommandCount, stage, "command count");
-        Require(session.Incidents.Count == stage.IncidentCount, stage, "incident count");
+        Require(session.Commands.Count == operation.CommandCount, operation, "command count");
+        Require(session.Incidents.Count == operation.IncidentCount, operation, "incident count");
+        Require(
+            operation.FencingTokens.Count == operation.Definition.ResourceRequirements.Count
+            && operation.Definition.ResourceRequirements.All(requirement =>
+                operation.FencingTokens.TryGetValue(requirement, out var token) && token > 0),
+            operation,
+            "resource fencing tokens");
     }
 
-    private static void Require(bool condition, ProductionStageRunSnapshot stage, string field)
+    private static string? FindResourceId(OperationRunDefinition definition, ResourceKind kind) =>
+        definition.ResourceRequirements.FirstOrDefault(requirement => requirement.Kind == kind)?.ResourceId;
+
+    private static bool IsTerminal(ExecutionStatus status) => status is
+        ExecutionStatus.Completed
+        or ExecutionStatus.Failed
+        or ExecutionStatus.TimedOut
+        or ExecutionStatus.Canceled
+        or ExecutionStatus.Rejected;
+
+    private static void Require(bool condition, OperationRunSnapshot operation, string field)
     {
         if (!condition)
         {
             throw new InvalidOperationException(
-                $"Production stage {stage.StageId} runtime evidence differs in {field}.");
+                $"Operation Run {operation.OperationRunId} Runtime evidence differs in {field}.");
         }
     }
 
     private static void RequireEqual(
         string? actual,
         string? expected,
-        ProductionStageRunSnapshot stage,
+        OperationRunSnapshot operation,
         string field)
     {
-        Require(string.Equals(actual, expected, StringComparison.Ordinal), stage, field);
+        Require(string.Equals(actual, expected, StringComparison.Ordinal), operation, field);
     }
 }

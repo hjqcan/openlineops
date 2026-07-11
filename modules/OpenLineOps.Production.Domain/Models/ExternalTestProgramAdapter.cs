@@ -5,9 +5,9 @@ namespace OpenLineOps.Production.Domain.Models;
 
 public static class ExternalTestProgramInputSources
 {
-    public const string DutIdentity = "$dut.identity";
+    public const string ProductIdentity = "$product.identity";
 
-    public const string DutModel = "$dut.model";
+    public const string ProductModel = "$product.model";
 }
 
 public enum ExternalTestProgramLaunchKind
@@ -267,11 +267,11 @@ public sealed class ExternalTestProgramAdapter : Entity<ExternalTestProgramAdapt
             throw new ArgumentException("External test program result mapping targets must be unique.");
         }
 
-        if (inputMappings.All(mapping => mapping.Source != ExternalTestProgramInputSources.DutIdentity)
-            || inputMappings.All(mapping => mapping.Source != ExternalTestProgramInputSources.DutModel))
+        if (inputMappings.All(mapping => mapping.Source != ExternalTestProgramInputSources.ProductIdentity)
+            || inputMappings.All(mapping => mapping.Source != ExternalTestProgramInputSources.ProductModel))
         {
             throw new ArgumentException(
-                "External test program input mappings must include DUT identity and DUT model.");
+                "External test program input mappings must include product identity and product model.");
         }
     }
 }

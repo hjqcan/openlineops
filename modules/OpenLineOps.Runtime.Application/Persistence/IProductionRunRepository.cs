@@ -1,5 +1,6 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Runtime.Application.Persistence;
 
@@ -7,6 +8,7 @@ public interface IProductionRunRepository
 {
     ValueTask<bool> TryAddAsync(
         ProductionRun run,
+        ProductionRunExecutionPlan executionPlan,
         CancellationToken cancellationToken = default);
 
     ValueTask<long> SaveAsync(
@@ -19,6 +21,12 @@ public interface IProductionRunRepository
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRecoverableAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+        string? productionLineDefinitionId = null,
+        string? stationSystemId = null,
+        string? slotId = null,
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>> ListPendingTerminalOutboxAsync(
@@ -44,9 +52,11 @@ public sealed record ProductionRunTerminalOutboxItem
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentOutOfRangeException.ThrowIfNegative(attemptCount);
-        if (run.Status is not ProductionRunStatus.Completed
-            and not ProductionRunStatus.Failed
-            and not ProductionRunStatus.Canceled
+        if (run.ExecutionStatus is not ExecutionStatus.Completed
+            and not ExecutionStatus.Failed
+            and not ExecutionStatus.TimedOut
+            and not ExecutionStatus.Canceled
+            and not ExecutionStatus.Rejected
             || run.CompletedAtUtc is null)
         {
             throw new ArgumentException(

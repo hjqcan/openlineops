@@ -1,6 +1,6 @@
 namespace OpenLineOps.Traceability.Application.Records;
 
 public sealed record TraceRecordExportPackage(
-    string PackageFormatVersion,
+    string PackageFormat,
     DateTimeOffset ExportedAtUtc,
     TraceRecordDetails TraceRecord);

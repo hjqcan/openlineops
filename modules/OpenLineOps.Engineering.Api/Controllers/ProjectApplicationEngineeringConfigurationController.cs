@@ -13,7 +13,7 @@ using PublishApiConfigurationSnapshotRequest = OpenLineOps.Engineering.Api.Model
 namespace OpenLineOps.Engineering.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.EngineeringV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Engineering)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationEngineering)]
 public sealed class ProjectApplicationEngineeringConfigurationController : ControllerBase
 {

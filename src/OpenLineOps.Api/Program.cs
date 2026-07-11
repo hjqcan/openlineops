@@ -40,7 +40,7 @@ builder.Services.AddOpenLineOpsTraceabilityModule(builder.Configuration);
 builder.Services.AddOpenLineOpsEventBus(builder.Configuration);
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenLineOpsReadinessHealthChecks(builder.Configuration);
-builder.Services.AddOpenApi(OpenLineOpsApiVersions.Current);
+builder.Services.AddOpenApi(OpenLineOpsApiDocument.Name);
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("OpenLineOpsDesktop", policy =>
@@ -81,7 +81,7 @@ app.MapGet("/health/live", () => Results.Ok(new
     Service = "OpenLineOps.Api"
 }))
     .WithName("GetLiveness")
-    .WithGroupName(OpenLineOpsApiGroups.HealthV1)
+    .WithGroupName(OpenLineOpsApiGroups.Health)
     .WithTags("Health")
     .AllowAnonymous();
 

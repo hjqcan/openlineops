@@ -1,5 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Serialization;
 using OpenLineOps.Runtime.Domain.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -68,13 +69,14 @@ internal static class RuntimeSessionSnapshotMapper
         return new PersistedRuntimeTraceMetadata(
             traceMetadata.ProductionRunId.Value,
             traceMetadata.ProductionLineDefinitionId,
-            traceMetadata.ProductionStageId,
-            traceMetadata.StageSequence,
-            traceMetadata.WorkstationId,
-            traceMetadata.DutIdentity.ModelId,
-            traceMetadata.DutIdentity.InputKey,
-            traceMetadata.DutIdentity.Value,
-            traceMetadata.BatchId,
+            traceMetadata.OperationId,
+            traceMetadata.OperationAttempt,
+            traceMetadata.StationSystemId,
+            traceMetadata.ProductionUnitIdentity.ModelId,
+            traceMetadata.ProductionUnitIdentity.InputKey,
+            traceMetadata.ProductionUnitIdentity.Value,
+            traceMetadata.LotId,
+            traceMetadata.CarrierId,
             traceMetadata.FixtureId,
             traceMetadata.DeviceId,
             traceMetadata.ActorId,
@@ -114,7 +116,7 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
-            command.SemanticOutcome?.ToString(),
+            command.ResultJudgement?.ToString(),
             command.ActionId.Value,
             command.TargetKind,
             command.TargetId);
@@ -151,7 +153,9 @@ internal static class RuntimeSessionSnapshotMapper
             new RuntimeStepId(command.StepId),
             new RuntimeCapabilityId(command.TargetCapabilityId),
             command.CommandName,
-            ParseEnum<RuntimeCommandStatus>(command.Status, nameof(command.Status)),
+            ParseEnum<OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus>(
+                command.Status,
+                nameof(command.Status)),
             command.CreatedAtUtc,
             command.Timeout,
             command.AcceptedAtUtc,
@@ -159,9 +163,9 @@ internal static class RuntimeSessionSnapshotMapper
             command.CompletedAtUtc,
             command.ResultPayload,
             command.FailureReason,
-            ParseOptionalEnum<RuntimeCommandSemanticOutcome>(
-                command.SemanticOutcome,
-                nameof(command.SemanticOutcome)),
+            ParseOptionalEnum<ResultJudgement>(
+                command.ResultJudgement,
+                nameof(command.ResultJudgement)),
             RequiredActionId(command.ActionId, $"runtime command {command.CommandId:D}"),
             RequiredTarget(command.TargetKind, command.TargetId, $"runtime command {command.CommandId:D}"));
     }
@@ -212,14 +216,19 @@ internal static class RuntimeSessionSnapshotMapper
             RequiredTraceIdentity(
                 traceMetadata.ProductionLineDefinitionId,
                 "production line definition id"),
-            RequiredTraceIdentity(traceMetadata.ProductionStageId, "production stage id"),
-            RequiredPositiveSequence(traceMetadata.StageSequence),
-            RequiredTraceIdentity(traceMetadata.WorkstationId, "workstation id"),
-            new DutIdentity(
-                RequiredTraceIdentity(traceMetadata.DutModelId, "DUT model id"),
-                RequiredTraceIdentity(traceMetadata.DutIdentityInputKey, "DUT identity input key"),
-                RequiredTraceIdentity(traceMetadata.DutIdentityValue, "DUT identity value")),
-            traceMetadata.BatchId,
+            RequiredTraceIdentity(traceMetadata.OperationId, "operation id"),
+            RequiredPositiveAttempt(traceMetadata.OperationAttempt),
+            RequiredTraceIdentity(traceMetadata.StationSystemId, "station system id"),
+            new ProductionUnitIdentity(
+                RequiredTraceIdentity(traceMetadata.ProductModelId, "product model id"),
+                RequiredTraceIdentity(
+                    traceMetadata.ProductionUnitIdentityInputKey,
+                    "Production Unit identity input key"),
+                RequiredTraceIdentity(
+                    traceMetadata.ProductionUnitIdentityValue,
+                    "Production Unit identity value")),
+            traceMetadata.LotId,
+            traceMetadata.CarrierId,
             traceMetadata.FixtureId,
             traceMetadata.DeviceId,
             RequiredTraceIdentity(traceMetadata.ActorId, "actor id"),
@@ -248,11 +257,11 @@ internal static class RuntimeSessionSnapshotMapper
             : new ProductionRunId(value);
     }
 
-    private static int RequiredPositiveSequence(int value)
+    private static int RequiredPositiveAttempt(int value)
     {
         return value <= 0
             ? throw new InvalidDataException(
-                "Persisted runtime session trace metadata does not declare a positive stage sequence.")
+                "Persisted runtime session trace metadata does not declare a positive operation attempt.")
             : value;
     }
 
@@ -308,13 +317,14 @@ internal sealed record PersistedRuntimeSession(
 internal sealed record PersistedRuntimeTraceMetadata(
     Guid ProductionRunId,
     string? ProductionLineDefinitionId,
-    string? ProductionStageId,
-    int StageSequence,
-    string? WorkstationId,
-    string? DutModelId,
-    string? DutIdentityInputKey,
-    string? DutIdentityValue,
-    string? BatchId,
+    string? OperationId,
+    int OperationAttempt,
+    string? StationSystemId,
+    string? ProductModelId,
+    string? ProductionUnitIdentityInputKey,
+    string? ProductionUnitIdentityValue,
+    string? LotId,
+    string? CarrierId,
     string? FixtureId,
     string? DeviceId,
     string? ActorId,
@@ -348,7 +358,7 @@ internal sealed record PersistedRuntimeCommand(
     DateTimeOffset? CompletedAtUtc,
     string? ResultPayload,
     string? FailureReason,
-    string? SemanticOutcome,
+    string? ResultJudgement,
     string ActionId,
     string TargetKind,
     string TargetId);

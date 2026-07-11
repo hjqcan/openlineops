@@ -26,13 +26,13 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
                 'session': session_id,
                 'run': production_run_id,
                 'line': production_line_definition_id,
-                'stage': production_stage_id,
-                'sequence': stage_sequence,
-                'workstation': workstation_id,
-                'dut': {
-                    'model': dut_model_id,
-                    'input_key': dut_identity_input_key,
-                    'value': dut_identity_value
+                'operation': operation_id,
+                'attempt': operation_attempt,
+                'station_system': station_system_id,
+                'production_unit': {
+                    'model': product_model_id,
+                    'input_key': production_unit_identity_input_key,
+                    'value': production_unit_identity_value
                 },
                 'release': [project_id, application_id, project_snapshot_id],
                 'action': action_id,
@@ -50,12 +50,12 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
         Assert.Contains("\"session\":\"00000000-0000-0000-0000-000000000001\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"run\":\"10000000-0000-0000-0000-000000000001\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"line\":\"line.main\"", result.Payload, StringComparison.Ordinal);
-        Assert.Contains("\"stage\":\"stage.main\"", result.Payload, StringComparison.Ordinal);
-        Assert.Contains("\"sequence\":1", result.Payload, StringComparison.Ordinal);
-        Assert.Contains("\"workstation\":\"workstation.main\"", result.Payload, StringComparison.Ordinal);
-        Assert.Contains("\"model\":\"dut.main\"", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"operation\":\"operation.main\"", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"attempt\":1", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"station_system\":\"station.main\"", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"model\":\"product.main\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"input_key\":\"serialNumber\"", result.Payload, StringComparison.Ordinal);
-        Assert.Contains("\"value\":\"SN-001\"", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"value\":\"UNIT-001\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"release\":[\"project.main\",\"application.main\",\"snapshot.release\"]", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"action\":\"node-normalize:action:1\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"target\":[\"Capability\",\"process.python-script\",\"process.python-script\"]", result.Payload, StringComparison.Ordinal);
@@ -113,11 +113,14 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
             new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
             "line.main",
-            "stage.main",
+            "operation.main",
             1,
-            "workstation.main",
-            new DutIdentity("dut.main", "serialNumber", "SN-001"),
-            new StationId("station-a"),
+            "station.main",
+            new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
+            null,
+            null,
+            null,
+            null,
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RuntimeStepId(Guid.Parse("00000000-0000-0000-0000-000000000002")),
             new RuntimeCommandId(Guid.Parse("00000000-0000-0000-0000-000000000003")),

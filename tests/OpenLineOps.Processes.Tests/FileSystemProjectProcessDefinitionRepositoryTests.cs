@@ -407,7 +407,7 @@ public sealed class FileSystemProjectProcessDefinitionRepositoryTests : IDisposa
     private static RuntimeActionContractCanonicalArtifact CreateWaitContractArtifact()
     {
         var contract = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "fixture.wait",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {

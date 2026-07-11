@@ -2,7 +2,7 @@ namespace OpenLineOps.Topology.Domain.Slots;
 
 public enum SlotMaterialKind
 {
-    Dut,
+    ProductionUnit,
     Carrier,
     FixturePosition,
     TrayPosition,

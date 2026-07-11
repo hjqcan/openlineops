@@ -88,23 +88,22 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                     "line.release.route",
                     "Release Route Line",
                     "topology.release.route",
-                    new ProjectReleaseDutModel("dut.release", "MAINBOARD-A", "serialNumber"),
-                    [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+                    new ProjectReleaseProductModel("product.release", "MAINBOARD-A", "serialNumber"),
+                    "operation.eol",
                     [
-                        new ProjectReleaseProductionStage(
-                            "stage.eol",
-                            1,
+                        new ProjectReleaseOperation(
+                            "operation.eol",
                             "EOL",
-                            "workstation.eol",
+                            "station.eol",
                             processDefinitionId,
                             configurationSnapshotId,
                             processVersionId,
-                            "openlineops.flow-ir/v1",
+                            "openlineops.flow-ir",
                             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                             "{}",
-                            ["openlineops_device_command@1"],
-                            ExternalTestProgramAdapterId: null)
+                            ["openlineops_device_command@1"])
                     ],
+                    Transitions: [],
                     ExternalTestProgramAdapters: []),
                 [new ProjectReleaseCapabilityBinding(
                     capabilityId,
@@ -159,12 +158,15 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "session-release",
             "00000000-0000-0000-0000-000000000010",
             "line.release.route",
-            "stage.eol",
+            "operation.eol",
             1,
-            "workstation.eol",
-            "dut.release",
+            "product.release",
             "serialNumber",
             "SERIAL-001",
+            null,
+            null,
+            null,
+            null,
             "step-release",
             "command-release",
             "node-scan",
@@ -193,16 +195,19 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             request.RuntimeSessionId,
             request.ProductionRunId,
             request.ProductionLineDefinitionId,
-            request.ProductionStageId,
-            request.StageSequence,
-            request.WorkstationId,
-            request.DutModelId,
-            request.DutIdentityInputKey,
-            request.DutIdentityValue,
+            request.OperationId,
+            request.OperationAttempt,
+            request.ProductModelId,
+            request.ProductionUnitIdentityInputKey,
+            request.ProductionUnitIdentityValue,
+            request.LotId,
+            request.CarrierId,
+            request.FixtureId,
+            request.DeviceId,
             request.RuntimeStepId,
             request.RuntimeCommandId,
             request.RuntimeNodeId,
-            request.StationId,
+            request.StationSystemId,
             request.ConfigurationSnapshotId,
             request.CapabilityId,
             "scan",
@@ -225,7 +230,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
     }
 
     [Fact]
-    public async Task ExternalTestProgramRouteUsesExactProductionStageAndFrozenExecutable()
+    public async Task ExternalTestProgramRouteUsesExactOperationAndFrozenExecutable()
     {
         const string projectId = "project.external.route";
         const string applicationId = "application.external.route";
@@ -275,23 +280,23 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                     "line.external.route",
                     "External Test Line",
                     "topology.external.route",
-                    new ProjectReleaseDutModel("dut.external", "MODEL-EXTERNAL", "serialNumber"),
-                    [new ProjectReleaseWorkstation("workstation.eol", "EOL", "station.eol")],
+                    new ProjectReleaseProductModel("product.external", "MODEL-EXTERNAL", "serialNumber"),
+                    "operation.external",
                     [
-                        new ProjectReleaseProductionStage(
-                            "stage.external",
-                            1,
+                        new ProjectReleaseOperation(
+                            "operation.external",
                             "External Test",
-                            "workstation.eol",
+                            "station.eol",
                             processDefinitionId,
                             configurationSnapshotId,
                             processVersionId,
-                            "openlineops.flow-ir/v1",
+                            "openlineops.flow-ir",
                             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                             "{}",
-                            ["openlineops_device_command@1"],
-                            adapterId)
+                            ["openlineops_device_command@1"])
                     ],
+                    Transitions: [],
+                    ExternalTestProgramAdapters:
                     [
                         new ProjectReleaseExternalTestProgramAdapter(
                             adapterId,
@@ -301,20 +306,20 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                             "ApplicationExecutable",
                             "programs/external/test.exe",
                             ProviderKey: null,
-                            ["--serial", "{{dut.identity}}", "--stage", "{{stage.id}}"],
+                            ["--serial", "{{product.identity}}", "--operation", "{{operation.id}}"],
                             [
                                 new ProjectReleaseExternalTestProgramInputMapping(
-                                    "$dut.identity",
+                                    "$product.identity",
                                     "serial"),
                                 new ProjectReleaseExternalTestProgramInputMapping(
-                                    "$dut.model",
+                                    "$product.model",
                                     "model"),
                                 new ProjectReleaseExternalTestProgramInputMapping(
                                     "$run.id",
                                     "runId"),
                                 new ProjectReleaseExternalTestProgramInputMapping(
-                                    "$stage.id",
-                                    "stageId")
+                                    "$operation.id",
+                                    "operationId")
                             ],
                             [
                                 new ProjectReleaseExternalTestProgramResultMapping(
@@ -380,12 +385,15 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             "session-external",
             "00000000-0000-0000-0000-000000000020",
             "line.external.route",
-            "stage.external",
+            "operation.external",
             1,
-            "workstation.eol",
-            "dut.external",
+            "product.external",
             "serialNumber",
             "SERIAL-EXT-001",
+            null,
+            null,
+            null,
+            null,
             "step-external",
             "command-external",
             "node-external",
@@ -418,13 +426,13 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
 
         Assert.Null(await resolver.ResolveAsync(CopyRequest(
             request,
-            productionStageId: "stage.other")));
+            operationId: "operation.other")));
         Assert.Null(await resolver.ResolveAsync(CopyRequest(
             request,
             productionLineDefinitionId: "line.other")));
         Assert.Null(await resolver.ResolveAsync(CopyRequest(
             request,
-            dutModelId: "dut.other")));
+            productModelId: "product.other")));
 
         await File.WriteAllTextAsync(
             Path.Combine(
@@ -453,40 +461,43 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         File.WriteAllText(
             Path.Combine(topologyDirectory, "topology.json"),
             $$"""
-            {"schemaVersion":"openlineops.automation-topology/v1","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
+            {"schemaVersion":"openlineops.automation-topology","resourceKind":"OpenLineOps.AutomationTopology","applicationId":"{{scope.ApplicationId}}","topologyId":"{{topologyId}}"}
             """);
         File.WriteAllText(
             Path.Combine(layoutDirectory, "layout.json"),
             $$"""
-            {"schemaVersion":"openlineops.site-layout/v1","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
+            {"schemaVersion":"openlineops.site-layout","resourceKind":"OpenLineOps.SiteLayout","applicationId":"{{scope.ApplicationId}}","layoutId":"{{layoutId}}"}
             """);
         File.WriteAllText(
             Path.Combine(productionDirectory, "line.json"),
             $$"""
-            {"schemaVersion":"openlineops.production-line/v1","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"{{lineDefinitionId}}"}
+            {"schemaVersion":"openlineops.production-line","resourceKind":"OpenLineOps.ProductionLine","applicationId":"{{scope.ApplicationId}}","lineDefinitionId":"{{lineDefinitionId}}"}
             """);
     }
 
     private static DeviceCommandRouteRequest CopyRequest(
         DeviceCommandRouteRequest request,
         string? productionLineDefinitionId = null,
-        string? productionStageId = null,
-        string? dutModelId = null)
+        string? operationId = null,
+        string? productModelId = null)
     {
         return new DeviceCommandRouteRequest(
             request.RuntimeSessionId,
             request.ProductionRunId,
             productionLineDefinitionId ?? request.ProductionLineDefinitionId,
-            productionStageId ?? request.ProductionStageId,
-            request.StageSequence,
-            request.WorkstationId,
-            dutModelId ?? request.DutModelId,
-            request.DutIdentityInputKey,
-            request.DutIdentityValue,
+            operationId ?? request.OperationId,
+            request.OperationAttempt,
+            productModelId ?? request.ProductModelId,
+            request.ProductionUnitIdentityInputKey,
+            request.ProductionUnitIdentityValue,
+            request.LotId,
+            request.CarrierId,
+            request.FixtureId,
+            request.DeviceId,
             request.RuntimeStepId,
             request.RuntimeCommandId,
             request.RuntimeNodeId,
-            request.StationId,
+            request.StationSystemId,
             request.ConfigurationSnapshotId,
             request.CapabilityId,
             request.CommandName,

@@ -12,19 +12,22 @@ public sealed class RuntimeReleaseIdentityTests
     [InlineData("application")]
     [InlineData("snapshot")]
     [InlineData("line")]
-    [InlineData("stage")]
-    [InlineData("workstation")]
+    [InlineData("operation")]
+    [InlineData("stationSystem")]
     public void CommandExecutionContextRejectsMissingReleaseIdentity(string missingField)
     {
         Assert.Throws<ArgumentException>(() => new RuntimeCommandExecutionContext(
             RuntimeSessionId.New(),
             ProductionRunId.New(),
             missingField == "line" ? " line.main " : "line.main",
-            missingField == "stage" ? " stage.main " : "stage.main",
+            missingField == "operation" ? " operation.main " : "operation.main",
             1,
-            missingField == "workstation" ? " workstation.main " : "workstation.main",
-            new DutIdentity("dut.main", "serialNumber", "SN-001"),
-            new StationId("station.main"),
+            missingField == "stationSystem" ? " station.main " : "station.main",
+            new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
+            null,
+            null,
+            null,
+            null,
             new ConfigurationSnapshotId("configuration.main"),
             RuntimeStepId.New(),
             RuntimeCommandId.New(),
@@ -47,18 +50,19 @@ public sealed class RuntimeReleaseIdentityTests
     [InlineData("snapshot")]
     [InlineData("topology")]
     [InlineData("line")]
-    [InlineData("stage")]
-    [InlineData("workstation")]
+    [InlineData("operation")]
+    [InlineData("stationSystem")]
     [InlineData("actor")]
     public void TraceMetadataRejectsMissingReleaseOrTopologyIdentity(string missingField)
     {
         Assert.Throws<ArgumentException>(() => new RuntimeSessionTraceMetadata(
             ProductionRunId.New(),
             missingField == "line" ? " " : "line.main",
-            missingField == "stage" ? " " : "stage.main",
+            missingField == "operation" ? " " : "operation.main",
             1,
-            missingField == "workstation" ? " " : "workstation.main",
-            new DutIdentity("dut.main", "serialNumber", "SN-001"),
+            missingField == "stationSystem" ? " " : "station.main",
+            new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
+            null,
             null,
             null,
             null,

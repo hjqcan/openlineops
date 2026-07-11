@@ -402,6 +402,7 @@
 }
 
 .topology-canvas-stage {
+  position: relative;
   display: grid;
   place-items: center;
   min-width: 0;
@@ -409,6 +410,168 @@
   overflow: auto;
   padding: 12px;
   background: radial-gradient(circle at 50% 40%, rgb(79 100 108 / 18%), transparent 56%), #1c252a;
+}
+
+.topology-live-overlay {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 20;
+  display: grid;
+  grid-template-rows: 30px minmax(0, 1fr);
+  width: min(278px, calc(100% - 40px));
+  max-height: calc(100% - 40px);
+  overflow: hidden;
+  border: 1px solid rgb(126 151 156 / 65%);
+  border-top: 3px solid #3cb29f;
+  border-radius: 3px;
+  background: rgb(24 34 39 / 94%);
+  color: #dfe8e7;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 36%);
+  backdrop-filter: blur(10px);
+}
+
+.topology-live-overlay.stale {
+  border-top-color: var(--topology-offline);
+}
+
+.topology-live-overlay > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid rgb(128 150 155 / 25%);
+  background: rgb(51 68 74 / 82%);
+}
+
+.topology-live-overlay > header > div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #53c8b6;
+}
+
+.topology-live-overlay > header strong,
+.topology-live-overlay > header span {
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: .12em;
+}
+
+.topology-live-overlay > header span {
+  color: #a4b5b7;
+}
+
+.topology-live-scroll {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.topology-live-scroll section {
+  padding: 7px;
+  border-bottom: 1px solid rgb(124 147 151 / 18%);
+}
+
+.topology-live-scroll h3 {
+  margin: 0 0 5px;
+  color: #889da1;
+  font-size: 6px;
+  font-weight: 850;
+  letter-spacing: .14em;
+}
+
+.topology-live-scroll p {
+  margin: 7px 0;
+  color: #74888c;
+  font-size: 8px;
+}
+
+.topology-live-product,
+.topology-live-station,
+.topology-live-slot {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 2px 3px;
+  border-top: 1px solid rgb(130 151 155 / 12%);
+  content-visibility: auto;
+  contain-intrinsic-size: 34px;
+}
+
+.topology-live-product > i,
+.topology-live-station > i,
+.topology-live-slot > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--topology-idle);
+}
+
+.topology-live-product > i.status-running,
+.topology-live-product > i.status-pending,
+.topology-live-station > i.status-running,
+.topology-live-slot > i.status-running {
+  background: var(--topology-running);
+}
+
+.topology-live-product > i.status-failed,
+.topology-live-product > i.status-timedout,
+.topology-live-product > i.status-rejected,
+.topology-live-station > i.status-failed,
+.topology-live-slot > i.status-failed {
+  background: var(--topology-failed);
+}
+
+.topology-live-product > i.status-canceled,
+.topology-live-station > i.status-offline,
+.topology-live-slot > i.status-offline {
+  background: var(--topology-offline);
+}
+
+.topology-live-product > span,
+.topology-live-station > span,
+.topology-live-slot > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.topology-live-product strong,
+.topology-live-product small,
+.topology-live-station strong,
+.topology-live-station small,
+.topology-live-slot strong,
+.topology-live-slot small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-live-product strong,
+.topology-live-station strong,
+.topology-live-slot strong {
+  color: #e1e9e8;
+  font: 8px "Cascadia Code", monospace;
+}
+
+.topology-live-product small,
+.topology-live-station small,
+.topology-live-slot small {
+  margin-top: 1px;
+  color: #8fa1a5;
+  font-size: 7px;
+}
+
+.topology-live-product em,
+.topology-live-station em,
+.topology-live-slot em {
+  color: #b7c4c5;
+  font-size: 6px;
+  font-style: normal;
+  text-transform: uppercase;
 }
 
 .topology-canvas {

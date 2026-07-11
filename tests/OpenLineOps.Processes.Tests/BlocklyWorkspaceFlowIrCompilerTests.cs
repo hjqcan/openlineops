@@ -43,7 +43,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
         Assert.Contains(document.BlockDependencies, dependency =>
             dependency.BlockType == "openlineops_move_axis"
             && dependency.Version == 1
-            && dependency.ContractSchemaVersion == RuntimeActionContractSchemaVersions.V1
+            && dependency.ContractSchemaVersion == RuntimeActionContractSchema.Current
             && dependency.ContractSha256 == move.Source.ContentHash
             && dependency.LockId == $"openlineops_move_axis@1#{move.Source.ContentHash}");
         using (var payload = JsonDocument.Parse(move.InputPayload!))
@@ -214,7 +214,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
     {
         const string blockType = "custom_wait";
         var contract = new RuntimeActionContract(
-            RuntimeActionContractSchemaVersions.V1,
+            RuntimeActionContractSchema.Current,
             "custom.wait",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {

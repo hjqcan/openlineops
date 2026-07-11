@@ -1,5 +1,8 @@
 <Solution>
   <Folder Name="/modules/">
+    <Project Path="modules/OpenLineOps.Agent.Application/OpenLineOps.Agent.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Agent.Domain/OpenLineOps.Agent.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Agent.Infrastructure/OpenLineOps.Agent.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Api/OpenLineOps.Devices.Api.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Application/OpenLineOps.Devices.Application.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Domain/OpenLineOps.Devices.Domain.csproj" />
@@ -53,6 +56,7 @@
     <Project Path="samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" />
   </Folder>
   <Folder Name="/shared/">
+    <Project Path="shared/OpenLineOps.Agent.Contracts/OpenLineOps.Agent.Contracts.csproj" />
     <Project Path="shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
     <Project Path="shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
     <Project Path="shared/OpenLineOps.Domain.Abstractions/OpenLineOps.Domain.Abstractions.csproj" />
@@ -63,12 +67,14 @@
     <Project Path="shared/OpenLineOps.StateMachine.Core/OpenLineOps.StateMachine.Core.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/OpenLineOps.Agent/OpenLineOps.Agent.csproj" />
     <Project Path="src/OpenLineOps.Api/OpenLineOps.Api.csproj" />
     <Project Path="src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" />
     <Project Path="src/OpenLineOps.Runner/OpenLineOps.Runner.csproj" />
     <Project Path="src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Api.Tests/OpenLineOps.Api.Tests.csproj" />
     <Project Path="tests/OpenLineOps.BoundedContext.Scaffolder.Tests/OpenLineOps.BoundedContext.Scaffolder.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Devices.Tests/OpenLineOps.Devices.Tests.csproj" />

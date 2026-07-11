@@ -1,9 +1,14 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Api.Tests;
@@ -23,10 +28,67 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
     }
 
     [Fact]
-    public async Task GetByIdReturnsCompleteProductionRunAndRejectsNonCanonicalIdentity()
+    public async Task PostCreatesAsynchronouslyAndReturnsCanonicalLocation()
     {
-        var runId = new ProductionRunId(Guid.Parse("abcdefab-cdef-abcd-efab-cdefabcdefab"));
-        var createdAtUtc = new DateTimeOffset(2026, 7, 10, 9, 0, 0, TimeSpan.Zero);
+        var runId = Guid.NewGuid();
+        var request = new
+        {
+            productionRunId = runId,
+            projectId = "project.api-submit",
+            applicationId = "application.api-submit",
+            projectSnapshotId = "snapshot.api-submit",
+            topologyId = "topology.api-submit",
+            productionLineDefinitionId = "line.api-submit",
+            productionUnitIdentity = new
+            {
+                modelId = "product.board",
+                inputKey = "serialNumber",
+                value = "SN-API-001"
+            },
+            actorId = "operator.api",
+            entryOperationId = "operation.main",
+            operations = new[]
+            {
+                new
+                {
+                    operationId = "operation.main",
+                    stationSystemId = "station.main",
+                    runtimeStationId = "station.main",
+                    configurationSnapshotId = "configuration.main",
+                    recipeSnapshotId = "recipe.main",
+                    processDefinitionId = "process.main",
+                    processVersionId = "process-version.main",
+                    resources = new[] { new { kind = "Station", resourceId = "station.main" } },
+                    process = new
+                    {
+                        startNodeId = (string?)null,
+                        nodes = Array.Empty<object>(),
+                        routingNodes = Array.Empty<object>(),
+                        transitions = Array.Empty<object>()
+                    }
+                }
+            },
+            routeTransitions = Array.Empty<object>(),
+            lotId = "lot-001",
+            carrierId = "carrier-001"
+        };
+
+        using var response = await _client.PostAsJsonAsync("/api/production-runs", request);
+        using var document = await ReadJsonAsync(response);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal($"/api/production-runs/{runId:D}", response.Headers.Location?.AbsolutePath);
+        Assert.Equal(runId, document.RootElement.GetProperty("productionRunId").GetGuid());
+        Assert.Equal("Pending", document.RootElement.GetProperty("executionStatus").GetString());
+        Assert.Equal("InProcess", document.RootElement.GetProperty("disposition").GetString());
+    }
+
+    [Fact]
+    public async Task GetByIdReturnsOperationDualAxesAndRejectsNonCanonicalIdentity()
+    {
+        var runId = ProductionRunId.New();
+        var createdAtUtc = new DateTimeOffset(2026, 7, 11, 9, 0, 0, TimeSpan.Zero);
+        var operationPlan = OperationPlan();
         var run = ProductionRun.Create(
             runId,
             "project.production-run-api",
@@ -34,87 +96,75 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             "snapshot.production-run-api",
             "topology.production-run-api",
             "line.production-run-api",
-            new DutIdentity("dut.production-run-api", "serialNumber", "DUT-API-001"),
-            "batch.production-run-api",
-            "fixture.production-run-api",
-            "device.production-run-api",
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-API-001"),
+            "lot.production-run-api",
+            "carrier.production-run-api",
             "operator.production-run-api",
+            operationPlan.Definition.OperationId,
             createdAtUtc,
-            [
-                new ProductionStageRunDefinition(
-                    "stage.production-run-api",
-                    1,
-                    "workstation.production-run-api",
-                    new StationId("station.production-run-api"),
-                    new ProcessDefinitionId("process.production-run-api"),
-                    new ProcessVersionId("process.production-run-api@1.0.0"),
-                    new ConfigurationSnapshotId("configuration.production-run-api"),
-                    new RecipeSnapshotId("recipe.production-run-api"))
-            ]);
+            [operationPlan.Definition],
+            []);
         var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
-        Assert.True(await repository.TryAddAsync(run));
+        Assert.True(await repository.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(runId, [operationPlan])));
         Assert.True(run.Start(createdAtUtc.AddSeconds(1)).Succeeded);
-        var sessionId = RuntimeSessionId.New();
-        Assert.True(run.StartStage(
-            "stage.production-run-api",
-            sessionId,
+        var operation = Assert.Single(run.Operations);
+        var leases = operation.ResourceRequirements.Select(resource => new ResourceLease(
+            resource,
+            run.Id,
+            operation.OperationRunId,
+            7,
+            createdAtUtc,
+            createdAtUtc.AddHours(1))).ToArray();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
             createdAtUtc.AddSeconds(2)).Succeeded);
-        Assert.True(run.CompleteStage(
-            "stage.production-run-api",
-            completedStepCount: 3,
-            commandCount: 4,
-            incidentCount: 1,
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Failed,
+            null,
+            3,
+            4,
+            1,
             createdAtUtc.AddSeconds(3)).Succeeded);
-
         await repository.SaveAsync(run, 0);
 
-        using var response = await _client.GetAsync($"/api/runtime/production-runs/{runId.Value:D}");
+        using var response = await _client.GetAsync($"/api/production-runs/{runId.Value:D}");
         using var document = await ReadJsonAsync(response);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = document.RootElement;
-        Assert.Equal(runId.Value, root.GetProperty("productionRunId").GetGuid());
-        Assert.Equal("project.production-run-api", root.GetProperty("projectId").GetString());
-        Assert.Equal("application.production-run-api", root.GetProperty("applicationId").GetString());
-        Assert.Equal("snapshot.production-run-api", root.GetProperty("projectSnapshotId").GetString());
-        Assert.Equal("topology.production-run-api", root.GetProperty("topologyId").GetString());
-        Assert.Equal("line.production-run-api", root.GetProperty("productionLineDefinitionId").GetString());
-        Assert.Equal("operator.production-run-api", root.GetProperty("actorId").GetString());
-        Assert.Equal("batch.production-run-api", root.GetProperty("batchId").GetString());
-        Assert.Equal("fixture.production-run-api", root.GetProperty("fixtureId").GetString());
-        Assert.Equal("device.production-run-api", root.GetProperty("deviceId").GetString());
-        Assert.Equal("Completed", root.GetProperty("status").GetString());
-        Assert.True(root.GetProperty("isTerminal").GetBoolean());
-        Assert.Equal(1, root.GetProperty("completedStageCount").GetInt32());
-        Assert.Equal(3, root.GetProperty("completedStepCount").GetInt32());
-        Assert.Equal(4, root.GetProperty("commandCount").GetInt32());
-        Assert.Equal(1, root.GetProperty("incidentCount").GetInt32());
-        var dutIdentity = root.GetProperty("dutIdentity");
-        Assert.Equal("dut.production-run-api", dutIdentity.GetProperty("modelId").GetString());
-        Assert.Equal("serialNumber", dutIdentity.GetProperty("inputKey").GetString());
-        Assert.Equal("DUT-API-001", dutIdentity.GetProperty("value").GetString());
-        var stage = Assert.Single(root.GetProperty("stages").EnumerateArray());
-        Assert.Equal("stage.production-run-api", stage.GetProperty("stageId").GetString());
-        Assert.Equal("workstation.production-run-api", stage.GetProperty("workstationId").GetString());
-        Assert.Equal("station.production-run-api", stage.GetProperty("stationSystemId").GetString());
-        Assert.Equal(sessionId.Value, stage.GetProperty("runtimeSessionId").GetGuid());
-        Assert.Equal(3, stage.GetProperty("completedStepCount").GetInt32());
-        Assert.Equal(4, stage.GetProperty("commandCount").GetInt32());
-        Assert.Equal(1, stage.GetProperty("incidentCount").GetInt32());
-        Assert.True(stage.GetProperty("isTerminal").GetBoolean());
+        Assert.Equal("Completed", root.GetProperty("executionStatus").GetString());
+        Assert.Equal("Failed", root.GetProperty("judgement").GetString());
+        Assert.Equal("Nonconforming", root.GetProperty("disposition").GetString());
+        Assert.Equal("SN-API-001", root.GetProperty("productionUnitIdentity")
+            .GetProperty("value").GetString());
+        var operationResponse = Assert.Single(root.GetProperty("operations").EnumerateArray());
+        Assert.Equal("operation.main", operationResponse.GetProperty("operationId").GetString());
+        Assert.Equal("Completed", operationResponse.GetProperty("executionStatus").GetString());
+        Assert.Equal("Failed", operationResponse.GetProperty("judgement").GetString());
+        Assert.Equal(7, Assert.Single(operationResponse.GetProperty("resources").EnumerateArray())
+            .GetProperty("fencingToken").GetInt64());
 
-        using var nonCanonicalResponse = await _client.GetAsync(
-            $"/api/runtime/production-runs/{runId.Value.ToString("D").ToUpperInvariant()}");
-        Assert.Equal(HttpStatusCode.BadRequest, nonCanonicalResponse.StatusCode);
-
-        using var missingResponse = await _client.GetAsync(
-            $"/api/runtime/production-runs/{Guid.NewGuid():D}");
-        Assert.Equal(HttpStatusCode.NotFound, missingResponse.StatusCode);
+        using var nonCanonical = await _client.GetAsync(
+            $"/api/production-runs/{runId.Value.ToString("D").ToUpperInvariant()}");
+        Assert.Equal(HttpStatusCode.BadRequest, nonCanonical.StatusCode);
     }
 
-    private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)
-    {
-        var stream = await response.Content.ReadAsStreamAsync();
-        return await JsonDocument.ParseAsync(stream);
-    }
+    private static OperationExecutionPlan OperationPlan() => new(
+        "operation.main",
+        "station.main",
+        new StationId("station.main"),
+        new ConfigurationSnapshotId("configuration.main"),
+        new RecipeSnapshotId("recipe.main"),
+        new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.main"),
+            new ProcessVersionId("process-version.main"),
+            []));
+
+    private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
+        await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
 }

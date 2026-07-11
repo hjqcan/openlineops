@@ -1,32 +1,41 @@
+using OpenLineOps.Production.Domain.Models;
+using OpenLineOps.Runtime.Contracts;
+
 namespace OpenLineOps.Production.Application.LineDefinitions;
 
 public sealed record SaveProductionLineDefinitionRequest(
     string LineDefinitionId,
     string DisplayName,
     string TopologyId,
-    DutModelRequest DutModel,
-    IReadOnlyCollection<WorkstationRequest> Workstations,
-    IReadOnlyCollection<ProcessStageRequest> Stages,
+    ProductModelRequest ProductModel,
+    string EntryOperationId,
+    IReadOnlyCollection<OperationDefinitionRequest> Operations,
+    IReadOnlyCollection<RouteTransitionRequest> Transitions,
     IReadOnlyCollection<ExternalTestProgramAdapterRequest> ExternalTestProgramAdapters);
 
-public sealed record DutModelRequest(
-    string DutModelId,
+public sealed record ProductModelRequest(
+    string ProductModelId,
     string ModelCode,
     string IdentityInputKey);
 
-public sealed record WorkstationRequest(
-    string WorkstationId,
+public sealed record OperationDefinitionRequest(
+    string OperationId,
     string DisplayName,
-    string StationSystemId);
-
-public sealed record ProcessStageRequest(
-    string StageId,
-    int Sequence,
-    string DisplayName,
-    string WorkstationId,
+    string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId,
-    string? ExternalTestProgramAdapterId);
+    string ConfigurationSnapshotId);
+
+public sealed record RouteTransitionRequest(
+    string TransitionId,
+    string SourceOperationId,
+    string TargetOperationId,
+    RouteTransitionKind Kind,
+    RouteJudgement? RequiredJudgement,
+    int? MaxTraversals,
+    string? ParallelGroupId,
+    string? OutputKey,
+    ProductionContextValueKind? ExpectedOutputKind,
+    string? ExpectedOutputValue);
 
 public sealed record ExternalTestProgramAdapterRequest(
     string AdapterId,

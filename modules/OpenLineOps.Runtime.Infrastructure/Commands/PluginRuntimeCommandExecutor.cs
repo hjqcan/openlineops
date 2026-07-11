@@ -61,7 +61,7 @@ public sealed class PluginRuntimeCommandExecutor : IRuntimeCommandExecutor
                 new PluginProcessCommandInvocationRequest(
                     releaseCommand.PluginId,
                     context.SessionId.ToString(),
-                    context.StationId.Value,
+                    context.StationSystemId,
                     context.ConfigurationSnapshotId.Value,
                     context.StepId.ToString(),
                     context.CommandId.ToString(),

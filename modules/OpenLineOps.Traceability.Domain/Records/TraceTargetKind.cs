@@ -6,6 +6,5 @@ public enum TraceTargetKind
     Capability,
     Driver,
     SlotGroup,
-    Slot,
-    Dut
+    Slot
 }

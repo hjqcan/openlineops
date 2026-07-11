@@ -16,7 +16,7 @@ using ApplicationStatusChangeRequest = OpenLineOps.Devices.Application.Configura
 namespace OpenLineOps.Devices.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.DevicesV1)]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Devices)]
 [Route(OpenLineOpsApiRoutes.Devices)]
 public sealed class DeviceConfigurationController : ControllerBase
 {

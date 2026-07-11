@@ -1,11 +1,16 @@
 using System.Collections.Concurrent;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
-public sealed class InMemoryProductionRunRepository : IProductionRunRepository
+public sealed class InMemoryProductionRunRepository :
+    IProductionRunRepository,
+    IProductionRunExecutionPlanRepository
 {
     private readonly ConcurrentDictionary<ProductionRunId, StoredProductionRun> _runs = [];
     private readonly ConcurrentDictionary<ProductionRunId, StoredTerminalOutboxItem> _terminalOutbox = [];
@@ -15,20 +20,25 @@ public sealed class InMemoryProductionRunRepository : IProductionRunRepository
 
     public ValueTask<bool> TryAddAsync(
         ProductionRun run,
+        ProductionRunExecutionPlan executionPlan,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
+        ArgumentNullException.ThrowIfNull(executionPlan);
         cancellationToken.ThrowIfCancellationRequested();
-        if (run.Status != ProductionRunStatus.Created)
+        if (run.ExecutionStatus != ExecutionStatus.Pending || executionPlan.RunId != run.Id)
         {
             throw new ArgumentException(
-                "A new production run must be persisted in Created status.",
+                "A new Production Run must be Pending and own its execution plan.",
                 nameof(run));
         }
 
         var added = _runs.TryAdd(
             run.Id,
-            new StoredProductionRun(ProductionRunSnapshotMapper.ToSnapshot(run), 0));
+            new StoredProductionRun(
+                ProductionRunSnapshotMapper.ToSnapshot(run),
+                executionPlan,
+                0));
         if (added)
         {
             Interlocked.Increment(ref _saveCount);
@@ -58,6 +68,7 @@ public sealed class InMemoryProductionRunRepository : IProductionRunRepository
         var nextRevision = checked(expectedRevision + 1);
         var updated = new StoredProductionRun(
             ProductionRunSnapshotMapper.ToSnapshot(run),
+            stored.ExecutionPlan,
             nextRevision);
         if (!_runs.TryUpdate(run.Id, updated, stored))
         {
@@ -101,6 +112,45 @@ public sealed class InMemoryProductionRunRepository : IProductionRunRepository
             .ThenBy(entry => entry.Run.Id.Value)
             .ToArray();
         return ValueTask.FromResult<IReadOnlyCollection<ProductionRunPersistenceEntry>>(runs);
+    }
+
+    public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+        string? productionLineDefinitionId = null,
+        string? stationSystemId = null,
+        string? slotId = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var entries = _runs.Values
+            .Select(stored => new ProductionRunPersistenceEntry(
+                ProductionRunSnapshotMapper.ToAggregate(stored.Snapshot),
+                stored.Revision))
+            .Where(entry => !entry.Run.IsTerminal)
+            .Where(entry => productionLineDefinitionId is null || string.Equals(
+                entry.Run.ProductionLineDefinitionId,
+                productionLineDefinitionId,
+                StringComparison.Ordinal))
+            .Where(entry => stationSystemId is null || entry.Run.OperationDefinitions.Any(definition =>
+                string.Equals(definition.StationSystemId, stationSystemId, StringComparison.Ordinal)))
+            .Where(entry => slotId is null || entry.Run.OperationDefinitions.Any(definition =>
+                definition.ResourceRequirements.Any(requirement =>
+                    requirement.Kind == ResourceKind.Slot
+                    && string.Equals(requirement.ResourceId, slotId, StringComparison.Ordinal))))
+            .OrderBy(entry => entry.Run.CreatedAtUtc)
+            .ThenBy(entry => entry.Run.Id.Value)
+            .ToArray();
+        return ValueTask.FromResult<IReadOnlyCollection<ProductionRunPersistenceEntry>>(entries);
+    }
+
+    public ValueTask<ProductionRunExecutionPlan?> GetByRunIdAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var plan = _runs.TryGetValue(runId, out var stored)
+            ? stored.ExecutionPlan
+            : null;
+        return ValueTask.FromResult(plan);
     }
 
     public ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
@@ -160,7 +210,10 @@ public sealed class InMemoryProductionRunRepository : IProductionRunRepository
             $"Production Run terminal outbox item {runId} does not exist.");
     }
 
-    private sealed record StoredProductionRun(PersistedProductionRun Snapshot, long Revision);
+    private sealed record StoredProductionRun(
+        PersistedProductionRun Snapshot,
+        ProductionRunExecutionPlan ExecutionPlan,
+        long Revision);
     private sealed record StoredTerminalOutboxItem(
         ProductionRunSnapshot Run,
         int AttemptCount,
