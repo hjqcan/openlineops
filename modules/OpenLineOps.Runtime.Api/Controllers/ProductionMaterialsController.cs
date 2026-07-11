@@ -7,6 +7,8 @@ using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Runtime.Api.Controllers;
 
@@ -15,6 +17,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [Route(OpenLineOpsApiRoutes.ProductionUnits)]
 public sealed class ProductionUnitsController(
     ProductionMaterialService service,
+    ProductionMaterialArrivalIngress arrivalIngress,
     IProductionMaterialRepository repository) : ControllerBase
 {
     [HttpPost]
@@ -47,9 +50,8 @@ public sealed class ProductionUnitsController(
             var entry = await repository.GetProductionUnitAsync(id, cancellationToken)
                 .ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Registered Production Unit was not persisted.");
-            return CreatedAtAction(
-                nameof(GetAsync),
-                new { productionUnitId = id.ToString() },
+            return Created(
+                $"/{OpenLineOpsApiRoutes.ProductionUnits}/{id}",
                 ProductionMaterialApi.ToResponse(entry.Aggregate.ToSnapshot()));
         }
         catch (Exception exception) when (exception is ArgumentException
@@ -96,10 +98,22 @@ public sealed class ProductionUnitsController(
 
         try
         {
-            var result = await service.ArriveAsync(
-                    new ArriveMaterialCommand(
-                        MaterialReference.ForProductionUnit(id),
-                        MaterialLocation.AtStation(request.LineId, request.StationSystemId),
+            var messageId = StationDispatchMessageIdentity.CreateMaterialArrivalMessageId(
+                id.Value,
+                request.LineId,
+                request.StationSystemId,
+                request.ActorId,
+                request.OccurredAtUtc);
+            var result = await arrivalIngress.HandleAsync(
+                    new MaterialArrived(
+                        messageId,
+                        StationDispatchMessageIdentity.CreateMaterialArrivalIdempotencyKey(messageId),
+                        "coordinator-api",
+                        request.StationSystemId,
+                        id.Value,
+                        request.LineId,
+                        request.StationSystemId,
+                        StationMaterialArrivalSources.Api,
                         request.ActorId,
                         request.OccurredAtUtc),
                     cancellationToken)
@@ -249,9 +263,8 @@ public sealed class ProductionLotsController(
             var entry = await repository.GetProductionLotAsync(id, cancellationToken)
                 .ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Registered Production Lot was not persisted.");
-            return CreatedAtAction(
-                nameof(GetAsync),
-                new { lotId = id.Value },
+            return Created(
+                $"/{OpenLineOpsApiRoutes.ProductionLots}/{id.Value}",
                 ProductionMaterialApi.ToResponse(entry.Aggregate.ToSnapshot()));
         }
         catch (Exception exception) when (exception is ArgumentException
@@ -399,9 +412,8 @@ public sealed class ProductionCarriersController(
     {
         var entry = await repository.GetCarrierAsync(id, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Registered Carrier was not persisted.");
-        return CreatedAtAction(
-            nameof(GetAsync),
-            new { carrierId = id.Value },
+        return Created(
+            $"/{OpenLineOpsApiRoutes.ProductionCarriers}/{id.Value}",
             ProductionMaterialApi.ToResponse(entry.Aggregate.ToSnapshot()));
     }
 
@@ -447,14 +459,8 @@ public sealed class SlotOccupanciesController(
 
             var entry = await repository.GetSlotAsync(address, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Registered Slot occupancy was not persisted.");
-            return CreatedAtAction(
-                nameof(GetAsync),
-                new
-                {
-                    lineId = address.LineId,
-                    stationSystemId = address.StationSystemId,
-                    slotId = address.SlotId
-                },
+            return Created(
+                $"/{OpenLineOpsApiRoutes.SlotOccupancies}/{address}",
                 ProductionMaterialApi.ToResponse(entry.Aggregate.ToSnapshot()));
         }
         catch (Exception exception) when (exception is ArgumentException
@@ -496,7 +502,8 @@ public sealed class SlotOccupanciesController(
         SlotOccupancyCommandApiRequest request,
         CancellationToken cancellationToken)
     {
-        if (command is not ("Reserve" or "ReleaseReservation" or "Load" or "Start" or "Complete" or "Unload"))
+        if (command is not ("Reserve" or "ReleaseReservation" or "Load" or "Start" or "Complete" or "Unload"
+            or "Block" or "Unblock" or "SetOffline" or "BringOnline"))
         {
             return BadRequest();
         }
@@ -504,43 +511,69 @@ public sealed class SlotOccupanciesController(
         try
         {
             var address = new SlotAddress(lineId, stationSystemId, slotId);
-            var material = ProductionMaterialApi.ToMaterial(request.MaterialKind, request.MaterialId);
+            var material = command is "Reserve" or "ReleaseReservation" or "Load" or "Start" or "Complete" or "Unload"
+                ? ProductionMaterialApi.ToMaterial(
+                    request.MaterialKind
+                        ?? throw new ArgumentException($"{command} requires material kind.", nameof(request)),
+                    request.MaterialId
+                        ?? throw new ArgumentException($"{command} requires material id.", nameof(request)))
+                : null;
             var result = command switch
             {
                 "Reserve" => await service.ReserveSlotAsync(
-                        new ReserveSlotCommand(address, material, request.ActorId, request.OccurredAtUtc),
+                        new ReserveSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "ReleaseReservation" => await service.ReleaseSlotReservationAsync(
                         new ReleaseSlotReservationCommand(
                             address,
-                            material,
+                            material!,
                             request.ActorId,
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Load" => await service.LoadSlotAsync(
-                        new LoadSlotCommand(address, material, request.ActorId, request.OccurredAtUtc),
+                        new LoadSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Start" => await service.StartSlotAsync(
-                        new StartSlotCommand(address, material, request.ActorId, request.OccurredAtUtc),
+                        new StartSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Complete" => await service.CompleteSlotAsync(
-                        new CompleteSlotCommand(address, material, request.ActorId, request.OccurredAtUtc),
+                        new CompleteSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Unload" => await service.UnloadSlotAsync(
                         new UnloadSlotCommand(
                             address,
-                            material,
+                            material!,
                             ProductionMaterialApi.ToDomain(request.Destination
                                 ?? throw new ArgumentException(
                                     "Unload requires a destination.",
                                     nameof(request))),
                             request.ActorId,
                             request.OccurredAtUtc),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "Block" => await service.BlockSlotAsync(
+                        new BlockSlotCommand(
+                            address,
+                            ProductionMaterialApi.RequiredReason(request.Reason, command),
+                            request.ActorId,
+                            request.OccurredAtUtc),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "Unblock" => await service.UnblockSlotAsync(
+                        new UnblockSlotCommand(address, request.ActorId, request.OccurredAtUtc),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "SetOffline" => await service.SetSlotOfflineAsync(
+                        new SetSlotOfflineCommand(address, request.ActorId, request.OccurredAtUtc),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "BringOnline" => await service.BringSlotOnlineAsync(
+                        new BringSlotOnlineCommand(address, request.ActorId, request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Unsupported Slot command {command}.")
@@ -706,8 +739,13 @@ internal static class ProductionMaterialApi
         snapshot.RegisteredBy,
         snapshot.RegisteredAtUtc,
         snapshot.LastTransitionAtUtc,
+        snapshot.LastLocationTransitionAtUtc,
+        snapshot.LastDispositionTransitionAtUtc,
         snapshot.Disposition.ToString(),
         snapshot.DispositionBeforeHold?.ToString(),
+        snapshot.ActiveProductionRunId?.Value,
+        snapshot.LastProductionRunId?.Value,
+        snapshot.LastProductionRunRevision,
         snapshot.DispositionReason,
         ToResponse(snapshot.Location));
 

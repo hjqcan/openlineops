@@ -18,10 +18,7 @@ namespace PythonScript.Analysis
 
         public void RegisterAssembly(Assembly assembly)
         {
-            if (assembly == null)
-            {
-                throw new ArgumentNullException(nameof(assembly));
-            }
+            ArgumentNullException.ThrowIfNull(assembly);
 
             string cacheKey = assembly.FullName ?? assembly.GetName().Name ?? string.Empty;
             assemblyCache.TryAdd(cacheKey, assembly);
@@ -34,10 +31,7 @@ namespace PythonScript.Analysis
 
         public void RegisterType(Type type)
         {
-            if (type == null)
-            {
-                throw new ArgumentNullException(nameof(type));
-            }
+            ArgumentNullException.ThrowIfNull(type);
 
             typeCache[type.Name] = type;
             if (!string.IsNullOrEmpty(type.FullName))
@@ -46,22 +40,22 @@ namespace PythonScript.Analysis
             }
         }
 
-        public bool TryResolve(string typeName, out Type? type)
+        public bool TryResolve(string name, out Type? type)
         {
-            if (string.IsNullOrWhiteSpace(typeName))
+            if (string.IsNullOrWhiteSpace(name))
             {
                 type = null;
                 return false;
             }
 
-            if (typeCache.TryGetValue(typeName, out type))
+            if (typeCache.TryGetValue(name, out type))
             {
                 return true;
             }
 
             foreach (var assembly in assemblyCache.Values)
             {
-                type = assembly.GetType(typeName);
+                type = assembly.GetType(name);
                 if (type != null)
                 {
                     RegisterType(type);

@@ -184,9 +184,9 @@ public sealed class OperationRun
         }
 
         _fencingTokens.Clear();
-        foreach (var requirement in Definition.ResourceRequirements)
+        foreach (var lease in leases)
         {
-            _fencingTokens.Add(requirement, byResource[requirement].FencingToken);
+            _fencingTokens.Add(lease.Resource, lease.FencingToken);
         }
 
         ExecutionStatus = ExecutionStatus.Running;
@@ -322,8 +322,10 @@ public sealed class OperationRun
 
         Require(RuntimeSessionId is not null && StartedAtUtc is not null,
             "Started Operation Run must identify its Runtime Session.");
-        Require(_fencingTokens.Count == Definition.ResourceRequirements.Count,
-            "Started Operation Run must retain every resource fencing token.");
+        Require(_fencingTokens.Count >= Definition.ResourceRequirements.Count
+                && _fencingTokens.Values.All(static token => token > 0)
+                && Definition.ResourceRequirements.All(_fencingTokens.ContainsKey),
+            "Started Operation Run must retain every static and resolved material resource fencing token.");
         if (ExecutionStatus == ExecutionStatus.Running)
         {
             Require(CompletedAtUtc is null && FailureCode is null && FailureReason is null,

@@ -1,6 +1,7 @@
 using OpenLineOps.Processes.Api.Models;
 using OpenLineOps.Processes.Application.Definitions;
 using OpenLineOps.Processes.Application.Validation;
+using OpenLineOps.Api.Abstractions;
 using CreateApiDefinitionRequest = OpenLineOps.Processes.Api.Models.CreateProcessDefinitionRequest;
 using CreateApiNodeRequest = OpenLineOps.Processes.Api.Models.CreateProcessNodeRequest;
 using CreateApiTransitionRequest = OpenLineOps.Processes.Api.Models.CreateProcessTransitionRequest;
@@ -55,7 +56,8 @@ internal static class ProcessDefinitionApiContractMapper
             definition.CreatedAtUtc,
             definition.PublishedAtUtc,
             definition.Nodes.Select(ToNodeResponse).ToArray(),
-            definition.Transitions.Select(ToTransitionResponse).ToArray());
+            definition.Transitions.Select(ToTransitionResponse).ToArray(),
+            EditorDocumentConcurrency.ComputeRevision(definition));
     }
 
     public static ProcessDefinitionSummaryResponse ToSummaryResponse(ProcessDefinitionSummary summary)

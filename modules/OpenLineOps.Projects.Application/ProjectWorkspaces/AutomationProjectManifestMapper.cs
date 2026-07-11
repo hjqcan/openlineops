@@ -107,7 +107,9 @@ public static class AutomationProjectManifestMapper
             binding.CapabilityId,
             binding.BindingId,
             binding.ProviderKind,
-            binding.ProviderKey);
+            binding.ProviderKey,
+            binding.OwnerSystemId,
+            binding.OwnerStationSystemId);
     }
 
     private static ProjectTargetReferenceManifest ToManifest(ProjectTargetReference target)
@@ -160,7 +162,9 @@ public static class AutomationProjectManifestMapper
             binding.CapabilityId,
             binding.BindingId,
             binding.ProviderKind,
-            binding.ProviderKey);
+            binding.ProviderKey,
+            binding.OwnerSystemId,
+            binding.OwnerStationSystemId);
     }
 
     private static ProjectTargetReference ToTargetReference(ProjectTargetReferenceManifest target)

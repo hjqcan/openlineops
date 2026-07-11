@@ -49,7 +49,8 @@ namespace PythonScript.Exceptions
             string? pythonExceptionType = null;
             try
             {
-                var typeStr = pythonException.Type?.ToString();
+                var typeStr = pythonException.Type?.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
                 pythonExceptionType = typeStr?.Split('.').LastOrDefault();
             }
             catch

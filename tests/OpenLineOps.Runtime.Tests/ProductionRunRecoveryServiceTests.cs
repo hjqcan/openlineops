@@ -6,6 +6,7 @@ using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
@@ -20,9 +21,13 @@ public sealed class ProductionRunRecoveryServiceTests
     [Fact]
     public async Task RunningHardwareOperationEntersRecoveryRequiredWithoutReplay()
     {
-        var repository = new InMemoryProductionRunRepository();
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
         var (run, plan) = CreateRun();
-        Assert.True(await repository.TryAddAsync(run, plan));
+        Assert.True(await repository.TryAddAsync(
+            run,
+            plan,
+            await ProductionRunTestMaterials.RegisterAsync(materials, run)));
         Assert.True(run.Start(Now).Succeeded);
         var operation = Assert.Single(run.Operations);
         var leases = operation.ResourceRequirements.Select(resource => new ResourceLease(
@@ -58,9 +63,13 @@ public sealed class ProductionRunRecoveryServiceTests
     [Fact]
     public async Task PendingRunRemainsDispatchableAfterRestart()
     {
-        var repository = new InMemoryProductionRunRepository();
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
         var (run, plan) = CreateRun();
-        Assert.True(await repository.TryAddAsync(run, plan));
+        Assert.True(await repository.TryAddAsync(
+            run,
+            plan,
+            await ProductionRunTestMaterials.RegisterAsync(materials, run)));
         var service = new ProductionRunRecoveryService(
             repository,
             new InMemoryResourceLeaseRepository(),
@@ -93,6 +102,7 @@ public sealed class ProductionRunRecoveryServiceTests
             "snapshot.main",
             "topology.main",
             "line.main",
+            ProductionUnitId.New(),
             new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
             null,
             null,

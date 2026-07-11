@@ -10,7 +10,8 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
         string displayName,
         string stationSystemId,
         string flowDefinitionId,
-        string configurationSnapshotId)
+        string configurationSnapshotId,
+        IEnumerable<OperationResourceBinding> resources)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
     {
         DisplayName = ProductionIdGuard.NotBlank(displayName, nameof(displayName));
@@ -19,6 +20,66 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
         ConfigurationSnapshotId = ProductionIdGuard.NotBlank(
             configurationSnapshotId,
             nameof(configurationSnapshotId));
+        ArgumentNullException.ThrowIfNull(resources);
+        var resourceArray = resources.ToArray();
+        if (resourceArray.Length == 0 || resourceArray.Any(static resource => resource is null))
+        {
+            throw new ArgumentException(
+                "Operation resources must contain non-null bindings.",
+                nameof(resources));
+        }
+
+        if (resourceArray.Select(resource => resource.Id.Value)
+                .Distinct(StringComparer.Ordinal).Count() != resourceArray.Length
+            || resourceArray.Select(resource => resource.Id.Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count() != resourceArray.Length)
+        {
+            throw new ArgumentException(
+                "Operation resource BindingIds must be unique and cannot differ only by case.",
+                nameof(resources));
+        }
+
+        var stationBindings = resourceArray
+            .Where(resource => resource.Kind == OperationResourceKind.Station)
+            .ToArray();
+        if (stationBindings.Length != 1
+            || stationBindings[0].Resolution != OperationResourceResolution.Fixed
+            || !string.Equals(
+                stationBindings[0].TopologyTargetId,
+                StationSystemId,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "An Operation must contain exactly one Fixed Station resource equal to StationSystemId.",
+                nameof(resources));
+        }
+
+        if (resourceArray.GroupBy(resource => (
+                    resource.Kind,
+                    resource.TopologyTargetId,
+                    resource.Resolution))
+                .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "Operation resource bindings must be semantically unique.",
+                nameof(resources));
+        }
+
+        if (resourceArray.Count(resource =>
+                resource.Kind == OperationResourceKind.Slot
+                && resource.Resolution != OperationResourceResolution.Fixed) > 1)
+        {
+            throw new ArgumentException(
+                "An Operation can declare at most one dynamic material Slot resource.",
+                nameof(resources));
+        }
+
+        Resources = resourceArray
+            .OrderBy(resource => resource.Kind)
+            .ThenBy(resource => resource.TopologyTargetId, StringComparer.Ordinal)
+            .ThenBy(resource => resource.Resolution)
+            .ThenBy(resource => resource.Id.Value, StringComparer.Ordinal)
+            .ToArray();
     }
 
     public string DisplayName { get; }
@@ -29,18 +90,22 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
 
     public string ConfigurationSnapshotId { get; }
 
+    public IReadOnlyList<OperationResourceBinding> Resources { get; }
+
     public static OperationDefinition Create(
         OperationDefinitionId id,
         string displayName,
         string stationSystemId,
         string flowDefinitionId,
-        string configurationSnapshotId)
+        string configurationSnapshotId,
+        IEnumerable<OperationResourceBinding> resources)
     {
         return new OperationDefinition(
             id,
             displayName,
             stationSystemId,
             flowDefinitionId,
-            configurationSnapshotId);
+            configurationSnapshotId,
+            resources);
     }
 }

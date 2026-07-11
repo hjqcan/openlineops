@@ -28,7 +28,8 @@ public enum ProductionRunCommand
     SafeStop = 8,
     Reconcile = 9,
     Retry = 10,
-    Abort = 11
+    Cancel = 11,
+    Abort = 12
 }
 
 public sealed record ProductionRunCommandRequest
@@ -37,7 +38,8 @@ public sealed record ProductionRunCommandRequest
         ProductionRunCommand command,
         string actorId,
         string? reason = null,
-        string? operationId = null)
+        string? operationId = null,
+        ProductionRecoveryDecision? recoveryDecision = null)
     {
         if (!Enum.IsDefined(command))
         {
@@ -48,12 +50,52 @@ public sealed record ProductionRunCommandRequest
         ActorId = Required(actorId, nameof(actorId));
         Reason = reason is null ? null : Required(reason, nameof(reason));
         OperationId = operationId is null ? null : Required(operationId, nameof(operationId));
-        if (command is ProductionRunCommand.Rework or ProductionRunCommand.Retry
-            && OperationId is null)
+        RecoveryDecision = recoveryDecision;
+        if (recoveryDecision is not null
+            && !string.Equals(recoveryDecision.ActorId, ActorId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Recovery Decision actor must equal the command actor.",
+                nameof(recoveryDecision));
+        }
+        if (command == ProductionRunCommand.Rework && OperationId is null)
         {
             throw new ArgumentException(
                 $"{command} requires an operation id.",
                 nameof(operationId));
+        }
+
+        var expectedRecoveryKind = command switch
+        {
+            ProductionRunCommand.Reconcile => ProductionRecoveryDecisionKind.Reconcile,
+            ProductionRunCommand.Retry => ProductionRecoveryDecisionKind.Retry,
+            ProductionRunCommand.Abort => ProductionRecoveryDecisionKind.Abort,
+            _ => (ProductionRecoveryDecisionKind?)null
+        };
+        if (expectedRecoveryKind is not null
+            && recoveryDecision?.Kind != expectedRecoveryKind)
+        {
+            throw new ArgumentException(
+                $"{command} requires a {expectedRecoveryKind} Recovery Decision.",
+                nameof(recoveryDecision));
+        }
+
+        if (command == ProductionRunCommand.Scrap
+            && recoveryDecision is not null
+            && recoveryDecision.Kind != ProductionRecoveryDecisionKind.Scrap)
+        {
+            throw new ArgumentException(
+                "Scrap can only carry a Scrap Recovery Decision.",
+                nameof(recoveryDecision));
+        }
+
+        if (expectedRecoveryKind is null
+            && command != ProductionRunCommand.Scrap
+            && recoveryDecision is not null)
+        {
+            throw new ArgumentException(
+                $"{command} cannot carry a Recovery Decision.",
+                nameof(recoveryDecision));
         }
     }
 
@@ -64,6 +106,8 @@ public sealed record ProductionRunCommandRequest
     public string? Reason { get; }
 
     public string? OperationId { get; }
+
+    public ProductionRecoveryDecision? RecoveryDecision { get; }
 
     private static string Required(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)

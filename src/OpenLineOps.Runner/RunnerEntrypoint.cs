@@ -19,7 +19,7 @@ public static class RunnerEntrypoint
         OpenLineOps Runner - one-shot immutable Production Line execution
 
         Usage:
-          OpenLineOps.Runner run <project-directory-or-.oloproj> --production-unit <identity> --actor <actor-id> [--snapshot <id|active>] [--run-id <guid>] [--lot <value>] [--carrier <value>] [--slot <value>] [--fixture <value>] [--device <value>]
+          OpenLineOps.Runner run <project-directory-or-.oloproj> --production-unit-id <guid> --identity <value> --actor <actor-id> [--snapshot <id|active>] [--run-id <guid>]
 
         Notes:
           --snapshot defaults to "active".
@@ -87,6 +87,7 @@ public static class RunnerEntrypoint
             services.AddOpenLineOpsEngineeringModule();
             services.AddOpenLineOpsPluginsModule(configuration);
             services.AddOpenLineOpsDevicesModule(configuration);
+            services.AddScoped<IRunnerProductionUnitPreparer, RunnerProductionUnitPreparer>();
             services.AddScoped<RunnerCommand>();
 
             await using var serviceProvider = services.BuildServiceProvider(

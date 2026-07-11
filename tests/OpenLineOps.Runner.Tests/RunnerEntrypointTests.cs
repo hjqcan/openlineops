@@ -27,14 +27,28 @@ public sealed class RunnerEntrypointTests
                     },
                     "Traceability": { "Persistence": { "Provider": "InMemory" } },
                     "Devices": { "Persistence": { "Provider": "InMemory" } },
-                    "Plugins": { "EventLog": { "Provider": "InMemory" } }
+                    "Plugins": {
+                      "EventLog": {
+                        "Provider": "Sqlite",
+                        "DatabasePath": "runner-plugin-events.sqlite"
+                      }
+                    }
                   }
                 }
                 """);
             var writer = new StringWriter();
 
             var exitCode = await RunnerEntrypoint.RunAsync(
-                ["run", missingProject, "--production-unit", "UNIT-001", "--actor", "runner-test"],
+                [
+                    "run",
+                    missingProject,
+                    "--production-unit-id",
+                    "00000000-0000-0000-0000-000000000001",
+                    "--identity",
+                    "UNIT-001",
+                    "--actor",
+                    "runner-test"
+                ],
                 Path.GetTempPath(),
                 writer);
 

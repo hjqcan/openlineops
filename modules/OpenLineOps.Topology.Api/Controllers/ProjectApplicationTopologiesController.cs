@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Topology.Api.Models;
@@ -12,6 +13,7 @@ using ApiAddSlotRequest = OpenLineOps.Topology.Api.Models.AddSlotDefinitionReque
 using ApiAddSystemRequest = OpenLineOps.Topology.Api.Models.AddAutomationSystemRequest;
 using ApiCreateTopologyRequest = OpenLineOps.Topology.Api.Models.CreateAutomationTopologyRequest;
 using ApiUpdateSlotGroupRequest = OpenLineOps.Topology.Api.Models.UpdateSlotGroupRequest;
+using ApiUpdateDriverBindingRequest = OpenLineOps.Topology.Api.Models.UpdateDriverBindingRequest;
 using ApiUpdateSlotRequest = OpenLineOps.Topology.Api.Models.UpdateSlotDefinitionRequest;
 using ApiUpdateSystemRequest = OpenLineOps.Topology.Api.Models.UpdateAutomationSystemRequest;
 using AppAddCapabilityRequest = OpenLineOps.Topology.Application.Topologies.AddCapabilityContractRequest;
@@ -21,6 +23,7 @@ using AppAddSlotRequest = OpenLineOps.Topology.Application.Topologies.AddSlotDef
 using AppAddSystemRequest = OpenLineOps.Topology.Application.Topologies.AddAutomationSystemRequest;
 using AppCreateTopologyRequest = OpenLineOps.Topology.Application.Topologies.CreateAutomationTopologyRequest;
 using AppUpdateSlotGroupRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotGroupRequest;
+using AppUpdateDriverBindingRequest = OpenLineOps.Topology.Application.Topologies.UpdateDriverBindingRequest;
 using AppUpdateSlotRequest = OpenLineOps.Topology.Application.Topologies.UpdateSlotDefinitionRequest;
 using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.UpdateAutomationSystemRequest;
 
@@ -29,7 +32,7 @@ namespace OpenLineOps.Topology.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationTopologies)]
-public sealed class ProjectApplicationTopologiesController : ControllerBase
+public sealed class ProjectApplicationTopologiesController : ControllerBase, IAsyncActionFilter
 {
     private readonly IProjectAutomationTopologyService _topologyService;
     private readonly ProjectReleaseTopologyReader _releaseReader;
@@ -40,6 +43,66 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
     {
         _topologyService = topologyService;
         _releaseReader = releaseReader;
+    }
+
+    [NonAction]
+    public async Task OnActionExecutionAsync(
+        ActionExecutingContext context,
+        ActionExecutionDelegate next)
+    {
+        var topologyId = context.RouteData.Values["topologyId"] as string;
+        var isMutation = !HttpMethods.IsGet(Request.Method) && topologyId is not null;
+        IAsyncDisposable? lease = null;
+        if (isMutation)
+        {
+            var projectId = context.RouteData.Values["projectId"] as string ?? string.Empty;
+            var applicationId = context.RouteData.Values["applicationId"] as string ?? string.Empty;
+            lease = await EditorDocumentConcurrency.AcquireAsync(
+                    $"topology:{projectId}:{applicationId}:{topologyId}",
+                    context.HttpContext.RequestAborted)
+                .ConfigureAwait(false);
+            var current = await _topologyService
+                .GetByIdAsync(projectId, applicationId, topologyId!, context.HttpContext.RequestAborted)
+                .ConfigureAwait(false);
+            if (current.IsFailure)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                context.Result = ToProblem(current.Error);
+                return;
+            }
+
+            var currentRevision = AutomationTopologyApiContract.ToResponse(current.Value).Revision;
+            var precondition = EditorDocumentConcurrency.Evaluate(
+                Request.Headers[EditorDocumentConcurrency.IfMatchHeaderName].ToString(),
+                Request.Headers[EditorDocumentConcurrency.ConflictResolutionHeaderName].ToString(),
+                currentRevision);
+            if (precondition != EditorDocumentPrecondition.Satisfied)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                context.Result = this.EditorDocumentPreconditionProblem(precondition, currentRevision);
+                return;
+            }
+        }
+
+        try
+        {
+            var executed = await next().ConfigureAwait(false);
+            if (executed.Result is ObjectResult { Value: AutomationTopologyResponse topology })
+            {
+                Response.SetEditorDocumentRevision(topology.Revision);
+            }
+            else if (executed.Result is ObjectResult { Value: TopologyTargetDeletionResponse deletion })
+            {
+                Response.SetEditorDocumentRevision(deletion.Topology.Revision);
+            }
+        }
+        finally
+        {
+            if (lease is not null)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     [HttpPost]
@@ -267,12 +330,59 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase
                 topologyId,
                 new AppAddDriverBindingRequest(
                     request.BindingId!,
+                    request.OwnerSystemId!,
                     request.CapabilityId!,
                     request.ProviderKind!,
                     request.ProviderKey!),
                 cancellationToken)
             .ConfigureAwait(false);
 
+        return ToActionResult(result);
+    }
+
+    [HttpPut("{topologyId}/driver-bindings/{bindingId}")]
+    public async Task<ActionResult<AutomationTopologyResponse>> UpdateDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        ApiUpdateDriverBindingRequest request,
+        CancellationToken cancellationToken)
+    {
+        var validationErrors = AutomationTopologyApiContract.Validate(request);
+        if (validationErrors.Count > 0)
+        {
+            return BadRequest(new ValidationProblemDetails(validationErrors));
+        }
+
+        var result = await _topologyService.UpdateDriverBindingAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            bindingId,
+            new AppUpdateDriverBindingRequest(
+                request.OwnerSystemId!,
+                request.CapabilityId!,
+                request.ProviderKind!,
+                request.ProviderKey!),
+            cancellationToken).ConfigureAwait(false);
+        return ToActionResult(result);
+    }
+
+    [HttpDelete("{topologyId}/driver-bindings/{bindingId}")]
+    public async Task<ActionResult<AutomationTopologyResponse>> DeleteDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _topologyService.DeleteDriverBindingAsync(
+            projectId,
+            applicationId,
+            topologyId,
+            bindingId,
+            cancellationToken).ConfigureAwait(false);
         return ToActionResult(result);
     }
 

@@ -11,13 +11,15 @@ namespace OpenLineOps.Runtime.Application.Execution;
 
 public sealed class InProcessStationOperationDispatcher(
     IRuntimeSessionRunner sessionRunner,
-    IRuntimeSessionRepository sessionRepository) : IStationOperationDispatcher
+    IRuntimeSessionRepository sessionRepository,
+    InProcessStationOperationRegistry executions) : IStationOperationDispatcher
 {
     public async ValueTask<StationOperationDispatchResult> DispatchAsync(
         StationOperationDispatchRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        using var execution = executions.Register(request.IdempotencyKey, cancellationToken);
         var sessionResult = await sessionRunner.RunAsync(
             new StartRuntimeSessionRequest(
                 request.RuntimeSessionId,
@@ -26,7 +28,7 @@ public sealed class InProcessStationOperationDispatcher(
                 request.ExecutionPlan.Definition.RecipeSnapshotId,
                 request.ExecutionPlan.FrozenExecutableProcess,
                 CreateTraceMetadata(request)),
-            cancellationToken).ConfigureAwait(false);
+            execution.CancellationToken).ConfigureAwait(false);
         if (sessionResult.IsFailure)
         {
             return new StationOperationDispatchResult(
@@ -43,7 +45,7 @@ public sealed class InProcessStationOperationDispatcher(
 
         var session = await sessionRepository.GetByIdAsync(
                 sessionResult.Value.SessionId,
-                cancellationToken)
+                CancellationToken.None)
             .ConfigureAwait(false)
             ?? throw new InvalidDataException(
                 $"Runtime Session {sessionResult.Value.SessionId} completed without durable state.");
@@ -53,10 +55,14 @@ public sealed class InProcessStationOperationDispatcher(
         var completedSteps = session.Steps.Count(step => step.Status == RuntimeStepStatus.Completed);
         if (session.Status == RuntimeSessionStatus.Completed)
         {
+            var outputs = ProductionContextOutputReader.ReadExplicitMany(session.Commands
+                .Where(static command =>
+                    command.Status == OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus.Completed)
+                .Select(static command => command.ResultPayload));
             return new StationOperationDispatchResult(
                 ExecutionStatus.Completed,
                 ResolveJudgement(session.Commands),
-                null,
+                outputs,
                 completedSteps,
                 session.Commands.Count,
                 session.Incidents.Count,
@@ -115,8 +121,10 @@ public sealed class InProcessStationOperationDispatcher(
         var operation = request.Operation;
         return new RuntimeSessionTraceMetadata(
             run.RunId,
+            run.ProductionUnitId,
             run.ProductionLineDefinitionId,
             operation.Definition.OperationId,
+            operation.OperationRunId,
             operation.Attempt,
             operation.Definition.StationSystemId,
             run.ProductionUnitIdentity,
@@ -130,6 +138,7 @@ public sealed class InProcessStationOperationDispatcher(
             run.ProjectId,
             run.ApplicationId,
             run.ProjectSnapshotId,
-            run.TopologyId);
+            run.TopologyId,
+            request.ResourceLeases.Select(ResourceLeaseFenceEvidence.FromLease));
     }
 }

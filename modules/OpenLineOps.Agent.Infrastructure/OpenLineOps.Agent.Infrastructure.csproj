@@ -14,8 +14,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.StationRuntime.Contracts\OpenLineOps.StationRuntime.Contracts.csproj" />
     <ProjectReference Include="..\OpenLineOps.Agent.Application\OpenLineOps.Agent.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Agent.Domain\OpenLineOps.Agent.Domain.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
   </ItemGroup>
 
 </Project>

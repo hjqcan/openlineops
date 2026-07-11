@@ -5,6 +5,7 @@ using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.HostedServices;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Execution;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
@@ -13,6 +14,7 @@ using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Commands;
+using OpenLineOps.Runtime.Infrastructure.Transport;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -40,6 +42,8 @@ public sealed class RuntimeModuleDependencyInjectionTests
             serviceProvider.GetRequiredService<IProductionRunExecutionPlanRepository>());
         Assert.IsType<InMemoryResourceLeaseRepository>(
             serviceProvider.GetRequiredService<IResourceLeaseRepository>());
+        Assert.IsType<ProductionLineRuntimeStateReader>(
+            scope.ServiceProvider.GetRequiredService<IProductionLineRuntimeStateReader>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<IProductionRunRecoveryService>());
         var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
         var recoveryIndex = Array.FindIndex(
@@ -51,12 +55,15 @@ public sealed class RuntimeModuleDependencyInjectionTests
             service => service is ProductionRunCoordinatorHostedService);
         Assert.IsType<RuntimeDomainEventPublisher>(
             serviceProvider.GetRequiredService<OpenLineOps.Runtime.Application.Events.IRuntimeDomainEventPublisher>());
+        Assert.IsType<DisabledStationSafetyGateway>(
+            serviceProvider.GetRequiredService<IStationEmergencyStopGateway>());
     }
 
     [Fact]
     public void ExplicitLocalExecutionResolvesOnlyTheInProcessDispatcherAndSafetyController()
     {
         var services = new ServiceCollection();
+        services.AddSingleton<IRuntimeCommandExecutor, SuccessfulRuntimeCommandExecutor>();
         services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
         using var serviceProvider = services.BuildServiceProvider();
         using var scope = serviceProvider.CreateScope();
@@ -328,4 +335,15 @@ public sealed class RuntimeModuleDependencyInjectionTests
             ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
         })
         .Build();
+
+    private sealed class SuccessfulRuntimeCommandExecutor : IRuntimeCommandExecutor
+    {
+        public ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed());
+        }
+    }
 }

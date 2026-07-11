@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -16,12 +17,12 @@ public sealed class ProductionMaterialDomainTests
         Assert.True(unit.MarkNonconforming("visual defect", BaseTimeUtc.AddSeconds(1)).Succeeded);
         Assert.True(unit.Hold("awaiting review", BaseTimeUtc.AddSeconds(2)).Succeeded);
 
-        Assert.Equal(ProductionUnitDisposition.Held, unit.Disposition);
-        Assert.Equal(ProductionUnitDisposition.Nonconforming, unit.DispositionBeforeHold);
+        Assert.Equal(ProductDisposition.Held, unit.Disposition);
+        Assert.Equal(ProductDisposition.Nonconforming, unit.DispositionBeforeHold);
         Assert.Equal("awaiting review", unit.DispositionReason);
 
         Assert.True(unit.Release(BaseTimeUtc.AddSeconds(3)).Succeeded);
-        Assert.Equal(ProductionUnitDisposition.Nonconforming, unit.Disposition);
+        Assert.Equal(ProductDisposition.Nonconforming, unit.Disposition);
         Assert.Null(unit.DispositionBeforeHold);
         Assert.Null(unit.DispositionReason);
     }
@@ -39,7 +40,7 @@ public sealed class ProductionMaterialDomainTests
 
         Assert.True(result.Succeeded, result.Message);
         Assert.Equal(quarantine, unit.Location);
-        Assert.Equal(ProductionUnitDisposition.Held, unit.Disposition);
+        Assert.Equal(ProductDisposition.Held, unit.Disposition);
     }
 
     [Fact]
@@ -89,7 +90,7 @@ public sealed class ProductionMaterialDomainTests
         var source = CreateUnit().ToSnapshot();
         var invalid = source with
         {
-            Disposition = ProductionUnitDisposition.Held,
+            Disposition = ProductDisposition.Held,
             DispositionBeforeHold = null,
             DispositionReason = "review"
         };

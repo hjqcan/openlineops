@@ -33,7 +33,9 @@ public sealed record SnapshotCapabilityBindingRequest(
     string CapabilityId,
     string BindingId,
     string ProviderKind,
-    string ProviderKey);
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId);
 
 public sealed record ProjectTargetReferenceRequest(
     string Kind,

@@ -55,6 +55,7 @@ public static class EngineeringConfigurationMapper
                 .OrderBy(binding => binding.Id.Value, StringComparer.Ordinal)
                 .Select(binding => new DeviceBindingDetails(
                     binding.Id.Value,
+                    binding.OwnerSystemId,
                     binding.CapabilityId.Value,
                     binding.DeviceKey))
                 .ToArray());
@@ -76,6 +77,7 @@ public static class EngineeringConfigurationMapper
                 .OrderBy(binding => binding.DeviceBindingId.Value, StringComparer.Ordinal)
                 .Select(binding => new DeviceBindingSnapshotDetails(
                     binding.DeviceBindingId.Value,
+                    binding.OwnerSystemId,
                     binding.CapabilityId.Value,
                     binding.DeviceKey))
                 .ToArray());

@@ -284,8 +284,10 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         var executionContext = new RuntimeCommandExecutionContext(
             session.Id,
             session.TraceMetadata.ProductionRunId,
+            session.TraceMetadata.ProductionUnitId,
             session.TraceMetadata.ProductionLineDefinitionId,
             session.TraceMetadata.OperationId,
+            session.TraceMetadata.OperationRunId,
             session.TraceMetadata.OperationAttempt,
             session.TraceMetadata.StationSystemId,
             session.TraceMetadata.ProductionUnitIdentity,
@@ -306,7 +308,8 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             step.TargetId,
             session.TraceMetadata.ProjectId,
             session.TraceMetadata.ApplicationId,
-            session.TraceMetadata.ProjectSnapshotId);
+            session.TraceMetadata.ProjectSnapshotId,
+            session.TraceMetadata.ResourceLeaseFences);
 
         var executionResult = await ExecuteCommandSafelyAsync(
                 executionContext,

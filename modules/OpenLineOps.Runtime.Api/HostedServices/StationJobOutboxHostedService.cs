@@ -33,11 +33,29 @@ public sealed class StationJobOutboxHostedService(
             {
                 try
                 {
-                    var request = JsonSerializer.Deserialize<StationJobRequested>(
-                        item.PayloadJson,
-                        JsonOptions)
-                        ?? throw new InvalidDataException("Station job outbox payload is empty.");
-                    await publisher.PublishAsync(request, stoppingToken).ConfigureAwait(false);
+                    switch (item.Kind)
+                    {
+                        case nameof(ResourceLeaseChanged):
+                            var change = JsonSerializer.Deserialize<ResourceLeaseChanged>(
+                                item.PayloadJson,
+                                JsonOptions)
+                                ?? throw new InvalidDataException(
+                                    "Resource lease outbox payload is empty.");
+                            await publisher.PublishAsync(change, stoppingToken).ConfigureAwait(false);
+                            break;
+                        case nameof(StationJobRequested):
+                            var request = JsonSerializer.Deserialize<StationJobRequested>(
+                                item.PayloadJson,
+                                JsonOptions)
+                                ?? throw new InvalidDataException(
+                                    "Station job outbox payload is empty.");
+                            await publisher.PublishAsync(request, stoppingToken).ConfigureAwait(false);
+                            break;
+                        default:
+                            throw new InvalidDataException(
+                                $"Unsupported Station dispatch outbox kind '{item.Kind}'.");
+                    }
+
                     await store.MarkPublishedAsync(item.MessageId, stoppingToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

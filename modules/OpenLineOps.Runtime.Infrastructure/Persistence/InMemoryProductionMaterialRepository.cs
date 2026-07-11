@@ -1,7 +1,9 @@
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -13,12 +15,153 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
     private readonly Dictionary<CarrierId, Stored<CarrierSnapshot>> _carriers = [];
     private readonly Dictionary<SlotAddress, Stored<SlotOccupancySnapshot>> _slots = [];
     private readonly Dictionary<MaterialGenealogyLinkId, MaterialGenealogyLink> _genealogy = [];
+    private readonly Dictionary<Guid, ProductionMaterialTimelineEntry> _timeline = [];
+
+    internal object CoordinationGate => _gate;
+
+    internal bool TryReserveProductionRun(
+        ProductionRun run,
+        ProductionRunAdmission admission)
+    {
+        if (!_units.TryGetValue(run.ProductionUnitId, out var stored)
+            || stored.Revision != admission.ExpectedRevision
+            || stored.Snapshot != admission.ProductionUnit)
+        {
+            return false;
+        }
+
+        var unit = ProductionUnit.Restore(stored.Snapshot);
+        var result = unit.ReserveProductionRun(run.Id, run.CreatedAtUtc);
+        if (!result.Succeeded)
+        {
+            return false;
+        }
+
+        _units[unit.Id] = new Stored<ProductionUnitSnapshot>(
+            unit.ToSnapshot(),
+            checked(stored.Revision + 1));
+        return true;
+    }
+
+    internal void SynchronizeProductionRun(ProductionRun run, long runRevision)
+    {
+        if (!_units.TryGetValue(run.ProductionUnitId, out var stored))
+        {
+            throw new InvalidDataException(
+                $"Production Unit {run.ProductionUnitId} disappeared during Production Run {run.Id}.");
+        }
+
+        var unit = ProductionUnit.Restore(stored.Snapshot);
+        var previousDisposition = unit.Disposition;
+        var result = unit.SynchronizeProductionRun(
+            run.Id,
+            runRevision,
+            run.Disposition,
+            run.IsTerminal,
+            run.FailureReason,
+            run.LastTransitionAtUtc);
+        if (!result.Succeeded)
+        {
+            throw new InvalidDataException(result.Message);
+        }
+
+        var slotUpdates = ResolveCompletedSlotUpdates(run, unit);
+
+        _units[unit.Id] = new Stored<ProductionUnitSnapshot>(
+            unit.ToSnapshot(),
+            checked(stored.Revision + 1));
+        foreach (var (address, slot, revision) in slotUpdates)
+        {
+            _slots[address] = new Stored<SlotOccupancySnapshot>(
+                slot.ToSnapshot(),
+                checked(revision + 1));
+            AppendTimeline(ProductionMaterialTimelineEntry.SlotOccupancy(
+                Guid.NewGuid(),
+                address,
+                slot.Material ?? throw new InvalidDataException(
+                    $"Completed Slot {address} lost its material binding."),
+                run.Id,
+                SlotOccupancyStatus.Running,
+                SlotOccupancyStatus.Occupied,
+                run.ActorId,
+                slot.LastTransitionAtUtc));
+        }
+
+        if (previousDisposition != unit.Disposition)
+        {
+            AppendTimeline(ProductionMaterialTimelineEntry.Disposition(
+                Guid.NewGuid(),
+                unit.Id,
+                run.Id,
+                previousDisposition,
+                unit.Disposition,
+                unit.DispositionReason,
+                run.ActorId,
+                unit.LastDispositionTransitionAtUtc));
+        }
+    }
+
+    private List<(SlotAddress Address, SlotOccupancy Slot, long Revision)>
+        ResolveCompletedSlotUpdates(ProductionRun run, ProductionUnit unit)
+    {
+        var updates = new List<(SlotAddress, SlotOccupancy, long)>();
+        var expectedMaterial = unit.Location is
+        {
+            Kind: MaterialLocationKind.CarrierPosition,
+            CarrierId: { } carrierId
+        }
+            ? MaterialReference.ForCarrier(carrierId)
+            : MaterialReference.ForProductionUnit(unit.Id);
+        foreach (var completedSlot in ProductionRunSlotLifecycle.ResolveCompletedSlots(run))
+        {
+            if (_timeline.Values.Any(evidence =>
+                    ProductionRunSlotLifecycle.IsCompletionEvidence(
+                        evidence,
+                        run.Id,
+                        completedSlot)))
+            {
+                continue;
+            }
+
+            var address = completedSlot.Address;
+            if (!_slots.TryGetValue(address, out var storedSlot))
+            {
+                throw new InvalidDataException($"Resolved Slot {address} disappeared during run synchronization.");
+            }
+
+            var slot = SlotOccupancy.Restore(storedSlot.Snapshot);
+            if (slot.Material != expectedMaterial)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {address} is bound to {slot.Material}, not {expectedMaterial}.");
+            }
+
+            if (slot.Status == SlotOccupancyStatus.Running)
+            {
+                var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
+                if (!completed.Succeeded)
+                {
+                    throw new InvalidDataException(completed.Message);
+                }
+
+                updates.Add((address, slot, storedSlot.Revision));
+            }
+            else if (slot.Status != SlotOccupancyStatus.Occupied)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {address} must be Running or idempotently Occupied, not {slot.Status}.");
+            }
+        }
+
+        return updates;
+    }
 
     public ValueTask<bool> TryAddAsync(
         ProductionUnit productionUnit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(productionUnit);
+        ProductionMaterialRegistrationGuard.RequireInitial(productionUnit);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -60,6 +203,7 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(carrier);
+        ProductionMaterialRegistrationGuard.RequireInitial(carrier);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -74,6 +218,7 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(slot);
+        ProductionMaterialRegistrationGuard.RequireInitial(slot);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -91,7 +236,19 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            return ValueTask.FromResult(_genealogy.TryAdd(link.Id, link));
+            if (_timeline.ContainsKey(link.Id.Value))
+            {
+                throw new InvalidOperationException(
+                    $"Production Material evidence {link.Id.Value:D} already exists.");
+            }
+
+            if (!_genealogy.TryAdd(link.Id, link))
+            {
+                return ValueTask.FromResult(false);
+            }
+
+            AppendTimeline(ProductionMaterialTimelineEntry.FromGenealogy(link));
+            return ValueTask.FromResult(true);
         }
     }
 
@@ -176,6 +333,24 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         }
     }
 
+    public ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>
+        ListCarriersAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var carriers = _carriers.Values
+                .Select(stored => new ProductionMaterialPersistenceEntry<Carrier>(
+                    Carrier.Restore(stored.Snapshot),
+                    stored.Revision))
+                .OrderBy(entry => entry.Aggregate.RegisteredAtUtc)
+                .ThenBy(entry => entry.Aggregate.Id.Value, StringComparer.Ordinal)
+                .ToArray();
+            return ValueTask.FromResult<
+                IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>(carriers);
+        }
+    }
+
     public ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<SlotOccupancy>>>
         ListSlotsAsync(
             string? lineId = null,
@@ -222,6 +397,23 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         }
     }
 
+    public ValueTask<IReadOnlyCollection<ProductionMaterialTimelineEntry>> ListTimelineAsync(
+        ProductionMaterialTimelineQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            IReadOnlyCollection<ProductionMaterialTimelineEntry> entries = _timeline.Values
+                .Where(query.Matches)
+                .OrderBy(entry => entry.OccurredAtUtc)
+                .ThenBy(entry => entry.EvidenceId)
+                .ToArray();
+            return ValueTask.FromResult(entries);
+        }
+    }
+
     public ValueTask CommitAsync(
         ProductionMaterialCommit commit,
         CancellationToken cancellationToken = default)
@@ -251,13 +443,36 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
                     update.Aggregate.ToSnapshot(),
                     checked(update.ExpectedRevision + 1));
             }
+
+            foreach (var evidence in commit.Timeline)
+            {
+                AppendTimeline(evidence);
+            }
         }
 
         return ValueTask.CompletedTask;
     }
 
+    private void AppendTimeline(ProductionMaterialTimelineEntry evidence)
+    {
+        if (!_timeline.TryAdd(evidence.EvidenceId, evidence))
+        {
+            throw new InvalidOperationException(
+                $"Production Material evidence {evidence.EvidenceId:D} already exists.");
+        }
+    }
+
     private void ValidateCommit(ProductionMaterialCommit commit)
     {
+        foreach (var evidence in commit.Timeline)
+        {
+            if (_timeline.ContainsKey(evidence.EvidenceId))
+            {
+                throw new InvalidOperationException(
+                    $"Production Material evidence {evidence.EvidenceId:D} already exists.");
+            }
+        }
+
         foreach (var update in commit.ProductionUnits)
         {
             RequireRevision(

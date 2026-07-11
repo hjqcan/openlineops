@@ -11,5 +11,6 @@ public enum TraceRuntimeSessionStatus
     Stopped,
     Completed,
     Failed,
-    Canceled
+    Canceled,
+    Reconciled
 }

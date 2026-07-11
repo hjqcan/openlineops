@@ -7,11 +7,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Application\OpenLineOps.Agent.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Infrastructure\OpenLineOps.Agent.Infrastructure.csproj" />
+    <ProjectReference Include="..\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj" />
   </ItemGroup>
 </Project>

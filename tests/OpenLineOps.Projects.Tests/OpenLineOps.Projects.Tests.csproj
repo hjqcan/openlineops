@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Domain\OpenLineOps.Projects.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

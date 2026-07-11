@@ -4,11 +4,11 @@ using OpenLineOps.Agent.Infrastructure.Packages;
 
 namespace OpenLineOps.Agent.Infrastructure.Execution;
 
-public sealed record PackageStationOperationExecutorOptions(string PackageInboxDirectory);
+public sealed record PackageStationOperationExecutorOptions(string PackageDistributionDirectory);
 
 public sealed class PackageStationOperationExecutor : IStationOperationExecutor
 {
-    private readonly string _packageInboxDirectory;
+    private readonly string _packageDistributionDirectory;
     private readonly SignedStationPackageInstaller _installer;
     private readonly IStationRuntimeHost _runtimeHost;
 
@@ -18,11 +18,15 @@ public sealed class PackageStationOperationExecutor : IStationOperationExecutor
         IStationRuntimeHost runtimeHost)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentException.ThrowIfNullOrWhiteSpace(options.PackageInboxDirectory);
-        _packageInboxDirectory = Path.GetFullPath(options.PackageInboxDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(options.PackageDistributionDirectory);
+        _packageDistributionDirectory = Path.GetFullPath(options.PackageDistributionDirectory);
         _installer = installer;
         _runtimeHost = runtimeHost;
-        Directory.CreateDirectory(_packageInboxDirectory);
+        if (!Directory.Exists(_packageDistributionDirectory))
+        {
+            throw new DirectoryNotFoundException(
+                $"Station package distribution directory '{_packageDistributionDirectory}' does not exist.");
+        }
     }
 
     public async ValueTask<StationOperationExecutionResult> ExecuteAsync(
@@ -37,7 +41,7 @@ public sealed class PackageStationOperationExecutor : IStationOperationExecutor
                 cancellationToken)
             .ConfigureAwait(false);
         var packagePath = Path.Combine(
-            _packageInboxDirectory,
+            _packageDistributionDirectory,
             $"{job.PackageContentSha256}.olopkg");
         var installed = await _installer
             .InstallAsync(packagePath, job.PackageContentSha256, cancellationToken)
@@ -66,6 +70,10 @@ public sealed class PackageStationOperationExecutor : IStationOperationExecutor
             || !string.Equals(
                 installed.Manifest.ProjectSnapshotId,
                 job.ProjectSnapshotId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                installed.Manifest.StationSystemId,
+                job.StationSystemId,
                 StringComparison.Ordinal))
         {
             throw new InvalidDataException(

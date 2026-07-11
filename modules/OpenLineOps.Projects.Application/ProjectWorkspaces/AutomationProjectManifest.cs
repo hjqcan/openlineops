@@ -97,7 +97,9 @@ public sealed record SnapshotCapabilityBindingManifest(
     string CapabilityId,
     string BindingId,
     string ProviderKind,
-    string ProviderKey);
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId);
 
 public sealed record ProjectTargetReferenceManifest(
     string Kind,

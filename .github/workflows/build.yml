@@ -27,6 +27,14 @@ jobs:
         shell: powershell
         run: ./eng/verify-no-version-suffix-implementations.ps1
 
+      - name: Reject technical-debt markers
+        shell: powershell
+        run: ./eng/verify-no-technical-debt-markers.ps1
+
+      - name: Reject legacy production contracts
+        shell: powershell
+        run: ./eng/verify-no-legacy-production-contracts.ps1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -75,10 +83,10 @@ jobs:
         run: dotnet format OpenLineOps.sln style --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --severity warn --verbosity minimal
 
       - name: Build .NET
-        run: dotnet build OpenLineOps.sln --no-restore -v minimal
+        run: dotnet build OpenLineOps.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Build PythonScript component
-        run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal
+        run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Test .NET
         run: dotnet test OpenLineOps.sln --no-build -v minimal
@@ -107,6 +115,14 @@ jobs:
       - name: Typecheck desktop
         working-directory: apps/desktop
         run: npm run typecheck
+
+      - name: Test persisted line projection
+        working-directory: apps/desktop
+        run: npm run test:line-projection
+
+      - name: Test desktop editor workspace
+        working-directory: apps/desktop
+        run: npm run test:editor-workspace
 
       - name: Build desktop
         working-directory: apps/desktop
@@ -155,6 +171,19 @@ jobs:
         shell: powershell
         run: ./eng/inspect-ci-release-artifact.ps1
 
+      - name: Run packaged production closure E2E
+        working-directory: apps/desktop
+        run: npm run e2e:production-closure:packaged
+
+      - name: Upload packaged production closure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-production-closure-${{ github.run_number }}
+          path: artifacts/production-closure-e2e
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Smoke test desktop
         working-directory: apps/desktop
         run: npm run smoke:e2e
@@ -164,6 +193,7 @@ jobs:
         run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
       - name: Upload release artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: openlineops-release-${{ github.run_number }}
@@ -176,3 +206,23 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  production-integration:
+    name: PostgreSQL and RabbitMQ production integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPENLINEOPS_RUN_POSTGRES_INTEGRATION: "1"
+      OPENLINEOPS_RUN_RABBITMQ_INTEGRATION: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run real PostgreSQL and RabbitMQ integration gates
+        run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal

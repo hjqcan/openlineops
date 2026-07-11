@@ -142,8 +142,10 @@ public sealed class RuntimeFlowCommandExecutorTests
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
             new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             "line.main",
             "operation.main",
+            "operation.main@0001",
             1,
             "station.main",
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
@@ -164,6 +166,7 @@ public sealed class RuntimeFlowCommandExecutorTests
             RuntimeFlowCommand.Capability,
             "project.main",
             "application.main",
-            "snapshot.release");
+            "snapshot.release",
+            RuntimeTestReleaseIdentity.ResourceFences());
     }
 }

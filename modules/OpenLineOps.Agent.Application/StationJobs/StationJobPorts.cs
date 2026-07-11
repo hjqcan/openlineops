@@ -17,6 +17,18 @@ public sealed record StationJobOutboxMessage(
     DateTimeOffset? NextAttemptAtUtc,
     DateTimeOffset? AcknowledgedAtUtc);
 
+public sealed record PendingStationJobArtifact(
+    string Name,
+    string Kind,
+    string LocalArtifactKey,
+    string? MediaType,
+    long SizeBytes,
+    string Sha256);
+
+public sealed record PendingStationJobCompletion(
+    StationJobCompleted Completion,
+    IReadOnlyCollection<PendingStationJobArtifact> Artifacts);
+
 public interface IStationJobStore
 {
     ValueTask<StationJobPersistenceEntry?> GetAsync(
@@ -56,6 +68,14 @@ public interface IStationJobStore
         Guid messageId,
         DateTimeOffset retryAtUtc,
         CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyCollection<StationJobOutboxMessage>> ListPendingArtifactCleanupAsync(
+        int maximumCount,
+        CancellationToken cancellationToken = default);
+
+    ValueTask DeleteAcknowledgedOutboxAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IStationOperationExecutor
@@ -71,6 +91,10 @@ public interface IStationResourceFenceValidator
     ValueTask<StationResourceFenceValidationResult> ValidateAndAdvanceAsync(
         StationJobSnapshot job,
         CancellationToken cancellationToken = default);
+
+    ValueTask<StationResourceFenceValidationResult> ValidateCurrentAsync(
+        StationJobSnapshot job,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IStationRuntimeHost
@@ -81,6 +105,21 @@ public interface IStationRuntimeHost
         CancellationToken cancellationToken = default);
 }
 
+public interface IStationRuntimeIsolationCleaner
+{
+    ValueTask CleanupAsync(
+        StationJobSnapshot job,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class StationRuntimeIsolationCleanupException : Exception
+{
+    public StationRuntimeIsolationCleanupException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
 public interface IStationAgentMessagePublisher
 {
     ValueTask PublishAsync(
@@ -89,11 +128,67 @@ public interface IStationAgentMessagePublisher
         CancellationToken cancellationToken = default);
 }
 
+public interface IStationArtifactTransfer
+{
+    ValueTask<StationJobArtifact> PublishAsync(
+        StationJobId jobId,
+        PendingStationJobArtifact artifact,
+        CancellationToken cancellationToken = default);
+
+    ValueTask ReleaseLocalAsync(
+        StationJobId jobId,
+        PendingStationJobArtifact artifact,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IStationJobReceiver
 {
     Task RunAsync(
         Func<StationJobRequested, CancellationToken, ValueTask> handler,
+        Func<ResourceLeaseChanged, CancellationToken, ValueTask> resourceLeaseHandler,
         CancellationToken cancellationToken = default);
+}
+
+public interface IStationResourceLeaseChangeInbox
+{
+    ValueTask ApplyAsync(
+        ResourceLeaseChanged change,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class StationResourceLeaseChangeCoordinator(
+    string agentId,
+    string stationId,
+    IStationResourceLeaseChangeInbox inbox)
+{
+    private readonly string _agentId = Required(agentId, nameof(agentId));
+    private readonly string _stationId = Required(stationId, nameof(stationId));
+    private readonly IStationResourceLeaseChangeInbox _inbox =
+        inbox ?? throw new ArgumentNullException(nameof(inbox));
+
+    public ValueTask HandleAsync(
+        ResourceLeaseChanged change,
+        CancellationToken cancellationToken = default)
+    {
+        StationMessageContract.Validate(change);
+        if (!string.Equals(change.AgentId, _agentId, StringComparison.Ordinal)
+            || !string.Equals(change.StationId, _stationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Resource lease change does not target this Agent/Station identity.");
+        }
+
+        return _inbox.ApplyAsync(change, cancellationToken);
+    }
+
+    private static string Required(string value, string parameterName) =>
+        string.IsNullOrWhiteSpace(value)
+        || char.IsWhiteSpace(value[0])
+        || char.IsWhiteSpace(value[^1])
+            ? throw new ArgumentException(
+                $"{parameterName} must be canonical non-empty text.",
+                parameterName)
+            : value;
 }
 
 public interface IStationSafetyReceiver
@@ -101,6 +196,7 @@ public interface IStationSafetyReceiver
     Task RunAsync(
         Func<EmergencyStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> emergencyStopHandler,
         Func<StationSafeStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> safeStopHandler,
+        Func<StationJobCancelRequested, CancellationToken, ValueTask<StationJobCancelExecutionResult>> jobCancelHandler,
         CancellationToken cancellationToken = default);
 }
 
@@ -120,6 +216,17 @@ public sealed record StationSafetyExecutionResult(
     string? FailureCode,
     string? FailureReason);
 
+public sealed record StationJobCancelExecutionResult(
+    bool Accepted,
+    string? FailureCode,
+    string? FailureReason)
+{
+    public static StationJobCancelExecutionResult Success() => new(true, null, null);
+
+    public static StationJobCancelExecutionResult Failure(string code, string reason) =>
+        new(false, code, reason);
+}
+
 public sealed record StationOperationProgress(int Percent, string Phase);
 
 public sealed record StationResourceFenceValidationResult(bool Accepted, string? RejectionReason)
@@ -134,8 +241,10 @@ public sealed record StationRuntimeExecutionRequest(
     string PackageContentDirectory);
 
 public sealed record StationOperationArtifact(
-    string RelativePath,
-    string MediaType,
+    string Name,
+    string Kind,
+    string LocalArtifactKey,
+    string? MediaType,
     long SizeBytes,
     string Sha256);
 
@@ -144,12 +253,21 @@ public sealed record StationOperationExecutionResult(
     ResultJudgement Judgement,
     string OutputsJson,
     IReadOnlyCollection<StationOperationArtifact> Artifacts,
+    IReadOnlyCollection<StationJobStepEvidence> Steps,
+    IReadOnlyCollection<StationJobCommandEvidence> Commands,
+    IReadOnlyCollection<StationJobIncidentEvidence> Incidents,
+    int CompletedStepCount,
+    int CommandCount,
+    int IncidentCount,
     string? FailureCode,
     string? FailureReason);
 
 public static class StationAgentMessageKinds
 {
+    public const string MaterialArrived = nameof(OpenLineOps.Agent.Contracts.MaterialArrived);
     public const string JobAccepted = "StationJobAccepted";
     public const string JobProgressed = "StationJobProgressed";
     public const string JobCompleted = "StationJobCompleted";
+    public const string JobCompletionPendingArtifactTransfer =
+        "StationJobCompletionPendingArtifactTransfer";
 }

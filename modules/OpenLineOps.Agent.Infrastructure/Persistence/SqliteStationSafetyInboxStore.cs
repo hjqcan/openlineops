@@ -29,6 +29,7 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
                    request_sha256,
                    request_message_id,
                    acknowledgement_message_id,
+                   target_job_id,
                    agent_id,
                    station_id,
                    received_at_utc,
@@ -42,6 +43,45 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
             ? ReadEntry(idempotencyKey, reader)
+            : null;
+    }
+
+    public async ValueTask<StationSafetyInboxEntry?> GetJobCancellationAsync(
+        OpenLineOps.Agent.Domain.StationJobs.StationJobId jobId,
+        CancellationToken cancellationToken = default)
+    {
+        if (jobId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("Station job id cannot be empty.", nameof(jobId));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT idempotency_key,
+                   command_kind,
+                   request_sha256,
+                   request_message_id,
+                   acknowledgement_message_id,
+                   target_job_id,
+                   agent_id,
+                   station_id,
+                   received_at_utc,
+                   acknowledgement_json,
+                   completed_at_utc
+            FROM station_safety_inbox
+            WHERE command_kind = $command_kind
+              AND target_job_id = $target_job_id
+            ORDER BY received_at_utc
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$command_kind", StationSafetyCommandKind.JobCancel.ToString());
+        command.Parameters.AddWithValue("$target_job_id", jobId.Value.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ReadEntry(reader.GetString(0), reader, 1)
             : null;
     }
 
@@ -61,6 +101,7 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
                 request_sha256,
                 request_message_id,
                 acknowledgement_message_id,
+                target_job_id,
                 agent_id,
                 station_id,
                 received_at_utc,
@@ -72,6 +113,7 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
                 $request_sha256,
                 $request_message_id,
                 $acknowledgement_message_id,
+                $target_job_id,
                 $agent_id,
                 $station_id,
                 $received_at_utc,
@@ -86,6 +128,9 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
         command.Parameters.AddWithValue(
             "$acknowledgement_message_id",
             entry.AcknowledgementMessageId.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$target_job_id",
+            entry.TargetJobId is null ? DBNull.Value : entry.TargetJobId.Value.ToString("D"));
         command.Parameters.AddWithValue("$agent_id", entry.AgentId);
         command.Parameters.AddWithValue("$station_id", entry.StationId);
         command.Parameters.AddWithValue("$received_at_utc", FormatUtc(entry.ReceivedAtUtc));
@@ -174,6 +219,7 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
                     request_sha256 TEXT NOT NULL,
                     request_message_id TEXT NOT NULL,
                     acknowledgement_message_id TEXT NOT NULL,
+                    target_job_id TEXT NULL,
                     agent_id TEXT NOT NULL,
                     station_id TEXT NOT NULL,
                     received_at_utc TEXT NOT NULL,
@@ -183,6 +229,10 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
 
                 CREATE INDEX IF NOT EXISTS ix_station_safety_inbox_completion
                     ON station_safety_inbox(completed_at_utc, received_at_utc);
+
+                CREATE INDEX IF NOT EXISTS ix_station_safety_inbox_job_cancel
+                    ON station_safety_inbox(target_job_id, received_at_utc)
+                    WHERE command_kind = 'JobCancel';
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
@@ -193,19 +243,25 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
         }
     }
 
-    private static StationSafetyInboxEntry ReadEntry(string idempotencyKey, SqliteDataReader reader)
+    private static StationSafetyInboxEntry ReadEntry(
+        string idempotencyKey,
+        SqliteDataReader reader,
+        int offset = 0)
     {
         return new StationSafetyInboxEntry(
             idempotencyKey,
-            ParseCommandKind(reader.GetString(0)),
-            reader.GetString(1),
-            Guid.ParseExact(reader.GetString(2), "D"),
-            Guid.ParseExact(reader.GetString(3), "D"),
-            reader.GetString(4),
-            reader.GetString(5),
-            ParseUtc(reader.GetString(6)),
-            reader.IsDBNull(7) ? null : reader.GetString(7),
-            reader.IsDBNull(8) ? null : ParseUtc(reader.GetString(8)));
+            ParseCommandKind(reader.GetString(offset)),
+            reader.GetString(offset + 1),
+            Guid.ParseExact(reader.GetString(offset + 2), "D"),
+            Guid.ParseExact(reader.GetString(offset + 3), "D"),
+            reader.IsDBNull(offset + 4)
+                ? null
+                : Guid.ParseExact(reader.GetString(offset + 4), "D"),
+            reader.GetString(offset + 5),
+            reader.GetString(offset + 6),
+            ParseUtc(reader.GetString(offset + 7)),
+            reader.IsDBNull(offset + 8) ? null : reader.GetString(offset + 8),
+            reader.IsDBNull(offset + 9) ? null : ParseUtc(reader.GetString(offset + 9)));
     }
 
     private static StationSafetyCommandKind ParseCommandKind(string value)
@@ -227,6 +283,14 @@ public sealed class SqliteStationSafetyInboxStore : IStationSafetyInboxStore, ID
             || entry.AcknowledgementMessageId == Guid.Empty)
         {
             throw new ArgumentException("Safety Inbox identities are invalid.", nameof(entry));
+        }
+
+        if ((entry.CommandKind == StationSafetyCommandKind.JobCancel) != entry.TargetJobId.HasValue
+            || entry.TargetJobId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Only a job cancellation Inbox entry requires a non-empty target job id.",
+                nameof(entry));
         }
 
         ValidateSha256(entry.RequestSha256, nameof(entry.RequestSha256));

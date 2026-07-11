@@ -2,6 +2,8 @@ namespace OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 
 public sealed class ExternalProgramHostOptions
 {
+    internal const int WorkspaceLeafLength = 32;
+
     public const string SectionName = "OpenLineOps:Devices:ExternalProgramHost";
 
     public string WorkspaceRootPath { get; set; } = "data/openlineops-external-program-workspaces";
@@ -18,13 +20,35 @@ public sealed class ExternalProgramHostOptions
 
     public long MaximumTotalArtifactBytes { get; set; } = 512L * 1024 * 1024;
 
-    public long ProcessMemoryLimitBytes { get; set; } = 1024L * 1024 * 1024;
+    public long MaximumWorkingSetBytes { get; set; } = 1024L * 1024 * 1024;
 
-    public int ActiveProcessLimit { get; set; } = 32;
+    public long MaximumJobMemoryBytes { get; set; } = 4L * 1024 * 1024 * 1024;
 
-    public int CpuTimeLimitSeconds { get; set; } = 3600;
+    public int MaximumProcessCount { get; set; } = 32;
 
-    public bool RequireWindowsJobObject { get; set; } = true;
+    public long MaximumCpuTimeMilliseconds { get; set; } = 3_600_000;
+
+    public long MaximumExecutionTimeMilliseconds { get; set; } = 3_600_000;
+
+    public int MaximumOutputDirectoryEntries { get; set; } = 512;
+
+    public int MaximumOutputDirectoryDepth { get; set; } = 8;
+
+    public int OutputDirectoryScanIntervalMilliseconds { get; set; } = 50;
+
+    public bool RequireRestrictedHostIdentity { get; set; } = true;
+
+    public bool RequireImmutableContentProtection { get; set; } = true;
+
+    public bool RequireAppContainerIsolation { get; set; } = true;
+
+    public string? AppContainerProfileName { get; set; }
+
+    public bool AppContainerProfileExternallyOwned { get; set; }
+
+    public IList<string> AllowedRestrictedHostAccounts { get; } = new List<string>();
+
+    public IList<string> AllowedRestrictedHostSids { get; } = new List<string>();
 
     public IList<string> AllowedInheritedEnvironmentVariables { get; } =
         new List<string> { "SystemRoot", "WINDIR" };
@@ -39,8 +63,15 @@ public sealed class ExternalProgramHostOptions
 
     public void Validate()
     {
-        _ = ResolveWorkspaceRootPath();
+        var workspaceRoot = ResolveWorkspaceRootPath();
         _ = ResolveEvidenceRootPath();
+        if (OperatingSystem.IsWindows()
+            && workspaceRoot.Length + 1 + WorkspaceLeafLength >= 260)
+        {
+            throw new InvalidOperationException(
+                "External program workspace root is too long for a bounded Windows process current directory.");
+        }
+
         Positive(MaximumStandardOutputBytes, nameof(MaximumStandardOutputBytes));
         Positive(MaximumStandardErrorBytes, nameof(MaximumStandardErrorBytes));
         Positive(MaximumArtifactCount, nameof(MaximumArtifactCount));
@@ -51,9 +82,14 @@ public sealed class ExternalProgramHostOptions
         }
         Positive(MaximumArtifactBytes, nameof(MaximumArtifactBytes));
         Positive(MaximumTotalArtifactBytes, nameof(MaximumTotalArtifactBytes));
-        Positive(ProcessMemoryLimitBytes, nameof(ProcessMemoryLimitBytes));
-        Positive(ActiveProcessLimit, nameof(ActiveProcessLimit));
-        Positive(CpuTimeLimitSeconds, nameof(CpuTimeLimitSeconds));
+        Positive(MaximumWorkingSetBytes, nameof(MaximumWorkingSetBytes));
+        Positive(MaximumJobMemoryBytes, nameof(MaximumJobMemoryBytes));
+        Positive(MaximumProcessCount, nameof(MaximumProcessCount));
+        Positive(MaximumCpuTimeMilliseconds, nameof(MaximumCpuTimeMilliseconds));
+        Positive(MaximumExecutionTimeMilliseconds, nameof(MaximumExecutionTimeMilliseconds));
+        Positive(MaximumOutputDirectoryEntries, nameof(MaximumOutputDirectoryEntries));
+        Positive(MaximumOutputDirectoryDepth, nameof(MaximumOutputDirectoryDepth));
+        Positive(OutputDirectoryScanIntervalMilliseconds, nameof(OutputDirectoryScanIntervalMilliseconds));
         if (MaximumTotalArtifactBytes < MaximumArtifactBytes)
         {
             throw new InvalidOperationException(
@@ -72,6 +108,57 @@ public sealed class ExternalProgramHostOptions
                 throw new InvalidOperationException(
                     "Allowed inherited environment variable names must be canonical and unique.");
             }
+        }
+
+
+        ValidateIdentityAllowlist();
+    }
+
+    private void ValidateIdentityAllowlist()
+    {
+        var accounts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var account in AllowedRestrictedHostAccounts)
+        {
+            if (!IsCanonical(account) || !accounts.Add(account))
+            {
+                throw new InvalidOperationException(
+                    "Allowed restricted host accounts must be canonical and unique.");
+            }
+        }
+
+        var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sid in AllowedRestrictedHostSids)
+        {
+            if (!IsCanonical(sid) || !sids.Add(sid))
+            {
+                throw new InvalidOperationException(
+                    "Allowed restricted host SIDs must be canonical and unique.");
+            }
+        }
+
+        if (RequireRestrictedHostIdentity
+            && accounts.Count == 0
+            && sids.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "Restricted external program hosting requires an allowed service account or SID.");
+        }
+
+        if (RequireAppContainerIsolation
+            && (!IsCanonical(AppContainerProfileName)
+                || AppContainerProfileName!.Length > 64
+                || AppContainerProfileName.Any(character =>
+                    !char.IsAsciiLetterOrDigit(character)
+                    && character is not '.' and not '-' and not '_')))
+        {
+            throw new InvalidOperationException(
+                "External program AppContainer profile name must be a canonical portable identity of at most 64 characters.");
+        }
+
+        if (AppContainerProfileExternallyOwned && !RequireAppContainerIsolation)
+        {
+            throw new InvalidOperationException(
+                "An externally owned AppContainer profile requires AppContainer isolation.");
         }
     }
 

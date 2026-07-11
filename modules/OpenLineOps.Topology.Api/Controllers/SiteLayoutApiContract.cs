@@ -1,5 +1,6 @@
 using OpenLineOps.Topology.Api.Models;
 using OpenLineOps.Topology.Application.Layouts;
+using OpenLineOps.Api.Abstractions;
 using ApiAddElementRequest = OpenLineOps.Topology.Api.Models.AddSiteLayoutElementRequest;
 using ApiCreateLayoutRequest = OpenLineOps.Topology.Api.Models.CreateSiteLayoutRequest;
 using ApiUpdateGeometryRequest = OpenLineOps.Topology.Api.Models.UpdateSiteLayoutElementGeometryRequest;
@@ -29,7 +30,8 @@ internal static class SiteLayoutApiContract
                 element.Height,
                 element.RotationDegrees,
                 element.ZIndex,
-                element.Style)).ToArray());
+                element.Style)).ToArray(),
+            EditorDocumentConcurrency.ComputeRevision(layout));
     }
 
     public static Dictionary<string, string[]> Validate(ApiCreateLayoutRequest? request)

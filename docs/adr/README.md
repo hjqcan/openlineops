@@ -18,9 +18,11 @@ an accepted ADR to change history. Add a new ADR that supersedes the old one.
 | [0006](0006-use-strongly-typed-domain-identifiers.md) | Use Strongly Typed Domain Identifiers | Accepted | 2026-06-30 |
 | [0007](0007-make-automation-project-workspace-primary-product-shell.md) | Make Automation Project Workspace The Primary Product Shell | Superseded by 0009 | 2026-07-09 |
 | [0008](0008-use-portable-application-project-units.md) | Use Portable Application Project Units | Accepted | 2026-07-10 |
-| [0009](0009-model-production-lines-and-compile-blockly-directly.md) | Model Production Lines Separately And Compile Blockly Directly | Superseded by 0011 | 2026-07-10 |
+| [0009](0009-model-production-lines-and-compile-blockly-directly.md) | Model Production Lines Separately And Compile Blockly Directly | Accepted; deployment refined by 0011 | 2026-07-10 |
 | [0010](0010-make-system-canonical-and-layout-hierarchical.md) | Make System Canonical And Layout Hierarchical | Accepted | 2026-07-10 |
 | [0011](0011-coordinate-production-through-station-agents.md) | Coordinate Production Through Station Agents | Accepted | 2026-07-11 |
+| [0012](0012-require-explicit-recovery-decisions.md) | Require Explicit Recovery Decisions | Accepted | 2026-07-11 |
+| [0013](0013-require-exact-line-controller-authorizations.md) | Require Exact Line Controller Authorizations | Accepted | 2026-07-11 |
 
 ## Status Values
 

@@ -11,7 +11,7 @@ The local development defaults remain unchanged:
 - EF Core/CAP transaction coordination is disabled unless explicitly enabled.
 
 Use this profile for a server or production-like deployment, not for the default
-single-workstation desktop profile.
+single-Station desktop profile.
 
 ## Runtime Shape
 

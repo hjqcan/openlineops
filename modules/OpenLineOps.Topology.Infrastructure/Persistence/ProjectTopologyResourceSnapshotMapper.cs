@@ -43,6 +43,7 @@ internal static class ProjectTopologyResourceSnapshotMapper
                 capability.SafetyClass.ToString())).ToArray(),
             topology.DriverBindings.Select(binding => new DriverBindingDocument(
                 binding.Id.Value,
+                binding.OwnerSystemId.Value,
                 binding.CapabilityId.Value,
                 binding.ProviderKind.ToString(),
                 binding.ProviderKey)).ToArray(),
@@ -109,6 +110,7 @@ internal static class ProjectTopologyResourceSnapshotMapper
         {
             EnsureSucceeded(topology.AddDriverBinding(DriverBinding.Create(
                 new DriverBindingId(binding.BindingId),
+                new AutomationSystemId(binding.OwnerSystemId),
                 new CapabilityContractId(binding.CapabilityId),
                 ParseEnum<DriverProviderKind>(binding.ProviderKind, "driver provider kind"),
                 binding.ProviderKey)));

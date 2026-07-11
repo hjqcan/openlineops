@@ -34,22 +34,13 @@ public sealed record PublishProjectSnapshotRequest(
     string? ApplicationId,
     string? ProductionLineDefinitionId);
 
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record SubmitProjectSnapshotProductionRunRequest(
-    Guid? ProductionRunId,
-    string? ProductionUnitIdentityValue,
-    string? ActorId,
-    string? LotId = null,
-    string? CarrierId = null,
-    string? SlotId = null,
-    string? FixtureId = null,
-    string? DeviceId = null);
-
 public sealed record SnapshotCapabilityBindingRequest(
     string? CapabilityId,
     string? BindingId,
     string? ProviderKind,
-    string? ProviderKey);
+    string? ProviderKey,
+    string? OwnerSystemId,
+    string? OwnerStationSystemId);
 
 public sealed record ProjectTargetReferenceRequest(
     string? Kind,
@@ -133,64 +124,22 @@ public sealed record SnapshotCapabilityBindingResponse(
     string CapabilityId,
     string BindingId,
     string ProviderKind,
-    string ProviderKey);
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId);
 
 public sealed record ProjectTargetReferenceResponse(
     string Kind,
     string TargetId);
 
-public sealed record SubmittedProjectSnapshotProductionRunResponse(
-    string SnapshotId,
+public sealed record ProjectReleaseProductionRunContextResponse(
     string ProjectId,
     string ApplicationId,
+    string SnapshotId,
     string TopologyId,
     string ProductionLineDefinitionId,
-    Guid ProductionRunId,
     string ProductModelId,
-    string ProductionUnitIdentityInputKey,
-    string ProductionUnitIdentityValue,
-    string ActorId,
-    string? LotId,
-    string? CarrierId,
-    string ExecutionStatus,
-    string Judgement,
-    string Disposition,
-    string ControlState,
-    bool IsTerminal,
-    DateTimeOffset CreatedAtUtc,
-    DateTimeOffset LastTransitionAtUtc,
-    DateTimeOffset? StartedAtUtc,
-    DateTimeOffset? CompletedAtUtc,
-    string? FailureCode,
-    string? FailureReason,
-    IReadOnlyCollection<ProductionOperationRunResponse> Operations,
-    IReadOnlyCollection<ProductionRouteDecisionResponse> RouteDecisions);
-
-public sealed record ProductionOperationRunResponse(
-    string OperationId,
-    string OperationRunId,
-    int Attempt,
-    string StationSystemId,
-    string RuntimeStationId,
-    string ProcessDefinitionId,
-    string ProcessVersionId,
-    string ConfigurationSnapshotId,
-    string RecipeSnapshotId,
-    string ExecutionStatus,
-    string Judgement,
-    Guid? RuntimeSessionId,
-    DateTimeOffset? StartedAtUtc,
-    DateTimeOffset? CompletedAtUtc,
-    string? FailureCode,
-    string? FailureReason,
-    int CompletedStepCount,
-    int CommandCount,
-    int IncidentCount);
-
-public sealed record ProductionRouteDecisionResponse(
-    string SourceOperationRunId,
-    string TransitionId,
-    string TargetOperationId,
-    string SourceJudgement,
-    int Traversal,
-    DateTimeOffset DecidedAtUtc);
+    string ProductModelIdentityInputKey,
+    string EntryOperationId,
+    string EntryStationSystemId,
+    IReadOnlyCollection<string> StationSystemIds);

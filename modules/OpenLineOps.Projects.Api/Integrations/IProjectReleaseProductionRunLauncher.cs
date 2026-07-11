@@ -15,10 +15,5 @@ public interface IProjectReleaseProductionRunLauncher
 
 public sealed record SubmitProjectReleaseProductionRunRequest(
     Guid ProductionRunId,
-    string ProductionUnitIdentityValue,
-    string ActorId,
-    string? LotId = null,
-    string? CarrierId = null,
-    string? SlotId = null,
-    string? FixtureId = null,
-    string? DeviceId = null);
+    Guid ProductionUnitId,
+    string ActorId);

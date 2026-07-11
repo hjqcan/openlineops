@@ -1,6 +1,6 @@
 # Composable Automation Model
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
 ## Product intent
 
@@ -24,12 +24,18 @@ can be published.
 - One physical or logical System has one `systemId`.
 - A Station is a specialized System, never a second object paired with a
   System.
-- A Production workstation, runtime station, layout shape, Flow target, alarm,
-  and trace record all use the same Station `systemId`.
+- An Operation, runtime Station, layout shape, Flow target, alarm, and trace
+  record all use the same Station `systemId`.
 - A SlotGroup belongs to exactly one Station System.
 - A Slot belongs to exactly one SlotGroup and the same Station System.
 - Design-time topology never stores mutable runtime status or occupancy.
 - Runtime status is projected onto the published layout by stable identity.
+- `ExecutionStatus` describes whether execution worked;
+  `ResultJudgement` describes the product result. They are never collapsed into
+  one success flag.
+- A product can be nonconforming after technically successful execution.
+- Production work in progress is represented by `ProductionUnit`,
+  `ProductionLot`, `Carrier`, genealogy, location, and Slot occupancy aggregates.
 - Layout geometry is semantic and hierarchical, not a collection of unrelated
   absolute rectangles.
 - Runtime executes only an immutable Project Snapshot and its content-addressed
@@ -96,16 +102,23 @@ A Driver is not a child System and a Capability is not runtime state. Keeping
 these concepts separate makes a System replaceable when another provider
 satisfies the same contract.
 
-## Group, Slot, and DUT
+## Group, Slot, and production material
 
 A `SlotGroup` represents a set of material endpoints operated as a unit: a
 fixture nest, tester bank, tray row, buffer lane, or robot pick group. It owns a
 capacity and belongs to one Station System.
 
 A `Slot` is a stable endpoint in that group. It owns an address, display name,
-allowed material kind, and enabled policy. A Slot is not a DUT. A DUT or other
-work item occupies a Slot at runtime and is identified by traceable production
-identity such as serial number, batch, carrier, or fixture.
+allowed material kind, and enabled policy. At runtime it can bind exactly one
+`ProductionUnit` or `Carrier`. Its state is `Available`, `Reserved`, `Occupied`,
+`Running`, `Blocked`, or `Offline`.
+
+A `ProductModelDefinition` declares the Application-local product model and its
+identity input key. A `ProductionUnit` is one traceable instance of that model.
+It may belong to a `ProductionLot`, travel inside a `Carrier`, occupy a Slot, and
+participate in parent/child assembly genealogy. Its disposition is independent
+from execution and is `InProcess`, `Completed`, `Nonconforming`, `Held`, or
+`Scrapped`.
 
 Slot layout identity must survive rename and movement. Runtime occupancy,
 measurements, result judgement, and movement history are separate runtime and
@@ -143,21 +156,26 @@ System, Group, or Slot identities.
 
 ## ProductionLineDefinition
 
-Production owns the ordered manufacturing/test composition. It does not own the
-physical topology or executable flow graph.
+Production owns the manufacturing/test route definition. It does not own the
+physical topology, mutable work in progress, or executable Flow graph.
 
 A line definition contains:
 
-- the DUT model and runtime identity key;
-- Workstations that reference exactly one Station `systemId`;
-- ordered stages that reference published flows;
-- optional external-test adapters, arguments, input mappings, result mappings,
-  timeout, and provider/executable declaration.
+- one `ProductModelDefinition` and runtime identity input key;
+- one entry Operation;
+- `OperationDefinition` nodes, each referencing exactly one Station `systemId`,
+  published Flow, and frozen configuration snapshot;
+- `RouteTransition` edges for sequence, result judgement, typed output equality,
+  bounded rework, parallel fork, and parallel join;
+- optional external-program adapter resources with arguments, input mappings,
+  typed result mappings, timeout, and provider/executable declaration.
 
-An external test is still a standard Flow action. It targets the Workstation's
+An external test is still a standard Flow action. It targets the Operation's
 Station System and enters the normal command, timeout, monitoring, release lock,
-and trace lifecycle. Production cannot launch an arbitrary program around
-Runtime.
+and trace lifecycle. A vendor-reported product failure is
+`Completed + Failed`; a crash, invalid protocol, or device fault is
+`Failed + Unknown` and creates an Incident. Production cannot launch an
+arbitrary program around Runtime.
 
 ## ProcessDefinition and Flow IR
 
@@ -173,7 +191,7 @@ block type/version, target kind/id, capability, command, input, timeout, and
 retry source mapping.
 
 Valid domain target kinds are `System`, `Capability`, `Driver`, `SlotGroup`,
-`Slot`, and `Dut`. There is no generated Python shadow source and no runtime
+`Slot`, and `ProductionUnit`. There is no generated Python shadow source and no runtime
 `automation_plan` expansion.
 
 A PythonScript action is published as an explicit, bounded Flow IR action. It
@@ -208,6 +226,12 @@ Runtime accepts a published Project Snapshot only. The Station `systemId` is the
 runtime station identity. Every action enters one standard execution lifecycle
 and produces monitoring and trace evidence.
 
+Creating a `ProductionRun` is asynchronous. The Coordinator persists the Run
+before dispatch, advances its route from typed Operation outputs and judgements,
+and leases Station, Slot, Fixture, and Device resources with fencing tokens.
+There is no project-wide execution lock: one unit can run at a downstream
+Station while another enters an upstream Station.
+
 The layout monitor overlays runtime projections without changing layout files:
 
 | State | Meaning | Default visual |
@@ -241,6 +265,8 @@ Application: Mainboard Line
 ```
 
 The two Stations can be moved independently on the Application canvas. Moving
-Functional Test carries Tester Bank and T1-T4. Production stages reference the
-two Station ids, Blockly targets their Systems/Groups/Slots, and Runtime paints
-the same shapes from published execution state.
+Functional Test carries Tester Bank and T1-T4. A route can connect an Inspect
+Operation to a Functional Test Operation, then branch on judgement to Complete,
+bounded Rework, or Hold. Blockly targets their Systems/Groups/Slots and Runtime
+paints the same shapes, product locations, queues, and Slot occupancies from the
+published execution projection.

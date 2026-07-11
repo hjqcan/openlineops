@@ -38,6 +38,7 @@ public sealed record CapabilityContractDetails(
 
 public sealed record DriverBindingDetails(
     string BindingId,
+    string OwnerSystemId,
     string CapabilityId,
     string ProviderKind,
     string ProviderKey);

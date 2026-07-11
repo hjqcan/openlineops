@@ -27,6 +27,11 @@ export interface ApiResponse<T = unknown> {
   text: string;
 }
 
+export interface EditorDocumentWriteOptions {
+  revision: string;
+  force?: boolean;
+}
+
 export interface SelectDirectoryOptions {
   title?: string;
   defaultPath?: string;
@@ -45,13 +50,39 @@ export interface SelectProjectFileOptions {
   buttonLabel?: string;
 }
 
+export interface SelectExternalProgramFilesOptions {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+  multiple?: boolean;
+}
+
+export interface SelectFilesResult {
+  canceled: boolean;
+  paths: string[];
+}
+
+export interface ExternalProgramUploadFile {
+  sourcePath: string;
+  resourceRelativePath: string;
+}
+
 export interface OpenLineOpsDesktopApi {
   getConfig(): Promise<DesktopConfig>;
   getBackendStatus(): Promise<BackendStatus>;
   startBackend(): Promise<BackendStatus>;
   stopBackend(): Promise<BackendStatus>;
+  onCloseRequested(listener: (requestId: number) => void): () => void;
+  respondToCloseRequest(requestId: number, allowClose: boolean): void;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
   selectApplicationProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
+  selectExternalProgramFiles(options?: SelectExternalProgramFilesOptions): Promise<SelectFilesResult>;
+  uploadExternalProgram<T = unknown>(
+    path: string,
+    definition: unknown | null,
+    files: ExternalProgramUploadFile[],
+    headers?: Record<string, string>
+  ): Promise<ApiResponse<T>>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

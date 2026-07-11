@@ -11,6 +11,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative;
   color: #243138;
   background: #deded8;
 }
@@ -137,10 +138,11 @@
 
 .operations-filter-bar select,
 .operations-command-composer input,
-.operations-command-composer select {
+.operations-command-composer select,
+.operations-command-composer textarea {
   box-sizing: border-box;
   width: 100%;
-  height: 28px;
+  min-height: 28px;
   min-width: 0;
   padding: 4px 7px;
   border: 1px solid #c3c9c5;
@@ -153,9 +155,68 @@
 
 .operations-filter-bar select:focus,
 .operations-command-composer input:focus,
-.operations-command-composer select:focus {
+.operations-command-composer select:focus,
+.operations-command-composer textarea:focus {
   border-color: #2d877c;
   box-shadow: 0 0 0 2px rgb(45 135 124 / 14%);
+}
+
+.operations-command-composer textarea {
+  resize: vertical;
+  font-family: "Cascadia Code", monospace;
+  line-height: 1.4;
+}
+
+.operations-emergency-confirmation {
+  position: absolute;
+  z-index: 50;
+  top: 108px;
+  left: 50%;
+  display: grid;
+  width: min(620px, calc(100% - 48px));
+  gap: 10px;
+  padding: 16px;
+  transform: translateX(-50%);
+  border: 2px solid #8d251f;
+  border-top-width: 7px;
+  background: #fff8f4;
+  box-shadow: 0 18px 50px rgb(44 16 12 / 42%);
+}
+
+.operations-emergency-confirmation > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #9d2d26;
+}
+
+.operations-emergency-confirmation > div:first-child span,
+.operations-emergency-confirmation label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.operations-emergency-confirmation strong { font-size: 13px; letter-spacing: .04em; }
+.operations-emergency-confirmation small { color: #6d5651; font-size: 9px; line-height: 1.45; }
+.operations-emergency-confirmation label { color: #684942; font-size: 8px; font-weight: 800; }
+.operations-emergency-confirmation input {
+  height: 31px;
+  padding: 4px 8px;
+  border: 1px solid #b7857b;
+  outline: 0;
+  background: #fff;
+  color: #3d2926;
+  font: 10px "Cascadia Code", monospace;
+}
+
+.operations-emergency-confirmation input:focus { border-color: #a22f27; box-shadow: 0 0 0 2px rgb(162 47 39 / 14%); }
+.operations-emergency-confirmation > div:last-child { display: flex; justify-content: flex-end; gap: 7px; }
+.operations-emergency-confirmation .button.danger,
+.operations-safety-board .button.danger {
+  border-color: #8f2b24;
+  background: #a9372f;
+  color: #fff;
 }
 
 .operations-layout {
@@ -320,7 +381,7 @@
 
 .operations-line-board {
   display: grid;
-  grid-template-rows: 38px minmax(0, 1fr);
+  grid-template-rows: 38px minmax(0, 1fr) auto;
   background:
     linear-gradient(90deg, rgb(77 95 102 / 6%) 1px, transparent 1px),
     linear-gradient(rgb(77 95 102 / 6%) 1px, transparent 1px),
@@ -384,6 +445,8 @@
 .operations-station-card.status-running { border-top-color: var(--ops-yellow); }
 .operations-station-card.status-failed { border-top-color: var(--ops-red); }
 .operations-station-card.status-held { border-top-color: var(--ops-held); }
+.operations-station-card.status-offline { border-top-color: #7d888a; opacity: .76; }
+.operations-station-card.status-completed { border-top-color: var(--ops-green); }
 
 .operations-station-card > header {
   display: flex;
@@ -414,6 +477,30 @@
   color: #738085;
   font-size: 7px;
 }
+
+.operations-station-safety-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.operations-station-safety-actions > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 23px;
+  padding: 0 7px;
+  border: 1px solid #8f2b24;
+  background: #a9372f;
+  color: #fff;
+  font-size: 7px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  cursor: pointer;
+}
+
+.operations-station-safety-actions > button:hover { background: #85241e; }
 
 .operations-product-lanes {
   display: grid;
@@ -486,6 +573,7 @@
 .operations-slot-strip > div.status-occupied > i,
 .operations-slot-strip > div.status-running > i { background: var(--ops-yellow); }
 .operations-slot-strip > div.status-blocked > i { background: var(--ops-red); }
+.operations-slot-strip > div.status-offline > i { background: #778386; }
 
 .operations-slot-strip > div > span {
   display: flex;
@@ -503,6 +591,183 @@
 .operations-slot-strip strong { font: 7px "Cascadia Code", monospace; }
 .operations-slot-strip small { color: #788489; font-size: 7px; }
 .operations-no-slots { color: #899395; font-size: 8px; }
+
+.operations-resource-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 5px;
+  padding: 8px 9px;
+  border-top: 1px solid #d9dcd7;
+  background: #f5f4ef;
+}
+
+.operations-resource-strip > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1px 5px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-left: 3px solid var(--ops-blue);
+  background: #e8ece9;
+}
+
+.operations-resource-strip > div.status-running { border-left-color: var(--ops-green); }
+.operations-resource-strip > div.status-held { border-left-color: var(--ops-held); }
+.operations-resource-strip > div.status-failed { border-left-color: var(--ops-red); }
+
+.operations-resource-strip span {
+  color: #728085;
+  font-size: 7px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.operations-resource-strip strong,
+.operations-resource-strip small {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-resource-strip strong { font: 8px "Cascadia Code", monospace; }
+.operations-resource-strip small { color: #718084; font-size: 7px; }
+
+.operations-station-carriers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 7px 9px;
+  border-top: 1px solid #d9dcd7;
+  color: #536c71;
+  font: 7px "Cascadia Code", monospace;
+}
+
+.operations-station-carriers span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border: 1px solid #b9cbc7;
+  background: #e5efec;
+}
+
+.operations-carrier-board {
+  display: grid;
+  grid-template-rows: 28px auto;
+  max-height: 178px;
+  border-top: 1px solid #b8bfba;
+  background: #e6e6df;
+}
+
+.operations-carrier-board > header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: #53666b;
+  font-size: 8px;
+  letter-spacing: .08em;
+}
+
+.operations-carrier-board > header small {
+  margin-left: auto;
+  color: #778588;
+}
+
+.operations-carrier-board > div {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 10px 9px;
+  overflow-x: auto;
+}
+
+.operations-carrier-board article {
+  display: grid;
+  flex: 0 0 240px;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid #bdc8c3;
+  border-left: 3px solid #4e8a80;
+  background: #f8f7f2;
+}
+
+.operations-carrier-board article > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.operations-carrier-board article > header span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.operations-carrier-board article strong { font-size: 8px; }
+.operations-carrier-board article small,
+.operations-carrier-board article p { margin: 0; color: #748186; font-size: 7px; }
+.operations-carrier-board article > div { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.operations-carrier-board article > div > span {
+  display: grid;
+  gap: 1px;
+  min-width: 70px;
+  padding: 4px;
+  background: #e8ede9;
+}
+
+.operations-carrier-board article > div b { color: #718085; font-size: 7px; }
+
+.operations-safety-board {
+  display: grid;
+  grid-template-rows: 29px auto;
+  max-height: 190px;
+  border-top: 1px solid #aab2ad;
+  background: #e8e6df;
+}
+
+.operations-safety-board > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  color: #66423c;
+  font-size: 8px;
+  letter-spacing: .06em;
+}
+
+.operations-safety-board > header span { display: flex; align-items: center; gap: 5px; }
+.operations-safety-board > header small { color: #83716c; letter-spacing: 0; }
+.operations-safety-board > div { min-height: 0; padding: 0 9px 8px; overflow-y: auto; }
+.operations-safety-board article {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) minmax(120px, auto);
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid #c5c4bd;
+  border-left: 3px solid #9c8a83;
+  background: #f9f7f1;
+}
+
+.operations-safety-board article + article { margin-top: 5px; }
+.operations-safety-board article.status-pending { border-left-color: var(--ops-yellow); }
+.operations-safety-board article.status-acknowledged { border-left-color: var(--ops-red); }
+.operations-safety-board article.status-rejected { border-left-color: #7a8282; }
+.operations-safety-board article > i { width: 6px; height: 6px; margin-top: 3px; border-radius: 50%; background: currentColor; }
+.operations-safety-board article > span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+.operations-safety-board article > span:last-child { align-items: flex-end; text-align: right; }
+.operations-safety-board article strong,
+.operations-safety-board article b { font-size: 8px; }
+.operations-safety-board article small,
+.operations-safety-board article em,
+.operations-safety-board > div > p { color: #7b7672; font-size: 7px; font-style: normal; }
+.operations-safety-board article em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operations-safety-board article .button { height: 22px; margin-top: 3px; padding: 0 6px; font-size: 7px; }
+.operations-safety-error { margin: 0 9px 8px; color: #9a3029; font-size: 8px; }
 
 .operations-run-detail {
   overflow-y: auto;
@@ -581,6 +846,21 @@
 .operations-operation-list b { font-size: 8px; }
 .operations-operation-list small { color: #7a868a; font-size: 7px; }
 .operations-operation-list > div > span:last-child { align-items: flex-end; }
+
+.operations-recovery-evidence {
+  display: grid;
+  gap: 5px;
+  margin: 0 9px 9px;
+  padding: 7px;
+  border-left: 3px solid var(--ops-held);
+  background: #f0e9df;
+}
+
+.operations-recovery-evidence > strong { color: #7b5a3d; font-size: 7px; letter-spacing: .08em; }
+.operations-recovery-evidence > span { display: flex; flex-direction: column; gap: 1px; }
+.operations-recovery-evidence b { font-size: 8px; }
+.operations-recovery-evidence small,
+.operations-recovery-evidence em { color: #796f67; font-size: 7px; font-style: normal; }
 
 .operations-failure {
   display: grid;

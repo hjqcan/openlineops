@@ -10,16 +10,37 @@ public interface IExternalProgramHost
 }
 
 public sealed record ExternalProgramExecutionRequest(
-    string AdapterId,
+    string ResourceId,
     Guid ProductionRunId,
     Guid RuntimeCommandId,
     string ReleaseApplicationRootPath,
-    string ExecutableRelativePath,
-    long ExecutableSizeBytes,
-    string ExecutableSha256,
+    string ResourceRootRelativePath,
+    string EntryPointRelativePath,
+    long EntryPointSizeBytes,
+    string EntryPointSha256,
+    IReadOnlyCollection<ExternalProgramExecutionFile> Files,
     IReadOnlyCollection<string> Arguments,
     string InvocationPayload,
-    TimeSpan Timeout);
+    TimeSpan Timeout,
+    ExternalProgramExecutionPolicy Policy);
+
+public sealed record ExternalProgramExecutionPolicy(
+    string PermissionProfileName,
+    bool NetworkAccessAllowed,
+    IReadOnlyCollection<string> AllowedEnvironmentVariables,
+    int MaximumProcessCount,
+    long MaximumWorkingSetBytes,
+    long MaximumCpuTimeMilliseconds,
+    int MaximumStandardOutputBytes,
+    int MaximumStandardErrorBytes,
+    int MaximumArtifactCount,
+    long MaximumArtifactBytes,
+    long MaximumTotalArtifactBytes);
+
+public sealed record ExternalProgramExecutionFile(
+    string RelativePath,
+    long SizeBytes,
+    string Sha256);
 
 public sealed record ExternalProgramExecutionResult(
     ExecutionStatus ExecutionStatus,

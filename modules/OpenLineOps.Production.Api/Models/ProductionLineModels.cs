@@ -11,7 +11,7 @@ public sealed record SaveProductionLineRequest(
     string? EntryOperationId,
     IReadOnlyCollection<OperationDefinitionRequest?>? Operations,
     IReadOnlyCollection<RouteTransitionRequest?>? Transitions,
-    IReadOnlyCollection<ExternalTestProgramAdapterRequest?>? ExternalTestProgramAdapters);
+    IReadOnlyCollection<LineControllerAuthorizationRequest?>? LineControllerAuthorizations);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ProductModelRequest(
@@ -25,7 +25,30 @@ public sealed record OperationDefinitionRequest(
     string? DisplayName,
     string? StationSystemId,
     string? FlowDefinitionId,
-    string? ConfigurationSnapshotId);
+    string? ConfigurationSnapshotId,
+    IReadOnlyCollection<OperationResourceBindingRequest?>? Resources);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record OperationResourceBindingRequest(
+    string? BindingId,
+    string? Kind,
+    string? TopologyTargetId,
+    string? Resolution);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record LineControllerAuthorizationRequest(
+    string? AuthorizationId,
+    string? OperationId,
+    string? ActionId,
+    string? ControllerSystemId,
+    string? ControllerBindingId,
+    string? ControllerCapabilityId,
+    string? ControllerAction,
+    string? TargetStationSystemId,
+    string? TargetSystemId,
+    string? TargetBindingId,
+    string? TargetCapabilityId,
+    string? TargetAction);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record RouteTransitionRequest(
@@ -40,33 +63,6 @@ public sealed record RouteTransitionRequest(
     string? ExpectedOutputKind,
     string? ExpectedOutputValue);
 
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ExternalTestProgramAdapterRequest(
-    string? AdapterId,
-    string? DisplayName,
-    string? CapabilityId,
-    string? CommandName,
-    string? Executable,
-    string? ProviderKey,
-    IReadOnlyCollection<string?>? ArgumentTemplates,
-    IReadOnlyCollection<ExternalTestProgramInputMappingRequest?>? InputMappings,
-    IReadOnlyCollection<ExternalTestProgramResultMappingRequest?>? ResultMappings,
-    ExternalTestProgramOutcomeMappingRequest? OutcomeMapping,
-    long? TimeoutMilliseconds);
-
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ExternalTestProgramInputMappingRequest(string? Source, string? Target);
-
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ExternalTestProgramResultMappingRequest(string? SourcePath, string? TargetKey);
-
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ExternalTestProgramOutcomeMappingRequest(
-    string? SourcePath,
-    string? PassedToken,
-    string? FailedToken,
-    string? AbortedToken);
-
 public sealed record ProductionLineResponse(
     string LineDefinitionId,
     string DisplayName,
@@ -75,9 +71,10 @@ public sealed record ProductionLineResponse(
     string EntryOperationId,
     IReadOnlyCollection<OperationDefinitionResponse> Operations,
     IReadOnlyCollection<RouteTransitionResponse> Transitions,
-    IReadOnlyCollection<ExternalTestProgramAdapterResponse> ExternalTestProgramAdapters,
+    IReadOnlyCollection<LineControllerAuthorizationResponse> LineControllerAuthorizations,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string Revision);
 
 public sealed record ProductionLineSummaryResponse(
     string LineDefinitionId,
@@ -97,7 +94,28 @@ public sealed record OperationDefinitionResponse(
     string DisplayName,
     string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId);
+    string ConfigurationSnapshotId,
+    IReadOnlyCollection<OperationResourceBindingResponse> Resources);
+
+public sealed record OperationResourceBindingResponse(
+    string BindingId,
+    string Kind,
+    string TopologyTargetId,
+    string Resolution);
+
+public sealed record LineControllerAuthorizationResponse(
+    string AuthorizationId,
+    string OperationId,
+    string ActionId,
+    string ControllerSystemId,
+    string ControllerBindingId,
+    string ControllerCapabilityId,
+    string ControllerAction,
+    string TargetStationSystemId,
+    string TargetSystemId,
+    string TargetBindingId,
+    string TargetCapabilityId,
+    string TargetAction);
 
 public sealed record RouteTransitionResponse(
     string TransitionId,
@@ -110,27 +128,3 @@ public sealed record RouteTransitionResponse(
     string? OutputKey,
     string? ExpectedOutputKind,
     string? ExpectedOutputValue);
-
-public sealed record ExternalTestProgramAdapterResponse(
-    string AdapterId,
-    string DisplayName,
-    string CapabilityId,
-    string CommandName,
-    string LaunchKind,
-    string? Executable,
-    string? ProviderKey,
-    IReadOnlyCollection<string> ArgumentTemplates,
-    IReadOnlyCollection<ExternalTestProgramInputMappingResponse> InputMappings,
-    IReadOnlyCollection<ExternalTestProgramResultMappingResponse> ResultMappings,
-    ExternalTestProgramOutcomeMappingResponse OutcomeMapping,
-    long TimeoutMilliseconds);
-
-public sealed record ExternalTestProgramInputMappingResponse(string Source, string Target);
-
-public sealed record ExternalTestProgramResultMappingResponse(string SourcePath, string TargetKey);
-
-public sealed record ExternalTestProgramOutcomeMappingResponse(
-    string SourcePath,
-    string PassedToken,
-    string FailedToken,
-    string AbortedToken);

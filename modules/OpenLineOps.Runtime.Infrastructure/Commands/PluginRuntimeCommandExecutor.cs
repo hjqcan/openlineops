@@ -29,6 +29,7 @@ public sealed class PluginRuntimeCommandExecutor : IRuntimeCommandExecutor
                 context.ProjectId,
                 context.ApplicationId,
                 context.ProjectSnapshotId,
+                context.StationSystemId,
                 context.TargetCapability.Value,
                 context.CommandName,
                 context.TargetKind,

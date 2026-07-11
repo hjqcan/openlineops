@@ -16,4 +16,10 @@ public interface IProjectReleaseArtifactStore
         string snapshotId,
         string expectedContentSha256,
         CancellationToken cancellationToken = default);
+
+    ValueTask RollbackPublicationAsync(
+        ProjectApplicationWorkspaceScope scope,
+        string snapshotId,
+        string expectedContentSha256,
+        CancellationToken cancellationToken = default);
 }

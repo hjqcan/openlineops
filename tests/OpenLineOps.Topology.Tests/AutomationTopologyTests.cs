@@ -1,4 +1,5 @@
 using OpenLineOps.Topology.Domain.Capabilities;
+using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
 using OpenLineOps.Topology.Domain.Layouts;
 using OpenLineOps.Topology.Domain.Slots;
@@ -79,26 +80,18 @@ public sealed class AutomationTopologyTests
     }
 
     [Fact]
-    public void StationMustBeRootAndNestedGeneralSystemMustBelongDirectlyToStation()
+    public void StationMustBeRootWhileGeneralSystemsMayFormRecursiveSubtrees()
     {
         var topology = AutomationTopology.Create(
             new AutomationTopologyId("topology.hierarchy"),
             "Hierarchy",
             DateTimeOffset.UtcNow);
-        var rootSystem = AutomationSystem.Create(
-            new AutomationSystemId("system.root"),
-            null,
-            SystemKind.System,
-            "line.root",
-            "Line Root");
         var station = AutomationSystem.Create(
             new AutomationSystemId("station.root"),
             null,
             SystemKind.Station,
             "station",
             "Station");
-
-        Assert.True(topology.AddSystem(rootSystem).Succeeded);
         Assert.True(topology.AddSystem(station).Succeeded);
 
         var nestedStation = topology.AddSystem(AutomationSystem.Create(
@@ -107,44 +100,118 @@ public sealed class AutomationTopologyTests
             SystemKind.Station,
             "station",
             "Nested Station"));
-        var generalUnderGeneral = topology.AddSystem(AutomationSystem.Create(
-            new AutomationSystemId("system.nested"),
-            rootSystem.Id,
+        var orphanGeneral = topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("system.orphan"),
+            null,
             SystemKind.System,
             "component",
-            "Nested General System"));
+            "Orphan General System"));
         var generalUnderStation = topology.AddSystem(AutomationSystem.Create(
             new AutomationSystemId("system.station-child"),
             station.Id,
             SystemKind.System,
             "component",
             "Station Component"));
+        var generalUnderGeneral = topology.AddSystem(AutomationSystem.Create(
+            new AutomationSystemId("system.nested"),
+            new AutomationSystemId("system.station-child"),
+            SystemKind.System,
+            "component",
+            "Nested General System"));
 
         Assert.False(nestedStation.Succeeded);
         Assert.Equal("Topology.StationMustBeRoot", nestedStation.Code);
-        Assert.False(generalUnderGeneral.Succeeded);
-        Assert.Equal("Topology.ChildSystemRequiresStation", generalUnderGeneral.Code);
+        Assert.False(orphanGeneral.Succeeded);
+        Assert.Equal("Topology.ChildSystemRequiresStationTree", orphanGeneral.Code);
         Assert.True(generalUnderStation.Succeeded);
+        Assert.True(generalUnderGeneral.Succeeded);
+    }
+
+    [Fact]
+    public void RecursiveStationSubtreeAllowsSameCapabilityOnDifferentOwnerSystemsOnly()
+    {
+        var topology = CreateTopology();
+        var capability = CapabilityContract.Create(
+            new CapabilityContractId("motion.axis"),
+            "Move",
+            new Version(1, 0),
+            null,
+            null,
+            TimeSpan.FromSeconds(5));
+        Assert.True(topology.AddCapability(capability).Succeeded);
+        var station = AutomationSystem.Create(
+            new AutomationSystemId("station.main"),
+            null,
+            SystemKind.Station,
+            "station",
+            "Main Station");
+        var cell = AutomationSystem.Create(
+            new AutomationSystemId("system.cell"),
+            station.Id,
+            SystemKind.System,
+            "cell",
+            "Cell");
+        var axisA = AutomationSystem.Create(
+            new AutomationSystemId("system.axis-a"),
+            cell.Id,
+            SystemKind.System,
+            "axis",
+            "Axis A",
+            providedCapabilities: [capability.Id]);
+        var axisB = AutomationSystem.Create(
+            new AutomationSystemId("system.axis-b"),
+            cell.Id,
+            SystemKind.System,
+            "axis",
+            "Axis B",
+            providedCapabilities: [capability.Id]);
+        Assert.True(topology.AddSystem(station).Succeeded);
+        Assert.True(topology.AddSystem(cell).Succeeded);
+        Assert.True(topology.AddSystem(axisA).Succeeded);
+        Assert.True(topology.AddSystem(axisB).Succeeded);
+
+        Assert.True(topology.AddDriverBinding(DriverBinding.Create(
+            new DriverBindingId("binding.axis-a"),
+            axisA.Id,
+            capability.Id,
+            DriverProviderKind.DeviceInstance,
+            "axis-a")).Succeeded);
+        Assert.True(topology.AddDriverBinding(DriverBinding.Create(
+            new DriverBindingId("binding.axis-b"),
+            axisB.Id,
+            capability.Id,
+            DriverProviderKind.DeviceInstance,
+            "axis-b")).Succeeded);
+        var duplicateOwnerCapability = topology.AddDriverBinding(DriverBinding.Create(
+            new DriverBindingId("binding.axis-a-duplicate"),
+            axisA.Id,
+            capability.Id,
+            DriverProviderKind.Simulator,
+            "axis-a-simulator"));
+
+        Assert.False(duplicateOwnerCapability.Succeeded);
+        Assert.Equal("Topology.CapabilityAlreadyBound", duplicateOwnerCapability.Code);
+        Assert.Equal(2, topology.DriverBindings.Count);
     }
 
     [Fact]
     public void SlotGroupRejectsNonStationParentAndSlotRejectsMismatchedSystem()
     {
         var topology = CreateTopology();
-        var generic = AutomationSystem.Create(
-            new AutomationSystemId("system.generic"),
-            null,
-            SystemKind.System,
-            "generic",
-            "Generic");
         var station = AutomationSystem.Create(
             new AutomationSystemId("station.main"),
             null,
             SystemKind.Station,
             "station",
             "Station");
-        Assert.True(topology.AddSystem(generic).Succeeded);
         Assert.True(topology.AddSystem(station).Succeeded);
+        var generic = AutomationSystem.Create(
+            new AutomationSystemId("system.generic"),
+            station.Id,
+            SystemKind.System,
+            "generic",
+            "Generic");
+        Assert.True(topology.AddSystem(generic).Succeeded);
 
         var rejected = topology.AddSlotGroup(SlotGroup.Create(
             new SlotGroupId("group.invalid"),

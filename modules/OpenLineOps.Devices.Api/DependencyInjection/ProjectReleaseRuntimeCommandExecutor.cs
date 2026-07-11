@@ -4,17 +4,22 @@ using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Commands;
+using System.Text.Json;
 
 namespace OpenLineOps.Devices.Api.DependencyInjection;
 
 internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExecutor
 {
+    private static readonly JsonSerializerOptions LineControllerJsonOptions =
+        new(JsonSerializerDefaults.Web);
+
     private readonly IProjectReleaseRuntimeCommandRouteResolver _routeResolver;
     private readonly DeviceRuntimeCommandExecutor _deviceExecutor;
     private readonly PluginRuntimeCommandExecutor _processPluginExecutor;
     private readonly RuntimeFlowCommandExecutor _flowExecutor;
     private readonly IRuntimeScriptExecutor _scriptExecutor;
     private readonly IExternalProgramHost _externalProgramHost;
+    private readonly IRuntimeCommandResourceFenceValidator _resourceFenceValidator;
 
     public ProjectReleaseRuntimeCommandExecutor(
         IProjectReleaseRuntimeCommandRouteResolver routeResolver,
@@ -22,7 +27,8 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
         PluginRuntimeCommandExecutor processPluginExecutor,
         RuntimeFlowCommandExecutor flowExecutor,
         IRuntimeScriptExecutor scriptExecutor,
-        IExternalProgramHost externalProgramHost)
+        IExternalProgramHost externalProgramHost,
+        IRuntimeCommandResourceFenceValidator resourceFenceValidator)
     {
         _routeResolver = routeResolver;
         _deviceExecutor = deviceExecutor;
@@ -30,6 +36,7 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
         _flowExecutor = flowExecutor;
         _scriptExecutor = scriptExecutor;
         _externalProgramHost = externalProgramHost;
+        _resourceFenceValidator = resourceFenceValidator;
     }
 
     public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
@@ -45,6 +52,13 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
 
         if (RuntimeScriptCommand.IsPythonScript(context))
         {
+            var fenceRejection = await ValidateResourceFencesAsync(context, cancellationToken)
+                .ConfigureAwait(false);
+            if (fenceRejection is not null)
+            {
+                return fenceRejection;
+            }
+
             if (!RuntimeScriptExecutionRequest.TryCreate(context, out var request, out var error))
             {
                 return RuntimeCommandExecutionResult.Rejected(
@@ -60,6 +74,7 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                     context.ProductionRunId.ToString(),
                     context.ProductionLineDefinitionId,
                     context.OperationId,
+                    context.OperationRunId,
                     context.OperationAttempt,
                     context.ProductionUnitIdentity.ModelId,
                     context.ProductionUnitIdentity.InputKey,
@@ -71,6 +86,7 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                     context.StepId.ToString(),
                     context.CommandId.ToString(),
                     context.NodeId.Value,
+                    context.ActionId.Value,
                     context.StationSystemId,
                     context.ConfigurationSnapshotId.Value,
                     new OpenLineOps.Devices.Domain.Identifiers.DeviceCapabilityId(
@@ -82,17 +98,37 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
                     context.TargetKind,
                     context.TargetId,
                     context.InputPayload,
-                    context.Timeout),
+                    context.Timeout,
+                    context.ResourceLeaseFences.Select(static fence =>
+                        new DeviceCommandResourceFenceEvidence(
+                            fence.Resource.Kind.ToString(),
+                            fence.Resource.ResourceId,
+                            fence.FencingToken,
+                            fence.ExpiresAtUtc))),
                 cancellationToken)
             .ConfigureAwait(false);
 
+        var routeFenceRejection = await ValidateResourceFencesAsync(context, cancellationToken)
+            .ConfigureAwait(false);
+        if (routeFenceRejection is not null)
+        {
+            return routeFenceRejection;
+        }
+
         return route switch
         {
-            ProjectReleaseExternalTestProgramCommandRoute externalTestRoute =>
-                await ProjectReleaseExternalTestProgramCommandExecutor.ExecuteAsync(
+            ProjectReleaseLineControllerCommandRoute lineControllerRoute =>
+                await ExecuteLineControllerAsync(
                         context,
-                        externalTestRoute,
-                        ExecuteExternalTestProviderAsync,
+                        lineControllerRoute,
+                        cancellationToken)
+                    .ConfigureAwait(false),
+            ProjectReleaseExternalProgramCommandRoute externalProgramRoute =>
+                await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+                        context,
+                        externalProgramRoute,
+                        ExecuteExternalProgramProviderAsync,
+                        ValidateResourceFencesAsync,
                         _externalProgramHost,
                         cancellationToken)
                     .ConfigureAwait(false),
@@ -107,11 +143,39 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
         };
     }
 
-    private async ValueTask<RuntimeCommandExecutionResult> ExecuteExternalTestProviderAsync(
+    private async ValueTask<RuntimeCommandExecutionResult> ExecuteLineControllerAsync(
+        RuntimeCommandExecutionContext context,
+        ProjectReleaseLineControllerCommandRoute route,
+        CancellationToken cancellationToken)
+    {
+        var inputPayload = JsonSerializer.Serialize(new LineControllerCommandEnvelope(
+            route.AuthorizationId,
+            route.TargetStationSystemId,
+            route.TargetSystemId,
+            route.TargetBindingId,
+            route.TargetCapabilityId,
+            route.TargetAction,
+            context.InputPayload), LineControllerJsonOptions);
+        return await _deviceExecutor.ExecuteAsync(
+                context,
+                route.ControllerRoute,
+                inputPayload,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask<RuntimeCommandExecutionResult> ExecuteExternalProgramProviderAsync(
         RuntimeCommandExecutionContext context,
         ProjectReleaseRuntimeCommandRoute route,
         CancellationToken cancellationToken)
     {
+        var fenceRejection = await ValidateResourceFencesAsync(context, cancellationToken)
+            .ConfigureAwait(false);
+        if (fenceRejection is not null)
+        {
+            return fenceRejection;
+        }
+
         return route switch
         {
             ProjectReleaseProcessCommandRoute =>
@@ -119,7 +183,25 @@ internal sealed class ProjectReleaseRuntimeCommandExecutor : IRuntimeCommandExec
             ProjectReleaseDeviceCommandRoute deviceRoute =>
                 await _deviceExecutor.ExecuteAsync(context, deviceRoute, cancellationToken).ConfigureAwait(false),
             _ => RuntimeCommandExecutionResult.Rejected(
-                $"Frozen external test provider kind '{route.ProviderKind}' is not executable.")
+                $"Frozen external program provider kind '{route.ProviderKind}' is not executable.")
         };
     }
+
+    private async ValueTask<RuntimeCommandExecutionResult?> ValidateResourceFencesAsync(
+        RuntimeCommandExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var validation = await _resourceFenceValidator.ValidateAsync(
+                context.ProductionRunId,
+                context.OperationRunId,
+                context.ResourceLeaseFences,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return validation.Accepted
+            ? null
+            : RuntimeCommandExecutionResult.Rejected(
+                validation.RejectionReason
+                ?? "Runtime command resource lease fences are no longer current.");
+    }
+
 }

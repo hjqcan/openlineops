@@ -102,11 +102,13 @@ namespace PythonScript.Contexts
             {
                 runtimeSession.Dispose();
             }
+
+            GC.SuppressFinalize(this);
         }
 
         protected void EnsureNotDisposed()
         {
-            if (disposed) throw new ObjectDisposedException(GetType().FullName);
+            ObjectDisposedException.ThrowIf(disposed, this);
         }
 
         #endregion

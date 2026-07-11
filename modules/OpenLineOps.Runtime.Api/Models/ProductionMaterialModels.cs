@@ -58,9 +58,10 @@ public sealed record MaterialTransferApiRequest(
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record SlotOccupancyCommandApiRequest(
-    string MaterialKind,
-    string MaterialId,
+    string? MaterialKind,
+    string? MaterialId,
     MaterialLocationApiRequest? Destination,
+    string? Reason,
     string ActorId,
     DateTimeOffset OccurredAtUtc);
 
@@ -100,8 +101,13 @@ public sealed record ProductionUnitApiResponse(
     string RegisteredBy,
     DateTimeOffset RegisteredAtUtc,
     DateTimeOffset LastTransitionAtUtc,
+    DateTimeOffset LastLocationTransitionAtUtc,
+    DateTimeOffset LastDispositionTransitionAtUtc,
     string Disposition,
     string? DispositionBeforeHold,
+    Guid? ActiveProductionRunId,
+    Guid? LastProductionRunId,
+    long LastProductionRunRevision,
     string? DispositionReason,
     MaterialLocationApiResponse? Location);
 

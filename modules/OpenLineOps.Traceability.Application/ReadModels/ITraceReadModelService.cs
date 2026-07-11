@@ -88,7 +88,11 @@ public sealed record StationRecentTraceReadModel(
     int MeasurementCount,
     int FailedMeasurementCount,
     int ArtifactCount,
-    int IncidentCount);
+    int IncidentCount,
+    int GenealogyCount,
+    int MaterialLocationTransitionCount,
+    int SlotOccupancyTransitionCount,
+    int DispositionTransitionCount);
 
 public sealed record EngineeringTraceSearchReadModel(
     PagedResult<EngineeringTraceSearchRowReadModel> Results,
@@ -123,7 +127,11 @@ public sealed record EngineeringTraceSearchRowReadModel(
     int FailedMeasurementCount,
     int ArtifactCount,
     int IncidentCount,
-    int RouteDecisionCount);
+    int RouteDecisionCount,
+    int GenealogyCount,
+    int MaterialLocationTransitionCount,
+    int SlotOccupancyTransitionCount,
+    int DispositionTransitionCount);
 
 public sealed record EngineeringTraceSearchFacetsReadModel(
     IReadOnlyCollection<TraceFacetCountReadModel> Judgements,

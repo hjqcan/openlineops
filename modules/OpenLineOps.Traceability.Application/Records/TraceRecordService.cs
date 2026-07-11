@@ -41,9 +41,11 @@ public sealed class TraceRecordService : ITraceRecordService
         try
         {
             var runId = new ProductionRunId(request.ProductionRunId);
+            var productionUnitId = new ProductionUnitId(request.ProductionUnitId);
             var traceRecord = TraceRecord.Create(
                 new TraceRecordId(runId.Value),
                 runId,
+                productionUnitId,
                 request.ProjectId!,
                 request.ApplicationId!,
                 request.ProjectSnapshotId!,
@@ -65,6 +67,10 @@ public sealed class TraceRecordService : ITraceRecordService
                 request.FailureReason,
                 request.Operations!.Select(ToOperation),
                 (request.RouteDecisions ?? []).Select(ToRouteDecision),
+                (request.Genealogy ?? []).Select(ToGenealogy),
+                (request.MaterialLocationTransitions ?? []).Select(ToMaterialLocationTransition),
+                (request.SlotOccupancyTransitions ?? []).Select(ToSlotOccupancyTransition),
+                (request.DispositionTransitions ?? []).Select(ToDispositionTransition),
                 (request.AuditEntries ?? []).Select(ToAuditEntry));
 
             var added = await _repository
@@ -197,6 +203,65 @@ public sealed class TraceRecordService : ITraceRecordService
         request.Traversal,
         request.DecidedAtUtc);
 
+    private static TraceMaterialGenealogy ToGenealogy(CreateTraceMaterialGenealogyRequest request) =>
+        new(
+            request.LinkId,
+            request.ParentProductionUnitId,
+            request.ChildProductionUnitId,
+            request.Relationship!,
+            request.OperationId!,
+            request.LinkedBy!,
+            request.LinkedAtUtc);
+
+    private static TraceMaterialLocationTransition ToMaterialLocationTransition(
+        CreateTraceMaterialLocationTransitionRequest request) => new(
+        request.EvidenceId,
+        request.ProductionRunId,
+        request.MaterialKind!,
+        request.MaterialId!,
+        request.Source is null ? null : ToMaterialLocation(request.Source),
+        ToMaterialLocation(request.Destination!),
+        request.ActorId!,
+        request.OccurredAtUtc);
+
+    private static TraceMaterialLocation ToMaterialLocation(
+        CreateTraceMaterialLocationRequest request) => new(
+        request.Kind!,
+        request.LineId,
+        request.StationSystemId,
+        request.SlotId,
+        request.CarrierId,
+        request.CarrierPositionId);
+
+    private static TraceSlotOccupancyTransition ToSlotOccupancyTransition(
+        CreateTraceSlotOccupancyTransitionRequest request) => new(
+        request.EvidenceId,
+        request.ProductionRunId,
+        request.LineId!,
+        request.StationSystemId!,
+        request.SlotId!,
+        request.MaterialKind!,
+        request.MaterialId!,
+        request.PreviousStatus!,
+        request.CurrentStatus!,
+        request.ActorId!,
+        request.OccurredAtUtc);
+
+    private static TraceDispositionTransition ToDispositionTransition(
+        CreateTraceDispositionTransitionRequest request) => new(
+        request.EvidenceId,
+        request.ProductionUnitId,
+        request.ProductionRunId,
+        ParseEnum<ProductDisposition>(
+            request.PreviousDisposition!,
+            "Traceability.InvalidPreviousDisposition"),
+        ParseEnum<ProductDisposition>(
+            request.CurrentDisposition!,
+            "Traceability.InvalidCurrentDisposition"),
+        request.Reason,
+        request.ActorId!,
+        request.OccurredAtUtc);
+
     private static TraceOperationOutput ToOutput(CreateTraceOperationOutputRequest request) => new(
         request.Key!,
         request.ValueKind!,
@@ -296,6 +361,13 @@ public sealed class TraceRecordService : ITraceRecordService
             return ApplicationError.Validation(
                 "Traceability.ProductionRunIdRequired",
                 "ProductionRunId is required.");
+        }
+
+        if (request.ProductionUnitId == Guid.Empty)
+        {
+            return ApplicationError.Validation(
+                "Traceability.ProductionUnitIdRequired",
+                "ProductionUnitId is required.");
         }
 
         if (request.CreatedAtUtc == default || request.CompletedAtUtc == default)

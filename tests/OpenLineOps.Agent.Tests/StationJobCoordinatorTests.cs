@@ -1,10 +1,13 @@
+using System.IO.Pipes;
 using System.Text.Json;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
+using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.StationRuntime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
 
@@ -14,20 +17,96 @@ public sealed class StationJobCoordinatorTests
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task RunningStationAuthorityRejectsJobImmediatelyAfterFenceReplacement()
+    {
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        var first = CreateAcceptedJob(42).ToSnapshot();
+        Assert.True((await validator.ValidateAndAdvanceAsync(first)).Accepted);
+        var authority = new StationResourceFenceAuthorityServer(first, validator);
+        using var cancellation = new CancellationTokenSource();
+        var server = authority.RunAsync(cancellation.Token);
+
+        try
+        {
+            Assert.True((await ValidateViaAuthorityAsync(authority, first)).Accepted);
+            var replacement = CreateAcceptedJob(43).ToSnapshot();
+            Assert.True((await validator.ValidateAndAdvanceAsync(replacement)).Accepted);
+
+            var stale = await ValidateViaAuthorityAsync(authority, first);
+
+            Assert.False(stale.Accepted);
+            Assert.Contains("no longer current", stale.RejectionReason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await cancellation.CancelAsync();
+            await server;
+        }
+    }
+
+    [Fact]
     public async Task HandlePersistsInboxProgressAndCompletedResultBeforePublish()
     {
         var store = new InMemoryStationJobStore();
+        var stepId = Guid.NewGuid();
         var executor = new RecordingExecutor(new StationOperationExecutionResult(
             ExecutionStatus.Completed,
             ResultJudgement.Failed,
             "{\"measuredVoltage\":0.4}",
-            [new StationOperationArtifact("reports/result.json", "application/json", 23, new string('a', 64))],
+            [new StationOperationArtifact(
+                "result.json",
+                "VendorReport",
+                "reports/result.json",
+                "application/json",
+                23,
+                new string('a', 64))],
+            [new StationJobStepEvidence(
+                stepId,
+                "node.measure",
+                "action.measure",
+                "System",
+                "system.tester",
+                "Measure voltage",
+                "Completed",
+                Now.AddSeconds(-1),
+                Now,
+                null)],
+            [new StationJobCommandEvidence(
+                Guid.NewGuid(),
+                stepId,
+                "node.measure",
+                "action.measure",
+                "System",
+                "system.tester",
+                "device.tester",
+                "Measure",
+                "Completed",
+                Now.AddSeconds(-1),
+                Now.AddMinutes(1),
+                Now.AddSeconds(-1),
+                Now.AddSeconds(-1),
+                Now,
+                "{\"measuredVoltage\":{\"kind\":\"FixedPoint\",\"value\":\"0.4\"}}",
+                null,
+                ResultJudgement.Failed)],
+            [new StationJobIncidentEvidence(
+                Guid.NewGuid(),
+                "Warning",
+                "Vendor.Nonconforming",
+                "Product result was outside tolerance.",
+                Now)],
+            1,
+            1,
+            1,
             null,
             null));
         var coordinator = new StationJobCoordinator(
             store,
             executor,
-            new InMemoryStationResourceFenceValidator(),
+            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
             new FixedClock(Now));
         var request = CreateRequest();
 
@@ -38,6 +117,9 @@ public sealed class StationJobCoordinatorTests
         Assert.Equal(StationJobStatus.Completed, result.Status);
         Assert.Equal(ExecutionStatus.Completed, result.ExecutionStatus);
         Assert.Equal(ResultJudgement.Failed, result.Judgement);
+        Assert.Equal(1, result.CompletedStepCount);
+        Assert.Equal(1, result.CommandCount);
+        Assert.Equal(1, result.IncidentCount);
         Assert.Equal(result.JobId, duplicate.JobId);
         Assert.Equal(result.Status, duplicate.Status);
         Assert.Equal(result.ExecutionStatus, duplicate.ExecutionStatus);
@@ -48,7 +130,7 @@ public sealed class StationJobCoordinatorTests
             [
                 StationAgentMessageKinds.JobAccepted,
                 StationAgentMessageKinds.JobProgressed,
-                StationAgentMessageKinds.JobCompleted
+                StationAgentMessageKinds.JobCompletionPendingArtifactTransfer
             ],
             outbox.Select(message => message.Kind));
     }
@@ -59,7 +141,10 @@ public sealed class StationJobCoordinatorTests
         var coordinator = new StationJobCoordinator(
             new InMemoryStationJobStore(),
             new RecordingExecutor(Success()),
-            new InMemoryStationResourceFenceValidator(),
+            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
             new FixedClock(Now));
         var request = CreateRequest();
         await coordinator.HandleAsync(request);
@@ -77,7 +162,10 @@ public sealed class StationJobCoordinatorTests
         var coordinator = new StationJobCoordinator(
             new InMemoryStationJobStore(),
             executor,
-            new InMemoryStationResourceFenceValidator(),
+            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
             new FixedClock(Now));
         var first = CreateRequest();
         var accepted = await coordinator.HandleAsync(first);
@@ -106,6 +194,39 @@ public sealed class StationJobCoordinatorTests
     }
 
     [Fact]
+    public async Task OfflineDelayedJobWithExpiredFenceNeverExecutesHardware()
+    {
+        var delayedNow = Now.AddMinutes(2);
+        var clock = new FixedClock(delayedNow);
+        var executor = new RecordingExecutor(Success());
+        var coordinator = new StationJobCoordinator(
+            new InMemoryStationJobStore(),
+            executor,
+            new InMemoryStationResourceFenceValidator(clock),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            clock);
+        var request = CreateRequest() with
+        {
+            ResourceFences = [new StationResourceFence(
+                "Station",
+                "station-assembly",
+                42,
+                Now.AddMinutes(1))]
+        };
+
+        var rejected = await coordinator.HandleAsync(request);
+
+        Assert.Equal(StationJobStatus.Rejected, rejected.Status);
+        Assert.Equal(ExecutionStatus.Rejected, rejected.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, rejected.Judgement);
+        Assert.Equal("Agent.ResourceFenceRejected", rejected.FailureCode);
+        Assert.Equal(0, executor.ExecutionCount);
+        Assert.Null(rejected.StartedAtUtc);
+    }
+
+    [Fact]
     public async Task RecoverMarksRunningHardwareWorkAsRecoveryRequiredWithoutReplay()
     {
         var path = Path.Combine(Path.GetTempPath(), $"openlineops-agent-{Guid.NewGuid():N}.db");
@@ -113,10 +234,16 @@ public sealed class StationJobCoordinatorTests
         {
             await using var fixture = await RunningSqliteJob.CreateAsync(path);
             var executor = new RecordingExecutor(Success());
+            var isolationCleaner = new RecordingIsolationCleaner();
             var coordinator = new StationJobCoordinator(
                 fixture.Store,
                 executor,
-                new SqliteStationResourceFenceValidator($"Data Source={path}"),
+                new SqliteStationResourceFenceValidator(
+                    $"Data Source={path}",
+                    new FixedClock(Now)),
+                new EmptyCancellationStore(),
+                new StationJobExecutionRegistry(),
+                isolationCleaner,
                 new FixedClock(Now));
 
             var recovered = await coordinator.RecoverAsync();
@@ -128,6 +255,123 @@ public sealed class StationJobCoordinatorTests
             Assert.Equal(ResultJudgement.Unknown, item.Judgement);
             Assert.Equal(0, executor.ExecutionCount);
             Assert.Equal(StationJobStatus.RecoveryRequired, persisted!.Job.Status);
+            Assert.Equal(fixture.Job.Id, Assert.Single(isolationCleaner.CleanedJobs).JobId);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task IsolationCleanupFailureRemainsRecoverableForStartupRetry()
+    {
+        var store = new InMemoryStationJobStore();
+        var cleaner = new RecordingIsolationCleaner();
+        var coordinator = new StationJobCoordinator(
+            store,
+            new CleanupFailureExecutor(),
+            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            cleaner,
+            new FixedClock(Now));
+        var request = CreateRequest();
+
+        await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(async () =>
+            await coordinator.HandleAsync(request));
+        var persisted = await store.GetAsync(new StationJobId(request.JobId));
+        Assert.Equal(StationJobStatus.RecoveryRequired, persisted!.Job.Status);
+
+        var recovered = await coordinator.RecoverAsync();
+
+        Assert.Equal(StationJobStatus.RecoveryRequired, Assert.Single(recovered).Status);
+        Assert.Equal(new StationJobId(request.JobId), Assert.Single(cleaner.CleanedJobs).JobId);
+    }
+
+    [Fact]
+    public async Task DurableCancellationBeforeDispatchPreventsHardwareExecution()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"openlineops-agent-cancel-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var cancellations = new SqliteStationSafetyInboxStore($"Data Source={path}");
+            var request = CreateRequest();
+            var cancel = CreateCancellation(request);
+            var control = new StationSafetyCommandCoordinator(cancellations, new FixedClock(Now));
+            var acknowledgement = await control.HandleJobCancelAsync(
+                cancel,
+                (_, _) => ValueTask.FromResult(StationJobCancelExecutionResult.Success()));
+            var executor = new RecordingExecutor(Success());
+            var coordinator = new StationJobCoordinator(
+                new InMemoryStationJobStore(),
+                executor,
+                new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+                cancellations,
+                new StationJobExecutionRegistry(),
+                new RecordingIsolationCleaner(),
+                new FixedClock(Now));
+
+            var result = await coordinator.HandleAsync(request);
+
+            Assert.True(acknowledgement.Accepted);
+            Assert.Equal(StationJobStatus.Canceled, result.Status);
+            Assert.Equal(ExecutionStatus.Canceled, result.ExecutionStatus);
+            Assert.Equal(ResultJudgement.Aborted, result.Judgement);
+            Assert.Equal(0, executor.ExecutionCount);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteSqliteFiles(path);
+        }
+    }
+
+    [Fact]
+    public async Task ActiveJobCancellationReachesExecutorTokenAndPersistsCanceledResult()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"openlineops-agent-cancel-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var cancellations = new SqliteStationSafetyInboxStore($"Data Source={path}");
+            var store = new InMemoryStationJobStore();
+            var executor = new CancelableExecutor();
+            var executions = new StationJobExecutionRegistry();
+            var coordinator = new StationJobCoordinator(
+                store,
+                executor,
+                new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+                cancellations,
+                executions,
+                new RecordingIsolationCleaner(),
+                new FixedClock(Now));
+            var request = CreateRequest();
+            var execution = coordinator.HandleAsync(request).AsTask();
+            await executor.Started.WaitAsync(TimeSpan.FromSeconds(5));
+            var control = new StationSafetyCommandCoordinator(cancellations, new FixedClock(Now));
+
+            var acknowledgement = await control.HandleJobCancelAsync(
+                CreateCancellation(request),
+                coordinator.CancelAsync);
+            var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+            var outbox = await store.ListPendingOutboxAsync(10, Now);
+
+            Assert.True(acknowledgement.Accepted);
+            Assert.True(executor.ExecutionToken.IsCancellationRequested);
+            Assert.Equal(StationJobStatus.Canceled, result.Status);
+            Assert.Equal(ExecutionStatus.Canceled, result.ExecutionStatus);
+            Assert.Equal(ResultJudgement.Aborted, result.Judgement);
+            var completed = Assert.Single(
+                outbox,
+                message => message.Kind == StationAgentMessageKinds.JobCompleted);
+            using var payload = JsonDocument.Parse(completed.PayloadJson);
+            Assert.Equal(
+                (int)ExecutionStatus.Canceled,
+                payload.RootElement.GetProperty("executionStatus").GetInt32());
+            Assert.Equal(
+                (int)ResultJudgement.Aborted,
+                payload.RootElement.GetProperty("judgement").GetInt32());
         }
         finally
         {
@@ -171,7 +415,7 @@ public sealed class StationJobCoordinatorTests
         }
     }
 
-    private static StationJobRequested CreateRequest()
+    private static StationJobRequested CreateRequest(long fencingToken = 42)
     {
         using var inputs = JsonDocument.Parse("{\"serialNumber\":\"BOARD-001\"}");
         return new StationJobRequested(
@@ -181,6 +425,8 @@ public sealed class StationJobCoordinatorTests
             "agent-station-assembly",
             "station-assembly",
             "system-station-assembly",
+            Guid.NewGuid(),
+            Guid.NewGuid(),
             Guid.NewGuid(),
             "operation-assemble@1",
             1,
@@ -192,6 +438,9 @@ public sealed class StationJobCoordinatorTests
             "project-a",
             "application-line",
             "snapshot-001",
+            "line-main",
+            "topology-main",
+            "operator-main",
             new string('b', 64),
             "operation-assemble",
             "flow-assemble",
@@ -201,15 +450,29 @@ public sealed class StationJobCoordinatorTests
             [new StationResourceFence(
                 "Station",
                 "station-assembly",
-                42,
+                fencingToken,
                 Now.AddHours(1))],
             inputs.RootElement.Clone(),
             Now);
     }
 
-    private static StationJob CreateAcceptedJob()
+    private static StationJobCancelRequested CreateCancellation(StationJobRequested request) => new(
+        Guid.NewGuid(),
+        $"{request.IdempotencyKey}/cancel",
+        request.JobId,
+        request.IdempotencyKey,
+        request.AgentId,
+        request.StationId,
+        request.StationSystemId,
+        request.ProductionRunId,
+        request.OperationRunId,
+        "operator-cancel",
+        "Terminate the active vendor process tree.",
+        Now);
+
+    private static StationJob CreateAcceptedJob(long fencingToken = 42)
     {
-        var request = CreateRequest();
+        var request = CreateRequest(fencingToken);
         var job = StationJob.Request(new StationJobRequest(
             new StationJobId(request.JobId),
             request.IdempotencyKey,
@@ -217,6 +480,8 @@ public sealed class StationJobCoordinatorTests
             request.StationId,
             request.StationSystemId,
             request.ProductionRunId,
+            request.ProductionUnitId,
+            request.RuntimeSessionId,
             new StationOperationRunId(request.OperationRunId),
             request.OperationAttempt,
             request.ProductModelId,
@@ -227,6 +492,9 @@ public sealed class StationJobCoordinatorTests
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
+            request.ProductionLineDefinitionId,
+            request.TopologyId,
+            request.ActorId,
             request.PackageContentSha256,
             request.OperationId,
             request.FlowDefinitionId,
@@ -245,11 +513,47 @@ public sealed class StationJobCoordinatorTests
         return job;
     }
 
+    private static async Task<StationResourceFenceValidationResponse> ValidateViaAuthorityAsync(
+        StationResourceFenceAuthorityServer authority,
+        StationJobSnapshot job)
+    {
+        await using var pipe = new NamedPipeClientStream(
+            ".",
+            authority.Descriptor.PipeName,
+            PipeDirection.InOut,
+            PipeOptions.Asynchronous);
+        await pipe.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await StationResourceFenceAuthorityWire.WriteAsync(
+            pipe,
+            new StationResourceFenceValidationRequest(
+                StationOperationDocumentContract.ResourceFenceValidationRequestSchema,
+                authority.Descriptor.AccessToken,
+                job.JobId.Value,
+                job.ProductionRunId,
+                job.OperationRunId.Value,
+                job.ResourceFences.Select(fence => new StationOperationResourceFence(
+                    fence.ResourceKind,
+                    fence.ResourceId,
+                    fence.FencingToken,
+                    fence.ExpiresAtUtc)).ToArray()),
+            CancellationToken.None);
+        return await StationResourceFenceAuthorityWire
+            .ReadAsync<StationResourceFenceValidationResponse>(pipe, CancellationToken.None)
+            .AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private static StationOperationExecutionResult Success() => new(
         ExecutionStatus.Completed,
         ResultJudgement.Passed,
         "{}",
         [],
+        [],
+        [],
+        [],
+        0,
+        0,
+        0,
         null,
         null);
 
@@ -277,9 +581,84 @@ public sealed class StationJobCoordinatorTests
         }
     }
 
+    private sealed class RecordingIsolationCleaner : IStationRuntimeIsolationCleaner
+    {
+        public List<StationJobSnapshot> CleanedJobs { get; } = [];
+
+        public ValueTask CleanupAsync(
+            StationJobSnapshot job,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CleanedJobs.Add(job);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class CleanupFailureExecutor : IStationOperationExecutor
+    {
+        public ValueTask<StationOperationExecutionResult> ExecuteAsync(
+            StationJobSnapshot job,
+            Func<StationOperationProgress, CancellationToken, ValueTask> reportProgress,
+            CancellationToken cancellationToken = default) =>
+            throw new StationRuntimeIsolationCleanupException(
+                "Synthetic isolation cleanup failure.",
+                new IOException("Synthetic locked workspace."));
+    }
+
+    private sealed class CancelableExecutor : IStationOperationExecutor
+    {
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+
+        public CancellationToken ExecutionToken { get; private set; }
+
+        public async ValueTask<StationOperationExecutionResult> ExecuteAsync(
+            StationJobSnapshot job,
+            Func<StationOperationProgress, CancellationToken, ValueTask> reportProgress,
+            CancellationToken cancellationToken = default)
+        {
+            _ = job;
+            _ = reportProgress;
+            ExecutionToken = cancellationToken;
+            _started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Infinite delay completed without cancellation.");
+        }
+    }
+
     private sealed class FixedClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class EmptyCancellationStore : IStationSafetyInboxStore
+    {
+        public ValueTask<StationSafetyInboxEntry?> GetAsync(
+            string idempotencyKey,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<StationSafetyInboxEntry?>(null);
+
+        public ValueTask<StationSafetyInboxEntry?> GetJobCancellationAsync(
+            StationJobId jobId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<StationSafetyInboxEntry?>(null);
+
+        public ValueTask<bool> TryBeginAsync(
+            StationSafetyInboxEntry entry,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask<StationSafetyInboxEntry> CompleteAsync(
+            string idempotencyKey,
+            StationSafetyCommandKind commandKind,
+            string requestSha256,
+            string acknowledgementJson,
+            DateTimeOffset completedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class RunningSqliteJob : IAsyncDisposable

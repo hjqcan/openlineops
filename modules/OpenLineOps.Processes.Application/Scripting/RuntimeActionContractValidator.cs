@@ -230,7 +230,7 @@ public static partial class RuntimeActionContractValidator
 
         if (command.RetryLimit != 0)
         {
-            return "Runtime Action Contract v1 supports only retryLimit 0.";
+            return "The Runtime Action Contract supports only retryLimit 0.";
         }
 
         return ValidateExpression(command.Input, fields, "emit.input", depth: 0);

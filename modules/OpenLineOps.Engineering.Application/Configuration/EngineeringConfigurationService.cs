@@ -303,6 +303,7 @@ internal sealed class ProjectEngineeringConfigurationEngine
             {
                 var bindingResult = stationProfile.AddDeviceBinding(DeviceBinding.Create(
                     new DeviceBindingId(bindingRequest.DeviceBindingId),
+                    bindingRequest.OwnerSystemId,
                     new DeviceCapabilityId(bindingRequest.CapabilityId),
                     bindingRequest.DeviceKey));
 
@@ -642,12 +643,13 @@ internal sealed class ProjectEngineeringConfigurationEngine
         foreach (var binding in request.DeviceBindings)
         {
             if (string.IsNullOrWhiteSpace(binding.DeviceBindingId)
+                || string.IsNullOrWhiteSpace(binding.OwnerSystemId)
                 || string.IsNullOrWhiteSpace(binding.CapabilityId)
                 || string.IsNullOrWhiteSpace(binding.DeviceKey))
             {
                 return ApplicationError.Validation(
                     "Engineering.InvalidDeviceBinding",
-                    "Device binding id, capability id, and device key are required.");
+                    "Device binding id, owner System id, capability id, and device key are required.");
             }
         }
 

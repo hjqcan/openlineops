@@ -42,12 +42,7 @@ public sealed class RunnerCommandTests
         Assert.Same(snapshot, launcher.Snapshot);
         Assert.NotNull(launcher.Request);
         Assert.Equal(RunId, launcher.Request.ProductionRunId);
-        Assert.Equal("UNIT-42", launcher.Request.ProductionUnitIdentityValue);
-        Assert.Equal("lot-a", launcher.Request.LotId);
-        Assert.Equal("carrier-a", launcher.Request.CarrierId);
-        Assert.Equal("slot-a", launcher.Request.SlotId);
-        Assert.Equal("fixture-a", launcher.Request.FixtureId);
-        Assert.Equal("device-a", launcher.Request.DeviceId);
+        Assert.Equal(Guid.Parse("00000000-0000-0000-0000-000000000043"), launcher.Request.ProductionUnitId);
         Assert.Equal("actor-a", launcher.Request.ActorId);
         Assert.Equal(new ProductionRunId(RunId), runner.RunId);
 
@@ -127,12 +122,8 @@ public sealed class RunnerCommandTests
         "project",
         "active",
         RunId,
+        Guid.Parse("00000000-0000-0000-0000-000000000043"),
         "UNIT-42",
-        "lot-a",
-        "carrier-a",
-        "slot-a",
-        "fixture-a",
-        "device-a",
         "actor-a");
 
     private static ProductionRunSnapshot CreateProductionRun(
@@ -150,7 +141,7 @@ public sealed class RunnerCommandTests
             new RecipeSnapshotId("recipe.main@1.0.0"),
             [
                 new ResourceRequirement(ResourceKind.Station, "station.main"),
-                new ResourceRequirement(ResourceKind.Slot, "slot-a")
+                new ResourceRequirement(ResourceKind.Slot, "line-a/station-a/slot-a")
             ]);
         var terminal = executionStatus is ExecutionStatus.Completed
             or ExecutionStatus.Failed
@@ -191,6 +182,7 @@ public sealed class RunnerCommandTests
             "snapshot.active",
             "topology.main",
             "line.main",
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-42"),
             "lot-a",
             "carrier-a",
@@ -214,7 +206,8 @@ public sealed class RunnerCommandTests
             [],
             [operation],
             [],
-            new Dictionary<string, int>(StringComparer.Ordinal));
+            new Dictionary<string, int>(StringComparer.Ordinal),
+            []);
     }
 
     private static RunnerCommand CreateCommand(
@@ -224,10 +217,28 @@ public sealed class RunnerCommandTests
     {
         return new RunnerCommand(
             new StubWorkspaceService(workspace),
+            new StubProductionUnitPreparer(),
             launcher,
             runner,
             new StubProductionRunRecoveryService(),
             new StubTerminalOutboxDispatcher());
+    }
+
+    private sealed class StubProductionUnitPreparer : IRunnerProductionUnitPreparer
+    {
+        public ValueTask<Result<RunnerProductionUnitPreparation>> PrepareAsync(
+            PublishedProjectSnapshotDetails snapshot,
+            RunnerRunOptions options,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(Result.Success(new RunnerProductionUnitPreparation(
+                options.ProductionUnitId,
+                "product.main",
+                "serialNumber",
+                options.ProductionUnitIdentityValue,
+                "station.main")));
+        }
     }
 
     private static AutomationProjectWorkspaceDetails CreateWorkspace(

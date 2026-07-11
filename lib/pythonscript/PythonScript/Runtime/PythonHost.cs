@@ -128,7 +128,10 @@ namespace PythonScript.Runtime
 
             foreach (PyObject item in sys.path)
             {
-                if (string.Equals(item.ToString(), normalized, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(
+                        item.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     return;
                 }

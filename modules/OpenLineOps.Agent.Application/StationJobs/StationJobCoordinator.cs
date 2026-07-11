@@ -17,17 +17,27 @@ public sealed class StationJobCoordinator
     private readonly IStationJobStore _store;
     private readonly IStationOperationExecutor _executor;
     private readonly IStationResourceFenceValidator _resourceFences;
+    private readonly IStationSafetyInboxStore _cancellations;
+    private readonly StationJobExecutionRegistry _executions;
+    private readonly IStationRuntimeIsolationCleaner _runtimeIsolationCleaner;
     private readonly IClock _clock;
 
     public StationJobCoordinator(
         IStationJobStore store,
         IStationOperationExecutor executor,
         IStationResourceFenceValidator resourceFences,
+        IStationSafetyInboxStore cancellations,
+        StationJobExecutionRegistry executions,
+        IStationRuntimeIsolationCleaner runtimeIsolationCleaner,
         IClock clock)
     {
         _store = store;
         _executor = executor;
         _resourceFences = resourceFences;
+        _cancellations = cancellations;
+        _executions = executions;
+        _runtimeIsolationCleaner = runtimeIsolationCleaner
+            ?? throw new ArgumentNullException(nameof(runtimeIsolationCleaner));
         _clock = clock;
     }
 
@@ -54,6 +64,8 @@ public sealed class StationJobCoordinator
             message.StationId,
             message.StationSystemId,
             message.ProductionRunId,
+            message.ProductionUnitId,
+            message.RuntimeSessionId,
             new StationOperationRunId(message.OperationRunId),
             message.OperationAttempt,
             message.ProductModelId,
@@ -64,6 +76,9 @@ public sealed class StationJobCoordinator
             message.ProjectId,
             message.ApplicationId,
             message.ProjectSnapshotId,
+            message.ProductionLineDefinitionId,
+            message.TopologyId,
+            message.ActorId,
             message.PackageContentSha256,
             message.OperationId,
             message.FlowDefinitionId,
@@ -120,6 +135,14 @@ public sealed class StationJobCoordinator
                     + "An operator must reconcile the physical station before any retry.");
                 await _store.SaveAsync(job, entry.Revision, [], CancellationToken.None)
                     .ConfigureAwait(false);
+                _executions.Forget(job.Id);
+            }
+
+            if (job.Status == StationJobStatus.RecoveryRequired)
+            {
+                await _runtimeIsolationCleaner
+                    .CleanupAsync(job.ToSnapshot(), CancellationToken.None)
+                    .ConfigureAwait(false);
             }
 
             recovered.Add(job.ToSnapshot());
@@ -128,33 +151,120 @@ public sealed class StationJobCoordinator
         return recovered;
     }
 
+    public async ValueTask<StationJobCancelExecutionResult> CancelAsync(
+        StationJobCancelRequested request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        Validate(request);
+        var entry = await _store.GetAsync(new StationJobId(request.JobId), cancellationToken)
+            .ConfigureAwait(false);
+        if (entry is null)
+        {
+            return StationJobCancelExecutionResult.Failure(
+                "Agent.StationJobNotFound",
+                $"Station job {request.JobId:D} is not persisted on this Agent.");
+        }
+
+        EnsureSameCancellationTarget(entry.Job, request);
+        if (entry.Job.Status == StationJobStatus.Canceled)
+        {
+            _executions.Forget(entry.Job.JobId);
+            return StationJobCancelExecutionResult.Success();
+        }
+
+        if (entry.Job.Status is StationJobStatus.Completed
+            or StationJobStatus.Failed
+            or StationJobStatus.TimedOut
+            or StationJobStatus.Rejected)
+        {
+            return StationJobCancelExecutionResult.Failure(
+                "Agent.StationJobAlreadyTerminal",
+                $"Station job {request.JobId:D} already ended as {entry.Job.Status}.");
+        }
+
+        if (entry.Job.Status == StationJobStatus.RecoveryRequired)
+        {
+            return StationJobCancelExecutionResult.Failure(
+                "Agent.StationJobRecoveryRequired",
+                $"Station job {request.JobId:D} requires physical reconciliation and cannot be replayed or canceled.");
+        }
+
+        _executions.RequestCancelOrRemember(entry.Job.JobId);
+        var current = await _store.GetAsync(entry.Job.JobId, cancellationToken)
+            .ConfigureAwait(false);
+        if (current?.Job.Status == StationJobStatus.Canceled)
+        {
+            _executions.Forget(entry.Job.JobId);
+            return StationJobCancelExecutionResult.Success();
+        }
+
+        if (current?.Job.Status is StationJobStatus.Completed
+            or StationJobStatus.Failed
+            or StationJobStatus.TimedOut
+            or StationJobStatus.Rejected)
+        {
+            _executions.Forget(entry.Job.JobId);
+            return StationJobCancelExecutionResult.Failure(
+                "Agent.StationJobAlreadyTerminal",
+                $"Station job {request.JobId:D} ended as {current.Job.Status} while cancellation was in flight.");
+        }
+
+        return StationJobCancelExecutionResult.Success();
+    }
+
     private async ValueTask<StationJobSnapshot> ExecuteAcceptedAsync(
         StationJob job,
         long expectedRevision,
         CancellationToken cancellationToken)
     {
+        using var execution = _executions.Register(job.Id, cancellationToken);
+        var persistedCancellation = await _cancellations
+            .GetJobCancellationAsync(job.Id, cancellationToken)
+            .ConfigureAwait(false);
+        if (persistedCancellation is not null || execution.CancellationToken.IsCancellationRequested)
+        {
+            return await CompleteCanceledAsync(
+                    job,
+                    expectedRevision,
+                    "Station operation was canceled before hardware execution began.")
+                .ConfigureAwait(false);
+        }
+
         var fenceValidation = await _resourceFences
             .ValidateAndAdvanceAsync(job.ToSnapshot(), cancellationToken)
             .ConfigureAwait(false);
+        if (execution.CancellationToken.IsCancellationRequested)
+        {
+            return await CompleteCanceledAsync(
+                    job,
+                    expectedRevision,
+                    "Station operation was canceled before hardware execution began.")
+                .ConfigureAwait(false);
+        }
+
+        if (!fenceValidation.Accepted)
+        {
+            job.RejectBeforeStart(
+                "Agent.ResourceFenceRejected",
+                fenceValidation.RejectionReason
+                    ?? "Station resource fencing token was rejected.",
+                _clock.UtcNow);
+            var rejectedMessage = CreateCompleted(job, null, checked(expectedRevision + 1));
+            await _store.SaveAsync(
+                    job,
+                    expectedRevision,
+                    [rejectedMessage],
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            _executions.Forget(job.Id);
+            return job.ToSnapshot();
+        }
+
         job.Start(_clock.UtcNow);
         var revision = await _store
             .SaveAsync(job, expectedRevision, [], CancellationToken.None)
             .ConfigureAwait(false);
-        if (!fenceValidation.Accepted)
-        {
-            job.Complete(new StationJobCompletion(
-                ProductionExecutionStatus.Rejected,
-                ProductionResultJudgement.Unknown,
-                "{}",
-                "Agent.ResourceFenceRejected",
-                fenceValidation.RejectionReason
-                    ?? "Station resource fencing token was rejected.",
-                _clock.UtcNow));
-            var rejectedMessage = CreateCompleted(job, [], checked(revision + 1));
-            await _store.SaveAsync(job, revision, [rejectedMessage], CancellationToken.None)
-                .ConfigureAwait(false);
-            return job.ToSnapshot();
-        }
 
         async ValueTask ReportProgressAsync(
             StationOperationProgress update,
@@ -176,16 +286,33 @@ public sealed class StationJobCoordinator
             result = await _executor.ExecuteAsync(
                     job.ToSnapshot(),
                     ReportProgressAsync,
-                    cancellationToken)
+                    execution.CancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (StationRuntimeIsolationCleanupException exception)
+        {
+            job.RequireRecovery(
+                "Station runtime isolation cleanup failed after execution. "
+                + "The Agent must retry cleanup during restart before the Job can be reconciled. "
+                + exception.Message);
+            await _store.SaveAsync(job, revision, [], CancellationToken.None)
+                .ConfigureAwait(false);
+            _executions.Forget(job.Id);
+            throw;
+        }
+        catch (OperationCanceledException) when (execution.CancellationToken.IsCancellationRequested)
         {
             result = new StationOperationExecutionResult(
                 ProductionExecutionStatus.Canceled,
-                ProductionResultJudgement.Unknown,
+                ProductionResultJudgement.Aborted,
                 "{}",
                 [],
+                [],
+                [],
+                [],
+                0,
+                0,
+                0,
                 "Agent.ExecutionCanceled",
                 "Station operation execution was canceled.");
         }
@@ -196,6 +323,17 @@ public sealed class StationJobCoordinator
                 ProductionResultJudgement.Unknown,
                 "{}",
                 [],
+                [],
+                [],
+                [new StationJobIncidentEvidence(
+                    Guid.NewGuid(),
+                    "Error",
+                    "Agent.ExecutionFailed",
+                    exception.Message,
+                    _clock.UtcNow)],
+                0,
+                0,
+                1,
                 "Agent.ExecutionFailed",
                 exception.Message);
         }
@@ -204,12 +342,29 @@ public sealed class StationJobCoordinator
             result.ExecutionStatus,
             result.Judgement,
             result.OutputsJson,
+            result.CompletedStepCount,
+            result.CommandCount,
+            result.IncidentCount,
             result.FailureCode,
             result.FailureReason,
             _clock.UtcNow));
-        var completedMessage = CreateCompleted(job, result.Artifacts, checked(revision + 1));
+        var completedMessage = CreateCompleted(job, result, checked(revision + 1));
         await _store.SaveAsync(job, revision, [completedMessage], CancellationToken.None)
             .ConfigureAwait(false);
+        _executions.Forget(job.Id);
+        return job.ToSnapshot();
+    }
+
+    private async ValueTask<StationJobSnapshot> CompleteCanceledAsync(
+        StationJob job,
+        long expectedRevision,
+        string reason)
+    {
+        job.Cancel(reason, _clock.UtcNow);
+        var completedMessage = CreateCompleted(job, null, checked(expectedRevision + 1));
+        await _store.SaveAsync(job, expectedRevision, [completedMessage], CancellationToken.None)
+            .ConfigureAwait(false);
+        _executions.Forget(job.Id);
         return job.ToSnapshot();
     }
 
@@ -227,7 +382,7 @@ public sealed class StationJobCoordinator
 
     private StationJobOutboxMessage CreateCompleted(
         StationJob job,
-        IReadOnlyCollection<StationOperationArtifact> artifacts,
+        StationOperationExecutionResult? result,
         long sequence)
     {
         using var outputs = JsonDocument.Parse(job.OutputsJson!);
@@ -237,19 +392,42 @@ public sealed class StationJobCoordinator
             job.IdempotencyKey,
             job.AgentId,
             job.StationId,
+            job.RuntimeSessionId,
             job.ExecutionStatus!.Value,
             job.Judgement!.Value,
             outputs.RootElement.Clone(),
-            artifacts.Select(artifact => new StationJobArtifact(
-                    artifact.RelativePath,
-                    artifact.MediaType,
-                    artifact.SizeBytes,
-                    artifact.Sha256))
-                .ToArray(),
+            job.CompletedStepCount,
+            job.CommandCount,
+            job.IncidentCount,
+            result?.Steps ?? [],
+            result?.Commands ?? [],
+            result?.Incidents ?? [],
+            [],
             job.FailureCode,
             job.FailureReason,
             job.CompletedAtUtc!.Value);
-        return Outbox(message.MessageId, job.Id, sequence, StationAgentMessageKinds.JobCompleted, message);
+        var pendingArtifacts = (result?.Artifacts ?? [])
+            .Select(artifact => new PendingStationJobArtifact(
+                artifact.Name,
+                artifact.Kind,
+                artifact.LocalArtifactKey,
+                artifact.MediaType,
+                artifact.SizeBytes,
+                artifact.Sha256))
+            .ToArray();
+        return pendingArtifacts.Length == 0
+            ? Outbox(
+                message.MessageId,
+                job.Id,
+                sequence,
+                StationAgentMessageKinds.JobCompleted,
+                message)
+            : Outbox(
+                message.MessageId,
+                job.Id,
+                sequence,
+                StationAgentMessageKinds.JobCompletionPendingArtifactTransfer,
+                new PendingStationJobCompletion(message, pendingArtifacts));
     }
 
     private StationJobOutboxMessage CreateProgressed(StationJob job, long sequence)
@@ -286,7 +464,9 @@ public sealed class StationJobCoordinator
     {
         if (message.MessageId == Guid.Empty
             || message.JobId == Guid.Empty
-            || message.ProductionRunId == Guid.Empty)
+            || message.ProductionRunId == Guid.Empty
+            || message.ProductionUnitId == Guid.Empty
+            || message.RuntimeSessionId == Guid.Empty)
         {
             throw new ArgumentException("Station job message identities cannot be empty.", nameof(message));
         }
@@ -313,6 +493,11 @@ public sealed class StationJobCoordinator
         _ = Required(message.ProjectId, nameof(message.ProjectId));
         _ = Required(message.ApplicationId, nameof(message.ApplicationId));
         _ = Required(message.ProjectSnapshotId, nameof(message.ProjectSnapshotId));
+        _ = Required(
+            message.ProductionLineDefinitionId,
+            nameof(message.ProductionLineDefinitionId));
+        _ = Required(message.TopologyId, nameof(message.TopologyId));
+        _ = Required(message.ActorId, nameof(message.ActorId));
         _ = Required(message.OperationId, nameof(message.OperationId));
         _ = Required(message.FlowDefinitionId, nameof(message.FlowDefinitionId));
         _ = Required(message.FlowVersionId, nameof(message.FlowVersionId));
@@ -331,10 +516,56 @@ public sealed class StationJobCoordinator
         }
     }
 
+    private static void Validate(StationJobCancelRequested message)
+    {
+        if (message.MessageId == Guid.Empty
+            || message.JobId == Guid.Empty
+            || message.ProductionRunId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Station job cancellation identities cannot be empty.",
+                nameof(message));
+        }
+
+        _ = Required(message.IdempotencyKey, nameof(message.IdempotencyKey));
+        _ = Required(message.JobIdempotencyKey, nameof(message.JobIdempotencyKey));
+        _ = Required(message.AgentId, nameof(message.AgentId));
+        _ = Required(message.StationId, nameof(message.StationId));
+        _ = Required(message.StationSystemId, nameof(message.StationSystemId));
+        _ = Required(message.OperationRunId, nameof(message.OperationRunId));
+        _ = Required(message.ActorId, nameof(message.ActorId));
+        _ = Required(message.Reason, nameof(message.Reason));
+        if (message.RequestedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station job cancellation timestamp must use UTC offset zero.",
+                nameof(message));
+        }
+    }
+
+    private static void EnsureSameCancellationTarget(
+        StationJobSnapshot job,
+        StationJobCancelRequested request)
+    {
+        if (job.JobId.Value != request.JobId
+            || job.ProductionRunId != request.ProductionRunId
+            || !string.Equals(job.IdempotencyKey, request.JobIdempotencyKey, StringComparison.Ordinal)
+            || !string.Equals(job.AgentId, request.AgentId, StringComparison.Ordinal)
+            || !string.Equals(job.StationId, request.StationId, StringComparison.Ordinal)
+            || !string.Equals(job.StationSystemId, request.StationSystemId, StringComparison.Ordinal)
+            || !string.Equals(job.OperationRunId.Value, request.OperationRunId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Station job cancellation '{request.IdempotencyKey}' does not match the persisted job identity.");
+        }
+    }
+
     private static void EnsureSameRequest(StationJobSnapshot existing, StationJobRequested message)
     {
         if (existing.JobId.Value != message.JobId
             || existing.ProductionRunId != message.ProductionRunId
+            || existing.ProductionUnitId != message.ProductionUnitId
+            || existing.RuntimeSessionId != message.RuntimeSessionId
             || existing.OperationRunId.Value != message.OperationRunId
             || existing.OperationAttempt != message.OperationAttempt
             || !string.Equals(existing.AgentId, message.AgentId, StringComparison.Ordinal)
@@ -351,7 +582,15 @@ public sealed class StationJobCoordinator
                 StringComparison.Ordinal)
             || !string.Equals(existing.LotId, message.LotId, StringComparison.Ordinal)
             || !string.Equals(existing.CarrierId, message.CarrierId, StringComparison.Ordinal)
+            || !string.Equals(existing.ProjectId, message.ProjectId, StringComparison.Ordinal)
+            || !string.Equals(existing.ApplicationId, message.ApplicationId, StringComparison.Ordinal)
             || !string.Equals(existing.ProjectSnapshotId, message.ProjectSnapshotId, StringComparison.Ordinal)
+            || !string.Equals(
+                existing.ProductionLineDefinitionId,
+                message.ProductionLineDefinitionId,
+                StringComparison.Ordinal)
+            || !string.Equals(existing.TopologyId, message.TopologyId, StringComparison.Ordinal)
+            || !string.Equals(existing.ActorId, message.ActorId, StringComparison.Ordinal)
             || !string.Equals(existing.PackageContentSha256, message.PackageContentSha256, StringComparison.Ordinal)
             || !string.Equals(existing.OperationId, message.OperationId, StringComparison.Ordinal)
             || !string.Equals(existing.FlowDefinitionId, message.FlowDefinitionId, StringComparison.Ordinal)

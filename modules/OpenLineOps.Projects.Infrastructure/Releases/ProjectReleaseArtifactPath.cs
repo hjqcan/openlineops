@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.Projects.Application.Releases;
 
 namespace OpenLineOps.Projects.Infrastructure.Releases;
 
@@ -58,7 +59,7 @@ internal static class ProjectReleaseArtifactPath
 
     public static string GetManifestPath(string releaseRootPath)
     {
-        return Path.Combine(releaseRootPath, ProjectReleaseArtifactManifest.FileName);
+        return Path.Combine(releaseRootPath, ProjectReleaseManifest.FileName);
     }
 
     public static string ResolveRelativePath(string rootPath, string relativePath)

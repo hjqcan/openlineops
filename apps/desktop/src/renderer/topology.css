@@ -160,7 +160,7 @@
 
 .topology-inspector {
   display: grid;
-  grid-template-rows: auto auto minmax(112px, 1fr) auto;
+  grid-template-rows: auto auto minmax(128px, auto) minmax(112px, 1fr) auto;
   border-left: 1px solid #c6cbc7;
 }
 
@@ -401,7 +401,7 @@
   font-size: 8px;
 }
 
-.topology-canvas-stage {
+.topology-canvas-plane {
   position: relative;
   display: grid;
   place-items: center;
@@ -489,7 +489,9 @@
 
 .topology-live-product,
 .topology-live-station,
-.topology-live-slot {
+.topology-live-slot,
+.topology-live-carrier,
+.topology-live-resource {
   display: grid;
   grid-template-columns: 7px minmax(0, 1fr) auto;
   align-items: center;
@@ -517,6 +519,10 @@
   background: var(--topology-running);
 }
 
+.topology-live-product > i.status-completed {
+  background: var(--topology-completed);
+}
+
 .topology-live-product > i.status-failed,
 .topology-live-product > i.status-timedout,
 .topology-live-product > i.status-rejected,
@@ -533,7 +539,9 @@
 
 .topology-live-product > span,
 .topology-live-station > span,
-.topology-live-slot > span {
+.topology-live-slot > span,
+.topology-live-carrier > span,
+.topology-live-resource > span {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -544,7 +552,11 @@
 .topology-live-station strong,
 .topology-live-station small,
 .topology-live-slot strong,
-.topology-live-slot small {
+.topology-live-slot small,
+.topology-live-carrier strong,
+.topology-live-carrier small,
+.topology-live-resource strong,
+.topology-live-resource small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -552,14 +564,18 @@
 
 .topology-live-product strong,
 .topology-live-station strong,
-.topology-live-slot strong {
+.topology-live-slot strong,
+.topology-live-carrier strong,
+.topology-live-resource strong {
   color: #e1e9e8;
   font: 8px "Cascadia Code", monospace;
 }
 
 .topology-live-product small,
 .topology-live-station small,
-.topology-live-slot small {
+.topology-live-slot small,
+.topology-live-carrier small,
+.topology-live-resource small {
   margin-top: 1px;
   color: #8fa1a5;
   font-size: 7px;
@@ -567,11 +583,23 @@
 
 .topology-live-product em,
 .topology-live-station em,
-.topology-live-slot em {
+.topology-live-slot em,
+.topology-live-carrier em,
+.topology-live-resource em {
   color: #b7c4c5;
   font-size: 6px;
   font-style: normal;
   text-transform: uppercase;
+}
+
+.topology-live-carrier,
+.topology-live-resource {
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  color: #67b7aa;
+}
+
+.topology-live-resource {
+  color: #d0a45c;
 }
 
 .topology-canvas {
@@ -1300,6 +1328,97 @@
   background: #e8e8e2;
   color: #899294;
 }
+
+.topology-driver-editor {
+  display: grid;
+  gap: 7px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 9px;
+  border-bottom: 1px solid #d4d8d3;
+  background: #f4f3ee;
+}
+
+.topology-driver-editor > header,
+.topology-driver-editor > header > div,
+.topology-driver-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topology-driver-editor > header { justify-content: space-between; }
+.topology-driver-editor > header strong { color: #334046; font-size: 9px; }
+.topology-driver-editor > header span {
+  display: grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: #dfe5df;
+  color: #5f6e6c;
+  font-size: 8px;
+}
+
+.topology-driver-list {
+  display: grid;
+  gap: 4px;
+}
+
+.topology-driver-list > button {
+  display: grid;
+  gap: 1px;
+  padding: 6px;
+  border: 1px solid #d3d8d3;
+  border-radius: 2px;
+  background: #fff;
+  color: #596568;
+  text-align: left;
+}
+
+.topology-driver-list > button.active {
+  border-color: #df8051;
+  box-shadow: inset 2px 0 #df8051;
+}
+
+.topology-driver-list strong { color: #303c42; font: 8px "Cascadia Code", Consolas, monospace; }
+.topology-driver-list span { font-size: 8px; }
+.topology-driver-list small { color: #889193; font-size: 7px; }
+.topology-driver-empty { margin: 0; color: #899294; font-size: 8px; }
+
+.topology-driver-form {
+  display: grid;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid #d8ddd8;
+  background: #fff;
+}
+
+.topology-driver-form label { display: grid; gap: 3px; min-width: 0; }
+.topology-driver-form label > span {
+  color: #788386;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.topology-driver-form input,
+.topology-driver-form select {
+  width: 100%;
+  min-width: 0;
+  height: 27px;
+  padding: 0 6px;
+  border: 1px solid #cbd2cd;
+  border-radius: 2px;
+  background: #fff;
+  color: #28343a;
+  font: 8px "Cascadia Code", Consolas, monospace;
+}
+
+.topology-driver-form input:disabled,
+.topology-driver-form select:disabled { background: #e8e8e2; color: #899294; }
+.topology-driver-actions { justify-content: flex-end; }
 
 .topology-semantic-pair {
   display: grid;

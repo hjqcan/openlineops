@@ -106,6 +106,46 @@ Test-ContentContains `
     -Message "Workflow must reject internal version tokens and version-suffixed implementations."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "verify-no-technical-debt-markers\.ps1" `
+    -Message "Workflow must reject technical-debt markers and unimplemented code paths."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "verify-no-legacy-production-contracts\.ps1" `
+    -Message "Workflow must reject legacy production contracts and compatibility aliases."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "npm run test:line-projection" `
+    -Message "Workflow must verify the persisted production-line projection independently from renderer memory."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "npm run test:editor-workspace" `
+    -Message "Workflow must verify multi-editor dirty, Save All, Problems, and conflict state."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "npm run e2e:production-closure:packaged" `
+    -Message "Workflow must run the packaged multi-Station production closure E2E gate."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "(?m)^\s*path:\s*artifacts/production-closure-e2e\s*$" `
+    -Message "Workflow must upload packaged production closure screenshots and machine-readable evidence."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "(?ms)name:\s*Upload packaged production closure evidence\s*\r?\n\s*if:\s*always\(\)\s*\r?\n\s*uses:\s*actions/upload-artifact@v7" `
+    -Message "Workflow must upload packaged production closure failure evidence even when the E2E gate fails."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "dotnet build OpenLineOps\.sln[^\r\n]*TreatWarningsAsErrors=true" `
+    -Message "Workflow must treat every .NET solution build warning as an error."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern 'OPENLINEOPS_RUN_POSTGRES_INTEGRATION:\s*"1"' `
+    -Message "Workflow must run the real PostgreSQL production integration gate."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern 'OPENLINEOPS_RUN_RABBITMQ_INTEGRATION:\s*"1"' `
+    -Message "Workflow must run the real RabbitMQ production integration gate."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern '\$expectedPythonDllName' `
     -Message "Workflow must prefer the version-specific Python runtime DLL for pythonnet."
 Test-ContentContains `

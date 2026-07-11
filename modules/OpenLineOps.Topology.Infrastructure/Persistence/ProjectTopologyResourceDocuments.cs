@@ -40,6 +40,7 @@ internal sealed record CapabilityContractDocument(
 
 internal sealed record DriverBindingDocument(
     string BindingId,
+    string OwnerSystemId,
     string CapabilityId,
     string ProviderKind,
     string ProviderKey);

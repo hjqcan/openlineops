@@ -12,19 +12,27 @@ public sealed class InMemoryProductionRunRepository :
     IProductionRunRepository,
     IProductionRunExecutionPlanRepository
 {
+    private readonly InMemoryProductionMaterialRepository _materials;
     private readonly ConcurrentDictionary<ProductionRunId, StoredProductionRun> _runs = [];
     private readonly ConcurrentDictionary<ProductionRunId, StoredTerminalOutboxItem> _terminalOutbox = [];
     private int _saveCount;
+
+    public InMemoryProductionRunRepository(InMemoryProductionMaterialRepository materials)
+    {
+        _materials = materials ?? throw new ArgumentNullException(nameof(materials));
+    }
 
     public int SaveCount => Volatile.Read(ref _saveCount);
 
     public ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
+        ProductionRunAdmission admission,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentNullException.ThrowIfNull(executionPlan);
+        ArgumentNullException.ThrowIfNull(admission);
         cancellationToken.ThrowIfCancellationRequested();
         if (run.ExecutionStatus != ExecutionStatus.Pending || executionPlan.RunId != run.Id)
         {
@@ -33,12 +41,31 @@ public sealed class InMemoryProductionRunRepository :
                 nameof(run));
         }
 
-        var added = _runs.TryAdd(
-            run.Id,
-            new StoredProductionRun(
-                ProductionRunSnapshotMapper.ToSnapshot(run),
-                executionPlan,
-                0));
+        bool added;
+        lock (_materials.CoordinationGate)
+        {
+            if (_runs.ContainsKey(run.Id))
+            {
+                return ValueTask.FromResult(false);
+            }
+
+            if (!_materials.TryReserveProductionRun(run, admission))
+            {
+                return ValueTask.FromResult(false);
+            }
+
+            added = _runs.TryAdd(
+                run.Id,
+                new StoredProductionRun(
+                    ProductionRunSnapshotMapper.ToSnapshot(run),
+                    executionPlan,
+                    0));
+            if (!added)
+            {
+                throw new InvalidOperationException(
+                    $"Production Run {run.Id} admission lost atomic ownership.");
+            }
+        }
         if (added)
         {
             Interlocked.Increment(ref _saveCount);
@@ -54,32 +81,38 @@ public sealed class InMemoryProductionRunRepository :
     {
         ArgumentNullException.ThrowIfNull(run);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!_runs.TryGetValue(run.Id, out var stored))
+        long nextRevision;
+        lock (_materials.CoordinationGate)
         {
-            throw new InvalidOperationException(
-                $"Production run {run.Id} must be added before it can be updated.");
-        }
+            if (!_runs.TryGetValue(run.Id, out var stored))
+            {
+                throw new InvalidOperationException(
+                    $"Production run {run.Id} must be added before it can be updated.");
+            }
 
-        if (stored.Revision != expectedRevision)
-        {
-            throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
-        }
+            if (stored.Revision != expectedRevision)
+            {
+                throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
+            }
 
-        var nextRevision = checked(expectedRevision + 1);
-        var updated = new StoredProductionRun(
-            ProductionRunSnapshotMapper.ToSnapshot(run),
-            stored.ExecutionPlan,
-            nextRevision);
-        if (!_runs.TryUpdate(run.Id, updated, stored))
-        {
-            throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
-        }
+            nextRevision = checked(expectedRevision + 1);
+            _materials.SynchronizeProductionRun(run, nextRevision);
+            var updated = new StoredProductionRun(
+                ProductionRunSnapshotMapper.ToSnapshot(run),
+                stored.ExecutionPlan,
+                nextRevision);
+            if (!_runs.TryUpdate(run.Id, updated, stored))
+            {
+                throw new InvalidOperationException(
+                    $"Production Run {run.Id} lost atomic ownership while synchronizing its Unit.");
+            }
 
-        if (run.IsTerminal)
-        {
-            _terminalOutbox.TryAdd(
-                run.Id,
-                new StoredTerminalOutboxItem(run.ToSnapshot(), 0, null));
+            if (run.IsTerminal)
+            {
+                _terminalOutbox.TryAdd(
+                    run.Id,
+                    new StoredTerminalOutboxItem(run.ToSnapshot(), 0, null));
+            }
         }
 
         Interlocked.Increment(ref _saveCount);

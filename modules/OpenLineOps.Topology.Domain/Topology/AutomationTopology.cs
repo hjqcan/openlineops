@@ -73,11 +73,11 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Station system {system.Id} must be placed at the topology root.");
         }
 
-        if (system is GeneralAutomationSystem && parent is not null and not StationSystem)
+        if (system is GeneralAutomationSystem && parent is null)
         {
             return TopologyOperationResult.Rejected(
-                "Topology.ChildSystemRequiresStation",
-                $"Child automation system {system.Id} must belong directly to a Station system.");
+                "Topology.ChildSystemRequiresStationTree",
+                $"Non-Station system {system.Id} must belong to a Station system subtree.");
         }
 
         var missingCapability = system.RequiredCapabilities
@@ -127,15 +127,97 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Capability contract {binding.CapabilityId} must exist before driver binding {binding.Id} can be added.");
         }
 
-        if (_driverBindings.Any(candidate => candidate.CapabilityId == binding.CapabilityId))
+        var owner = _systems.SingleOrDefault(candidate => candidate.Id == binding.OwnerSystemId);
+        if (owner is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingOwnerMissing",
+                $"Driver binding {binding.Id} must be owned by an existing System, not {binding.OwnerSystemId}.");
+        }
+
+        if (!owner.RequiredCapabilities.Contains(binding.CapabilityId)
+            && !owner.ProvidedCapabilities.Contains(binding.CapabilityId))
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingOwnerCapabilityMissing",
+                $"Driver binding owner {binding.OwnerSystemId} must declare capability {binding.CapabilityId}.");
+        }
+
+        if (_driverBindings.Any(candidate => candidate.OwnerSystemId == binding.OwnerSystemId
+            && candidate.CapabilityId == binding.CapabilityId))
         {
             return TopologyOperationResult.Rejected(
                 "Topology.CapabilityAlreadyBound",
-                $"Capability contract {binding.CapabilityId} is already bound in topology {Id}.");
+                $"Capability contract {binding.CapabilityId} is already bound for system {binding.OwnerSystemId} in topology {Id}.");
         }
 
         _driverBindings.Add(binding);
         return TopologyOperationResult.Accepted("Driver binding added.");
+    }
+
+    public TopologyOperationResult UpdateDriverBinding(
+        DriverBindingId bindingId,
+        AutomationSystemId ownerSystemId,
+        CapabilityContractId capabilityId,
+        DriverProviderKind providerKind,
+        string providerKey)
+    {
+        var binding = _driverBindings.SingleOrDefault(candidate => candidate.Id == bindingId);
+        if (binding is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingNotFound",
+                $"Driver binding {bindingId} was not found in topology {Id}.");
+        }
+
+        if (_capabilities.All(candidate => candidate.Id != capabilityId))
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingCapabilityMissing",
+                $"Capability contract {capabilityId} must exist before driver binding {bindingId} can be updated.");
+        }
+
+        var owner = _systems.SingleOrDefault(candidate => candidate.Id == ownerSystemId);
+        if (owner is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingOwnerMissing",
+                $"Driver binding {bindingId} must be owned by an existing System, not {ownerSystemId}.");
+        }
+
+        if (!owner.RequiredCapabilities.Contains(capabilityId)
+            && !owner.ProvidedCapabilities.Contains(capabilityId))
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingOwnerCapabilityMissing",
+                $"Driver binding owner {ownerSystemId} must declare capability {capabilityId}.");
+        }
+
+        if (_driverBindings.Any(candidate => candidate.Id != bindingId
+            && candidate.OwnerSystemId == ownerSystemId
+            && candidate.CapabilityId == capabilityId))
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.CapabilityAlreadyBound",
+                $"Capability contract {capabilityId} is already bound for system {ownerSystemId} in topology {Id}.");
+        }
+
+        binding.Update(ownerSystemId, capabilityId, providerKind, providerKey);
+        return TopologyOperationResult.Accepted("Driver binding updated.");
+    }
+
+    public TopologyOperationResult RemoveDriverBinding(DriverBindingId bindingId)
+    {
+        var binding = _driverBindings.SingleOrDefault(candidate => candidate.Id == bindingId);
+        if (binding is null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.DriverBindingNotFound",
+                $"Driver binding {bindingId} was not found in topology {Id}.");
+        }
+
+        _driverBindings.Remove(binding);
+        return TopologyOperationResult.Accepted("Driver binding removed.");
     }
 
     public TopologyOperationResult AddSlotGroup(SlotGroup slotGroup)
@@ -258,6 +340,7 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         _slots.RemoveAll(slot => removedSystemIds.Contains(slot.ParentSystemId)
             || removedGroupIds.Contains(slot.SlotGroupId));
         _slotGroups.RemoveAll(group => removedGroupIds.Contains(group.Id));
+        _driverBindings.RemoveAll(binding => removedSystemIds.Contains(binding.OwnerSystemId));
         _systems.RemoveAll(system => removedSystemIds.Contains(system.Id));
 
         return TopologyOperationResult.Accepted("Automation system subtree removed.");

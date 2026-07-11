@@ -48,7 +48,12 @@ public sealed class ProjectReleaseSourceResolverTests
                 [],
                 new Dictionary<string, string>())],
             [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
-            [new DriverBindingDetails("binding.axis", "motion.axis", "PluginCommand", "plugin.axis")],
+            [new DriverBindingDetails(
+                "binding.axis",
+                "system.axis",
+                "motion.axis",
+                "PluginCommand",
+                "plugin.axis")],
             [],
             []);
         var action = new FlowIrAction(
@@ -122,6 +127,7 @@ public sealed class ProjectReleaseSourceResolverTests
                 [new CapabilityContractDetails("motion.axis", "Move", "1", null, null, 30, "Normal")],
                 [new DriverBindingDetails(
                     "binding.axis",
+                    "system.axis",
                     "motion.axis",
                     "ProcessCommandProvider",
                     "plugin.axis")],
@@ -164,6 +170,7 @@ public sealed class ProjectReleaseSourceResolverTests
                 engineeringRepository: null!,
                 blockRepository: null!,
                 productionRepository: null!,
+                externalProgramRepository: null!,
                 flowIrCompiler: null!,
                 flowIrSerializer: null!,
                 clock: null!,
@@ -171,6 +178,7 @@ public sealed class ProjectReleaseSourceResolverTests
 
             var result = await resolver.ResolvePackageDependenciesAsync(
                 topology,
+                "system.axis",
                 document,
                 CancellationToken.None);
 
@@ -202,6 +210,7 @@ public sealed class ProjectReleaseSourceResolverTests
             engineeringRepository: null!,
             blockRepository: null!,
             productionRepository: null!,
+            externalProgramRepository: null!,
             flowIrCompiler: new ProcessFlowIrCompiler(),
             flowIrSerializer: new FlowIrCanonicalSerializer(),
             clock: null!);

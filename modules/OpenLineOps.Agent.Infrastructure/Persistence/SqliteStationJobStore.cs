@@ -273,6 +273,73 @@ public sealed class SqliteStationJobStore : IStationJobStore, IDisposable
             .ConfigureAwait(false);
     }
 
+    public async ValueTask<IReadOnlyCollection<StationJobOutboxMessage>>
+        ListPendingArtifactCleanupAsync(
+            int maximumCount,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT message_id,
+                   job_id,
+                   sequence,
+                   kind,
+                   payload_json,
+                   created_at_utc,
+                   attempt_count,
+                   next_attempt_at_utc,
+                   acknowledged_at_utc
+            FROM station_job_outbox
+            WHERE acknowledged_at_utc IS NOT NULL
+              AND kind = $kind
+            ORDER BY acknowledged_at_utc, message_id
+            LIMIT $maximum_count;
+            """;
+        command.Parameters.AddWithValue(
+            "$kind",
+            StationAgentMessageKinds.JobCompletionPendingArtifactTransfer);
+        command.Parameters.AddWithValue("$maximum_count", maximumCount);
+        var result = new List<StationJobOutboxMessage>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(ReadOutbox(reader));
+        }
+
+        return result;
+    }
+
+    public async ValueTask DeleteAcknowledgedOutboxAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default)
+    {
+        if (messageId == Guid.Empty)
+        {
+            throw new ArgumentException("Outbox message id cannot be empty.", nameof(messageId));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM station_job_outbox
+            WHERE message_id = $message_id
+              AND acknowledged_at_utc IS NOT NULL;
+            """;
+        command.Parameters.AddWithValue("$message_id", messageId.ToString("D"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Acknowledged Station job outbox message {messageId:D} does not exist.");
+        }
+    }
+
     public void Dispose()
     {
         _schemaLock.Dispose();
@@ -473,6 +540,17 @@ public sealed class SqliteStationJobStore : IStationJobStore, IDisposable
             StationJob.Restore(snapshot).ToSnapshot(),
             revision);
     }
+
+    private static StationJobOutboxMessage ReadOutbox(SqliteDataReader reader) => new(
+        Guid.Parse(reader.GetString(0)),
+        new StationJobId(Guid.Parse(reader.GetString(1))),
+        reader.GetInt64(2),
+        reader.GetString(3),
+        reader.GetString(4),
+        ParseUtc(reader.GetString(5)),
+        reader.GetInt32(6),
+        reader.IsDBNull(7) ? null : ParseUtc(reader.GetString(7)),
+        reader.IsDBNull(8) ? null : ParseUtc(reader.GetString(8)));
 
     private SqliteConnection CreateConnection() => new(_connectionString);
 

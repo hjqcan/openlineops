@@ -5,6 +5,9 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Occupancy;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
@@ -29,10 +32,12 @@ public sealed class SqliteProductionRunRepository :
     public async ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
+        ProductionRunAdmission admission,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentNullException.ThrowIfNull(executionPlan);
+        ArgumentNullException.ThrowIfNull(admission);
         if (run.ExecutionStatus != ExecutionStatus.Pending || executionPlan.RunId != run.Id)
         {
             throw new ArgumentException(
@@ -50,10 +55,25 @@ public sealed class SqliteProductionRunRepository :
             JsonOptions);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        if (!await TryReserveProductionUnitAsync(
+                connection,
+                transaction,
+                run,
+                admission,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return false;
+        }
+
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO production_runs (
                 run_id,
+                production_unit_id,
                 document_json,
                 execution_plan_json,
                 revision,
@@ -67,6 +87,7 @@ public sealed class SqliteProductionRunRepository :
                 updated_at_utc)
             VALUES (
                 $run_id,
+                $production_unit_id,
                 $document_json,
                 $execution_plan_json,
                 0,
@@ -82,7 +103,17 @@ public sealed class SqliteProductionRunRepository :
             """;
         AddParameters(command, run, documentJson);
         command.Parameters.AddWithValue("$execution_plan_json", executionPlanJson);
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (added)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return added;
     }
 
     public async ValueTask<long> SaveAsync(
@@ -98,9 +129,7 @@ public sealed class SqliteProductionRunRepository :
             JsonOptions);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = (SqliteTransaction)await connection
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         var nextRevision = checked(expectedRevision + 1);
@@ -129,6 +158,39 @@ public sealed class SqliteProductionRunRepository :
                     transaction,
                     run.Id,
                     expectedRevision,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var productionUnitSynchronization = await SynchronizeProductionUnitAsync(
+                connection,
+                transaction,
+                run,
+                nextRevision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await SynchronizeCompletedSlotsAsync(
+                connection,
+                transaction,
+                run,
+                productionUnitSynchronization.Unit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (productionUnitSynchronization.PreviousDisposition
+            != productionUnitSynchronization.Unit.Disposition)
+        {
+            await InsertTimelineAsync(
+                    connection,
+                    transaction,
+                    ProductionMaterialTimelineEntry.Disposition(
+                        Guid.NewGuid(),
+                        productionUnitSynchronization.Unit.Id,
+                        run.Id,
+                        productionUnitSynchronization.PreviousDisposition,
+                        productionUnitSynchronization.Unit.Disposition,
+                        productionUnitSynchronization.Unit.DispositionReason,
+                        run.ActorId,
+                        productionUnitSynchronization.Unit.LastDispositionTransitionAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -380,6 +442,7 @@ public sealed class SqliteProductionRunRepository :
             command.CommandText = """
                 CREATE TABLE IF NOT EXISTS production_runs (
                     run_id TEXT NOT NULL PRIMARY KEY,
+                    production_unit_id TEXT NOT NULL,
                     document_json TEXT NOT NULL,
                     execution_plan_json TEXT NOT NULL,
                     revision INTEGER NOT NULL,
@@ -396,6 +459,22 @@ public sealed class SqliteProductionRunRepository :
                 CREATE INDEX IF NOT EXISTS ix_production_runs_recovery
                     ON production_runs(execution_status, last_transition_at_utc);
 
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_production_runs_active_unit
+                    ON production_runs(production_unit_id)
+                    WHERE execution_status IN ('Pending', 'Running');
+
+                CREATE TABLE IF NOT EXISTS production_units (
+                    production_unit_id TEXT NOT NULL PRIMARY KEY,
+                    product_model_id TEXT NOT NULL,
+                    identity_key TEXT NOT NULL,
+                    identity_value TEXT NOT NULL,
+                    document_json TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    disposition TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    UNIQUE(product_model_id, identity_key, identity_value)
+                );
+
                 CREATE TABLE IF NOT EXISTS production_run_terminal_outbox (
                     run_id TEXT NOT NULL PRIMARY KEY,
                     document_json TEXT NOT NULL,
@@ -407,6 +486,18 @@ public sealed class SqliteProductionRunRepository :
 
                 CREATE INDEX IF NOT EXISTS ix_production_run_terminal_outbox_order
                     ON production_run_terminal_outbox(occurred_at_utc, run_id);
+
+                CREATE TABLE IF NOT EXISTS production_material_timeline (
+                    evidence_id TEXT NOT NULL PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    production_run_id TEXT NULL,
+                    production_unit_id TEXT NULL,
+                    carrier_id TEXT NULL,
+                    genealogy_parent_unit_id TEXT NULL,
+                    genealogy_child_unit_id TEXT NULL,
+                    document_json TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL
+                );
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
@@ -490,6 +581,351 @@ public sealed class SqliteProductionRunRepository :
         throw new ProductionRunConcurrencyException(runId, expectedRevision);
     }
 
+    private static async ValueTask<bool> TryReserveProductionUnitAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        ProductionRunAdmission admission,
+        CancellationToken cancellationToken)
+    {
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT document_json, revision
+            FROM production_units
+            WHERE production_unit_id = $production_unit_id
+            LIMIT 1;
+            """;
+        read.Parameters.AddWithValue("$production_unit_id", run.ProductionUnitId.Value.ToString("D"));
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        var storedDocument = reader.GetString(0);
+        var storedRevision = reader.GetInt64(1);
+        await reader.DisposeAsync().ConfigureAwait(false);
+        var unit = DeserializeProductionUnit(storedDocument);
+        if (storedRevision != admission.ExpectedRevision
+            || unit.ToSnapshot() != admission.ProductionUnit
+            || unit.Id != run.ProductionUnitId)
+        {
+            return false;
+        }
+
+        var reservation = unit.ReserveProductionRun(run.Id, run.CreatedAtUtc);
+        if (!reservation.Succeeded)
+        {
+            return false;
+        }
+
+        return await UpdateProductionUnitAsync(
+                connection,
+                transaction,
+                unit,
+                storedRevision,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask<ProductionUnitSynchronization> SynchronizeProductionUnitAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        long runRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT document_json, revision
+            FROM production_units
+            WHERE production_unit_id = $production_unit_id
+            LIMIT 1;
+            """;
+        read.Parameters.AddWithValue("$production_unit_id", run.ProductionUnitId.Value.ToString("D"));
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                $"Production Unit {run.ProductionUnitId} disappeared during Production Run {run.Id}.");
+        }
+
+        var unit = DeserializeProductionUnit(reader.GetString(0));
+        var unitRevision = reader.GetInt64(1);
+        await reader.DisposeAsync().ConfigureAwait(false);
+        var previousDisposition = unit.Disposition;
+        var result = unit.SynchronizeProductionRun(
+            run.Id,
+            runRevision,
+            run.Disposition,
+            run.IsTerminal,
+            run.FailureReason,
+            run.LastTransitionAtUtc);
+        if (!result.Succeeded
+            || !await UpdateProductionUnitAsync(
+                    connection,
+                    transaction,
+                    unit,
+                    unitRevision,
+                    cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                result.Succeeded
+                    ? $"Production Unit {unit.Id} changed during atomic run synchronization."
+                    : result.Message);
+        }
+
+        return new ProductionUnitSynchronization(unit, previousDisposition);
+    }
+
+    private static async ValueTask SynchronizeCompletedSlotsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        ProductionUnit unit,
+        CancellationToken cancellationToken)
+    {
+        var expectedMaterial = unit.Location is
+        {
+            Kind: MaterialLocationKind.CarrierPosition,
+            CarrierId: { } carrierId
+        }
+            ? MaterialReference.ForCarrier(carrierId)
+            : MaterialReference.ForProductionUnit(unit.Id);
+        foreach (var completedSlot in ProductionRunSlotLifecycle.ResolveCompletedSlots(run))
+        {
+            if (await HasSlotCompletionEvidenceAsync(
+                    connection,
+                    transaction,
+                    run.Id,
+                    completedSlot,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var read = connection.CreateCommand();
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT document_json, revision
+                FROM slot_occupancies
+                WHERE line_id = $line_id
+                  AND station_system_id = $station_system_id
+                  AND slot_id = $slot_id
+                LIMIT 1;
+                """;
+            AddSlotIdentity(read, completedSlot.Address);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {completedSlot.Address} disappeared during run synchronization.");
+            }
+
+            var slot = DeserializeSlot(reader.GetString(0));
+            var revision = reader.GetInt64(1);
+            await reader.DisposeAsync().ConfigureAwait(false);
+            if (slot.Material != expectedMaterial)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} is bound to {slot.Material}, not {expectedMaterial}.");
+            }
+
+            if (slot.Status == SlotOccupancyStatus.Occupied)
+            {
+                continue;
+            }
+
+            if (slot.Status != SlotOccupancyStatus.Running)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} must be Running or idempotently Occupied, not {slot.Status}.");
+            }
+
+            var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
+            if (!completed.Succeeded)
+            {
+                throw new InvalidDataException(completed.Message);
+            }
+
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE slot_occupancies
+                SET document_json = $document_json,
+                    revision = $next_revision,
+                    status = $status,
+                    updated_at_utc = $updated_at_utc
+                WHERE line_id = $line_id
+                  AND station_system_id = $station_system_id
+                  AND slot_id = $slot_id
+                  AND revision = $expected_revision;
+                """;
+            update.Parameters.AddWithValue(
+                "$document_json",
+                JsonSerializer.Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(slot), JsonOptions));
+            update.Parameters.AddWithValue("$next_revision", checked(revision + 1));
+            update.Parameters.AddWithValue("$status", slot.Status.ToString());
+            update.Parameters.AddWithValue("$updated_at_utc", FormatTimestamp(slot.LastTransitionAtUtc));
+            AddSlotIdentity(update, slot.Address);
+            update.Parameters.AddWithValue("$expected_revision", revision);
+            if (await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} changed during atomic run synchronization.");
+            }
+
+            await InsertTimelineAsync(
+                    connection,
+                    transaction,
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        slot.Address,
+                        expectedMaterial,
+                        run.Id,
+                        SlotOccupancyStatus.Running,
+                        SlotOccupancyStatus.Occupied,
+                        run.ActorId,
+                        completedSlot.CompletedAtUtc),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask<bool> HasSlotCompletionEvidenceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRunId runId,
+        CompletedSlotOperation completedSlot,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT document_json
+            FROM production_material_timeline
+            WHERE kind = $kind
+              AND production_run_id = $production_run_id
+              AND occurred_at_utc = $occurred_at_utc;
+            """;
+        command.Parameters.AddWithValue(
+            "$kind",
+            ProductionMaterialEvidenceKind.SlotOccupancyTransition.ToString());
+        command.Parameters.AddWithValue("$production_run_id", runId.Value.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$occurred_at_utc",
+            FormatTimestamp(completedSlot.CompletedAtUtc));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var snapshot = JsonSerializer.Deserialize<PersistedProductionMaterialTimelineEntry>(
+                reader.GetString(0),
+                JsonOptions)
+                ?? throw new InvalidDataException(
+                    "Persisted Slot completion evidence is empty.");
+            if (ProductionRunSlotLifecycle.IsCompletionEvidence(
+                    ProductionMaterialSnapshotMapper.ToAggregate(snapshot),
+                    runId,
+                    completedSlot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static async ValueTask InsertTimelineAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionMaterialTimelineEntry evidence,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO production_material_timeline (
+                evidence_id, kind, production_run_id, production_unit_id, carrier_id,
+                genealogy_parent_unit_id, genealogy_child_unit_id, document_json, occurred_at_utc)
+            VALUES (
+                $evidence_id, $kind, $production_run_id, $production_unit_id, $carrier_id,
+                $genealogy_parent_unit_id, $genealogy_child_unit_id, $document_json, $occurred_at_utc);
+            """;
+        command.Parameters.AddWithValue("$evidence_id", evidence.EvidenceId.ToString("D"));
+        command.Parameters.AddWithValue("$kind", evidence.Kind.ToString());
+        command.Parameters.AddWithValue(
+            "$production_run_id",
+            (object?)evidence.ProductionRunId?.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$production_unit_id",
+            (object?)evidence.ProductionUnitId?.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue("$carrier_id", (object?)evidence.CarrierId?.Value ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$genealogy_parent_unit_id",
+            (object?)evidence.Genealogy?.ParentUnitId.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$genealogy_child_unit_id",
+            (object?)evidence.Genealogy?.ChildUnitId.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$document_json",
+            JsonSerializer.Serialize(
+                ProductionMaterialSnapshotMapper.ToSnapshot(evidence),
+                JsonOptions));
+        command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(evidence.OccurredAtUtc));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record ProductionUnitSynchronization(
+        ProductionUnit Unit,
+        ProductDisposition PreviousDisposition);
+
+    private static async ValueTask<bool> UpdateProductionUnitAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionUnit unit,
+        long expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE production_units
+            SET document_json = $document_json,
+                revision = $next_revision,
+                disposition = $disposition,
+                updated_at_utc = $updated_at_utc
+            WHERE production_unit_id = $production_unit_id
+              AND revision = $expected_revision;
+            """;
+        update.Parameters.AddWithValue(
+            "$document_json",
+            JsonSerializer.Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(unit), JsonOptions));
+        update.Parameters.AddWithValue("$next_revision", checked(expectedRevision + 1));
+        update.Parameters.AddWithValue("$disposition", unit.Disposition.ToString());
+        update.Parameters.AddWithValue("$updated_at_utc", FormatTimestamp(unit.LastTransitionAtUtc));
+        update.Parameters.AddWithValue("$production_unit_id", unit.Id.Value.ToString("D"));
+        update.Parameters.AddWithValue("$expected_revision", expectedRevision);
+        return await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
+
+    private static ProductionUnit DeserializeProductionUnit(string documentJson)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedProductionUnit>(documentJson, JsonOptions)
+            ?? throw new InvalidDataException("Persisted Production Unit document is empty.");
+        return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
+    }
+
+    private static SlotOccupancy DeserializeSlot(string documentJson)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedSlotOccupancy>(documentJson, JsonOptions)
+            ?? throw new InvalidDataException("Persisted Slot occupancy document is empty.");
+        return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
+    }
+
     private static async ValueTask InsertTerminalOutboxAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -529,6 +965,9 @@ public sealed class SqliteProductionRunRepository :
         string documentJson)
     {
         command.Parameters.AddWithValue("$run_id", run.Id.Value.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$production_unit_id",
+            run.ProductionUnitId.Value.ToString("D"));
         command.Parameters.AddWithValue("$document_json", documentJson);
         command.Parameters.AddWithValue("$execution_status", run.ExecutionStatus.ToString());
         command.Parameters.AddWithValue("$project_snapshot_id", run.ProjectSnapshotId);
@@ -542,6 +981,13 @@ public sealed class SqliteProductionRunRepository :
             "$last_transition_at_utc",
             FormatTimestamp(run.LastTransitionAtUtc));
         command.Parameters.AddWithValue("$updated_at_utc", FormatTimestamp(DateTimeOffset.UtcNow));
+    }
+
+    private static void AddSlotIdentity(SqliteCommand command, SlotAddress address)
+    {
+        command.Parameters.AddWithValue("$line_id", address.LineId);
+        command.Parameters.AddWithValue("$station_system_id", address.StationSystemId);
+        command.Parameters.AddWithValue("$slot_id", address.SlotId);
     }
 
     private static string FormatTimestamp(DateTimeOffset value)

@@ -72,6 +72,7 @@ public sealed class ConfigurationSnapshot : Entity<ConfigurationSnapshotId>
             stationProfile.DeviceBindings
                 .Select(binding => new DeviceBindingSnapshot(
                     binding.Id,
+                    binding.OwnerSystemId,
                     binding.CapabilityId,
                     binding.DeviceKey))
                 .ToArray(),

@@ -17,6 +17,9 @@ public static class OpenLineOpsApiRoutes
     public const string MaterialGenealogy = "api/material-genealogy";
     public const string OperationsActiveRuns = "api/operations/active-runs";
     public const string OperationsLineState = "api/operations/lines/{lineId}/state";
+    public const string OperationsStationEmergencyStop =
+        "api/operations/stations/{stationSystemId}/emergency-stop";
+    public const string OperationsSafetyEvents = "api/operations/safety-events";
     public const string RuntimeSessions = "api/runtime/sessions";
     public const string ProjectApplicationTopologies =
         AutomationProjects + "/{projectId}/applications/{applicationId}/topologies";
@@ -30,5 +33,9 @@ public static class OpenLineOpsApiRoutes
         AutomationProjects + "/{projectId}/applications/{applicationId}/engineering";
     public const string ProjectApplicationProductionLines =
         AutomationProjects + "/{projectId}/applications/{applicationId}/production-lines";
+    public const string ProjectApplicationExternalPrograms =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/external-programs";
+    public const string ProjectSnapshotProductionRunContext =
+        AutomationProjects + "/{projectId}/snapshots/{snapshotId}/production-run-context";
     public const string Traceability = "api/traceability";
 }

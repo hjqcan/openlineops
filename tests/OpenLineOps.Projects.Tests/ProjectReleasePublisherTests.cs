@@ -1,9 +1,11 @@
+using System.Security.Cryptography;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Projects.Infrastructure.Releases;
 
 namespace OpenLineOps.Projects.Tests;
 
@@ -35,6 +37,7 @@ public sealed class ProjectReleasePublisherTests
             scopeResolver,
             sourceResolver,
             artifactStore,
+            new RecordingStationPackagePublisher(calls),
             new FixedClock(PublishedAtUtc));
 
         var result = await publisher.PublishAsync(
@@ -51,8 +54,10 @@ public sealed class ProjectReleasePublisherTests
                 "workspace.save",
                 "scope.resolve",
                 "source.resolve",
+                "station-packages.validate",
                 "artifact.publish",
                 "source.resolve",
+                "station-packages.publish",
                 "project.publish",
                 "workspace.save"
             ],
@@ -92,6 +97,7 @@ public sealed class ProjectReleasePublisherTests
                 Result.Failure<ProjectReleaseSourceMetadata>(expectedError),
                 calls),
             new RecordingArtifactStore(CreateArtifact(projectPath), calls),
+            new RecordingStationPackagePublisher(calls),
             new FixedClock(PublishedAtUtc));
 
         var result = await publisher.PublishAsync(
@@ -127,6 +133,7 @@ public sealed class ProjectReleasePublisherTests
                 calls),
             new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
             new RecordingArtifactStore(artifact, calls),
+            new RecordingStationPackagePublisher(calls),
             new FixedClock(PublishedAtUtc));
 
         var result = await publisher.PublishAsync(
@@ -139,7 +146,7 @@ public sealed class ProjectReleasePublisherTests
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ReleaseArtifactPathOutsideProject", result.Error.Code);
         Assert.Equal(
-            ["project.get", "workspace.save", "scope.resolve", "source.resolve", "artifact.publish", "source.resolve"],
+            ["project.get", "workspace.save", "scope.resolve", "source.resolve", "station-packages.validate", "artifact.publish", "source.resolve", "artifact.rollback"],
             calls);
         Assert.Null(projectService.PublishRequest);
     }
@@ -163,6 +170,7 @@ public sealed class ProjectReleasePublisherTests
                 calls),
             sourceResolver,
             new RecordingArtifactStore(CreateArtifact(projectPath), calls),
+            new RecordingStationPackagePublisher(calls),
             new FixedClock(PublishedAtUtc));
 
         var result = await publisher.PublishAsync(
@@ -175,7 +183,7 @@ public sealed class ProjectReleasePublisherTests
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ReleaseArtifactSourceMismatch", result.Error.Code);
         Assert.Equal(
-            ["project.get", "workspace.save", "scope.resolve", "source.resolve", "artifact.publish", "source.resolve"],
+            ["project.get", "workspace.save", "scope.resolve", "source.resolve", "station-packages.validate", "artifact.publish", "source.resolve", "artifact.rollback"],
             calls);
         Assert.Null(projectService.PublishRequest);
     }
@@ -203,6 +211,7 @@ public sealed class ProjectReleasePublisherTests
                 calls),
             new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
             new RecordingArtifactStore(CreateArtifact(projectPath), calls),
+            new RecordingStationPackagePublisher(calls),
             new FixedClock(PublishedAtUtc));
 
         var result = await publisher.PublishAsync(
@@ -220,15 +229,219 @@ public sealed class ProjectReleasePublisherTests
                 "workspace.save",
                 "scope.resolve",
                 "source.resolve",
+                "station-packages.validate",
                 "artifact.publish",
                 "source.resolve",
+                "station-packages.publish",
                 "project.publish",
                 "workspace.save",
                 "workspace.open"
+                ,"station-packages.rollback"
+                ,"artifact.rollback"
             ],
             calls);
         Assert.Null(projectService.CurrentProject.ActiveSnapshotId);
         Assert.Empty(projectService.CurrentProject.Snapshots);
+    }
+
+    [Fact]
+    public async Task InvalidSigningConfigurationLeavesNoReleaseAndSameSnapshotSucceedsAfterRepair()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-release-preflight-{Guid.NewGuid():N}");
+        var projectPath = Path.Combine(root, "project");
+        var applicationRoot = Path.Combine(projectPath, "applications", "application.main");
+        var distribution = Path.Combine(root, "distribution");
+        var catalog = Path.Combine(root, "catalog");
+        var privateKeyPath = Path.Combine(root, "keys", "release-private.pem");
+        Directory.CreateDirectory(applicationRoot);
+        File.WriteAllText(
+            Path.Combine(applicationRoot, "application.main.oloapp"),
+            "{\"applicationId\":\"application.main\"}");
+        WriteFrozenApplicationResources(applicationRoot);
+        var calls = new List<string>();
+        var project = CreateProject(projectPath);
+        var metadata = CreateMetadata();
+        metadata = metadata with
+        {
+            TargetReferences =
+            [
+                .. metadata.TargetReferences,
+                new ProjectReleaseTargetReference("System", "station.main"),
+                new ProjectReleaseTargetReference("System", "station.eol")
+            ]
+        };
+        var stationPackages = new FileSystemProjectReleaseStationPackagePublisher(
+            new StationPackagePublicationOptions(
+                distribution,
+                catalog,
+                "test-release-signing",
+                privateKeyPath));
+        var publisher = new ProjectReleasePublisher(
+            new RecordingProjectService(project, calls),
+            new RecordingWorkspaceService(project, calls),
+            new RecordingScopeResolver(
+                new ProjectApplicationWorkspaceScope(
+                    "project.main",
+                    "application.main",
+                    projectPath,
+                    ApplicationProjectPath),
+                calls),
+            new RecordingSourceResolver(Result.Success(metadata), calls),
+            new FileSystemProjectReleaseArtifactStore(),
+            stationPackages,
+            new FixedClock(PublishedAtUtc));
+        var request = new PublishProjectReleaseRequest(
+            "snapshot.main",
+            "application.main",
+            "line.main");
+        try
+        {
+            var failed = await publisher.PublishAsync("project.main", request);
+
+            Assert.True(failed.IsFailure);
+            Assert.Equal(
+                "Conflict.Projects.StationPackageConfigurationInvalid",
+                failed.Error.Code);
+            Assert.False(Directory.Exists(Path.Combine(projectPath, "releases")));
+            Assert.False(Directory.Exists(distribution));
+            Assert.False(Directory.Exists(catalog));
+
+            Directory.CreateDirectory(Path.GetDirectoryName(privateKeyPath)!);
+            using (var rsa = RSA.Create(3072))
+            {
+                await File.WriteAllTextAsync(privateKeyPath, rsa.ExportRSAPrivateKeyPem());
+            }
+
+            var repaired = await publisher.PublishAsync("project.main", request);
+
+            Assert.True(repaired.IsSuccess, repaired.IsFailure ? repaired.Error.Message : string.Empty);
+            Assert.True(Directory.Exists(Path.Combine(projectPath, "releases")));
+            Assert.Single(Directory.EnumerateFiles(distribution, "*.olopkg"));
+            Assert.Single(Directory.EnumerateFiles(catalog, "*.json"));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SigningPrivateKeyInsideAutomationProjectIsRejectedBeforePublication()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-release-key-boundary-{Guid.NewGuid():N}");
+        var projectPath = Path.Combine(root, "project");
+        var applicationRoot = Path.Combine(projectPath, "applications", "application.main");
+        var keyPath = Path.Combine(projectPath, "secrets", "release-private.pem");
+        Directory.CreateDirectory(applicationRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
+        using (var rsa = RSA.Create(3072))
+        {
+            await File.WriteAllTextAsync(keyPath, rsa.ExportRSAPrivateKeyPem());
+        }
+
+        var distribution = Path.Combine(root, "distribution");
+        var catalog = Path.Combine(root, "catalog");
+        var publisher = new FileSystemProjectReleaseStationPackagePublisher(
+            new StationPackagePublicationOptions(
+                distribution,
+                catalog,
+                "test-release-signing",
+                keyPath));
+        try
+        {
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await publisher.ValidateConfigurationAsync(new(
+                    new ProjectApplicationWorkspaceScope(
+                        "project.main",
+                        "application.main",
+                        projectPath,
+                        ApplicationProjectPath),
+                    "snapshot.main")));
+
+            Assert.Contains("outside", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(Path.Combine(projectPath, "releases")));
+            Assert.False(Directory.Exists(distribution));
+            Assert.False(Directory.Exists(catalog));
+            Assert.Empty(Directory.EnumerateFiles(root, "*.olopkg", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StationPackageFailureRollsBackFrozenReleaseBeforeSnapshotMutation()
+    {
+        var calls = new List<string>();
+        var projectPath = Path.Combine(Path.GetTempPath(), $"openlineops-package-rollback-{Guid.NewGuid():N}");
+        var project = CreateProject(projectPath);
+        var projectService = new RecordingProjectService(project, calls);
+        var publisher = new ProjectReleasePublisher(
+            projectService,
+            new RecordingWorkspaceService(project, calls),
+            new RecordingScopeResolver(
+                new ProjectApplicationWorkspaceScope(
+                    "project.main",
+                    "application.main",
+                    projectPath,
+                    ApplicationProjectPath),
+                calls),
+            new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
+            new RecordingArtifactStore(CreateArtifact(projectPath), calls),
+            new FailingStationPackagePublisher(calls),
+            new FixedClock(PublishedAtUtc));
+
+        var result = await publisher.PublishAsync(
+            "project.main",
+            new PublishProjectReleaseRequest("snapshot.main", "application.main", "line.main"));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Conflict.Projects.StationPackagePublicationFailed", result.Error.Code);
+        Assert.Contains("artifact.rollback", calls);
+        Assert.DoesNotContain("project.publish", calls);
+        Assert.Null(projectService.PublishRequest);
+    }
+
+    [Fact]
+    public async Task CancellationBeforeRootManifestCommitRestoresAggregateAndAllArtifacts()
+    {
+        var calls = new List<string>();
+        var projectPath = Path.Combine(Path.GetTempPath(), $"openlineops-cancel-rollback-{Guid.NewGuid():N}");
+        var previousProject = CreateProject(projectPath);
+        var projectService = new RecordingProjectService(previousProject, calls);
+        var publisher = new ProjectReleasePublisher(
+            projectService,
+            new CancelingManifestWorkspaceService(previousProject, projectService, calls),
+            new RecordingScopeResolver(
+                new ProjectApplicationWorkspaceScope(
+                    "project.main",
+                    "application.main",
+                    projectPath,
+                    ApplicationProjectPath),
+                calls),
+            new RecordingSourceResolver(Result.Success(CreateMetadata()), calls),
+            new RecordingArtifactStore(CreateArtifact(projectPath), calls),
+            new RecordingStationPackagePublisher(calls),
+            new FixedClock(PublishedAtUtc));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await publisher.PublishAsync(
+                "project.main",
+                new PublishProjectReleaseRequest("snapshot.main", "application.main", "line.main")));
+
+        Assert.Null(projectService.CurrentProject.ActiveSnapshotId);
+        Assert.Empty(projectService.CurrentProject.Snapshots);
+        Assert.Contains("workspace.open", calls);
+        Assert.Contains("station-packages.rollback", calls);
+        Assert.Contains("artifact.rollback", calls);
     }
 
     private static AutomationProjectDetails CreateProject(string projectPath)
@@ -251,18 +464,54 @@ public sealed class ProjectReleasePublisherTests
             Snapshots: []);
     }
 
+    private static void WriteFrozenApplicationResources(string applicationRoot)
+    {
+        var topology = Path.Combine(applicationRoot, "topology");
+        var layouts = Path.Combine(applicationRoot, "layouts");
+        var line = Path.Combine(applicationRoot, "production", "lines", "line.main");
+        var projects = Path.Combine(applicationRoot, "configuration", "projects");
+        var profiles = Path.Combine(applicationRoot, "configuration", "station-profiles");
+        Directory.CreateDirectory(topology);
+        Directory.CreateDirectory(layouts);
+        Directory.CreateDirectory(line);
+        Directory.CreateDirectory(projects);
+        Directory.CreateDirectory(profiles);
+        File.WriteAllText(
+            Path.Combine(topology, "topology.json"),
+            "{\"schemaVersion\":\"openlineops.automation-topology\",\"resourceKind\":\"OpenLineOps.AutomationTopology\",\"applicationId\":\"application.main\",\"topologyId\":\"topology.main\"}");
+        foreach (var layoutId in new[] { "layout.main", "layout.overview" })
+        {
+            File.WriteAllText(
+                Path.Combine(layouts, $"{layoutId}.json"),
+                $"{{\"schemaVersion\":\"openlineops.site-layout\",\"resourceKind\":\"OpenLineOps.SiteLayout\",\"applicationId\":\"application.main\",\"layoutId\":\"{layoutId}\"}}");
+        }
+
+        File.WriteAllText(
+            Path.Combine(line, "line.json"),
+            "{\"schemaVersion\":\"openlineops.production-line\",\"resourceKind\":\"OpenLineOps.ProductionLine\",\"applicationId\":\"application.main\",\"lineDefinitionId\":\"line.main\"}");
+        File.WriteAllText(
+            Path.Combine(projects, "project-main.json"),
+            "{\"schema\":\"openlineops.engineering-configuration-resource\",\"schemaVersion\":1,\"applicationId\":\"application.main\",\"resourceKind\":\"project\",\"resourceId\":\"engineering.main\",\"snapshot\":{\"projectId\":\"engineering.main\",\"workspaceId\":\"workspace.main\",\"displayName\":\"Main\",\"createdAtUtc\":\"2026-07-10T08:00:00+00:00\",\"activeSnapshotId\":\"configuration.main.v1\",\"snapshots\":[{\"snapshotId\":\"configuration.main.v1\",\"projectId\":\"engineering.main\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1.0.0\",\"recipeId\":\"recipe.main\",\"recipeVersionId\":\"recipe.main@1\",\"stationProfileId\":\"station.profile.main\",\"status\":\"Published\",\"publishedAtUtc\":\"2026-07-10T08:00:00+00:00\",\"deviceBindings\":[]}]}}" );
+        File.WriteAllText(
+            Path.Combine(profiles, "station-profile-main.json"),
+            "{\"schema\":\"openlineops.engineering-configuration-resource\",\"schemaVersion\":1,\"applicationId\":\"application.main\",\"resourceKind\":\"station-profile\",\"resourceId\":\"station.profile.main\",\"snapshot\":{\"stationProfileId\":\"station.profile.main\",\"stationSystemId\":\"station.eol\",\"displayName\":\"EOL\",\"deviceBindings\":[]}}" );
+    }
+
     private static ProjectReleaseSourceMetadata CreateMetadata()
     {
         return new ProjectReleaseSourceMetadata(
             "topology.main",
             ["layout.main", "layout.overview"],
             CreateProductionMetadata(),
+            [],
             [
                 new ProjectReleaseCapabilityBinding(
                     "motion.axis",
                     "binding.motion",
                     "Simulator",
-                    "simulator.motion")
+                    "simulator.motion",
+                    "station.main",
+                    "station.main")
             ],
             [new ProjectReleaseTargetReference("Slot", "slot.main")],
             ["openlineops_move_axis@1"],
@@ -301,10 +550,17 @@ public sealed class ProjectReleasePublisherTests
                     "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                     "{}",
-                    ["openlineops_move_axis@1"])
+                    ["openlineops_move_axis@1"],
+                    [new ProjectReleaseOperationResource(
+                        "resource.station",
+                        "Station",
+                        "station.eol",
+                        "Fixed",
+                        [])],
+                    [])
             ],
             Transitions: [],
-            ExternalTestProgramAdapters: []);
+            LineControllerAuthorizations: []);
     }
 
     private static ProjectReleaseArtifactDescriptor CreateArtifact(string projectPath)
@@ -420,6 +676,82 @@ public sealed class ProjectReleasePublisherTests
         {
             throw new NotSupportedException();
         }
+
+        public ValueTask RollbackPublicationAsync(
+            ProjectApplicationWorkspaceScope scope,
+            string snapshotId,
+            string expectedContentSha256,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("artifact.rollback");
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingStationPackagePublisher(List<string> calls)
+        : IProjectReleaseStationPackagePublisher
+    {
+        public ValueTask ValidateConfigurationAsync(
+            ProjectReleaseStationPackagePreflightRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("station-packages.validate");
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<ProjectReleaseStationPackageSet> PublishAsync(
+            ProjectReleaseStationPackageRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("station-packages.publish");
+            var packages = request.Metadata.ProductionLine.Operations
+                .Select(operation => operation.StationSystemId)
+                .Distinct(StringComparer.Ordinal)
+                .Select(stationSystemId => new ProjectReleaseStationPackage(
+                    stationSystemId,
+                    new string('b', 64),
+                    Path.Combine(request.Release.ReleaseRootPath, $"{stationSystemId}.olopkg"),
+                    Path.Combine(request.Release.ReleaseRootPath, $"{stationSystemId}.json")))
+                .ToArray();
+            return ValueTask.FromResult(new ProjectReleaseStationPackageSet(
+                request.Release.ProjectId,
+                request.Release.ApplicationId,
+                request.Release.SnapshotId,
+                packages));
+        }
+
+        public ValueTask RollbackAsync(
+            ProjectReleaseStationPackageSet packages,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("station-packages.rollback");
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingStationPackagePublisher(List<string> calls)
+        : IProjectReleaseStationPackagePublisher
+    {
+        public ValueTask ValidateConfigurationAsync(
+            ProjectReleaseStationPackagePreflightRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("station-packages.validate");
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<ProjectReleaseStationPackageSet> PublishAsync(
+            ProjectReleaseStationPackageRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("station-packages.publish");
+            return ValueTask.FromException<ProjectReleaseStationPackageSet>(
+                new IOException("Distribution write failed."));
+        }
+
+        public ValueTask RollbackAsync(
+            ProjectReleaseStationPackageSet packages,
+            CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingProjectService(
@@ -526,6 +858,45 @@ public sealed class ProjectReleasePublisherTests
             OpenAutomationProjectWorkspaceRequest request,
             CancellationToken cancellationToken = default)
         {
+            calls.Add("workspace.open");
+            projectService.Restore(previousProject);
+            return Task.FromResult(Result.Success(CreateWorkspaceDetails(previousProject)));
+        }
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> CreateAsync(
+            CreateAutomationProjectWorkspaceRequest request,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> ImportApplicationAsync(
+            string projectId,
+            ImportAutomationProjectApplicationRequest request,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class CancelingManifestWorkspaceService(
+        AutomationProjectDetails previousProject,
+        RecordingProjectService projectService,
+        List<string> calls) : IAutomationProjectWorkspaceService
+    {
+        private int _saveCount;
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> SaveManifestAsync(
+            string projectId,
+            CancellationToken cancellationToken = default)
+        {
+            calls.Add("workspace.save");
+            _saveCount += 1;
+            return _saveCount == 1
+                ? Task.FromResult(Result.Success(CreateWorkspaceDetails(previousProject)))
+                : Task.FromException<Result<AutomationProjectWorkspaceDetails>>(
+                    new OperationCanceledException("Canceled before root manifest commit."));
+        }
+
+        public Task<Result<AutomationProjectWorkspaceDetails>> OpenAsync(
+            OpenAutomationProjectWorkspaceRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(CancellationToken.None, cancellationToken);
             calls.Add("workspace.open");
             projectService.Restore(previousProject);
             return Task.FromResult(Result.Success(CreateWorkspaceDetails(previousProject)));

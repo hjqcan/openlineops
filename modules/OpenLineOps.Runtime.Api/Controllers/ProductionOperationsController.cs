@@ -1,9 +1,10 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
-using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Api.Models;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Runtime.Api.Controllers;
 
@@ -11,7 +12,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 public sealed class ProductionOperationsController(
     IProductionRunRepository repository,
-    IClock clock) : ControllerBase
+    IProductionLineRuntimeStateReader lineStateReader) : ControllerBase
 {
     [HttpGet(OpenLineOpsApiRoutes.OperationsActiveRuns)]
     [ProducesResponseType<ActiveProductionRunsResponse>(StatusCodes.Status200OK)]
@@ -28,7 +29,7 @@ public sealed class ProductionOperationsController(
                 cancellationToken)
             .ConfigureAwait(false);
         return Ok(new ActiveProductionRunsResponse(active
-            .Select(entry => ProductionRunResponseMapper.ToResponse(entry.Run.ToSnapshot()))
+            .Select(entry => ProductionRunReadModelMapper.ToReadModel(entry.Run.ToSnapshot()))
             .ToArray()));
     }
 
@@ -45,17 +46,8 @@ public sealed class ProductionOperationsController(
             return BadRequest();
         }
 
-        var active = await repository.ListActiveAsync(
-                productionLineDefinitionId: lineId,
-                cancellationToken: cancellationToken)
+        var state = await lineStateReader.ReadAsync(lineId, cancellationToken)
             .ConfigureAwait(false);
-        var runs = active
-            .Select(entry => ProductionRunResponseMapper.ToResponse(entry.Run.ToSnapshot()))
-            .ToArray();
-        return Ok(new ProductionLineRuntimeStateResponse(
-            lineId,
-            clock.UtcNow,
-            runs.Length,
-            runs));
+        return Ok(ProductionLineRuntimeStateResponseMapper.ToResponse(state));
     }
 }

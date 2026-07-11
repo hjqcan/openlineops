@@ -40,7 +40,9 @@ public sealed record SnapshotCapabilityBindingDetails(
     string CapabilityId,
     string BindingId,
     string ProviderKind,
-    string ProviderKey);
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId);
 
 public sealed record ProjectTargetReferenceDetails(
     string Kind,

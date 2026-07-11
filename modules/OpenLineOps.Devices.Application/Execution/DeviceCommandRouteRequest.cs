@@ -9,6 +9,7 @@ public sealed record DeviceCommandRouteRequest
         string productionRunId,
         string productionLineDefinitionId,
         string operationId,
+        string operationRunId,
         int operationAttempt,
         string productModelId,
         string productionUnitIdentityInputKey,
@@ -20,6 +21,7 @@ public sealed record DeviceCommandRouteRequest
         string runtimeStepId,
         string runtimeCommandId,
         string runtimeNodeId,
+        string actionId,
         string stationSystemId,
         string configurationSnapshotId,
         DeviceCapabilityId capabilityId,
@@ -30,7 +32,8 @@ public sealed record DeviceCommandRouteRequest
         string targetKind,
         string targetId,
         string? inputPayload,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        IEnumerable<DeviceCommandResourceFenceEvidence> resourceLeaseFences)
     {
         RuntimeSessionId = NotBlank(runtimeSessionId, nameof(runtimeSessionId));
         ProductionRunId = CanonicalGuid(productionRunId, nameof(productionRunId));
@@ -38,6 +41,7 @@ public sealed record DeviceCommandRouteRequest
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
         OperationId = NotBlank(operationId, nameof(operationId));
+        OperationRunId = NotBlank(operationRunId, nameof(operationRunId));
         if (operationAttempt <= 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -46,6 +50,16 @@ public sealed record DeviceCommandRouteRequest
         }
 
         OperationAttempt = operationAttempt;
+        if (!string.Equals(
+                OperationRunId,
+                $"{OperationId}@{OperationAttempt:D4}",
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Operation Run id must match the Operation identity and attempt.",
+                nameof(operationRunId));
+        }
+
         ProductModelId = NotBlank(productModelId, nameof(productModelId));
         ProductionUnitIdentityInputKey = NotBlank(
             productionUnitIdentityInputKey,
@@ -60,6 +74,7 @@ public sealed record DeviceCommandRouteRequest
         RuntimeStepId = NotBlank(runtimeStepId, nameof(runtimeStepId));
         RuntimeCommandId = NotBlank(runtimeCommandId, nameof(runtimeCommandId));
         RuntimeNodeId = NotBlank(runtimeNodeId, nameof(runtimeNodeId));
+        ActionId = NotBlank(actionId, nameof(actionId));
         StationSystemId = NotBlank(stationSystemId, nameof(stationSystemId));
         ConfigurationSnapshotId = NotBlank(configurationSnapshotId, nameof(configurationSnapshotId));
         CapabilityId = capabilityId ?? throw new ArgumentNullException(nameof(capabilityId));
@@ -79,6 +94,28 @@ public sealed record DeviceCommandRouteRequest
         }
 
         Timeout = timeout;
+        ArgumentNullException.ThrowIfNull(resourceLeaseFences);
+        var fences = resourceLeaseFences.ToArray();
+        if (fences.Length == 0
+            || fences.Any(static fence => fence is null)
+            || fences.Select(static fence => (fence.ResourceKind, fence.ResourceId))
+                .Distinct()
+                .Count() != fences.Length
+            || !fences.Any(fence => string.Equals(
+                    fence.ResourceKind,
+                    "Station",
+                    StringComparison.Ordinal)
+                && string.Equals(fence.ResourceId, StationSystemId, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "Device command requires unique resource lease fences including its Station.",
+                nameof(resourceLeaseFences));
+        }
+
+        ResourceLeaseFences = fences
+            .OrderBy(static fence => fence.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static fence => fence.ResourceId, StringComparer.Ordinal)
+            .ToArray();
     }
 
     public string RuntimeSessionId { get; }
@@ -88,6 +125,8 @@ public sealed record DeviceCommandRouteRequest
     public string ProductionLineDefinitionId { get; }
 
     public string OperationId { get; }
+
+    public string OperationRunId { get; }
 
     public int OperationAttempt { get; }
 
@@ -111,6 +150,8 @@ public sealed record DeviceCommandRouteRequest
 
     public string RuntimeNodeId { get; }
 
+    public string ActionId { get; }
+
     public string StationSystemId { get; }
 
     public string ConfigurationSnapshotId { get; }
@@ -132,6 +173,8 @@ public sealed record DeviceCommandRouteRequest
     public string? InputPayload { get; }
 
     public TimeSpan Timeout { get; }
+
+    public IReadOnlyList<DeviceCommandResourceFenceEvidence> ResourceLeaseFences { get; }
 
     private static string NotBlank(string value, string parameterName)
     {
@@ -158,4 +201,46 @@ public sealed record DeviceCommandRouteRequest
                 $"{parameterName} must be a non-empty canonical GUID.",
                 parameterName);
     }
+}
+
+public sealed record DeviceCommandResourceFenceEvidence
+{
+    public DeviceCommandResourceFenceEvidence(
+        string resourceKind,
+        string resourceId,
+        long fencingToken,
+        DateTimeOffset expiresAtUtc)
+    {
+        ResourceKind = Required(resourceKind, nameof(resourceKind));
+        if (ResourceKind is not ("Station" or "Fixture" or "Device" or "SlotGroup" or "Slot"))
+        {
+            throw new ArgumentException("Resource kind is not a canonical Runtime resource token.", nameof(resourceKind));
+        }
+
+        ResourceId = Required(resourceId, nameof(resourceId));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fencingToken);
+        if (expiresAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Resource fence expiry must use UTC offset zero.", nameof(expiresAtUtc));
+        }
+
+        FencingToken = fencingToken;
+        ExpiresAtUtc = expiresAtUtc;
+    }
+
+    public string ResourceKind { get; }
+
+    public string ResourceId { get; }
+
+    public long FencingToken { get; }
+
+    public DateTimeOffset ExpiresAtUtc { get; }
+
+    private static string Required(string value, string parameterName) =>
+        string.IsNullOrWhiteSpace(value)
+        || !string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            ? throw new ArgumentException(
+                $"{parameterName} must be non-empty canonical text.",
+                parameterName)
+            : value;
 }

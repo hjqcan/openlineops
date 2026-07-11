@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
@@ -58,8 +59,6 @@ public sealed class ProductionMaterialRepositoryTests
         var slot = SlotOccupancy.Register(address, BaseTimeUtc);
         var material = MaterialReference.ForProductionUnit(unit.Id);
         var station = MaterialLocation.AtStation(address.LineId, address.StationSystemId);
-        Assert.True(unit.Arrive(station, BaseTimeUtc.AddSeconds(1)).Succeeded);
-        Assert.True(slot.Reserve(material, BaseTimeUtc.AddSeconds(2)).Succeeded);
         var genealogy = new MaterialGenealogyLink(
             MaterialGenealogyLinkId.New(),
             ProductionUnitId.New(),
@@ -75,6 +74,36 @@ public sealed class ProductionMaterialRepositoryTests
             Assert.True(await repository.TryAddAsync(unit));
             Assert.True(await repository.TryAddAsync(carrier));
             Assert.True(await repository.TryAddAsync(slot));
+            var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                await repository.GetProductionUnitAsync(unit.Id));
+            var slotEntry = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
+                await repository.GetSlotAsync(address));
+            Assert.True(unitEntry.Aggregate.Arrive(station, BaseTimeUtc.AddSeconds(1)).Succeeded);
+            Assert.True(slotEntry.Aggregate.Reserve(material, BaseTimeUtc.AddSeconds(2)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                productionUnits:
+                [new ProductionUnitUpdate(unitEntry.Aggregate, unitEntry.Revision)],
+                slots: [new SlotOccupancyUpdate(slotEntry.Aggregate, slotEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        material,
+                        null,
+                        null,
+                        station,
+                        "operator-a",
+                        BaseTimeUtc.AddSeconds(1)),
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        material,
+                        null,
+                        SlotOccupancyStatus.Available,
+                        SlotOccupancyStatus.Reserved,
+                        "operator-a",
+                        BaseTimeUtc.AddSeconds(2))
+                ]));
             Assert.True(await repository.TryAddAsync(genealogy));
         }
 
@@ -85,20 +114,150 @@ public sealed class ProductionMaterialRepositoryTests
             await restarted.GetProductionUnitAsync(unit.Id));
         var restoredCarrier = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
             await restarted.GetCarrierAsync(carrier.Id));
+        var listedCarrier = Assert.Single(
+            await restarted.ListCarriersAsync(),
+            entry => entry.Aggregate.Id == carrier.Id);
         var restoredSlot = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
             await restarted.GetSlotAsync(address));
         var restoredLink = Assert.Single(await restarted.ListGenealogyLinksAsync());
 
         Assert.Equal(25, restoredLot.Aggregate.DeclaredQuantity);
         Assert.Equal(station, restoredUnit.Aggregate.Location);
-        Assert.Equal(ProductionUnitDisposition.InProcess, restoredUnit.Aggregate.Disposition);
+        Assert.Equal(ProductDisposition.InProcess, restoredUnit.Aggregate.Disposition);
         Assert.Equal(24, restoredCarrier.Aggregate.Capacity);
+        Assert.Equal(carrier.Id, listedCarrier.Aggregate.Id);
         Assert.Equal(SlotOccupancyStatus.Reserved, restoredSlot.Aggregate.Status);
         Assert.Equal(material, restoredSlot.Aggregate.Material);
         Assert.Equal(genealogy, restoredLink);
         Assert.All(
             new[] { restoredLot.Revision, restoredUnit.Revision, restoredCarrier.Revision, restoredSlot.Revision },
-            revision => Assert.Equal(0, revision));
+            revision => Assert.True(revision is 0 or 1));
+        Assert.Equal(1, restoredUnit.Revision);
+        Assert.Equal(1, restoredSlot.Revision);
+    }
+
+    [Fact]
+    public async Task SqliteTimelineRebuildsCarrierSlotLocationAndGenealogyEvidenceAfterRestart()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        var parentId = ProductionUnitId.New();
+        var childId = ProductionUnitId.New();
+        var carrierId = new CarrierId("carrier-timeline");
+        var slot = new SlotAddress("line-a", "station-assembly", "slot-timeline");
+        var station = MaterialLocation.AtStation(slot.LineId, slot.StationSystemId);
+        var nextStation = MaterialLocation.AtStation("line-a", "station-next");
+        var child = MaterialReference.ForProductionUnit(childId);
+        var carrier = MaterialReference.ForCarrier(carrierId);
+        var linkId = MaterialGenealogyLinkId.New();
+
+        using (var materials = new SqliteProductionMaterialRepository(database.ConnectionString))
+        using (var runs = new SqliteProductionRunRepository(database.ConnectionString))
+        {
+            var service = new ProductionMaterialService(materials, runs);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                parentId,
+                "board-a",
+                "serial-number",
+                "SN-PARENT",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                childId,
+                "board-a",
+                "serial-number",
+                "SN-CHILD",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterCarrierAsync(new RegisterCarrierCommand(
+                carrierId,
+                "tray-4",
+                4,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterSlotAsync(new RegisterSlotCommand(
+                slot,
+                "engineer-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                child,
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(1)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                carrier,
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(2)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                child,
+                station,
+                MaterialLocation.OnCarrier(carrierId, "position-01"),
+                "operator-a",
+                BaseTimeUtc.AddSeconds(3)))).Succeeded);
+            Assert.True((await service.LinkGenealogyAsync(new LinkMaterialGenealogyCommand(
+                linkId,
+                parentId,
+                childId,
+                "ComponentOf",
+                "operation.assembly",
+                "operator-a",
+                BaseTimeUtc.AddSeconds(4)))).Succeeded);
+            Assert.True((await service.ReserveSlotAsync(new ReserveSlotCommand(
+                slot,
+                carrier,
+                "coordinator",
+                BaseTimeUtc.AddSeconds(5)))).Succeeded);
+            Assert.True((await service.LoadSlotAsync(new LoadSlotCommand(
+                slot,
+                carrier,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(6)))).Succeeded);
+            Assert.True((await service.StartSlotAsync(new StartSlotCommand(
+                slot,
+                carrier,
+                "agent-a",
+                BaseTimeUtc.AddSeconds(7)))).Succeeded);
+            Assert.True((await service.CompleteSlotAsync(new CompleteSlotCommand(
+                slot,
+                carrier,
+                "agent-a",
+                BaseTimeUtc.AddSeconds(8)))).Succeeded);
+            Assert.True((await service.UnloadSlotAsync(new UnloadSlotCommand(
+                slot,
+                carrier,
+                nextStation,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(9)))).Succeeded);
+        }
+
+        using var restarted = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var timeline = await restarted.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+            productionUnitId: childId,
+            carrierId: carrierId));
+        Assert.Equal(5, timeline.Count(entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.LocationTransition));
+        Assert.Equal(5, timeline.Count(entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition));
+        var genealogy = Assert.Single(timeline, entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.Genealogy);
+        Assert.Equal(linkId, genealogy.Genealogy?.Id);
+        Assert.Contains(timeline, entry =>
+            entry.DestinationLocation == MaterialLocation.OnCarrier(carrierId, "position-01"));
+        Assert.Contains(timeline, entry => entry.DestinationLocation == nextStation);
+        Assert.Equal(
+            [
+                SlotOccupancyStatus.Reserved,
+                SlotOccupancyStatus.Occupied,
+                SlotOccupancyStatus.Running,
+                SlotOccupancyStatus.Occupied,
+                SlotOccupancyStatus.Available
+            ],
+            timeline
+                .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition)
+                .Select(entry => entry.CurrentSlotStatus!.Value)
+                .ToArray());
     }
 
     [Fact]
@@ -238,20 +397,53 @@ public sealed class ProductionMaterialRepositoryTests
             await repository.GetSlotAsync(address));
         Assert.True(currentSlot.Aggregate.Block("maintenance", BaseTimeUtc.AddSeconds(1)).Succeeded);
         await repository.CommitAsync(new ProductionMaterialCommit(
-            slots: [new SlotOccupancyUpdate(currentSlot.Aggregate, currentSlot.Revision)]));
+            slots: [new SlotOccupancyUpdate(currentSlot.Aggregate, currentSlot.Revision)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.SlotOccupancy(
+                    Guid.NewGuid(),
+                    address,
+                    null,
+                    null,
+                    SlotOccupancyStatus.Available,
+                    SlotOccupancyStatus.Blocked,
+                    "operator-a",
+                    BaseTimeUtc.AddSeconds(1))
+            ]));
 
         Assert.True(unitEntry.Aggregate.Hold("quality review", BaseTimeUtc.AddSeconds(2)).Succeeded);
         Assert.True(staleSlot.Aggregate.Block("stale maintenance", BaseTimeUtc.AddSeconds(2)).Succeeded);
         await Assert.ThrowsAsync<ProductionMaterialConcurrencyException>(async () =>
             await repository.CommitAsync(new ProductionMaterialCommit(
                 productionUnits: [new ProductionUnitUpdate(unitEntry.Aggregate, unitEntry.Revision)],
-                slots: [new SlotOccupancyUpdate(staleSlot.Aggregate, staleSlot.Revision)])));
+                slots: [new SlotOccupancyUpdate(staleSlot.Aggregate, staleSlot.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Disposition(
+                        Guid.NewGuid(),
+                        unit.Id,
+                        null,
+                        ProductDisposition.InProcess,
+                        ProductDisposition.Held,
+                        "quality review",
+                        "operator-a",
+                        BaseTimeUtc.AddSeconds(2)),
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        null,
+                        null,
+                        SlotOccupancyStatus.Available,
+                        SlotOccupancyStatus.Blocked,
+                        "operator-a",
+                        BaseTimeUtc.AddSeconds(2))
+                ])));
 
         var persistedUnit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
             await repository.GetProductionUnitAsync(unit.Id));
         var persistedSlot = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
             await repository.GetSlotAsync(address));
-        Assert.Equal(ProductionUnitDisposition.InProcess, persistedUnit.Aggregate.Disposition);
+        Assert.Equal(ProductDisposition.InProcess, persistedUnit.Aggregate.Disposition);
         Assert.Equal(0, persistedUnit.Revision);
         Assert.Equal(SlotOccupancyStatus.Blocked, persistedSlot.Aggregate.Status);
         Assert.Equal(1, persistedSlot.Revision);

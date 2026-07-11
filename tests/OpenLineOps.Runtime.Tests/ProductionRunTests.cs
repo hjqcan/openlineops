@@ -1,5 +1,6 @@
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
@@ -149,12 +150,79 @@ public sealed class ProductionRunTests
 
         Assert.True(run.MarkRecoveryRequired("Host terminated.", Now.AddSeconds(2)).Succeeded);
         Assert.Equal(ProductionRunControlState.RecoveryRequired, run.ControlState);
-        Assert.True(run.RetryRecovery("test", "Operator reconciled station.", Now.AddSeconds(3)).Succeeded);
+        var decision = new ProductionRecoveryDecision(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            ProductionRecoveryDecisionKind.Retry,
+            "operator-001",
+            "Station state was inspected before retry.",
+            "inspection:retry-001",
+            Now.AddSeconds(3),
+            operationId: "test");
+        Assert.True(run.RetryRecovery(decision).Succeeded);
 
         Assert.Equal(ProductionRunControlState.Active, run.ControlState);
         Assert.Equal(ExecutionStatus.Canceled, run.Operations[0].ExecutionStatus);
         Assert.Equal("test@0002", run.Operations[1].OperationRunId);
         Assert.Equal(ExecutionStatus.Pending, run.Operations[1].ExecutionStatus);
+        Assert.Equal(decision, Assert.Single(run.RecoveryDecisions));
+    }
+
+    [Fact]
+    public void ReconcileCompletesInterruptedOperationFromObservedEvidenceWithoutReplay()
+    {
+        var run = CreateRun([Operation("test")], []);
+        StartOperation(run, "test@0001", Now.AddSeconds(1));
+        Assert.True(run.MarkRecoveryRequired("Agent disconnected after hardware actuation.", Now.AddSeconds(2)).Succeeded);
+        var decision = new ProductionRecoveryDecision(
+            Guid.Parse("22222222-2222-2222-2222-222222222222"),
+            ProductionRecoveryDecisionKind.Reconcile,
+            "operator-001",
+            "Physical inspection confirms the operation completed.",
+            "inspection:camera-report-42",
+            Now.AddSeconds(3),
+            operationRunId: "test@0001",
+            observedJudgement: ResultJudgement.Passed,
+            observedOutputs: new Dictionary<string, ProductionContextValue>
+            {
+                ["inspectionResult"] = new(ProductionContextValueKind.Text, "confirmed")
+            });
+
+        Assert.True(run.ReconcileRecovery(decision).Succeeded);
+
+        Assert.Equal(ExecutionStatus.Completed, run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, run.Judgement);
+        Assert.Equal("confirmed", run.Operations[0].Outputs["inspectionResult"].CanonicalValue);
+        Assert.Equal(decision, Assert.Single(run.RecoveryDecisions));
+    }
+
+    [Fact]
+    public void RecoveryDecisionIdIsIdempotentAndRejectsDifferentEvidence()
+    {
+        var run = CreateRun([Operation("test")], []);
+        StartOperation(run, "test@0001", Now.AddSeconds(1));
+        Assert.True(run.MarkRecoveryRequired("Host terminated.", Now.AddSeconds(2)).Succeeded);
+        var decision = new ProductionRecoveryDecision(
+            Guid.Parse("33333333-3333-3333-3333-333333333333"),
+            ProductionRecoveryDecisionKind.Abort,
+            "operator-001",
+            "Product state cannot be established.",
+            "incident:recovery-88",
+            Now.AddSeconds(3));
+
+        Assert.True(run.AbortRecovery(decision).Succeeded);
+        Assert.True(run.AbortRecovery(decision).Succeeded);
+        var mismatch = new ProductionRecoveryDecision(
+            decision.DecisionId,
+            decision.Kind,
+            decision.ActorId,
+            "Different immutable reason.",
+            decision.EvidenceReference,
+            decision.DecidedAtUtc);
+
+        var result = run.AbortRecovery(mismatch);
+        Assert.False(result.Succeeded);
+        Assert.Equal("Runtime.RecoveryDecisionIdentityMismatch", result.Code);
+        Assert.Single(run.RecoveryDecisions);
     }
 
     private static ProductionRun CreateRun(
@@ -169,6 +237,7 @@ public sealed class ProductionRunTests
             "snapshot.main",
             "topology.main",
             "line.main",
+            ProductionUnitId.New(),
             new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
             "lot-001",
             "carrier-001",

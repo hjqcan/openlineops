@@ -7,6 +7,7 @@ using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Execution;
@@ -15,6 +16,7 @@ public sealed class ProductionRunRunner(
     IProductionRunRepository runRepository,
     IProductionRunExecutionPlanRepository planRepository,
     IResourceLeaseRepository resourceLeases,
+    IProductionOperationReadiness operationReadiness,
     IStationOperationDispatcher stationDispatcher,
     IRuntimeDomainEventPublisher domainEventPublisher,
     IRuntimeIdProvider idProvider,
@@ -65,7 +67,8 @@ public sealed class ProductionRunRunner(
         while (!run.IsTerminal && run.ControlState == ProductionRunControlState.Active)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var ready = run.Operations
+            var readinessSnapshot = run.ToSnapshot();
+            var ready = readinessSnapshot.Operations
                 .Where(operation => operation.ExecutionStatus == ExecutionStatus.Pending)
                 .OrderBy(operation => operation.OperationRunId, StringComparer.Ordinal)
                 .ToArray();
@@ -74,23 +77,136 @@ public sealed class ProductionRunRunner(
                 break;
             }
 
-            var dispatches = new List<PendingStationDispatch>(ready.Length);
+            var dispatchable = new List<ReadyOperation>(ready.Length);
+            ProductionOperationReadiness? recoveryRequired = null;
             foreach (var operation in ready)
+            {
+                var readiness = await operationReadiness.EvaluateAsync(
+                        readinessSnapshot,
+                        operation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (readiness.Kind == ProductionOperationReadinessKind.RecoveryRequired)
+                {
+                    recoveryRequired = readiness;
+                    break;
+                }
+
+                if (readiness.Kind == ProductionOperationReadinessKind.Ready)
+                {
+                    dispatchable.Add(new ReadyOperation(
+                        operation,
+                        readiness.MaterialResources,
+                        readiness.EvidenceKey));
+                }
+            }
+
+            if (recoveryRequired is not null)
+            {
+                var recovery = run.MarkRecoveryRequired(recoveryRequired.Reason, clock.UtcNow);
+                if (!recovery.Succeeded)
+                {
+                    return Failure(recovery);
+                }
+
+                await PersistAndPublishAsync(run, revision, CancellationToken.None)
+                    .ConfigureAwait(false);
+                return Result.Success(new ProductionRunRunResult(run.ToSnapshot()));
+            }
+
+            var dispatches = new List<PendingStationDispatch>(dispatchable.Count);
+            foreach (var readyOperation in dispatchable)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var executionPlan = plan.Operations.Single(candidate => string.Equals(
                     candidate.Definition.OperationId,
-                    operation.OperationId,
+                    readyOperation.Operation.Definition.OperationId,
                     StringComparison.Ordinal));
+                var requiredResources = readyOperation.Operation.Definition.ResourceRequirements
+                    .Concat(readyOperation.MaterialResources)
+                    .Distinct()
+                    .ToArray();
                 var leases = await resourceLeases.TryAcquireAsync(
                     run.Id,
-                    operation.OperationRunId,
-                    operation.ResourceRequirements,
+                    readyOperation.Operation.OperationRunId,
+                    requiredResources,
                     clock.UtcNow,
                     CalculateLeaseDuration(executionPlan),
                     cancellationToken).ConfigureAwait(false);
                 if (leases is null)
                 {
+                    continue;
+                }
+
+                var confirmedReadiness = await operationReadiness.EvaluateAsync(
+                        run.ToSnapshot(),
+                        readyOperation.Operation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                var sameMaterialResources = confirmedReadiness.MaterialResources.ToHashSet()
+                    .SetEquals(readyOperation.MaterialResources);
+                if (confirmedReadiness.Kind != ProductionOperationReadinessKind.Ready
+                    || !sameMaterialResources
+                    || !string.Equals(
+                        confirmedReadiness.EvidenceKey,
+                        readyOperation.EvidenceKey,
+                        StringComparison.Ordinal))
+                {
+                    await resourceLeases.ReleaseAsync(
+                            run.Id,
+                            readyOperation.Operation.OperationRunId,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (confirmedReadiness.Kind == ProductionOperationReadinessKind.RecoveryRequired)
+                    {
+                        var latestForRecovery = await runRepository.GetByIdAsync(
+                                run.Id,
+                                CancellationToken.None)
+                            .ConfigureAwait(false)
+                            ?? throw new InvalidDataException(
+                                $"Production Run {run.Id} disappeared during material readiness recovery.");
+                        var recovery = latestForRecovery.Run.MarkRecoveryRequired(
+                            confirmedReadiness.Reason,
+                            clock.UtcNow);
+                        if (recovery.Succeeded)
+                        {
+                            await PersistAndPublishAsync(
+                                    latestForRecovery.Run,
+                                    latestForRecovery.Revision,
+                                    CancellationToken.None)
+                                .ConfigureAwait(false);
+                        }
+
+                        return Result.Success(new ProductionRunRunResult(
+                            latestForRecovery.Run.ToSnapshot()));
+                    }
+
+                    continue;
+                }
+
+                var latest = await runRepository.GetByIdAsync(run.Id, cancellationToken)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidDataException(
+                        $"Production Run {run.Id} disappeared while acquiring Station resources.");
+                if (latest.Revision != revision)
+                {
+                    run = latest.Run;
+                    revision = latest.Revision;
+                }
+
+                var operation = run.Operations.Single(candidate => string.Equals(
+                    candidate.OperationRunId,
+                    readyOperation.Operation.OperationRunId,
+                    StringComparison.Ordinal));
+                if (run.IsTerminal
+                    || run.ControlState != ProductionRunControlState.Active
+                    || operation.ExecutionStatus != ExecutionStatus.Pending)
+                {
+                    await resourceLeases.ReleaseAsync(
+                            run.Id,
+                            readyOperation.Operation.OperationRunId,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
                     continue;
                 }
 
@@ -126,7 +242,7 @@ public sealed class ProductionRunRunner(
                 // Start every ready Station operation before awaiting any one of them. Route
                 // results are still folded back into the aggregate serially below.
                 dispatches.Add(new PendingStationDispatch(
-                    operation,
+                    operation.OperationRunId,
                     DispatchCapturingAsync(request, cancellationToken)));
             }
 
@@ -139,57 +255,85 @@ public sealed class ProductionRunRunner(
                 .ConfigureAwait(false);
 
             RuntimeOperationResult? transitionFailure = null;
-            var uncertainDispatches = new List<PendingStationDispatch>();
-            foreach (var dispatch in dispatches)
+            var persisted = false;
+            for (var attempt = 0; attempt < 8 && !persisted; attempt++)
             {
-                var outcome = await dispatch.Outcome.ConfigureAwait(false);
-                if (outcome.Result is not null)
-                {
-                    var transition = ApplyDispatchResult(run, dispatch.Operation, outcome.Result);
-                    if (!transition.Succeeded && transitionFailure is null)
-                    {
-                        transitionFailure = transition;
-                    }
-                }
-                else
-                {
-                    uncertainDispatches.Add(dispatch);
-                }
-            }
-
-            if (uncertainDispatches.Count > 0 && !run.IsTerminal)
-            {
-                var exceptionNames = uncertainDispatches
-                    .Select(static dispatch => dispatch.Outcome.Result.Exception?.GetType().Name)
-                    .Where(static name => name is not null)
-                    .Distinct(StringComparer.Ordinal)
-                    .Order(StringComparer.Ordinal);
-                var reason = cancellationToken.IsCancellationRequested
-                    ? "Station operation dispatch was interrupted; no hardware command was replayed."
-                    : $"Station dispatcher failed with {string.Join(", ", exceptionNames)}; no hardware command was replayed.";
-                var recovery = run.MarkRecoveryRequired(reason, clock.UtcNow);
-                if (!recovery.Succeeded && transitionFailure is null)
-                {
-                    transitionFailure = recovery;
-                }
-            }
-
-            try
-            {
-                revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
+                var current = await runRepository.GetByIdAsync(run.Id, CancellationToken.None)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidDataException(
+                        $"Production Run {run.Id} disappeared while Station operations were executing.");
+                run = current.Run;
+                revision = current.Revision;
+                transitionFailure = null;
+                var hasTransition = false;
+                var uncertainDispatches = new List<PendingStationDispatch>();
                 foreach (var dispatch in dispatches)
                 {
-                    await resourceLeases.HoldForRecoveryAsync(
-                        run.Id,
-                        dispatch.Operation.OperationRunId,
-                        CancellationToken.None).ConfigureAwait(false);
+                    var outcome = await dispatch.Outcome.ConfigureAwait(false);
+                    if (outcome.Result is null)
+                    {
+                        uncertainDispatches.Add(dispatch);
+                    }
+                    else if (!run.IsTerminal)
+                    {
+                        var transition = ApplyDispatchResult(
+                            run,
+                            dispatch.OperationRunId,
+                            outcome.Result);
+                        hasTransition |= transition.Succeeded;
+                        if (!transition.Succeeded && transitionFailure is null)
+                        {
+                            transitionFailure = transition;
+                        }
+                    }
                 }
 
-                throw;
+                if (uncertainDispatches.Count > 0 && !run.IsTerminal)
+                {
+                    var exceptionNames = uncertainDispatches
+                        .Select(static dispatch => dispatch.Outcome.Result.Exception?.GetType().Name)
+                        .Where(static name => name is not null)
+                        .Distinct(StringComparer.Ordinal)
+                        .Order(StringComparer.Ordinal);
+                    var reason = cancellationToken.IsCancellationRequested
+                        ? "Station operation dispatch was interrupted; no hardware command was replayed."
+                        : $"Station dispatcher failed with {string.Join(", ", exceptionNames)}; no hardware command was replayed.";
+                    var recovery = run.MarkRecoveryRequired(reason, clock.UtcNow);
+                    hasTransition |= recovery.Succeeded;
+                    if (!recovery.Succeeded && transitionFailure is null)
+                    {
+                        transitionFailure = recovery;
+                    }
+                }
+
+                if (!hasTransition)
+                {
+                    persisted = true;
+                    break;
+                }
+
+                try
+                {
+                    revision = await PersistAndPublishAsync(run, revision, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    persisted = true;
+                }
+                catch (ProductionRunConcurrencyException) when (attempt < 7)
+                {
+                    continue;
+                }
+                catch
+                {
+                    foreach (var dispatch in dispatches)
+                    {
+                        await resourceLeases.HoldForRecoveryAsync(
+                            run.Id,
+                            dispatch.OperationRunId,
+                            CancellationToken.None).ConfigureAwait(false);
+                    }
+
+                    throw;
+                }
             }
 
             foreach (var dispatch in dispatches)
@@ -199,14 +343,14 @@ public sealed class ProductionRunRunner(
                 {
                     await resourceLeases.HoldForRecoveryAsync(
                         run.Id,
-                        dispatch.Operation.OperationRunId,
+                        dispatch.OperationRunId,
                         CancellationToken.None).ConfigureAwait(false);
                 }
                 else
                 {
                     await resourceLeases.ReleaseAsync(
                         run.Id,
-                        dispatch.Operation.OperationRunId,
+                        dispatch.OperationRunId,
                         CancellationToken.None).ConfigureAwait(false);
                 }
             }
@@ -223,13 +367,13 @@ public sealed class ProductionRunRunner(
 
     private static RuntimeOperationResult ApplyDispatchResult(
         ProductionRun run,
-        OperationRun operation,
+        string operationRunId,
         StationOperationDispatchResult result)
     {
         if (result.ExecutionStatus == ExecutionStatus.Completed)
         {
             return run.CompleteOperation(
-                operation.OperationRunId,
+                operationRunId,
                 result.Judgement,
                 result.Outputs,
                 result.CompletedStepCount,
@@ -240,13 +384,13 @@ public sealed class ProductionRunRunner(
 
         if (result.ExecutionStatus == ExecutionStatus.Canceled)
         {
-            return run.Stop(
+            return run.Cancel(
                 result.FailureReason ?? "Station operation was canceled.",
                 result.CompletedAtUtc);
         }
 
         return run.FailOperation(
-            operation.OperationRunId,
+            operationRunId,
             result.ExecutionStatus,
             result.FailureCode ?? "Runtime.StationOperationFailed",
             result.FailureReason ?? "Station operation failed without a reason.",
@@ -308,8 +452,13 @@ public sealed class ProductionRunRunner(
         Result.Failure<ProductionRunRunResult>(error);
 
     private sealed record PendingStationDispatch(
-        OperationRun Operation,
+        string OperationRunId,
         Task<StationDispatchOutcome> Outcome);
+
+    private sealed record ReadyOperation(
+        OperationRunSnapshot Operation,
+        IReadOnlyCollection<ResourceRequirement> MaterialResources,
+        string? EvidenceKey);
 
     private sealed record StationDispatchOutcome(
         StationOperationDispatchResult? Result,

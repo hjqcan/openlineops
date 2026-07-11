@@ -1,5 +1,7 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Domain.Resources;
 
 namespace OpenLineOps.Runtime.Application.Commands;
 
@@ -8,8 +10,10 @@ public sealed record RuntimeCommandExecutionContext
     public RuntimeCommandExecutionContext(
         RuntimeSessionId sessionId,
         ProductionRunId productionRunId,
+        ProductionUnitId productionUnitId,
         string productionLineDefinitionId,
         string operationId,
+        string operationRunId,
         int operationAttempt,
         string stationSystemId,
         ProductionUnitIdentity productionUnitIdentity,
@@ -30,7 +34,8 @@ public sealed record RuntimeCommandExecutionContext
         string targetId,
         string projectId,
         string applicationId,
-        string projectSnapshotId)
+        string projectSnapshotId,
+        IEnumerable<ResourceLeaseFenceEvidence> resourceLeaseFences)
     {
         SessionId = sessionId.Value == Guid.Empty
             ? throw new ArgumentException("sessionId cannot be empty.", nameof(sessionId))
@@ -38,10 +43,14 @@ public sealed record RuntimeCommandExecutionContext
         ProductionRunId = productionRunId.Value == Guid.Empty
             ? throw new ArgumentException("productionRunId cannot be empty.", nameof(productionRunId))
             : productionRunId;
+        ProductionUnitId = productionUnitId.Value == Guid.Empty
+            ? throw new ArgumentException("productionUnitId cannot be empty.", nameof(productionUnitId))
+            : productionUnitId;
         ProductionLineDefinitionId = Required(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
         OperationId = Required(operationId, nameof(operationId));
+        OperationRunId = Required(operationRunId, nameof(operationRunId));
         if (operationAttempt <= 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -50,6 +59,16 @@ public sealed record RuntimeCommandExecutionContext
         }
 
         OperationAttempt = operationAttempt;
+        if (!string.Equals(
+                OperationRunId,
+                $"{OperationId}@{OperationAttempt:D4}",
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Operation Run id must match the Operation identity and attempt.",
+                nameof(operationRunId));
+        }
+
         StationSystemId = Required(stationSystemId, nameof(stationSystemId));
         ProductionUnitIdentity = productionUnitIdentity
             ?? throw new ArgumentNullException(nameof(productionUnitIdentity));
@@ -78,15 +97,38 @@ public sealed record RuntimeCommandExecutionContext
         ProjectId = Required(projectId, nameof(projectId));
         ApplicationId = Required(applicationId, nameof(applicationId));
         ProjectSnapshotId = Required(projectSnapshotId, nameof(projectSnapshotId));
+        ArgumentNullException.ThrowIfNull(resourceLeaseFences);
+        var fences = resourceLeaseFences.ToArray();
+        if (fences.Length == 0
+            || fences.Any(static fence => fence is null)
+            || fences.Select(static fence => fence.Resource).Distinct().Count() != fences.Length
+            || !fences.Any(fence => fence.Resource.Kind == ResourceKind.Station
+                && string.Equals(
+                    fence.Resource.ResourceId,
+                    StationSystemId,
+                    StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "Runtime command requires unique resource lease fences including its Station.",
+                nameof(resourceLeaseFences));
+        }
+
+        ResourceLeaseFences = fences
+            .OrderBy(static fence => fence.Resource.CanonicalKey, StringComparer.Ordinal)
+            .ToArray();
     }
 
     public RuntimeSessionId SessionId { get; }
 
     public ProductionRunId ProductionRunId { get; }
 
+    public ProductionUnitId ProductionUnitId { get; }
+
     public string ProductionLineDefinitionId { get; }
 
     public string OperationId { get; }
+
+    public string OperationRunId { get; }
 
     public int OperationAttempt { get; }
 
@@ -129,6 +171,8 @@ public sealed record RuntimeCommandExecutionContext
     public string ApplicationId { get; }
 
     public string ProjectSnapshotId { get; }
+
+    public IReadOnlyList<ResourceLeaseFenceEvidence> ResourceLeaseFences { get; }
 
     private static string? Optional(string? value, string parameterName)
     {

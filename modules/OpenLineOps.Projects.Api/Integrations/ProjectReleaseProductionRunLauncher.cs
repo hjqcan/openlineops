@@ -1,4 +1,3 @@
-using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Runtime;
@@ -7,6 +6,7 @@ using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
@@ -14,23 +14,20 @@ namespace OpenLineOps.Projects.Api.Integrations;
 
 public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProductionRunLauncher
 {
-    private readonly IProjectApplicationWorkspaceScopeResolver _scopeResolver;
-    private readonly IProjectReleaseArtifactStore _releaseStore;
+    private readonly IProjectReleaseSnapshotReader _releaseReader;
     private readonly IProjectRuntimeConfigurationSnapshotResolver _configurationResolver;
     private readonly IProductionRunCoordinator _productionRunCoordinator;
     private readonly IFlowIrCanonicalSerializer _flowIrSerializer;
     private readonly IFlowIrExecutableRuntimeProcessMapper _flowIrMapper;
 
     public ProjectReleaseProductionRunLauncher(
-        IProjectApplicationWorkspaceScopeResolver scopeResolver,
-        IProjectReleaseArtifactStore releaseStore,
+        IProjectReleaseSnapshotReader releaseReader,
         IProjectRuntimeConfigurationSnapshotResolver configurationResolver,
         IProductionRunCoordinator productionRunCoordinator,
         IFlowIrCanonicalSerializer flowIrSerializer,
         IFlowIrExecutableRuntimeProcessMapper flowIrMapper)
     {
-        _scopeResolver = scopeResolver;
-        _releaseStore = releaseStore;
+        _releaseReader = releaseReader;
         _configurationResolver = configurationResolver;
         _productionRunCoordinator = productionRunCoordinator;
         _flowIrSerializer = flowIrSerializer;
@@ -52,45 +49,16 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
 
         try
         {
-            var liveScope = await _scopeResolver
-                .ResolveAsync(snapshot.ProjectId, snapshot.ApplicationId, cancellationToken)
+            var releaseResult = await _releaseReader
+                .OpenAsync(snapshot, cancellationToken)
                 .ConfigureAwait(false);
-            if (liveScope is null)
+            if (releaseResult.IsFailure)
             {
-                return Failure(
-                    "Projects.ProjectApplicationNotFound",
-                    $"Application {snapshot.ApplicationId} was not found in project {snapshot.ProjectId}.",
-                    notFound: true);
+                return Result.Failure<ProductionRunSnapshot>(releaseResult.Error);
             }
 
-            var release = await _releaseStore
-                .OpenAsync(
-                    liveScope,
-                    snapshot.SnapshotId,
-                    snapshot.ReleaseContentSha256,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (release is null)
-            {
-                return Failure(
-                    "Projects.ProjectReleaseNotFound",
-                    $"Immutable release for project snapshot {snapshot.SnapshotId} was not found.",
-                    notFound: true);
-            }
-
-            var mismatch = FindMetadataMismatch(liveScope, snapshot, release);
-            if (mismatch is not null)
-            {
-                return Failure(
-                    "Projects.ProjectReleaseMetadataMismatch",
-                    $"Immutable release for project snapshot {snapshot.SnapshotId} does not match the published snapshot: {mismatch}.");
-            }
-
-            var releaseScope = new ProjectApplicationWorkspaceScope(
-                snapshot.ProjectId,
-                snapshot.ApplicationId,
-                release.SourceRootPath,
-                release.ApplicationProjectRelativePath);
+            var release = releaseResult.Value.Artifact;
+            var releaseScope = releaseResult.Value.ReleaseScope;
             var line = release.Metadata.ProductionLine;
             var operations = line.Operations.ToArray();
             if (operations.Length == 0
@@ -154,7 +122,11 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                     new ConfigurationSnapshotId(configuration.ConfigurationSnapshotId),
                     new RecipeSnapshotId(configuration.RecipeSnapshotId),
                     executableResult.Value,
-                    CreateResourceRequirements(operation, request)));
+                    CreateResourceRequirements(
+                        line.LineDefinitionId,
+                        operation,
+                        line.LineControllerAuthorizations),
+                    CreateMaterialSlotRequirement(operation)));
             }
 
             var transitions = line.Transitions
@@ -169,16 +141,13 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                         snapshot.SnapshotId,
                         snapshot.TopologyId,
                         line.LineDefinitionId,
-                        new ProductionUnitIdentity(
-                            line.ProductModel.ProductModelId,
-                            line.ProductModel.IdentityInputKey,
-                            request.ProductionUnitIdentityValue),
+                        new ProductionUnitId(request.ProductionUnitId),
+                        line.ProductModel.ProductModelId,
+                        line.ProductModel.IdentityInputKey,
                         request.ActorId,
                         line.EntryOperationId,
                         plans,
-                        transitions,
-                        request.LotId,
-                        request.CarrierId),
+                        transitions),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -273,25 +242,116 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
     }
 
     private static List<ResourceRequirement> CreateResourceRequirements(
+        string productionLineDefinitionId,
         ProjectReleaseOperation operation,
-        SubmitProjectReleaseProductionRunRequest request)
+        IReadOnlyCollection<ProjectReleaseLineControllerAuthorization> lineControllerAuthorizations)
     {
-        var resources = new List<ResourceRequirement>
+        if (operation.Resources is null || operation.Resources.Count == 0)
         {
-            new(ResourceKind.Station, operation.StationSystemId)
-        };
-        AddOptional(ResourceKind.Slot, request.SlotId);
-        AddOptional(ResourceKind.Fixture, request.FixtureId);
-        AddOptional(ResourceKind.Device, request.DeviceId);
-        return resources;
-
-        void AddOptional(ResourceKind kind, string? resourceId)
-        {
-            if (resourceId is not null)
-            {
-                resources.Add(new ResourceRequirement(kind, resourceId));
-            }
+            throw new InvalidDataException(
+                $"Operation {operation.OperationId} has no frozen resources.");
         }
+
+        var resources = new List<ResourceRequirement>(
+            operation.Resources.Count + (operation.AuthorizedActions.Count * 2));
+        foreach (var resource in operation.Resources)
+        {
+            if (!string.Equals(resource.Resolution, "Fixed", StringComparison.Ordinal))
+            {
+                if (!string.Equals(resource.Kind, "Slot", StringComparison.Ordinal)
+                    || resource.Resolution is not "CurrentMaterialSlot" and not "AvailableSlotInGroup")
+                {
+                    throw new InvalidDataException(
+                        $"Operation {operation.OperationId} resource {resource.BindingId} has invalid dynamic resolution.");
+                }
+
+                continue;
+            }
+
+            var kind = resource.Kind switch
+            {
+                "Station" => ResourceKind.Station,
+                "Fixture" => ResourceKind.Fixture,
+                "Device" => ResourceKind.Device,
+                "SlotGroup" => ResourceKind.SlotGroup,
+                "Slot" => ResourceKind.Slot,
+                _ => throw new InvalidDataException(
+                    $"Operation {operation.OperationId} resource {resource.BindingId} has invalid kind '{resource.Kind}'.")
+            };
+            var resourceId = kind == ResourceKind.Slot
+                ? $"{productionLineDefinitionId}/{operation.StationSystemId}/{resource.TopologyTargetId}"
+                : resource.TopologyTargetId;
+            resources.Add(new ResourceRequirement(kind, resourceId));
+        }
+
+        foreach (var authorization in lineControllerAuthorizations.Where(authorization =>
+                     string.Equals(
+                         authorization.OperationId,
+                         operation.OperationId,
+                         StringComparison.Ordinal)))
+        {
+            resources.Add(new ResourceRequirement(
+                ResourceKind.Station,
+                authorization.TargetStationSystemId));
+            resources.Add(new ResourceRequirement(
+                ResourceKind.Device,
+                authorization.TargetBindingId));
+        }
+
+        resources = resources.Distinct().ToList();
+
+        if (resources.Count(resource => resource.Kind == ResourceKind.Station
+                && string.Equals(
+                    resource.ResourceId,
+                    operation.StationSystemId,
+                    StringComparison.Ordinal)) != 1
+            || resources.Count(resource => resource.Kind == ResourceKind.Station) !=
+                1 + lineControllerAuthorizations
+                    .Where(authorization => string.Equals(
+                        authorization.OperationId,
+                        operation.OperationId,
+                        StringComparison.Ordinal))
+                    .Select(authorization => authorization.TargetStationSystemId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count())
+        {
+            throw new InvalidDataException(
+                $"Operation {operation.OperationId} frozen resources do not contain one unique Station lease.");
+        }
+
+        return resources;
+    }
+
+    private static MaterialSlotRequirement? CreateMaterialSlotRequirement(
+        ProjectReleaseOperation operation)
+    {
+        var dynamicSlots = operation.Resources
+            .Where(resource => string.Equals(resource.Kind, "Slot", StringComparison.Ordinal)
+                && !string.Equals(resource.Resolution, "Fixed", StringComparison.Ordinal))
+            .ToArray();
+        if (dynamicSlots.Length > 1)
+        {
+            throw new InvalidDataException(
+                $"Operation {operation.OperationId} declares more than one dynamic material Slot resource.");
+        }
+
+        if (dynamicSlots.Length == 0)
+        {
+            return null;
+        }
+
+        var resource = dynamicSlots[0];
+        var resolution = resource.Resolution switch
+        {
+            "CurrentMaterialSlot" => MaterialSlotResolution.CurrentMaterialSlot,
+            "AvailableSlotInGroup" => MaterialSlotResolution.AvailableSlotInGroup,
+            _ => throw new InvalidDataException(
+                $"Operation {operation.OperationId} resource {resource.BindingId} has invalid Slot resolution '{resource.Resolution}'.")
+        };
+        return new MaterialSlotRequirement(
+            resolution,
+            resource.TopologyTargetId,
+            resource.EligibleSlotIds);
     }
 
     private static RouteTransitionDefinition ToRuntimeTransition(
@@ -361,127 +421,6 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
         return parsed;
     }
 
-    private static string? FindMetadataMismatch(
-        ProjectApplicationWorkspaceScope liveScope,
-        PublishedProjectSnapshotDetails snapshot,
-        OpenedProjectReleaseArtifact release)
-    {
-        if (!string.Equals(release.SnapshotId, snapshot.SnapshotId, StringComparison.Ordinal)
-            || !string.Equals(release.ProjectId, snapshot.ProjectId, StringComparison.Ordinal)
-            || !string.Equals(release.ApplicationId, snapshot.ApplicationId, StringComparison.Ordinal))
-        {
-            return "release Project, Application, or snapshot identity differs";
-        }
-
-        if (!string.Equals(release.ContentSha256, snapshot.ReleaseContentSha256, StringComparison.Ordinal))
-        {
-            return "release content SHA-256 differs";
-        }
-
-        var manifestPathMismatch = FindManifestPathMismatch(liveScope, snapshot, release);
-        if (manifestPathMismatch is not null)
-        {
-            return manifestPathMismatch;
-        }
-
-        var metadata = release.Metadata;
-        if (!string.Equals(metadata.TopologyId, snapshot.TopologyId, StringComparison.Ordinal)
-            || !string.Equals(
-                metadata.ProductionLine.TopologyId,
-                snapshot.TopologyId,
-                StringComparison.Ordinal))
-        {
-            return "Production line topology differs";
-        }
-
-        if (!string.Equals(
-                metadata.ProductionLine.LineDefinitionId,
-                snapshot.ProductionLineDefinitionId,
-                StringComparison.Ordinal))
-        {
-            return "Production line identity differs";
-        }
-
-        if (!SequenceEqualOrdinal(metadata.LayoutIds, snapshot.LayoutIds)
-            || !SequenceEqualOrdinal(metadata.BlockVersionIds, snapshot.BlockVersionIds))
-        {
-            return "Layout or Blockly block revision identities differ";
-        }
-
-        var releaseBindings = metadata.CapabilityBindings
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
-            .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
-            .ToArray();
-        var snapshotBindings = snapshot.CapabilityBindings
-            .Select(binding => new ProjectReleaseCapabilityBinding(
-                binding.CapabilityId,
-                binding.BindingId,
-                binding.ProviderKind,
-                binding.ProviderKey))
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
-            .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
-            .ToArray();
-        if (!releaseBindings.SequenceEqual(snapshotBindings))
-        {
-            return "capability bindings differ";
-        }
-
-        var releaseTargets = metadata.TargetReferences
-            .OrderBy(target => target.Kind, StringComparer.Ordinal)
-            .ThenBy(target => target.TargetId, StringComparer.Ordinal)
-            .ToArray();
-        var snapshotTargets = snapshot.TargetReferences
-            .Select(target => new ProjectReleaseTargetReference(target.Kind, target.TargetId))
-            .OrderBy(target => target.Kind, StringComparer.Ordinal)
-            .ThenBy(target => target.TargetId, StringComparer.Ordinal)
-            .ToArray();
-        return releaseTargets.SequenceEqual(snapshotTargets)
-            ? null
-            : "target references differ";
-    }
-
-    private static string? FindManifestPathMismatch(
-        ProjectApplicationWorkspaceScope liveScope,
-        PublishedProjectSnapshotDetails snapshot,
-        OpenedProjectReleaseArtifact release)
-    {
-        var declaredPath = snapshot.ReleaseManifestPath;
-        if (Path.IsPathRooted(declaredPath) || declaredPath.Contains('\\'))
-        {
-            return "release manifest path is not a canonical project-relative path";
-        }
-
-        var projectRoot = Path.GetFullPath(liveScope.ProjectPath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var projectPrefix = projectRoot + Path.DirectorySeparatorChar;
-        var declaredFullPath = Path.GetFullPath(Path.Combine(
-            projectRoot,
-            declaredPath.Replace('/', Path.DirectorySeparatorChar)));
-        var pathComparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        if (!declaredFullPath.StartsWith(projectPrefix, pathComparison))
-        {
-            return "release manifest path escapes the project directory";
-        }
-
-        var actualManifestPath = Path.GetFullPath(release.ManifestPath);
-        if (!actualManifestPath.StartsWith(projectPrefix, pathComparison))
-        {
-            return "opened release manifest is outside the project directory";
-        }
-
-        var actualRelativePath = Path.GetRelativePath(projectRoot, actualManifestPath)
-            .Replace('\\', '/');
-        return string.Equals(declaredPath, actualRelativePath, StringComparison.Ordinal)
-            ? null
-            : $"release manifest path is {actualRelativePath}, expected {declaredPath}";
-    }
-
     private static ApplicationError? ValidateRequest(
         SubmitProjectReleaseProductionRunRequest request)
     {
@@ -492,39 +431,22 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                 "ProductionRunId must be a non-empty GUID.");
         }
 
-        if (!IsCanonical(request.ProductionUnitIdentityValue) || !IsCanonical(request.ActorId))
+        if (request.ProductionUnitId == Guid.Empty || !IsCanonical(request.ActorId))
         {
             return ApplicationError.Validation(
                 "Projects.ProductionRunIdentityInvalid",
-                "Production Unit identity and actor identity must be non-empty canonical values.");
+                "ProductionUnitId must be a non-empty GUID and actor identity must be canonical.");
         }
 
-        return IsCanonicalOptional(request.LotId)
-            && IsCanonicalOptional(request.CarrierId)
-            && IsCanonicalOptional(request.SlotId)
-            && IsCanonicalOptional(request.FixtureId)
-            && IsCanonicalOptional(request.DeviceId)
-            ? null
-            : ApplicationError.Validation(
-                "Projects.ProductionRunMetadataInvalid",
-                "Optional Production Run metadata must be null or non-empty canonical values.");
+        return null;
     }
 
     private static bool IsCanonical(string value) =>
         !string.IsNullOrWhiteSpace(value)
         && string.Equals(value, value.Trim(), StringComparison.Ordinal);
 
-    private static bool IsCanonicalOptional(string? value) => value is null || IsCanonical(value);
-
-    private static bool SequenceEqualOrdinal(IEnumerable<string> left, IEnumerable<string> right) =>
-        left.Order(StringComparer.Ordinal)
-            .SequenceEqual(right.Order(StringComparer.Ordinal), StringComparer.Ordinal);
-
     private static Result<ProductionRunSnapshot> Failure(
         string code,
-        string message,
-        bool notFound = false) =>
-        Result.Failure<ProductionRunSnapshot>(notFound
-            ? ApplicationError.NotFound(code, message)
-            : ApplicationError.Conflict(code, message));
+        string message) =>
+        Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(code, message));
 }

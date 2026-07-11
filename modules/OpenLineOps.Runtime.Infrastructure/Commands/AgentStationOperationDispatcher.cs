@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Runs;
@@ -27,12 +25,14 @@ public sealed class AgentStationOperationDispatcher(
         using var inputs = JsonDocument.Parse("{}");
         var message = new StationJobRequested(
             Guid.NewGuid(),
-            DeterministicJobId(request.IdempotencyKey),
+            StationJobIdentity.CreateJobId(request.IdempotencyKey),
             request.IdempotencyKey,
             route.AgentId,
             route.StationId,
             request.Operation.Definition.StationSystemId,
             request.Run.RunId.Value,
+            request.Run.ProductionUnitId.Value,
+            request.RuntimeSessionId.Value,
             request.Operation.OperationRunId,
             request.Operation.Attempt,
             request.Run.ProductionUnitIdentity.ModelId,
@@ -43,6 +43,9 @@ public sealed class AgentStationOperationDispatcher(
             request.Run.ProjectId,
             request.Run.ApplicationId,
             request.Run.ProjectSnapshotId,
+            request.Run.ProductionLineDefinitionId,
+            request.Run.TopologyId,
+            request.Run.ActorId,
             route.PackageContentSha256,
             request.Operation.Definition.OperationId,
             request.Operation.Definition.ProcessDefinitionId.Value,
@@ -59,6 +62,7 @@ public sealed class AgentStationOperationDispatcher(
         var completion = await gateway.DispatchAsync(message, cancellationToken)
             .ConfigureAwait(false);
         if (completion.JobId != message.JobId
+            || completion.RuntimeSessionId != message.RuntimeSessionId
             || !string.Equals(
                 completion.IdempotencyKey,
                 message.IdempotencyKey,
@@ -68,63 +72,25 @@ public sealed class AgentStationOperationDispatcher(
                 "Station Agent returned a completion for a different idempotent job.");
         }
 
+        if (completion.CompletedStepCount != completion.Steps.Count(step =>
+                string.Equals(step.Status, "Completed", StringComparison.Ordinal))
+            || completion.CommandCount != completion.Commands.Count
+            || completion.IncidentCount != completion.Incidents.Count)
+        {
+            throw new InvalidDataException(
+                "Station Agent completion evidence counts do not match its detailed evidence.");
+        }
+
         return new StationOperationDispatchResult(
             completion.ExecutionStatus,
             completion.Judgement,
-            ParseOutputs(completion.Outputs),
-            0,
-            0,
-            0,
+            ProductionContextOutputReader.Read(completion.Outputs),
+            completion.CompletedStepCount,
+            completion.CommandCount,
+            completion.IncidentCount,
             completion.CompletedAtUtc,
             completion.FailureCode,
             completion.FailureReason);
     }
 
-    private static Dictionary<string, ProductionContextValue> ParseOutputs(
-        JsonElement outputs)
-    {
-        if (outputs.ValueKind != JsonValueKind.Object)
-        {
-            throw new InvalidDataException("Station output context must be a JSON object.");
-        }
-
-        var values = new Dictionary<string, ProductionContextValue>(StringComparer.Ordinal);
-        foreach (var property in outputs.EnumerateObject())
-        {
-            if (property.Value.ValueKind != JsonValueKind.Object
-                || !property.Value.TryGetProperty("kind", out var kindElement)
-                || !property.Value.TryGetProperty("value", out var valueElement)
-                || property.Value.EnumerateObject().Count() != 2
-                || kindElement.ValueKind != JsonValueKind.String
-                || valueElement.ValueKind != JsonValueKind.String)
-            {
-                throw new InvalidDataException(
-                    $"Station output '{property.Name}' must contain only string kind and value fields.");
-            }
-
-            var kindToken = kindElement.GetString();
-            if (!Enum.TryParse<ProductionContextValueKind>(kindToken, false, out var kind)
-                || !Enum.IsDefined(kind)
-                || !string.Equals(kind.ToString(), kindToken, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    $"Station output '{property.Name}' has invalid kind '{kindToken}'.");
-            }
-
-            if (!values.TryAdd(
-                    property.Name,
-                    new ProductionContextValue(kind, valueElement.GetString()!)))
-            {
-                throw new InvalidDataException($"Station output '{property.Name}' is duplicated.");
-            }
-        }
-
-        return values;
-    }
-
-    private static Guid DeterministicJobId(string idempotencyKey)
-    {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(idempotencyKey));
-        return new Guid(hash.AsSpan(0, 16));
-    }
 }

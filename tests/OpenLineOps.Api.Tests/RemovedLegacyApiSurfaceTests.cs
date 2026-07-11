@@ -61,7 +61,7 @@ public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<WebApplicationF
     }
 
     [Fact]
-    public async Task ProductionRunStartRejectsRemovedSerialNumberField()
+    public async Task NestedProjectSnapshotProductionRunRouteDoesNotExist()
     {
         using var response = await _client.PostAsJsonAsync(
             "/api/automation-projects/obsolete/snapshots/obsolete/production-runs",
@@ -73,6 +73,6 @@ public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<WebApplicationF
                 serialNumber = "SN-001"
             });
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }

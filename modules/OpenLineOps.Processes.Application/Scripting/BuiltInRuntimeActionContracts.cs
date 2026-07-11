@@ -13,7 +13,7 @@ internal static class BuiltInRuntimeActionContracts
             "openlineops_rotate_motor" => RotateMotor(),
             "openlineops_wait" => Wait(),
             "openlineops_result_from_input" => ResultFromInput(),
-            "openlineops_run_external_test" => RunExternalTest(),
+            "openlineops_run_external_program" => RunExternalProgram(),
             _ => throw new ArgumentException(
                 $"Built-in Blockly block {blockType} does not have a Runtime Action Contract.",
                 nameof(blockType))
@@ -140,17 +140,17 @@ internal static class BuiltInRuntimeActionContracts
             ]));
     }
 
-    private static RuntimeActionContract RunExternalTest()
+    private static RuntimeActionContract RunExternalProgram()
     {
         return Contract(
-            "production.external-test.run",
+            "application.external-program.run",
             new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
             {
                 ["TARGET_KIND"] = TargetKindField(),
                 ["TARGET_ID"] = TargetIdField(),
                 ["CAPABILITY"] = TextField(maxLength: 256),
                 ["COMMAND"] = TextField(maxLength: 256),
-                ["ADAPTER_ID"] = TextField(maxLength: 256),
+                ["RESOURCE_ID"] = TextField(maxLength: 96),
                 ["TIMEOUT_MS"] = IntegerField(minimum: 1)
             },
             new RuntimeDeviceCommandEmit(
@@ -158,7 +158,7 @@ internal static class BuiltInRuntimeActionContracts
                 Field("TARGET_ID"),
                 Field("CAPABILITY"),
                 Field("COMMAND"),
-                Object(("externalTestProgramAdapterId", Field("ADAPTER_ID"))),
+                Object(("externalProgramResourceId", Field("RESOURCE_ID"))),
                 Field("TIMEOUT_MS")));
     }
 

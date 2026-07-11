@@ -59,11 +59,14 @@
     <Project Path="shared/OpenLineOps.Agent.Contracts/OpenLineOps.Agent.Contracts.csproj" />
     <Project Path="shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
     <Project Path="shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.ContentProtection/OpenLineOps.ContentProtection.csproj" />
     <Project Path="shared/OpenLineOps.Domain.Abstractions/OpenLineOps.Domain.Abstractions.csproj" />
     <Project Path="shared/OpenLineOps.EventBus/OpenLineOps.EventBus.csproj" />
     <Project Path="shared/OpenLineOps.Infrastructure.Data.Core/OpenLineOps.Infrastructure.Data.Core.csproj" />
     <Project Path="shared/OpenLineOps.Plugin.Abstractions/OpenLineOps.Plugin.Abstractions.csproj" />
+    <Project Path="shared/OpenLineOps.ProcessIsolation/OpenLineOps.ProcessIsolation.csproj" />
     <Project Path="shared/OpenLineOps.Runtime.Contracts/OpenLineOps.Runtime.Contracts.csproj" />
+    <Project Path="shared/OpenLineOps.StationRuntime.Contracts/OpenLineOps.StationRuntime.Contracts.csproj" />
     <Project Path="shared/OpenLineOps.StateMachine.Core/OpenLineOps.StateMachine.Core.csproj" />
   </Folder>
   <Folder Name="/src/">
@@ -72,11 +75,13 @@
     <Project Path="src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" />
     <Project Path="src/OpenLineOps.Runner/OpenLineOps.Runner.csproj" />
     <Project Path="src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj" />
+    <Project Path="src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Api.Tests/OpenLineOps.Api.Tests.csproj" />
     <Project Path="tests/OpenLineOps.BoundedContext.Scaffolder.Tests/OpenLineOps.BoundedContext.Scaffolder.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.ContentProtection.Tests/OpenLineOps.ContentProtection.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Devices.Tests/OpenLineOps.Devices.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Domain.Abstractions.Tests/OpenLineOps.Domain.Abstractions.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Engineering.Tests/OpenLineOps.Engineering.Tests.csproj" />
@@ -85,17 +90,21 @@
     <Project Path="tests/OpenLineOps.Operations.Tests/OpenLineOps.Operations.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Plugins.Tests/OpenLineOps.Plugins.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Processes.Tests/OpenLineOps.Processes.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.ProcessIsolation.Tests/OpenLineOps.ProcessIsolation.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Production.Tests/OpenLineOps.Production.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ReleaseManifest.Tests/OpenLineOps.ReleaseManifest.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runner.Tests/OpenLineOps.Runner.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runtime.Tests/OpenLineOps.Runtime.Tests.csproj" />
     <Project Path="tests/OpenLineOps.SampleInspection.Tests/OpenLineOps.SampleInspection.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.StationRuntime.Tests/OpenLineOps.StationRuntime.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Topology.Tests/OpenLineOps.Topology.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Traceability.Tests/OpenLineOps.Traceability.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.VendorTestHelper.Tests/OpenLineOps.VendorTestHelper.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/OpenLineOps.BoundedContext.Scaffolder/OpenLineOps.BoundedContext.Scaffolder.csproj" />
     <Project Path="tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj" />
+    <Project Path="tools/OpenLineOps.VendorTestHelper/OpenLineOps.VendorTestHelper.csproj" />
   </Folder>
 </Solution>

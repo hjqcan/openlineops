@@ -15,6 +15,14 @@ public sealed class DeviceRuntimeCommandExecutor
     public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
         RuntimeCommandExecutionContext context,
         ProjectReleaseDeviceCommandRoute route,
+        CancellationToken cancellationToken = default) =>
+        await ExecuteAsync(context, route, context.InputPayload, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+        RuntimeCommandExecutionContext context,
+        ProjectReleaseDeviceCommandRoute route,
+        string? inputPayload,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -27,7 +35,7 @@ public sealed class DeviceRuntimeCommandExecutor
             route.CommandDefinitionId,
             route.CapabilityId,
             context.CommandName,
-            context.InputPayload,
+            inputPayload,
             context.Timeout,
             route.PluginPackage);
 

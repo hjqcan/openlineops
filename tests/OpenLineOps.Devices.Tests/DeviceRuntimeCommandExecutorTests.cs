@@ -3,6 +3,7 @@ using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Devices.Tests;
@@ -66,8 +67,10 @@ public sealed class DeviceRuntimeCommandExecutorTests
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
             new ProductionRunId(Guid.Parse("00000000-0000-0000-0000-000000000010")),
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             "line-main",
             "operation-scan",
+            "operation-scan@0001",
             1,
             "station-scan",
             new ProductionUnitIdentity("model-main", "serialNumber", "ABC"),
@@ -88,7 +91,11 @@ public sealed class DeviceRuntimeCommandExecutorTests
             "system.scanner",
             "project-main",
             "application-main",
-            "project-snapshot-main");
+            "project-snapshot-main",
+            [new ResourceLeaseFenceEvidence(
+                new ResourceRequirement(ResourceKind.Station, "station-scan"),
+                1,
+                new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))]);
     }
 
     private sealed class CapturingDeviceCommandExecutor(

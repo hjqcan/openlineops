@@ -1,7 +1,7 @@
 import type {
   AutomationTopologyResponse,
   ConfigurationSnapshotResponse,
-  ExternalTestProgramAdapterRequest,
+  LineControllerAuthorization,
   ProcessDefinitionSummary,
   ProductionOperationRequest,
   RouteTransitionRequest,
@@ -10,7 +10,7 @@ import type {
 } from './contracts';
 
 export type ProductionDesignerProblemSeverity = 'Error' | 'Warning';
-export type ProductionDesignerProblemScope = 'Line' | 'Product' | 'Operation' | 'Transition' | 'Resource';
+export type ProductionDesignerProblemScope = 'Line' | 'Product' | 'Operation' | 'Transition';
 
 export interface ProductionDesignerProblem {
   id: string;
@@ -75,7 +75,7 @@ export function validateProductionLine(
 
   if (line.operations.length === 0) {
     add('Line', line.lineDefinitionId, 'A production line requires at least one Operation.');
-    return validateExternalResources(line.externalTestProgramAdapters, problems, add);
+    return problems;
   }
 
   validateUniqueIds(
@@ -87,6 +87,11 @@ export function validateProductionLine(
     line.transitions.map(transition => transition.transitionId),
     'Transition',
     'Route Transition IDs',
+    add);
+  validateUniqueIds(
+    line.lineControllerAuthorizations.map(authorization => authorization.authorizationId),
+    'Operation',
+    'Line Controller authorization IDs',
     add);
 
   const operationById = new Map(line.operations.map(operation => [operation.operationId, operation]));
@@ -106,6 +111,24 @@ export function validateProductionLine(
       flowById,
       configurationById,
       profileById,
+      context.topology,
+      add);
+  }
+
+  const authorizedActions = new Set<string>();
+  for (const authorization of line.lineControllerAuthorizations) {
+    const actionKey = `${authorization.operationId}\u001f${authorization.actionId}`;
+    if (authorizedActions.has(actionKey)) {
+      add(
+        'Operation',
+        authorization.operationId || authorization.authorizationId,
+        `Flow action '${authorization.actionId}' has more than one Line Controller authorization.`);
+    }
+    authorizedActions.add(actionKey);
+    validateLineControllerAuthorization(
+      authorization,
+      operationById,
+      context.topology,
       add);
   }
 
@@ -127,8 +150,86 @@ export function validateProductionLine(
   validateOutgoingShapes(line.operations, line.transitions, add);
   validateRouteGraph(line, operationById, add);
   validateParallelGroups(line.transitions, add);
-  validateExternalResources(line.externalTestProgramAdapters, problems, add);
   return problems;
+}
+
+function validateLineControllerAuthorization(
+  authorization: LineControllerAuthorization,
+  operationById: Map<string, ProductionOperationRequest>,
+  topology: AutomationTopologyResponse | null,
+  add: AddProblem
+): void {
+  const entityId = authorization.operationId || authorization.authorizationId || 'line-controller';
+  validatePortableId(authorization.authorizationId, 'Line Controller authorization ID', 'Operation', entityId, add);
+  validateCanonicalText(authorization.actionId, 'Flow action ID', 'Operation', entityId, add);
+  const operation = operationById.get(authorization.operationId);
+  if (!operation) {
+    add('Operation', entityId, `Line Controller authorization Operation '${authorization.operationId}' does not exist.`);
+    return;
+  }
+
+  if (!topology) {
+    return;
+  }
+
+  const controllerBinding = topology.driverBindings.find(binding => (
+    binding.bindingId === authorization.controllerBindingId
+    && binding.ownerSystemId === authorization.controllerSystemId
+    && binding.capabilityId === authorization.controllerCapabilityId));
+  const targetBinding = topology.driverBindings.find(binding => (
+    binding.bindingId === authorization.targetBindingId
+    && binding.ownerSystemId === authorization.targetSystemId
+    && binding.capabilityId === authorization.targetCapabilityId));
+  const controllerCapability = topology.capabilities.find(capability => (
+    capability.capabilityId === authorization.controllerCapabilityId
+    && capability.commandName === authorization.controllerAction));
+  const targetCapability = topology.capabilities.find(capability => (
+    capability.capabilityId === authorization.targetCapabilityId
+    && capability.commandName === authorization.targetAction));
+  if (!controllerBinding
+      || !isSystemWithinStation(
+        authorization.controllerSystemId,
+        operation.stationSystemId,
+        topology)) {
+    add('Operation', entityId, 'Controller owner System/Binding/Capability must resolve inside the Operation Station subtree.');
+  }
+  if (!controllerCapability) {
+    add('Operation', entityId, 'Controller Capability/Action must match one topology capability contract.');
+  }
+  if (!operation.resources.some(resource => resource.kind === 'Device'
+      && resource.resolution === 'Fixed'
+      && resource.topologyTargetId === authorization.controllerBindingId)) {
+    add('Operation', entityId, 'Controller Binding must be an exact Fixed Device resource of the Operation.');
+  }
+  const targetStation = topology.systems.find(system => (
+    system.systemId === authorization.targetStationSystemId && system.kind === 'Station'));
+  if (!targetStation
+      || targetStation.systemId === operation.stationSystemId
+      || !targetBinding
+      || !isSystemWithinStation(
+        authorization.targetSystemId,
+        authorization.targetStationSystemId,
+        topology)) {
+    add('Operation', entityId, 'Remote Station/System/Binding/Capability must resolve inside a different declared Station subtree.');
+  }
+  if (!targetCapability) {
+    add('Operation', entityId, 'Remote Capability/Action must match one topology capability contract.');
+  }
+}
+
+function isSystemWithinStation(
+  systemId: string,
+  stationSystemId: string,
+  topology: AutomationTopologyResponse
+): boolean {
+  let currentId: string | null = systemId;
+  for (let depth = 0; depth <= topology.systems.length && currentId; depth += 1) {
+    if (currentId === stationSystemId) {
+      return true;
+    }
+    currentId = topology.systems.find(system => system.systemId === currentId)?.parentSystemId ?? null;
+  }
+  return false;
 }
 
 function validateOperation(
@@ -137,6 +238,7 @@ function validateOperation(
   flowById: Map<string, ProcessDefinitionSummary>,
   configurationById: Map<string, ConfigurationSnapshotResponse>,
   profileById: Map<string, StationProfileResponse>,
+  topology: AutomationTopologyResponse | null,
   add: AddProblem
 ): void {
   const entityId = operation.operationId || 'operation';
@@ -154,6 +256,9 @@ function validateOperation(
   if (operation.stationSystemId && !stationById.has(operation.stationSystemId)) {
     add('Operation', entityId, `Station System '${operation.stationSystemId}' is not a Station in this Application.`);
   }
+
+
+  validateOperationResources(operation, topology, add);
 
   const flow = flowById.get(operation.flowDefinitionId);
   if (operation.flowDefinitionId && !flow) {
@@ -187,6 +292,63 @@ function validateOperation(
       'Operation',
       entityId,
       `Configuration Snapshot '${configuration.snapshotId}' does not freeze the selected Flow version.`);
+  }
+}
+
+function validateOperationResources(
+  operation: ProductionOperationRequest,
+  topology: AutomationTopologyResponse | null,
+  add: AddProblem
+): void {
+  const entityId = operation.operationId || 'operation';
+  validateUniqueIds(
+    operation.resources.map(resource => resource.bindingId),
+    'Operation',
+    'Operation Resource Binding IDs',
+    add);
+  const stationResources = operation.resources.filter(resource => resource.kind === 'Station');
+  if (stationResources.length !== 1
+      || stationResources[0]?.resolution !== 'Fixed'
+      || stationResources[0]?.topologyTargetId !== operation.stationSystemId) {
+    add('Operation', entityId, 'Exactly one Fixed Station resource must equal Station System.');
+  }
+  if (operation.resources.filter(resource => (
+    resource.kind === 'Slot' && resource.resolution !== 'Fixed')).length > 1) {
+    add('Operation', entityId, 'An Operation can declare at most one dynamic material Slot resource.');
+  }
+
+  for (const resource of operation.resources) {
+    validatePortableId(resource.bindingId, 'Resource Binding ID', 'Operation', entityId, add);
+    validateCanonicalText(resource.topologyTargetId, 'Resource topology target', 'Operation', entityId, add);
+    if (resource.kind !== 'Slot' && resource.resolution !== 'Fixed') {
+      add('Operation', entityId, `${resource.kind} resources only support Fixed resolution.`);
+    }
+    if (!topology || resource.kind === 'Station') {
+      continue;
+    }
+    const slot = topology.slots.find(candidate => candidate.slotId === resource.topologyTargetId);
+    const group = topology.slotGroups.find(candidate => candidate.slotGroupId === resource.topologyTargetId);
+    const system = topology.systems.find(candidate => candidate.systemId === resource.topologyTargetId);
+    const driver = topology.driverBindings.find(candidate => candidate.bindingId === resource.topologyTargetId);
+    const valid = resource.kind === 'Fixture'
+      ? group?.parentSystemId === operation.stationSystemId && group.kind === 'FixtureNest'
+      : resource.kind === 'Device'
+        ? system?.parentSystemId === operation.stationSystemId
+          || (driver !== undefined
+            && (driver.providerKind === 'DeviceInstance' || driver.providerKind === 'PluginCommand'))
+        : resource.kind === 'SlotGroup'
+          ? group?.parentSystemId === operation.stationSystemId
+          : resource.resolution === 'CurrentMaterialSlot'
+            ? resource.topologyTargetId === operation.stationSystemId
+            : resource.resolution === 'AvailableSlotInGroup'
+              ? group?.parentSystemId === operation.stationSystemId
+              : slot?.parentSystemId === operation.stationSystemId && slot.isEnabled;
+    if (!valid) {
+      add(
+        'Operation',
+        entityId,
+        `Resource '${resource.bindingId}' does not resolve to an enabled target in Station '${operation.stationSystemId}'.`);
+    }
   }
 }
 
@@ -444,80 +606,6 @@ function validateParallelGroups(
         group[0].transitionId,
         `Parallel Group '${groupId}' must use distinct fork and join Operations.`);
     }
-  }
-}
-
-function validateExternalResources(
-  adapters: ExternalTestProgramAdapterRequest[],
-  problems: ProductionDesignerProblem[],
-  add: AddProblem
-): ProductionDesignerProblem[] {
-  validateUniqueIds(adapters.map(adapter => adapter.adapterId), 'Resource', 'External Program Adapter IDs', add);
-  for (const adapter of adapters) {
-    const entityId = adapter.adapterId || 'external-program';
-    validatePortableId(adapter.adapterId, 'External Program Adapter ID', 'Resource', entityId, add);
-    validateCanonicalText(adapter.displayName, 'Adapter display name', 'Resource', entityId, add);
-    validateCanonicalText(adapter.capabilityId, 'Capability reference', 'Resource', entityId, add);
-    validateCanonicalText(adapter.commandName, 'Command name', 'Resource', entityId, add);
-    if ((adapter.executable === null) === (adapter.providerKey === null)) {
-      add('Resource', entityId, 'Select exactly one Application executable or Provider key.');
-    }
-    if (adapter.executable !== null
-        && !/^programs\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(adapter.executable)) {
-      add(
-        'Resource',
-        entityId,
-        'Executable must be an Application-relative portable path under programs/.');
-    }
-    if (adapter.providerKey !== null) {
-      validateCanonicalText(adapter.providerKey, 'Provider key', 'Resource', entityId, add);
-    }
-    if (!Number.isInteger(adapter.timeoutMilliseconds) || adapter.timeoutMilliseconds <= 0) {
-      add('Resource', entityId, 'Timeout must be a positive whole number of milliseconds.');
-    }
-    if (adapter.inputMappings.length === 0 || adapter.resultMappings.length === 0) {
-      add('Resource', entityId, 'Input and result mappings are required.');
-    }
-    const inputSources = new Set(adapter.inputMappings.map(mapping => mapping.source));
-    if (!inputSources.has('$product.identity') || !inputSources.has('$product.model')) {
-      add(
-        'Resource',
-        entityId,
-        'Input mappings must explicitly include $product.identity and $product.model.');
-    }
-    validateMappingTargets(
-      adapter.inputMappings.map(mapping => mapping.target),
-      'input mapping targets',
-      entityId,
-      add);
-    validateMappingTargets(
-      adapter.resultMappings.map(mapping => mapping.targetKey),
-      'result mapping targets',
-      entityId,
-      add);
-    const tokens = [
-      adapter.outcomeMapping.passedToken,
-      adapter.outcomeMapping.failedToken,
-      adapter.outcomeMapping.abortedToken
-    ];
-    if (tokens.some(token => !isCanonicalText(token)) || new Set(tokens).size !== tokens.length) {
-      add('Resource', entityId, 'Passed, Failed and Aborted tokens must be non-empty pairwise-distinct exact values.');
-    }
-  }
-  return problems;
-}
-
-function validateMappingTargets(
-  targets: string[],
-  label: string,
-  entityId: string,
-  add: AddProblem
-): void {
-  if (targets.some(target => !isCanonicalText(target))) {
-    add('Resource', entityId, `External program ${label} must be canonical text.`);
-  }
-  if (new Set(targets).size !== targets.length) {
-    add('Resource', entityId, `External program ${label} must be unique.`);
   }
 }
 

@@ -70,6 +70,7 @@ public sealed class InMemoryTraceRecordRepository : ITraceRecordRepository
     private static bool Matches(TraceRecord record, TraceRecordQuery query)
     {
         return (query.ProductionRunId is null || record.ProductionRunId.Value == query.ProductionRunId)
+               && (query.ProductionUnitId is null || record.ProductionUnitId.Value == query.ProductionUnitId)
             && MatchesOptional(record.ProductModelId, query.ProductModelId)
             && MatchesOptional(record.ProductionUnitIdentityInputKey, query.ProductionUnitIdentityInputKey)
             && MatchesOptional(record.ProductionUnitIdentityValue, query.ProductionUnitIdentityValue)

@@ -41,6 +41,12 @@ import {
   updateProcessDefinition,
   validateProcessDefinition
 } from './api';
+import { useEditorDocument } from './editor-workspace';
+import {
+  readEditorConflictRevision,
+  type EditorDocumentConflict,
+  type EditorProblem
+} from './editor-workspace-model';
 
 type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'Blockly' | 'PythonScript';
 type AddableProcessNodeKind = Exclude<ProcessNodeKind, 'Start'>;
@@ -85,6 +91,8 @@ interface ProcessDraft {
   selectedNodeId: string;
   nodes: ProcessNodeDraft[];
   transitions: ProcessTransitionDraft[];
+  revision: string;
+  dirty: boolean;
 }
 
 interface ProjectTargetOption {
@@ -226,6 +234,7 @@ export function ProcessWorkbench({
   const [blockHistoryBusy, setBlockHistoryBusy] = useState(false);
   const [projectTopology, setProjectTopology] = useState<AutomationTopologyResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const [conflict, setConflict] = useState<EditorDocumentConflict | null>(null);
 
   const activeApplication = activeWorkspace?.project.applications.find(
     application => application.applicationId === activeApplicationId)
@@ -382,7 +391,7 @@ export function ProcessWorkbench({
   ]);
 
   const mutateDraft = useCallback((updater: (current: ProcessDraft) => ProcessDraft) => {
-    setDraft(updater);
+    setDraft(current => ({ ...updater(current), dirty: true }));
     setSelectedDefinition(null);
     setValidationReport(null);
   }, []);
@@ -393,17 +402,16 @@ export function ProcessWorkbench({
     setEditingDefinitionId(null);
     setLoadedDefinitionStatus(null);
     setValidationReport(null);
+    setConflict(null);
   }, [blockCatalog]);
 
-  const saveDraft = useCallback(async () => {
+  const saveDraft = useCallback(async (force = false) => {
     if (!projectApplicationApiScope) {
-      onMessage('Open a project Application before saving a process.');
-      return;
+      throw new Error('Open a project Application before saving a process.');
     }
 
     if (isLoadedDefinitionReadOnly) {
-      onMessage('Published process definitions cannot be overwritten. Create a new draft to continue.');
-      return;
+      throw new Error('Published process definitions cannot be overwritten. Create a new draft to continue.');
     }
 
     setBusy(true);
@@ -412,16 +420,39 @@ export function ProcessWorkbench({
     try {
       const request = toCreateRequest(draft);
       const response = editingDefinitionId
-        ? await updateProcessDefinition(editingDefinitionId, request, projectApplicationApiScope)
+        ? await updateProcessDefinition(
+          editingDefinitionId,
+          request,
+          projectApplicationApiScope,
+          { revision: draft.revision, force })
         : await createProcessDefinition(request, projectApplicationApiScope);
       if (!response.ok || !response.body) {
+        if (response.status === 412) {
+          const currentRevision = readEditorConflictRevision(response.text);
+          if (currentRevision) {
+            setConflict({
+              loadedRevision: draft.revision,
+              currentRevision,
+              reload: async () => {
+                await reloadDraft();
+                setConflict(null);
+              },
+              overwrite: async () => {
+                await saveDraft(true);
+                setConflict(null);
+              }
+            });
+          }
+        }
         onMessage(`Process save failed: ${response.status} ${response.text}`);
-        return;
+        throw new Error(`Process save failed: ${response.status}`);
       }
 
       setSelectedDefinition(response.body);
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
+      setDraft(fromProcessDefinition(response.body));
+      setConflict(null);
       onMessage(`Saved ${response.body.processDefinitionId}`);
       await loadDefinitions();
     } finally {
@@ -458,7 +489,8 @@ export function ProcessWorkbench({
     try {
       const response = await publishProcessDefinition(
         selectedDefinition.processDefinitionId,
-        projectApplicationApiScope);
+        projectApplicationApiScope,
+        { revision: selectedDefinition.revision });
       if (!response.ok || !response.body) {
         onMessage(`Publish failed: ${response.status} ${response.text}`);
         return;
@@ -493,11 +525,27 @@ export function ProcessWorkbench({
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body));
+      setConflict(null);
       onMessage(`${response.body.processDefinitionId} loaded`);
     } finally {
       setBusy(false);
     }
   }, [blockCatalog, onMessage, projectApplicationApiScope]);
+
+  const reloadDraft = useCallback(async () => {
+    if (!editingDefinitionId || !projectApplicationApiScope) {
+      resetDraft();
+      return;
+    }
+    const response = await getProcessDefinition(editingDefinitionId, projectApplicationApiScope);
+    if (!response.ok || !response.body) {
+      throw new Error(`Process reload failed: ${response.status} ${response.text}`);
+    }
+    setSelectedDefinition(response.body);
+    setLoadedDefinitionStatus(response.body.status);
+    setDraft(fromProcessDefinition(response.body));
+    setValidationReport(null);
+  }, [editingDefinitionId, projectApplicationApiScope, resetDraft]);
 
   const updateDraftField = useCallback(<TKey extends keyof ProcessDraft>(
     key: TKey,
@@ -758,6 +806,25 @@ export function ProcessWorkbench({
     }));
   }, [mutateDraft]);
 
+  const editorProblems = useMemo<EditorProblem[]>(() => (validationReport?.issues ?? []).map(
+    (issue, index) => ({
+      id: `${issue.code}-${index + 1}`,
+      severity: issue.severity === 'Error' ? 'Error' : 'Warning',
+      message: issue.message,
+      targetId: draft.selectedNodeId || null
+    })), [draft.selectedNodeId, validationReport?.issues]);
+  useEditorDocument({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && !isLoadedDefinitionReadOnly,
+    save: () => saveDraft(),
+    revert: reloadDraft,
+    focus: targetId => {
+      if (targetId && draft.nodes.some(node => node.nodeId === targetId)) selectNode(targetId);
+    },
+    problems: editorProblems,
+    conflict
+  });
+
   return (
     <section className="process-workbench">
       <div className="panel process-editor-panel">
@@ -777,7 +844,7 @@ export function ProcessWorkbench({
           <button
             type="button"
             className="button primary"
-            onClick={saveDraft}
+            onClick={() => void saveDraft().catch(error => onMessage(String(error)))}
             disabled={!isBackendHealthy || busy || isLoadedDefinitionReadOnly}
             title={isLoadedDefinitionReadOnly
               ? 'Published definitions are read-only. Create a new draft to continue.'
@@ -828,7 +895,7 @@ export function ProcessWorkbench({
             />
           </aside>
 
-          <section className="process-stage">
+          <section className="process-canvas-shell">
             <details className="process-overview" open>
               <summary>
                 <div>
@@ -1058,6 +1125,7 @@ function NodeInspector({
           onClick={onRemoveNode}
           disabled={node.kind === 'Start'}
           title="Remove selected node"
+          data-testid="remove-process-node"
         >
           <Trash2 size={15} />
         </button>
@@ -2085,7 +2153,9 @@ function createDraft(): ProcessDraft {
         loopPolicy: 'None',
         maxTraversals: 1
       }
-    ]
+    ],
+    revision: '',
+    dirty: true
   };
 }
 
@@ -2214,7 +2284,9 @@ function fromProcessDefinition(definition: ProcessDefinitionResponse): ProcessDr
       label: transition.label ?? '',
       loopPolicy: parseTransitionLoopPolicy(transition.loopPolicy),
       maxTraversals: transition.maxTraversals ?? 1
-    }))
+    })),
+    revision: definition.revision,
+    dirty: false
   };
 }
 

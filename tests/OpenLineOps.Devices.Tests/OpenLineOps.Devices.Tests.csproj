@@ -35,6 +35,7 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Domain\OpenLineOps.Runtime.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj" />
   </ItemGroup>
 
 </Project>

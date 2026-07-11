@@ -135,6 +135,39 @@ public sealed class ProjectAutomationTopologyService : IProjectAutomationTopolog
             cancellationToken);
     }
 
+    public Task<Result<AutomationTopologyDetails>> UpdateDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        UpdateDriverBindingRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.UpdateDriverBindingAsync(
+                topologyId,
+                bindingId,
+                request,
+                cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<AutomationTopologyDetails>> DeleteDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.DeleteDriverBindingAsync(topologyId, bindingId, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<Result<AutomationTopologyDetails>> AddSlotGroupAsync(
         string projectId,
         string applicationId,

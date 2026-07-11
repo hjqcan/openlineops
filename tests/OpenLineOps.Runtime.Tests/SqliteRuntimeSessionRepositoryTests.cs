@@ -5,6 +5,7 @@ using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
@@ -92,8 +93,10 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             BaseTimeUtc,
             new RuntimeSessionTraceMetadata(
                 new ProductionRunId(Guid.Parse("20000000-0000-0000-0000-000000000001")),
+                new ProductionUnitId(Guid.Parse("21000000-0000-0000-0000-000000000001")),
                 "LINE-TRACE",
                 "OPERATION-TRACE",
+                "OPERATION-TRACE@0003",
                 3,
                 "STATION-SYSTEM-TRACE",
                 new ProductionUnitIdentity("PRODUCT-MODEL-TRACE", "barcode", "UNIT-TRACE-001"),
@@ -105,7 +108,8 @@ public sealed class SqliteRuntimeSessionRepositoryTests
                 "PROJECT-TRACE",
                 "APPLICATION-TRACE",
                 "PROJECT-SNAPSHOT-TRACE",
-                "TOPOLOGY-TRACE"));
+                "TOPOLOGY-TRACE",
+                RuntimeTestReleaseIdentity.ResourceFences("STATION-SYSTEM-TRACE")));
 
         await repository.SaveAsync(session);
 

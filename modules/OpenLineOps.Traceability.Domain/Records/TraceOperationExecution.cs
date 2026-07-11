@@ -170,7 +170,8 @@ public sealed record TraceOperationExecution
 
         if (ExecutionStatus == ExecutionStatus.Completed)
         {
-            if (RuntimeSessionStatus != TraceRuntimeSessionStatus.Completed
+            if (RuntimeSessionStatus is not (TraceRuntimeSessionStatus.Completed
+                    or TraceRuntimeSessionStatus.Reconciled)
                 || FailureCode is not null
                 || FailureReason is not null
                 || Judgement == ResultJudgement.Unknown)

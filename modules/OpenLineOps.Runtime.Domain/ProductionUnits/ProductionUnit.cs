@@ -1,4 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Entities;
+using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Operations;
 
@@ -29,15 +31,6 @@ public readonly record struct ProductionUnitId
     }
 }
 
-public enum ProductionUnitDisposition
-{
-    InProcess,
-    Completed,
-    Nonconforming,
-    Held,
-    Scrapped
-}
-
 public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 {
     private ProductionUnit(
@@ -56,8 +49,9 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
         LotId = lotId;
         RegisteredBy = ProductionMaterialGuard.Canonical(registeredBy, nameof(registeredBy));
         RegisteredAtUtc = ProductionMaterialGuard.Utc(registeredAtUtc, nameof(registeredAtUtc));
-        LastTransitionAtUtc = registeredAtUtc;
-        Disposition = ProductionUnitDisposition.InProcess;
+        LastLocationTransitionAtUtc = registeredAtUtc;
+        LastDispositionTransitionAtUtc = registeredAtUtc;
+        Disposition = ProductDisposition.InProcess;
     }
 
     public string ProductModelId { get; }
@@ -72,11 +66,24 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
     public DateTimeOffset RegisteredAtUtc { get; }
 
-    public DateTimeOffset LastTransitionAtUtc { get; private set; }
+    public DateTimeOffset LastLocationTransitionAtUtc { get; private set; }
 
-    public ProductionUnitDisposition Disposition { get; private set; }
+    public DateTimeOffset LastDispositionTransitionAtUtc { get; private set; }
 
-    public ProductionUnitDisposition? DispositionBeforeHold { get; private set; }
+    public DateTimeOffset LastTransitionAtUtc =>
+        LastLocationTransitionAtUtc >= LastDispositionTransitionAtUtc
+            ? LastLocationTransitionAtUtc
+            : LastDispositionTransitionAtUtc;
+
+    public ProductDisposition Disposition { get; private set; }
+
+    public ProductDisposition? DispositionBeforeHold { get; private set; }
+
+    public ProductionRunId? ActiveProductionRunId { get; private set; }
+
+    public ProductionRunId? LastProductionRunId { get; private set; }
+
+    public long LastProductionRunRevision { get; private set; }
 
     public string? DispositionReason { get; private set; }
 
@@ -113,9 +120,13 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
             snapshot.RegisteredBy,
             snapshot.RegisteredAtUtc)
         {
-            LastTransitionAtUtc = snapshot.LastTransitionAtUtc,
+            LastLocationTransitionAtUtc = snapshot.LastLocationTransitionAtUtc,
+            LastDispositionTransitionAtUtc = snapshot.LastDispositionTransitionAtUtc,
             Disposition = snapshot.Disposition,
             DispositionBeforeHold = snapshot.DispositionBeforeHold,
+            ActiveProductionRunId = snapshot.ActiveProductionRunId,
+            LastProductionRunId = snapshot.LastProductionRunId,
+            LastProductionRunRevision = snapshot.LastProductionRunRevision,
             DispositionReason = ProductionMaterialGuard.OptionalCanonical(
                 snapshot.DispositionReason,
                 nameof(snapshot.DispositionReason)),
@@ -153,10 +164,10 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             arrivedAtUtc,
-            LastTransitionAtUtc,
+            LastLocationTransitionAtUtc,
             $"Production Unit {Id}");
         Location = stationLocation;
-        LastTransitionAtUtc = arrivedAtUtc;
+        LastLocationTransitionAtUtc = arrivedAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit arrived at Station queue.");
     }
 
@@ -183,19 +194,128 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             transferredAtUtc,
-            LastTransitionAtUtc,
+            LastLocationTransitionAtUtc,
             $"Production Unit {Id}");
         Location = destination;
-        LastTransitionAtUtc = transferredAtUtc;
+        LastLocationTransitionAtUtc = transferredAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit location transferred.");
+    }
+
+    public RuntimeOperationResult ReserveProductionRun(
+        ProductionRunId productionRunId,
+        DateTimeOffset reservedAtUtc)
+    {
+        if (productionRunId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("Production Run id cannot be empty.", nameof(productionRunId));
+        }
+
+        if (ActiveProductionRunId is { } activeRunId)
+        {
+            return activeRunId == productionRunId
+                ? RuntimeOperationResult.Accepted("Production Unit is already reserved for this run.")
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.ProductionUnitAlreadyActive",
+                    $"Production Unit {Id} is already reserved for Production Run {activeRunId}.");
+        }
+
+        if (Disposition != ProductDisposition.InProcess)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitRunReservationRejected",
+                $"Production Unit {Id} cannot enter a run while its disposition is {Disposition}.");
+        }
+
+        ProductionMaterialGuard.RequireMonotonic(
+            reservedAtUtc,
+            LastDispositionTransitionAtUtc,
+            $"Production Unit {Id}");
+        ActiveProductionRunId = productionRunId;
+        LastProductionRunId = productionRunId;
+        LastProductionRunRevision = 0;
+        LastDispositionTransitionAtUtc = reservedAtUtc;
+        return RuntimeOperationResult.Accepted("Production Unit reserved for Production Run.");
+    }
+
+    public RuntimeOperationResult SynchronizeProductionRun(
+        ProductionRunId productionRunId,
+        long runRevision,
+        ProductDisposition disposition,
+        bool isTerminal,
+        string? reason,
+        DateTimeOffset occurredAtUtc)
+    {
+        if (ActiveProductionRunId != productionRunId)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitRunReservationMismatch",
+                $"Production Unit {Id} is not reserved for Production Run {productionRunId}.");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(runRevision);
+        if (LastProductionRunId != productionRunId
+            || runRevision <= LastProductionRunRevision)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitRunRevisionRejected",
+                $"Production Unit {Id} cannot apply Production Run {productionRunId} revision {runRevision} "
+                + $"after {LastProductionRunId}/{LastProductionRunRevision}.");
+        }
+
+        if (!Enum.IsDefined(disposition))
+        {
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        }
+
+
+        if (!isTerminal && disposition is ProductDisposition.Completed or ProductDisposition.Scrapped)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitRunStateInvalid",
+                $"Active Production Run {productionRunId} cannot project terminal disposition {disposition}.");
+        }
+
+        if (isTerminal && disposition == ProductDisposition.InProcess)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitRunStateInvalid",
+                $"Terminal Production Run {productionRunId} cannot retain InProcess disposition.");
+        }
+
+        ProductionMaterialGuard.RequireMonotonic(
+            occurredAtUtc,
+            LastDispositionTransitionAtUtc,
+            $"Production Unit {Id}");
+        Disposition = disposition;
+        DispositionBeforeHold = null;
+        DispositionReason = disposition is ProductDisposition.Nonconforming
+            or ProductDisposition.Held
+            or ProductDisposition.Scrapped
+                ? ProductionMaterialGuard.Canonical(
+                    reason ?? $"Production Run {productionRunId} entered {disposition}.",
+                    nameof(reason))
+                : null;
+        ActiveProductionRunId = isTerminal ? null : productionRunId;
+        LastProductionRunId = productionRunId;
+        LastProductionRunRevision = runRevision;
+        LastDispositionTransitionAtUtc = occurredAtUtc;
+        ValidateState();
+        return RuntimeOperationResult.Accepted("Production Unit synchronized with Production Run.");
     }
 
     public RuntimeOperationResult Hold(string reason, DateTimeOffset heldAtUtc)
     {
         var normalizedReason = ProductionMaterialGuard.Canonical(reason, nameof(reason));
-        if (Disposition is ProductionUnitDisposition.Completed
-            or ProductionUnitDisposition.Scrapped
-            or ProductionUnitDisposition.Held)
+        if (ActiveProductionRunId is not null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitActiveRunConflict",
+                $"Production Unit {Id} disposition is controlled by active Production Run {ActiveProductionRunId}.");
+        }
+
+        if (Disposition is ProductDisposition.Completed
+            or ProductDisposition.Scrapped
+            or ProductDisposition.Held)
         {
             return RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitHoldRejected",
@@ -204,18 +324,25 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             heldAtUtc,
-            LastTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             $"Production Unit {Id}");
         DispositionBeforeHold = Disposition;
-        Disposition = ProductionUnitDisposition.Held;
+        Disposition = ProductDisposition.Held;
         DispositionReason = normalizedReason;
-        LastTransitionAtUtc = heldAtUtc;
+        LastDispositionTransitionAtUtc = heldAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit held.");
     }
 
     public RuntimeOperationResult Release(DateTimeOffset releasedAtUtc)
     {
-        if (Disposition != ProductionUnitDisposition.Held || DispositionBeforeHold is null)
+        if (ActiveProductionRunId is not null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitActiveRunConflict",
+                $"Production Unit {Id} disposition is controlled by active Production Run {ActiveProductionRunId}.");
+        }
+
+        if (Disposition != ProductDisposition.Held || DispositionBeforeHold is null)
         {
             return RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitReleaseRejected",
@@ -224,19 +351,26 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             releasedAtUtc,
-            LastTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             $"Production Unit {Id}");
         Disposition = DispositionBeforeHold.Value;
         DispositionBeforeHold = null;
         DispositionReason = null;
-        LastTransitionAtUtc = releasedAtUtc;
+        LastDispositionTransitionAtUtc = releasedAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit released.");
     }
 
     public RuntimeOperationResult MarkNonconforming(string reason, DateTimeOffset markedAtUtc)
     {
         var normalizedReason = ProductionMaterialGuard.Canonical(reason, nameof(reason));
-        if (Disposition != ProductionUnitDisposition.InProcess)
+        if (ActiveProductionRunId is not null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitActiveRunConflict",
+                $"Production Unit {Id} disposition is controlled by active Production Run {ActiveProductionRunId}.");
+        }
+
+        if (Disposition != ProductDisposition.InProcess)
         {
             return RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitNonconformingRejected",
@@ -245,17 +379,24 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             markedAtUtc,
-            LastTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             $"Production Unit {Id}");
-        Disposition = ProductionUnitDisposition.Nonconforming;
+        Disposition = ProductDisposition.Nonconforming;
         DispositionReason = normalizedReason;
-        LastTransitionAtUtc = markedAtUtc;
+        LastDispositionTransitionAtUtc = markedAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit marked nonconforming.");
     }
 
     public RuntimeOperationResult Complete(DateTimeOffset completedAtUtc)
     {
-        if (Disposition != ProductionUnitDisposition.InProcess)
+        if (ActiveProductionRunId is not null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitActiveRunConflict",
+                $"Production Unit {Id} disposition is controlled by active Production Run {ActiveProductionRunId}.");
+        }
+
+        if (Disposition != ProductDisposition.InProcess)
         {
             return RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitCompleteRejected",
@@ -264,18 +405,25 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             completedAtUtc,
-            LastTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             $"Production Unit {Id}");
-        Disposition = ProductionUnitDisposition.Completed;
+        Disposition = ProductDisposition.Completed;
         DispositionReason = null;
-        LastTransitionAtUtc = completedAtUtc;
+        LastDispositionTransitionAtUtc = completedAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit completed.");
     }
 
     public RuntimeOperationResult Scrap(string reason, DateTimeOffset scrappedAtUtc)
     {
         var normalizedReason = ProductionMaterialGuard.Canonical(reason, nameof(reason));
-        if (Disposition is ProductionUnitDisposition.Completed or ProductionUnitDisposition.Scrapped)
+        if (ActiveProductionRunId is not null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionUnitActiveRunConflict",
+                $"Production Unit {Id} disposition is controlled by active Production Run {ActiveProductionRunId}.");
+        }
+
+        if (Disposition is ProductDisposition.Completed or ProductDisposition.Scrapped)
         {
             return RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitScrapRejected",
@@ -284,12 +432,12 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
         ProductionMaterialGuard.RequireMonotonic(
             scrappedAtUtc,
-            LastTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             $"Production Unit {Id}");
-        Disposition = ProductionUnitDisposition.Scrapped;
+        Disposition = ProductDisposition.Scrapped;
         DispositionBeforeHold = null;
         DispositionReason = normalizedReason;
-        LastTransitionAtUtc = scrappedAtUtc;
+        LastDispositionTransitionAtUtc = scrappedAtUtc;
         return RuntimeOperationResult.Accepted("Production Unit scrapped.");
     }
 
@@ -303,17 +451,21 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
             LotId,
             RegisteredBy,
             RegisteredAtUtc,
-            LastTransitionAtUtc,
+            LastLocationTransitionAtUtc,
+            LastDispositionTransitionAtUtc,
             Disposition,
             DispositionBeforeHold,
+            ActiveProductionRunId,
+            LastProductionRunId,
+            LastProductionRunRevision,
             DispositionReason,
             Location);
     }
 
     private RuntimeOperationResult RequireMovable()
     {
-        return Disposition is ProductionUnitDisposition.InProcess
-            or ProductionUnitDisposition.Nonconforming
+        return Disposition is ProductDisposition.InProcess
+            or ProductDisposition.Nonconforming
             ? RuntimeOperationResult.Accepted()
             : RuntimeOperationResult.Rejected(
                 "Runtime.ProductionUnitMovementRejected",
@@ -322,11 +474,32 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
 
     private void ValidateState()
     {
-        ProductionMaterialGuard.Utc(LastTransitionAtUtc, nameof(LastTransitionAtUtc));
-        if (LastTransitionAtUtc < RegisteredAtUtc)
+        ProductionMaterialGuard.Utc(
+            LastLocationTransitionAtUtc,
+            nameof(LastLocationTransitionAtUtc));
+        ProductionMaterialGuard.Utc(
+            LastDispositionTransitionAtUtc,
+            nameof(LastDispositionTransitionAtUtc));
+        if (LastLocationTransitionAtUtc < RegisteredAtUtc
+            || LastDispositionTransitionAtUtc < RegisteredAtUtc)
         {
             throw new InvalidOperationException(
                 "Production Unit transition time precedes registration time.");
+        }
+
+
+        if (LastProductionRunRevision < 0
+            || LastProductionRunId is null && LastProductionRunRevision != 0
+            || ActiveProductionRunId is not null && LastProductionRunId != ActiveProductionRunId)
+        {
+            throw new InvalidOperationException("Production Unit run reservation state is inconsistent.");
+        }
+
+        if (ActiveProductionRunId is not null
+            && Disposition is (ProductDisposition.Completed or ProductDisposition.Scrapped))
+        {
+            throw new InvalidOperationException(
+                "An active Production Run cannot coexist with a terminal Production Unit disposition.");
         }
 
         if (!Enum.IsDefined(Disposition)
@@ -335,26 +508,28 @@ public sealed class ProductionUnit : AggregateRoot<ProductionUnitId>
             throw new InvalidOperationException("Production Unit disposition is invalid.");
         }
 
-        var holdStateIsValid = Disposition == ProductionUnitDisposition.Held
-            ? DispositionBeforeHold is ProductionUnitDisposition.InProcess
-                or ProductionUnitDisposition.Nonconforming
-                && DispositionReason is not null
+        var holdStateIsValid = Disposition == ProductDisposition.Held
+            ? DispositionReason is not null
+              && (DispositionBeforeHold is null && LastProductionRunId is not null
+                  || ActiveProductionRunId is null
+                  && DispositionBeforeHold is (ProductDisposition.InProcess
+                      or ProductDisposition.Nonconforming))
             : DispositionBeforeHold is null;
         if (!holdStateIsValid)
         {
             throw new InvalidOperationException("Production Unit hold state is inconsistent.");
         }
 
-        if (Disposition is ProductionUnitDisposition.Nonconforming
-            or ProductionUnitDisposition.Scrapped
+        if (Disposition is ProductDisposition.Nonconforming
+            or ProductDisposition.Scrapped
             && DispositionReason is null)
         {
             throw new InvalidOperationException(
                 $"Production Unit disposition {Disposition} requires a reason.");
         }
 
-        if (Disposition is ProductionUnitDisposition.InProcess
-            or ProductionUnitDisposition.Completed
+        if (Disposition is ProductDisposition.InProcess
+            or ProductDisposition.Completed
             && DispositionReason is not null)
         {
             throw new InvalidOperationException(
@@ -371,8 +546,18 @@ public sealed record ProductionUnitSnapshot(
     ProductionLotId? LotId,
     string RegisteredBy,
     DateTimeOffset RegisteredAtUtc,
-    DateTimeOffset LastTransitionAtUtc,
-    ProductionUnitDisposition Disposition,
-    ProductionUnitDisposition? DispositionBeforeHold,
+    DateTimeOffset LastLocationTransitionAtUtc,
+    DateTimeOffset LastDispositionTransitionAtUtc,
+    ProductDisposition Disposition,
+    ProductDisposition? DispositionBeforeHold,
+    ProductionRunId? ActiveProductionRunId,
+    ProductionRunId? LastProductionRunId,
+    long LastProductionRunRevision,
     string? DispositionReason,
-    MaterialLocation? Location);
+    MaterialLocation? Location)
+{
+    public DateTimeOffset LastTransitionAtUtc =>
+        LastLocationTransitionAtUtc >= LastDispositionTransitionAtUtc
+            ? LastLocationTransitionAtUtc
+            : LastDispositionTransitionAtUtc;
+}

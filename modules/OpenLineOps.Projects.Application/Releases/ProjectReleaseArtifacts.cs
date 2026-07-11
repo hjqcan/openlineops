@@ -2,10 +2,32 @@ using System.Text.Json.Serialization;
 
 namespace OpenLineOps.Projects.Application.Releases;
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record ProjectReleaseManifest(
+    string Schema,
+    int SchemaVersion,
+    string SnapshotId,
+    string ProjectId,
+    string ApplicationId,
+    DateTimeOffset PublishedAtUtc,
+    string SourceApplicationRelativePath,
+    string ApplicationProjectRelativePath,
+    ProjectReleaseSourceMetadata Metadata,
+    ProjectReleaseSourceFile[] Files,
+    string ContentSha256)
+{
+    public const string RequiredSchema = "openlineops.project-release-artifact";
+
+    public const int RequiredSchemaVersion = 1;
+
+    public const string FileName = "release.json";
+}
+
 public sealed record ProjectReleaseSourceMetadata(
     string TopologyId,
     IReadOnlyCollection<string> LayoutIds,
     ProjectReleaseProductionLine ProductionLine,
+    IReadOnlyCollection<ProjectReleaseExternalProgramResource> ExternalProgramResources,
     IReadOnlyCollection<ProjectReleaseCapabilityBinding> CapabilityBindings,
     IReadOnlyCollection<ProjectReleaseTargetReference> TargetReferences,
     IReadOnlyCollection<string> BlockVersionIds,
@@ -19,7 +41,7 @@ public sealed record ProjectReleaseProductionLine(
     string EntryOperationId,
     IReadOnlyCollection<ProjectReleaseOperation> Operations,
     IReadOnlyCollection<ProjectReleaseRouteTransition> Transitions,
-    IReadOnlyCollection<ProjectReleaseExternalTestProgramAdapter> ExternalTestProgramAdapters);
+    IReadOnlyCollection<ProjectReleaseLineControllerAuthorization> LineControllerAuthorizations);
 
 public sealed record ProjectReleaseProductModel(
     string ProductModelId,
@@ -36,7 +58,41 @@ public sealed record ProjectReleaseOperation(
     string FlowIrSchema,
     string FlowIrSha256,
     string FlowIrCanonicalJson,
-    IReadOnlyCollection<string> BlockVersionIds);
+    IReadOnlyCollection<string> BlockVersionIds,
+    IReadOnlyCollection<ProjectReleaseOperationResource> Resources,
+    IReadOnlyCollection<ProjectReleaseAuthorizedAction> AuthorizedActions);
+
+public sealed record ProjectReleaseOperationResource(
+    string BindingId,
+    string Kind,
+    string TopologyTargetId,
+    string Resolution,
+    IReadOnlyCollection<string> EligibleSlotIds);
+
+public sealed record ProjectReleaseAuthorizedAction(
+    string ActionId,
+    string NodeId,
+    string Kind,
+    string RequiredCapability,
+    string CommandName,
+    string TargetKind,
+    string TargetId,
+    long TimeoutMilliseconds,
+    string? LineControllerAuthorizationId);
+
+public sealed record ProjectReleaseLineControllerAuthorization(
+    string AuthorizationId,
+    string OperationId,
+    string ActionId,
+    string ControllerSystemId,
+    string ControllerBindingId,
+    string ControllerCapabilityId,
+    string ControllerAction,
+    string TargetStationSystemId,
+    string TargetSystemId,
+    string TargetBindingId,
+    string TargetCapabilityId,
+    string TargetAction);
 
 public sealed record ProjectReleaseRouteTransition(
     string TransitionId,
@@ -50,39 +106,68 @@ public sealed record ProjectReleaseRouteTransition(
     string? ExpectedOutputKind,
     string? ExpectedOutputValue);
 
-public sealed record ProjectReleaseExternalTestProgramAdapter(
-    string AdapterId,
+public sealed record ProjectReleaseExternalProgramResource(
+    string ResourceId,
     string DisplayName,
     string CapabilityId,
     string CommandName,
     string LaunchKind,
-    string? Executable,
+    string? EntryPoint,
+    string? ResourceProviderKind,
     string? ProviderKey,
     IReadOnlyCollection<string> ArgumentTemplates,
-    IReadOnlyCollection<ProjectReleaseExternalTestProgramInputMapping> InputMappings,
-    IReadOnlyCollection<ProjectReleaseExternalTestProgramResultMapping> ResultMappings,
-    ProjectReleaseExternalTestProgramOutcomeMapping OutcomeMapping,
-    long TimeoutMilliseconds);
+    IReadOnlyCollection<ProjectReleaseExternalProgramInputMapping> InputMappings,
+    IReadOnlyCollection<ProjectReleaseExternalProgramResultMapping> ResultMappings,
+    ProjectReleaseExternalProgramOutcomeMapping OutcomeMapping,
+    ProjectReleaseExternalProgramPermissionProfile PermissionProfile,
+    ProjectReleaseExternalProgramExecutionLimits ExecutionLimits,
+    IReadOnlyCollection<ProjectReleaseExternalProgramFile> Files,
+    string ContentSha256,
+    string ResourceRelativePath);
 
-public sealed record ProjectReleaseExternalTestProgramInputMapping(
+public sealed record ProjectReleaseExternalProgramInputMapping(
     string Source,
     string Target);
 
-public sealed record ProjectReleaseExternalTestProgramResultMapping(
+public sealed record ProjectReleaseExternalProgramResultMapping(
     string SourcePath,
-    string TargetKey);
+    string TargetKey,
+    string ValueKind);
 
-public sealed record ProjectReleaseExternalTestProgramOutcomeMapping(
+public sealed record ProjectReleaseExternalProgramOutcomeMapping(
     string SourcePath,
     string PassedToken,
     string FailedToken,
     string AbortedToken);
 
+public sealed record ProjectReleaseExternalProgramPermissionProfile(
+    string ProfileName,
+    bool NetworkAccessAllowed,
+    IReadOnlyCollection<string> AllowedEnvironmentVariables);
+
+public sealed record ProjectReleaseExternalProgramExecutionLimits(
+    long TimeoutMilliseconds,
+    int MaximumProcessCount,
+    long MaximumWorkingSetBytes,
+    long MaximumCpuTimeMilliseconds,
+    int MaximumStandardOutputBytes,
+    int MaximumStandardErrorBytes,
+    int MaximumArtifactCount,
+    long MaximumArtifactBytes,
+    long MaximumTotalArtifactBytes);
+
+public sealed record ProjectReleaseExternalProgramFile(
+    string RelativePath,
+    long SizeBytes,
+    string Sha256);
+
 public sealed record ProjectReleaseCapabilityBinding(
     string CapabilityId,
     string BindingId,
     string ProviderKind,
-    string ProviderKey);
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId);
 
 public sealed record ProjectReleaseTargetReference(
     string Kind,
@@ -93,6 +178,8 @@ public sealed record ProjectReleasePackageDependencyLock(
     string BindingId,
     string ProviderKind,
     string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId,
     string PackageId,
     string PluginId,
     string PackageVersion,

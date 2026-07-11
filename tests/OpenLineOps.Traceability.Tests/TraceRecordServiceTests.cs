@@ -7,6 +7,7 @@ namespace OpenLineOps.Traceability.Tests;
 public sealed class TraceRecordServiceTests
 {
     private static readonly Guid ProductionRunId = Guid.Parse("90000000-0000-0000-0000-000000000001");
+    private static readonly Guid ProductionUnitId = Guid.Parse("90000000-0000-0000-0000-000000000004");
     private static readonly Guid RuntimeSessionId = Guid.Parse("90000000-0000-0000-0000-000000000002");
     private static readonly Guid AuditEntryId = Guid.Parse("90000000-0000-0000-0000-000000000003");
 
@@ -39,6 +40,7 @@ public sealed class TraceRecordServiceTests
     {
         return new CreateTraceRecordRequest(
             ProductionRunId,
+            ProductionUnitId,
             "project-a",
             "application-a",
             "snapshot-a",
@@ -87,6 +89,10 @@ public sealed class TraceRecordServiceTests
                     [],
                     [])
             ],
+            [],
+            [],
+            [],
+            [],
             [],
             [
                 new CreateAuditEntryRequest(

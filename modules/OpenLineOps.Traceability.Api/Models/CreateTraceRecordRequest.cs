@@ -2,6 +2,7 @@ namespace OpenLineOps.Traceability.Api.Models;
 
 public sealed record CreateTraceRecordRequest(
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string? ProjectId,
     string? ApplicationId,
     string? ProjectSnapshotId,
@@ -23,7 +24,61 @@ public sealed record CreateTraceRecordRequest(
     string? FailureReason,
     IReadOnlyCollection<CreateTraceOperationExecutionRequest>? Operations,
     IReadOnlyCollection<CreateTraceRouteDecisionRequest>? RouteDecisions,
+    IReadOnlyCollection<CreateTraceMaterialGenealogyRequest>? Genealogy,
+    IReadOnlyCollection<CreateTraceMaterialLocationTransitionRequest>? MaterialLocationTransitions,
+    IReadOnlyCollection<CreateTraceSlotOccupancyTransitionRequest>? SlotOccupancyTransitions,
+    IReadOnlyCollection<CreateTraceDispositionTransitionRequest>? DispositionTransitions,
     IReadOnlyCollection<CreateAuditEntryRequest>? AuditEntries);
+
+public sealed record CreateTraceMaterialLocationRequest(
+    string? Kind,
+    string? LineId,
+    string? StationSystemId,
+    string? SlotId,
+    string? CarrierId,
+    string? CarrierPositionId);
+
+public sealed record CreateTraceMaterialLocationTransitionRequest(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string? MaterialKind,
+    string? MaterialId,
+    CreateTraceMaterialLocationRequest? Source,
+    CreateTraceMaterialLocationRequest? Destination,
+    string? ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record CreateTraceSlotOccupancyTransitionRequest(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string? LineId,
+    string? StationSystemId,
+    string? SlotId,
+    string? MaterialKind,
+    string? MaterialId,
+    string? PreviousStatus,
+    string? CurrentStatus,
+    string? ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record CreateTraceDispositionTransitionRequest(
+    Guid EvidenceId,
+    Guid ProductionUnitId,
+    Guid? ProductionRunId,
+    string? PreviousDisposition,
+    string? CurrentDisposition,
+    string? Reason,
+    string? ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record CreateTraceMaterialGenealogyRequest(
+    Guid LinkId,
+    Guid ParentProductionUnitId,
+    Guid ChildProductionUnitId,
+    string? Relationship,
+    string? OperationId,
+    string? LinkedBy,
+    DateTimeOffset LinkedAtUtc);
 
 public sealed record CreateTraceOperationExecutionRequest(
     string? OperationRunId,

@@ -12,6 +12,7 @@ namespace OpenLineOps.Runner;
 public sealed class RunnerCommand
 {
     private readonly IAutomationProjectWorkspaceService _workspaceService;
+    private readonly IRunnerProductionUnitPreparer _productionUnitPreparer;
     private readonly IProjectReleaseProductionRunLauncher _productionRunLauncher;
     private readonly IProductionRunRunner _productionRunRunner;
     private readonly IProductionRunRecoveryService _recoveryService;
@@ -19,12 +20,14 @@ public sealed class RunnerCommand
 
     public RunnerCommand(
         IAutomationProjectWorkspaceService workspaceService,
+        IRunnerProductionUnitPreparer productionUnitPreparer,
         IProjectReleaseProductionRunLauncher productionRunLauncher,
         IProductionRunRunner productionRunRunner,
         IProductionRunRecoveryService recoveryService,
         IProductionRunTerminalOutboxDispatcher terminalOutboxDispatcher)
     {
         _workspaceService = workspaceService;
+        _productionUnitPreparer = productionUnitPreparer;
         _productionRunLauncher = productionRunLauncher;
         _productionRunRunner = productionRunRunner;
         _recoveryService = recoveryService;
@@ -110,18 +113,30 @@ public sealed class RunnerCommand
         await _recoveryService.RecoverAsync(cancellationToken).ConfigureAwait(false);
         await _terminalOutboxDispatcher.DrainAsync(cancellationToken).ConfigureAwait(false);
 
+        var preparation = await _productionUnitPreparer
+            .PrepareAsync(snapshot, options, cancellationToken)
+            .ConfigureAwait(false);
+        if (preparation.IsFailure)
+        {
+            return await WriteFailureAsync(
+                IsMissingRelease(preparation.Error.Code)
+                    ? RunnerExitCodes.ImmutableReleaseMissing
+                    : RunnerExitCodes.ProductionRunStartRejected,
+                projectTarget,
+                preparation.Error.Code,
+                preparation.Error.Message,
+                output,
+                workspace,
+                snapshot).ConfigureAwait(false);
+        }
+
         var submission = await _productionRunLauncher
             .SubmitAsync(
                 snapshot,
                 new SubmitProjectReleaseProductionRunRequest(
                     options.ProductionRunId,
-                    options.ProductionUnitIdentityValue,
-                    options.ActorId,
-                    options.LotId,
-                    options.CarrierId,
-                    options.SlotId,
-                    options.FixtureId,
-                    options.DeviceId),
+                    options.ProductionUnitId,
+                    options.ActorId),
                 cancellationToken)
             .ConfigureAwait(false);
         if (submission.IsFailure)

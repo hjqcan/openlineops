@@ -13,7 +13,13 @@ public sealed class DurableStationJobGateway(IStationJobCoordinationStore store)
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        _ = await store.TryEnqueueAsync(request, cancellationToken).ConfigureAwait(false);
+        var resourceLeaseChanges = request.ResourceFences
+            .OrderBy(static fence => fence.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static fence => fence.ResourceId, StringComparer.Ordinal)
+            .Select(fence => StationDispatchMessageIdentity.CreateLeaseGranted(request, fence))
+            .ToArray();
+        _ = await store.TryEnqueueAsync(request, resourceLeaseChanges, cancellationToken)
+            .ConfigureAwait(false);
         while (true)
         {
             var completion = await store.GetCompletionAsync(request.IdempotencyKey, cancellationToken)
@@ -32,5 +38,9 @@ public interface IStationJobOutboxPublisher
 {
     ValueTask PublishAsync(
         StationJobRequested request,
+        CancellationToken cancellationToken = default);
+
+    ValueTask PublishAsync(
+        ResourceLeaseChanged change,
         CancellationToken cancellationToken = default);
 }

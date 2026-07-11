@@ -24,6 +24,8 @@ public sealed class ProjectReleaseProductionRunLauncherTests
 
     private static readonly Guid RunId =
         Guid.Parse("00000000-0000-0000-0000-000000000123");
+    private static readonly Guid ProductionUnitId =
+        Guid.Parse("00000000-0000-0000-0000-000000000124");
 
     [Fact]
     public async Task SubmitRejectsReleaseMetadataMismatchBeforeResolvingConfigurations()
@@ -69,6 +71,52 @@ public sealed class ProjectReleaseProductionRunLauncherTests
     }
 
     [Fact]
+    public async Task SubmitRejectsDuplicatePublishedSnapshotFrozenIdentities()
+    {
+        var snapshot = Snapshot();
+        var binding = Assert.Single(snapshot.CapabilityBindings);
+        var releaseStore = new RecordingReleaseStore(OpenedRelease());
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            releaseStore,
+            new RecordingConfigurationResolver([]),
+            new RecordingProductionRunCoordinator());
+
+        var result = await launcher.SubmitAsync(
+            snapshot with { CapabilityBindings = [binding, binding] },
+            SubmitRequest());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Conflict.Projects.ProjectReleaseMetadataMismatch", result.Error.Code);
+        Assert.Contains("duplicate frozen identities", result.Error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SubmitRejectsDuplicateReleaseFrozenIdentities()
+    {
+        var release = OpenedRelease();
+        var target = release.Metadata.TargetReferences.First();
+        release = release with
+        {
+            Metadata = release.Metadata with
+            {
+                TargetReferences = [.. release.Metadata.TargetReferences, target]
+            }
+        };
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            new RecordingReleaseStore(release),
+            new RecordingConfigurationResolver([]),
+            new RecordingProductionRunCoordinator());
+
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Conflict.Projects.ProjectReleaseMetadataMismatch", result.Error.Code);
+        Assert.Contains("duplicate frozen identities", result.Error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SubmitBuildsPortableGraphAndFencedResourcesFromImmutableRelease()
     {
         var release = OpenedRelease(operationCount: 2, includeCondition: true);
@@ -99,11 +147,9 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Assert.Equal("snapshot.main", request.ProjectSnapshotId);
         Assert.Equal("topology.main", request.TopologyId);
         Assert.Equal("line.main", request.ProductionLineDefinitionId);
-        Assert.Equal("product.main", request.ProductionUnitIdentity.ModelId);
-        Assert.Equal("serialNumber", request.ProductionUnitIdentity.InputKey);
-        Assert.Equal("UNIT-1", request.ProductionUnitIdentity.Value);
-        Assert.Equal("lot-1", request.LotId);
-        Assert.Equal("carrier-1", request.CarrierId);
+        Assert.Equal(ProductionUnitId, request.ProductionUnitId.Value);
+        Assert.Equal("product.main", request.FrozenProductModelId);
+        Assert.Equal("serialNumber", request.FrozenIdentityInputKey);
         Assert.Equal("operation.main", request.EntryOperationId);
         Assert.Equal(2, request.Operations.Count);
 
@@ -156,7 +202,140 @@ public sealed class ProjectReleaseProductionRunLauncherTests
     }
 
     [Fact]
-    public async Task SubmitRejectsPaddedProductionUnitIdentityWithoutOpeningRelease()
+    public async Task SubmitCreatesOnlyFrozenFixedLeasesAndMaterialSlotPolicy()
+    {
+        var release = OpenedRelease();
+        var operation = Assert.Single(release.Metadata.ProductionLine.Operations);
+        release = release with
+        {
+            Metadata = release.Metadata with
+            {
+                ProductionLine = release.Metadata.ProductionLine with
+                {
+                    Operations = [operation with
+                    {
+                        Resources =
+                        [
+                            .. operation.Resources,
+                            new ProjectReleaseOperationResource(
+                                "resource.fixture",
+                                "Fixture",
+                                "fixture.main",
+                                "Fixed",
+                                []),
+                            new ProjectReleaseOperationResource(
+                                "resource.device",
+                                "Device",
+                                "device.main",
+                                "Fixed",
+                                []),
+                            new ProjectReleaseOperationResource(
+                                "resource.group",
+                                "SlotGroup",
+                                "group.main",
+                                "Fixed",
+                                []),
+                            new ProjectReleaseOperationResource(
+                                "resource.slot.fixed",
+                                "Slot",
+                                "slot.fixed",
+                                "Fixed",
+                                []),
+                            new ProjectReleaseOperationResource(
+                                "resource.slot.material",
+                                "Slot",
+                                "station.main",
+                                "CurrentMaterialSlot",
+                                [])
+                        ]
+                    }]
+                }
+            }
+        };
+        var coordinator = new RecordingProductionRunCoordinator();
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            new RecordingReleaseStore(release),
+            new RecordingConfigurationResolver(
+                [RuntimeConfiguration("configuration.main", "station.main")]),
+            coordinator);
+
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
+
+        Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
+        var plan = Assert.Single(Assert.IsType<SubmitProductionRunRequest>(coordinator.LastRequest).Operations);
+        Assert.Equal(
+            [ResourceKind.Station, ResourceKind.Slot, ResourceKind.Fixture, ResourceKind.Device, ResourceKind.SlotGroup],
+            plan.Definition.ResourceRequirements.Select(resource => resource.Kind));
+        Assert.Contains(
+            new ResourceRequirement(ResourceKind.Slot, "line.main/station.main/slot.fixed"),
+            plan.Definition.ResourceRequirements);
+        Assert.Equal(
+            MaterialSlotResolution.CurrentMaterialSlot,
+            plan.Definition.MaterialSlotRequirement?.Resolution);
+        Assert.Equal("station.main", plan.Definition.MaterialSlotRequirement?.TopologyTargetId);
+    }
+
+    [Fact]
+    public async Task SubmitAddsExactRemoteStationAndBindingLeasesForFrozenLineControllerGrant()
+    {
+        var release = OpenedRelease();
+        var operation = Assert.Single(release.Metadata.ProductionLine.Operations);
+        var authorizedAction = Assert.Single(operation.AuthorizedActions);
+        var authorization = new ProjectReleaseLineControllerAuthorization(
+            "authorization.remote-axis",
+            operation.OperationId,
+            authorizedAction.ActionId,
+            "station.main",
+            "binding.axis.x",
+            authorizedAction.RequiredCapability,
+            authorizedAction.CommandName,
+            "station.remote",
+            "system.remote-axis",
+            "binding.remote-axis",
+            "motion.remote-axis",
+            "MoveRemote");
+        release = release with
+        {
+            Metadata = release.Metadata with
+            {
+                ProductionLine = release.Metadata.ProductionLine with
+                {
+                    Operations = [operation with
+                    {
+                        AuthorizedActions = [authorizedAction with
+                        {
+                            TargetKind = "Driver",
+                            TargetId = authorization.TargetBindingId,
+                            LineControllerAuthorizationId = authorization.AuthorizationId
+                        }]
+                    }],
+                    LineControllerAuthorizations = [authorization]
+                }
+            }
+        };
+        var coordinator = new RecordingProductionRunCoordinator();
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            new RecordingReleaseStore(release),
+            new RecordingConfigurationResolver(
+                [RuntimeConfiguration("configuration.main", "station.main")]),
+            coordinator);
+
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
+
+        Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
+        var plan = Assert.Single(Assert.IsType<SubmitProductionRunRequest>(coordinator.LastRequest).Operations);
+        Assert.Contains(
+            new ResourceRequirement(ResourceKind.Station, authorization.TargetStationSystemId),
+            plan.Definition.ResourceRequirements);
+        Assert.Contains(
+            new ResourceRequirement(ResourceKind.Device, authorization.TargetBindingId),
+            plan.Definition.ResourceRequirements);
+    }
+
+    [Fact]
+    public async Task SubmitRejectsEmptyProductionUnitIdentityWithoutOpeningRelease()
     {
         var releaseStore = new RecordingReleaseStore(OpenedRelease());
         var launcher = CreateLauncher(
@@ -167,7 +346,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
 
         var result = await launcher.SubmitAsync(
             Snapshot(),
-            SubmitRequest() with { ProductionUnitIdentityValue = " UNIT-1" });
+            SubmitRequest() with { ProductionUnitId = Guid.Empty });
 
         Assert.True(result.IsFailure);
         Assert.Equal("Validation.Projects.ProductionRunIdentityInvalid", result.Error.Code);
@@ -188,10 +367,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Assert.Equal("MoveAbsolute", Assert.Single(operation.FrozenExecutableProcess.Nodes).CommandName);
         Assert.Equal(
             [
-                new ResourceRequirement(ResourceKind.Station, stationSystemId),
-                new ResourceRequirement(ResourceKind.Slot, "slot-1"),
-                new ResourceRequirement(ResourceKind.Fixture, "fixture-1"),
-                new ResourceRequirement(ResourceKind.Device, "device-1")
+                new ResourceRequirement(ResourceKind.Station, stationSystemId)
             ],
             operation.Definition.ResourceRequirements);
     }
@@ -204,8 +380,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
     {
         var serializer = new FlowIrCanonicalSerializer();
         return new ProjectReleaseProductionRunLauncher(
-            scopeResolver,
-            releaseStore,
+            new ProjectReleaseSnapshotReader(scopeResolver, releaseStore),
             configurationResolver,
             coordinator,
             serializer,
@@ -228,7 +403,9 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 "motion.axis.move",
                 "binding.axis.x",
                 "Driver",
-                "driver.axis.x")],
+                "driver.axis.x",
+                "station.main",
+                "station.main")],
             [
                 new ProjectTargetReferenceDetails("System", "station.main"),
                 new ProjectTargetReferenceDetails("System", "station.secondary")
@@ -300,11 +477,14 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                     operations,
                     transitions,
                     []),
+                ExternalProgramResources: [],
                 [new ProjectReleaseCapabilityBinding(
                     "motion.axis.move",
                     "binding.axis.x",
                     "Driver",
-                    "driver.axis.x")],
+                    "driver.axis.x",
+                    "station.main",
+                    "station.main")],
                 [
                     new ProjectReleaseTargetReference("System", "station.main"),
                     new ProjectReleaseTargetReference("System", "station.secondary")
@@ -330,7 +510,23 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             flowIr.SchemaVersion,
             flowIr.Sha256,
             flowIr.CanonicalJson,
-            []);
+            [],
+            [new ProjectReleaseOperationResource(
+                $"resource.station.{operationId}",
+                "Station",
+                stationSystemId,
+                "Fixed",
+                [])],
+            [new ProjectReleaseAuthorizedAction(
+                "move:action:1",
+                "move",
+                "DeviceCommand",
+                "motion.axis.move",
+                "MoveAbsolute",
+                "Capability",
+                "motion.axis.move",
+                5_000,
+                null)]);
     }
 
     private static FlowIrCanonicalArtifact FrozenFlowIr()
@@ -367,13 +563,8 @@ public sealed class ProjectReleaseProductionRunLauncherTests
     {
         return new SubmitProjectReleaseProductionRunRequest(
             RunId,
-            "UNIT-1",
-            "operator-1",
-            "lot-1",
-            "carrier-1",
-            "slot-1",
-            "fixture-1",
-            "device-1");
+            ProductionUnitId,
+            "operator-1");
     }
 
     private static ProcessDefinition PublishedProcessDefinition()
@@ -444,6 +635,13 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             OpenCallCount++;
             return ValueTask.FromResult(release);
         }
+
+        public ValueTask RollbackPublicationAsync(
+            ProjectApplicationWorkspaceScope scope,
+            string snapshotId,
+            string expectedContentSha256,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Rollback is outside this test fixture.");
     }
 
     private sealed class RecordingConfigurationResolver(
@@ -493,9 +691,13 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 request.ProjectSnapshotId,
                 request.TopologyId,
                 request.ProductionLineDefinitionId,
-                request.ProductionUnitIdentity,
-                request.LotId,
-                request.CarrierId,
+                request.ProductionUnitId,
+                new ProductionUnitIdentity(
+                    request.FrozenProductModelId,
+                    request.FrozenIdentityInputKey,
+                    "UNIT-1"),
+                null,
+                null,
                 request.ActorId,
                 request.EntryOperationId,
                 PublishedAtUtc,

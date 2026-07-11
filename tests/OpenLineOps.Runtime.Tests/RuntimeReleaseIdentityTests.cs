@@ -1,5 +1,6 @@
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 
@@ -19,8 +20,10 @@ public sealed class RuntimeReleaseIdentityTests
         Assert.Throws<ArgumentException>(() => new RuntimeCommandExecutionContext(
             RuntimeSessionId.New(),
             ProductionRunId.New(),
+            ProductionUnitId.New(),
             missingField == "line" ? " line.main " : "line.main",
             missingField == "operation" ? " operation.main " : "operation.main",
+            "operation.main@0001",
             1,
             missingField == "stationSystem" ? " station.main " : "station.main",
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
@@ -41,7 +44,8 @@ public sealed class RuntimeReleaseIdentityTests
             "system.main",
             missingField == "project" ? " " : "project.main",
             missingField == "application" ? " " : "application.main",
-            missingField == "snapshot" ? " " : "snapshot.main"));
+            missingField == "snapshot" ? " " : "snapshot.main",
+            RuntimeTestReleaseIdentity.ResourceFences()));
     }
 
     [Theory]
@@ -57,8 +61,10 @@ public sealed class RuntimeReleaseIdentityTests
     {
         Assert.Throws<ArgumentException>(() => new RuntimeSessionTraceMetadata(
             ProductionRunId.New(),
+            ProductionUnitId.New(),
             missingField == "line" ? " " : "line.main",
             missingField == "operation" ? " " : "operation.main",
+            "operation.main@0001",
             1,
             missingField == "stationSystem" ? " " : "station.main",
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
@@ -70,6 +76,7 @@ public sealed class RuntimeReleaseIdentityTests
             missingField == "project" ? " " : "project.main",
             missingField == "application" ? " " : "application.main",
             missingField == "snapshot" ? " " : "snapshot.main",
-            missingField == "topology" ? " " : "topology.main"));
+            missingField == "topology" ? " " : "topology.main",
+            RuntimeTestReleaseIdentity.ResourceFences()));
     }
 }

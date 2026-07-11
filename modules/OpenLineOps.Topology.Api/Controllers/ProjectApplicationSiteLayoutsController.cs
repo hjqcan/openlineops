@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Topology.Api.Models;
@@ -19,7 +20,7 @@ namespace OpenLineOps.Topology.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationSiteLayouts)]
-public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
+public sealed class ProjectApplicationSiteLayoutsController : ControllerBase, IAsyncActionFilter
 {
     private readonly IProjectAutomationTopologyService _topologyService;
     private readonly ProjectReleaseTopologyReader _releaseReader;
@@ -30,6 +31,62 @@ public sealed class ProjectApplicationSiteLayoutsController : ControllerBase
     {
         _topologyService = topologyService;
         _releaseReader = releaseReader;
+    }
+
+    [NonAction]
+    public async Task OnActionExecutionAsync(
+        ActionExecutingContext context,
+        ActionExecutionDelegate next)
+    {
+        var layoutId = context.RouteData.Values["layoutId"] as string;
+        var isMutation = !HttpMethods.IsGet(Request.Method) && layoutId is not null;
+        IAsyncDisposable? lease = null;
+        if (isMutation)
+        {
+            var projectId = context.RouteData.Values["projectId"] as string ?? string.Empty;
+            var applicationId = context.RouteData.Values["applicationId"] as string ?? string.Empty;
+            lease = await EditorDocumentConcurrency.AcquireAsync(
+                    $"layout:{projectId}:{applicationId}:{layoutId}",
+                    context.HttpContext.RequestAborted)
+                .ConfigureAwait(false);
+            var current = await _topologyService
+                .GetLayoutByIdAsync(projectId, applicationId, layoutId!, context.HttpContext.RequestAborted)
+                .ConfigureAwait(false);
+            if (current.IsFailure)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                context.Result = ToProblem(current.Error);
+                return;
+            }
+
+            var currentRevision = SiteLayoutApiContract.ToResponse(current.Value).Revision;
+            var precondition = EditorDocumentConcurrency.Evaluate(
+                Request.Headers[EditorDocumentConcurrency.IfMatchHeaderName].ToString(),
+                Request.Headers[EditorDocumentConcurrency.ConflictResolutionHeaderName].ToString(),
+                currentRevision);
+            if (precondition != EditorDocumentPrecondition.Satisfied)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+                context.Result = this.EditorDocumentPreconditionProblem(precondition, currentRevision);
+                return;
+            }
+        }
+
+        try
+        {
+            var executed = await next().ConfigureAwait(false);
+            if (executed.Result is ObjectResult { Value: SiteLayoutResponse layout })
+            {
+                Response.SetEditorDocumentRevision(layout.Revision);
+            }
+        }
+        finally
+        {
+            if (lease is not null)
+            {
+                await lease.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     [HttpPost]

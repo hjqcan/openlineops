@@ -77,6 +77,7 @@ public static class AutomationTopologyMapper
     {
         return new DriverBindingDetails(
             binding.Id.Value,
+            binding.OwnerSystemId.Value,
             binding.CapabilityId.Value,
             binding.ProviderKind.ToString(),
             binding.ProviderKey);

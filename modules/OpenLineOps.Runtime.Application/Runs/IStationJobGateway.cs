@@ -9,6 +9,13 @@ public interface IStationJobGateway
         CancellationToken cancellationToken = default);
 }
 
+public interface IStationJobCancellationGateway
+{
+    ValueTask<StationJobCancelAcknowledged> RequestCancelAsync(
+        StationJobCancelRequested request,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IStationDeploymentResolver
 {
     ValueTask<StationDeploymentRoute> ResolveAsync(

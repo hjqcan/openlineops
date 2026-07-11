@@ -4,6 +4,7 @@ using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -31,6 +32,11 @@ public sealed class AgentStationDispatchTests
         Assert.Equal(1, message.OperationAttempt);
         Assert.Equal("product.board", message.ProductModelId);
         Assert.Equal("SN-001", message.ProductionUnitIdentityValue);
+        Assert.Equal(request.Run.ProductionUnitId.Value, message.ProductionUnitId);
+        Assert.Equal(request.RuntimeSessionId.Value, message.RuntimeSessionId);
+        Assert.Equal(request.Run.ProductionLineDefinitionId, message.ProductionLineDefinitionId);
+        Assert.Equal(request.Run.TopologyId, message.TopologyId);
+        Assert.Equal(request.Run.ActorId, message.ActorId);
         Assert.Equal("station.main", message.StationSystemId);
         Assert.Equal(request.ResourceLeases.Count, message.ResourceFences.Count);
         Assert.All(message.ResourceFences, fence =>
@@ -41,6 +47,9 @@ public sealed class AgentStationDispatchTests
         Assert.Equal(ExecutionStatus.Completed, result.ExecutionStatus);
         Assert.Equal(ResultJudgement.Passed, result.Judgement);
         Assert.Equal("true", result.Outputs["accepted"].CanonicalValue);
+        Assert.Equal(0, result.CompletedStepCount);
+        Assert.Equal(0, result.CommandCount);
+        Assert.Equal(0, result.IncidentCount);
     }
 
     [Fact]
@@ -79,7 +88,7 @@ public sealed class AgentStationDispatchTests
                 []),
             [
                 new ResourceRequirement(ResourceKind.Station, "station.main"),
-                new ResourceRequirement(ResourceKind.Slot, "slot.01"),
+                new ResourceRequirement(ResourceKind.Slot, "line.main/station.main/slot.01"),
                 new ResourceRequirement(ResourceKind.Device, "device.tester")
             ]);
         var run = ProductionRun.Create(
@@ -89,6 +98,7 @@ public sealed class AgentStationDispatchTests
             "snapshot.main",
             "topology.main",
             "line.main",
+            ProductionUnitId.New(),
             new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
             "lot-001",
             "carrier-001",
@@ -145,9 +155,16 @@ public sealed class AgentStationDispatchTests
                 request.IdempotencyKey,
                 request.AgentId,
                 request.StationId,
+                request.RuntimeSessionId,
                 ExecutionStatus.Completed,
                 ResultJudgement.Passed,
                 outputs.RootElement.Clone(),
+                0,
+                0,
+                0,
+                [],
+                [],
+                [],
                 [],
                 null,
                 null,

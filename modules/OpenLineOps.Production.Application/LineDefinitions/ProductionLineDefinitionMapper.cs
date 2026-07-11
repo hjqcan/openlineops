@@ -22,7 +22,12 @@ public static class ProductionLineDefinitionMapper
                     operation.DisplayName,
                     operation.StationSystemId,
                     operation.FlowDefinitionId,
-                    operation.ConfigurationSnapshotId))
+                    operation.ConfigurationSnapshotId,
+                    operation.Resources.Select(resource => new OperationResourceBindingDetails(
+                        resource.Id.Value,
+                        resource.Kind.ToString(),
+                        resource.TopologyTargetId,
+                        resource.Resolution.ToString())).ToArray()))
                 .ToArray(),
             definition.Transitions
                 .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
@@ -38,27 +43,21 @@ public static class ProductionLineDefinitionMapper
                     transition.OutputCondition?.ExpectedValue.Kind.ToString(),
                     transition.OutputCondition?.ExpectedValue.CanonicalValue))
                 .ToArray(),
-            definition.ExternalTestProgramAdapters
-                .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
-                .Select(adapter => new ExternalTestProgramAdapterDetails(
-                    adapter.Id.Value,
-                    adapter.DisplayName,
-                    adapter.CapabilityId,
-                    adapter.CommandName,
-                    adapter.LaunchKind.ToString(),
-                    adapter.Executable,
-                    adapter.ProviderKey,
-                    adapter.ArgumentTemplates.ToArray(),
-                    adapter.InputMappings.Select(mapping =>
-                        new ExternalTestProgramInputMappingDetails(mapping.Source, mapping.Target)).ToArray(),
-                    adapter.ResultMappings.Select(mapping =>
-                        new ExternalTestProgramResultMappingDetails(mapping.SourcePath, mapping.TargetKey)).ToArray(),
-                    new ExternalTestProgramOutcomeMappingDetails(
-                        adapter.OutcomeMapping.SourcePath,
-                        adapter.OutcomeMapping.PassedToken,
-                        adapter.OutcomeMapping.FailedToken,
-                        adapter.OutcomeMapping.AbortedToken),
-                    checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond)))
+            definition.LineControllerAuthorizations
+                .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
+                .Select(authorization => new LineControllerAuthorizationDetails(
+                    authorization.Id.Value,
+                    authorization.OperationId.Value,
+                    authorization.ActionId,
+                    authorization.ControllerSystemId,
+                    authorization.ControllerBindingId,
+                    authorization.ControllerCapabilityId,
+                    authorization.ControllerAction,
+                    authorization.TargetStationSystemId,
+                    authorization.TargetSystemId,
+                    authorization.TargetBindingId,
+                    authorization.TargetCapabilityId,
+                    authorization.TargetAction))
                 .ToArray(),
             definition.CreatedAtUtc,
             definition.UpdatedAtUtc);

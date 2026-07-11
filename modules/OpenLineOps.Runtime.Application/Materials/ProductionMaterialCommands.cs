@@ -67,6 +67,27 @@ public sealed record CompleteSlotCommand(
     string ActorId,
     DateTimeOffset OccurredAtUtc);
 
+public sealed record BlockSlotCommand(
+    SlotAddress Slot,
+    string Reason,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record UnblockSlotCommand(
+    SlotAddress Slot,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record SetSlotOfflineCommand(
+    SlotAddress Slot,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record BringSlotOnlineCommand(
+    SlotAddress Slot,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
 public sealed record UnloadSlotCommand(
     SlotAddress Slot,
     MaterialReference Material,

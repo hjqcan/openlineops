@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Runs;
@@ -12,13 +13,13 @@ public sealed record SubmitProductionRunRequest
         string projectSnapshotId,
         string topologyId,
         string productionLineDefinitionId,
-        ProductionUnitIdentity productionUnitIdentity,
+        ProductionUnitId productionUnitId,
+        string frozenProductModelId,
+        string frozenIdentityInputKey,
         string actorId,
         string entryOperationId,
         IReadOnlyList<OperationExecutionPlan> operations,
-        IReadOnlyList<RouteTransitionDefinition> routeTransitions,
-        string? lotId = null,
-        string? carrierId = null)
+        IReadOnlyList<RouteTransitionDefinition> routeTransitions)
     {
         if (runId.Value == Guid.Empty)
         {
@@ -33,16 +34,17 @@ public sealed record SubmitProductionRunRequest
         ProductionLineDefinitionId = Required(
             productionLineDefinitionId,
             nameof(productionLineDefinitionId));
-        ProductionUnitIdentity = productionUnitIdentity
-            ?? throw new ArgumentNullException(nameof(productionUnitIdentity));
+        ProductionUnitId = productionUnitId.Value == Guid.Empty
+            ? throw new ArgumentException("Production Unit id cannot be empty.", nameof(productionUnitId))
+            : productionUnitId;
+        FrozenProductModelId = Required(frozenProductModelId, nameof(frozenProductModelId));
+        FrozenIdentityInputKey = Required(frozenIdentityInputKey, nameof(frozenIdentityInputKey));
         ActorId = Required(actorId, nameof(actorId));
         EntryOperationId = Required(entryOperationId, nameof(entryOperationId));
         ArgumentNullException.ThrowIfNull(operations);
         ArgumentNullException.ThrowIfNull(routeTransitions);
         Operations = operations.ToArray();
         RouteTransitions = routeTransitions.ToArray();
-        LotId = Optional(lotId, nameof(lotId));
-        CarrierId = Optional(carrierId, nameof(carrierId));
     }
 
     public ProductionRunId RunId { get; }
@@ -57,7 +59,11 @@ public sealed record SubmitProductionRunRequest
 
     public string ProductionLineDefinitionId { get; }
 
-    public ProductionUnitIdentity ProductionUnitIdentity { get; }
+    public ProductionUnitId ProductionUnitId { get; }
+
+    public string FrozenProductModelId { get; }
+
+    public string FrozenIdentityInputKey { get; }
 
     public string ActorId { get; }
 
@@ -66,10 +72,6 @@ public sealed record SubmitProductionRunRequest
     public IReadOnlyList<OperationExecutionPlan> Operations { get; }
 
     public IReadOnlyList<RouteTransitionDefinition> RouteTransitions { get; }
-
-    public string? LotId { get; }
-
-    public string? CarrierId { get; }
 
     private static string Required(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)
@@ -80,6 +82,4 @@ public sealed record SubmitProductionRunRequest
                 parameterName)
             : value;
 
-    private static string? Optional(string? value, string parameterName) =>
-        value is null ? null : Required(value, parameterName);
 }

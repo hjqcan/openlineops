@@ -31,7 +31,12 @@ internal static class ProductionLineResourceMapper
                     operation.DisplayName,
                     operation.StationSystemId,
                     operation.FlowDefinitionId,
-                    operation.ConfigurationSnapshotId))
+                    operation.ConfigurationSnapshotId,
+                    operation.Resources.Select(resource => new OperationResourceBindingDocument(
+                        resource.Id.Value,
+                        resource.Kind.ToString(),
+                        resource.TopologyTargetId,
+                        resource.Resolution.ToString())).ToArray()))
                 .ToArray(),
             definition.Transitions
                 .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
@@ -47,26 +52,21 @@ internal static class ProductionLineResourceMapper
                     transition.OutputCondition?.ExpectedValue.Kind.ToString(),
                     transition.OutputCondition?.ExpectedValue.CanonicalValue))
                 .ToArray(),
-            definition.ExternalTestProgramAdapters
-                .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
-                .Select(adapter => new ExternalTestProgramAdapterDocument(
-                    adapter.Id.Value,
-                    adapter.DisplayName,
-                    adapter.CapabilityId,
-                    adapter.CommandName,
-                    adapter.Executable,
-                    adapter.ProviderKey,
-                    adapter.ArgumentTemplates.ToArray(),
-                    adapter.InputMappings.Select(mapping =>
-                        new ExternalTestProgramInputMappingDocument(mapping.Source, mapping.Target)).ToArray(),
-                    adapter.ResultMappings.Select(mapping =>
-                        new ExternalTestProgramResultMappingDocument(mapping.SourcePath, mapping.TargetKey)).ToArray(),
-                    new ExternalTestProgramOutcomeMappingDocument(
-                        adapter.OutcomeMapping.SourcePath,
-                        adapter.OutcomeMapping.PassedToken,
-                        adapter.OutcomeMapping.FailedToken,
-                        adapter.OutcomeMapping.AbortedToken),
-                    checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond)))
+            definition.LineControllerAuthorizations
+                .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
+                .Select(authorization => new LineControllerAuthorizationDocument(
+                    authorization.Id.Value,
+                    authorization.OperationId.Value,
+                    authorization.ActionId,
+                    authorization.ControllerSystemId,
+                    authorization.ControllerBindingId,
+                    authorization.ControllerCapabilityId,
+                    authorization.ControllerAction,
+                    authorization.TargetStationSystemId,
+                    authorization.TargetSystemId,
+                    authorization.TargetBindingId,
+                    authorization.TargetCapabilityId,
+                    authorization.TargetAction))
                 .ToArray(),
             definition.CreatedAtUtc,
             definition.UpdatedAtUtc);
@@ -91,7 +91,14 @@ internal static class ProductionLineResourceMapper
                 operation.DisplayName,
                 operation.StationSystemId,
                 operation.FlowDefinitionId,
-                operation.ConfigurationSnapshotId)),
+                operation.ConfigurationSnapshotId,
+                operation.Resources.Select(resource => new OperationResourceBinding(
+                    new OperationResourceBindingId(resource.BindingId),
+                    ParseExact<OperationResourceKind>(resource.Kind, "Operation resource kind"),
+                    resource.TopologyTargetId,
+                    ParseExact<OperationResourceResolution>(
+                        resource.Resolution,
+                        "Operation resource resolution"))))),
             document.Transitions.Select(transition => RouteTransition.Create(
                 new RouteTransitionId(transition.TransitionId),
                 new OperationDefinitionId(transition.SourceOperationId),
@@ -111,24 +118,20 @@ internal static class ProductionLineResourceMapper
                                 transition.ExpectedOutputKind!,
                                 "Production Context value kind"),
                             transition.ExpectedOutputValue!)))),
-            document.ExternalTestProgramAdapters.Select(adapter => ExternalTestProgramAdapter.Create(
-                new ExternalTestProgramAdapterId(adapter.AdapterId),
-                adapter.DisplayName,
-                adapter.CapabilityId,
-                adapter.CommandName,
-                adapter.Executable,
-                adapter.ProviderKey,
-                adapter.ArgumentTemplates,
-                adapter.InputMappings.Select(mapping =>
-                    new ExternalTestProgramInputMapping(mapping.Source, mapping.Target)),
-                adapter.ResultMappings.Select(mapping =>
-                    new ExternalTestProgramResultMapping(mapping.SourcePath, mapping.TargetKey)),
-                new ExternalTestProgramOutcomeMapping(
-                    adapter.OutcomeMapping.SourcePath,
-                    adapter.OutcomeMapping.PassedToken,
-                    adapter.OutcomeMapping.FailedToken,
-                    adapter.OutcomeMapping.AbortedToken),
-                MillisecondsToTimeout(adapter.TimeoutMilliseconds))),
+            document.LineControllerAuthorizations.Select(authorization =>
+                new LineControllerAuthorization(
+                    new LineControllerAuthorizationId(authorization.AuthorizationId),
+                    new OperationDefinitionId(authorization.OperationId),
+                    authorization.ActionId,
+                    authorization.ControllerSystemId,
+                    authorization.ControllerBindingId,
+                    authorization.ControllerCapabilityId,
+                    authorization.ControllerAction,
+                    authorization.TargetStationSystemId,
+                    authorization.TargetSystemId,
+                    authorization.TargetBindingId,
+                    authorization.TargetCapabilityId,
+                    authorization.TargetAction)),
             document.CreatedAtUtc,
             document.UpdatedAtUtc);
     }
@@ -157,13 +160,20 @@ internal static class ProductionLineResourceMapper
             || string.IsNullOrWhiteSpace(document.EntryOperationId)
             || document.Operations is null
             || document.Transitions is null
-            || document.ExternalTestProgramAdapters is null
+            || document.LineControllerAuthorizations is null
             || document.Operations.Any(static operation => operation is null
                 || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId)
                 || !string.Equals(
                     operation.ConfigurationSnapshotId,
                     operation.ConfigurationSnapshotId.Trim(),
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal)
+                || operation.Resources is null
+                || operation.Resources.Length == 0
+                || operation.Resources.Any(static resource => resource is null
+                    || string.IsNullOrWhiteSpace(resource.BindingId)
+                    || string.IsNullOrWhiteSpace(resource.Kind)
+                    || string.IsNullOrWhiteSpace(resource.TopologyTargetId)
+                    || string.IsNullOrWhiteSpace(resource.Resolution)))
             || document.Transitions.Any(static transition => transition is null
                 || string.IsNullOrWhiteSpace(transition.Kind)
                 || (string.Equals(
@@ -173,16 +183,19 @@ internal static class ProductionLineResourceMapper
                     != (transition.OutputKey is not null
                         && transition.ExpectedOutputKind is not null
                         && transition.ExpectedOutputValue is not null)))
-            || document.ExternalTestProgramAdapters.Any(adapter =>
-                adapter is null
-                || adapter.ArgumentTemplates is null
-                || adapter.InputMappings is null
-                || adapter.ResultMappings is null
-                || adapter.OutcomeMapping is null
-                || adapter.ArgumentTemplates.Any(static argument => argument is null)
-                || adapter.InputMappings.Any(static mapping => mapping is null)
-                || adapter.ResultMappings.Any(static mapping => mapping is null)
-                || !IsValidTimeout(adapter.TimeoutMilliseconds)))
+            || document.LineControllerAuthorizations.Any(static authorization => authorization is null
+                || string.IsNullOrWhiteSpace(authorization.AuthorizationId)
+                || string.IsNullOrWhiteSpace(authorization.OperationId)
+                || string.IsNullOrWhiteSpace(authorization.ActionId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerSystemId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerBindingId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerCapabilityId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerAction)
+                || string.IsNullOrWhiteSpace(authorization.TargetStationSystemId)
+                || string.IsNullOrWhiteSpace(authorization.TargetSystemId)
+                || string.IsNullOrWhiteSpace(authorization.TargetBindingId)
+                || string.IsNullOrWhiteSpace(authorization.TargetCapabilityId)
+                || string.IsNullOrWhiteSpace(authorization.TargetAction)))
         {
             throw new InvalidDataException(
                 "Production line resource must contain all required semantic collections.");
@@ -203,20 +216,4 @@ internal static class ProductionLineResourceMapper
         return parsed;
     }
 
-    private static bool IsValidTimeout(long timeoutMilliseconds)
-    {
-        var maximumMilliseconds = TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond;
-        return timeoutMilliseconds > 0 && timeoutMilliseconds <= maximumMilliseconds;
-    }
-
-    private static TimeSpan MillisecondsToTimeout(long timeoutMilliseconds)
-    {
-        if (!IsValidTimeout(timeoutMilliseconds))
-        {
-            throw new InvalidDataException(
-                "External test program timeout must be a positive whole number of milliseconds representable by TimeSpan.");
-        }
-
-        return TimeSpan.FromTicks(checked(timeoutMilliseconds * TimeSpan.TicksPerMillisecond));
-    }
 }

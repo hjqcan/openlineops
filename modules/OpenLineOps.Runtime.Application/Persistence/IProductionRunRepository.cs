@@ -1,6 +1,7 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 
 namespace OpenLineOps.Runtime.Application.Persistence;
 
@@ -9,6 +10,7 @@ public interface IProductionRunRepository
     ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
+        ProductionRunAdmission admission,
         CancellationToken cancellationToken = default);
 
     ValueTask<long> SaveAsync(
@@ -41,6 +43,21 @@ public interface IProductionRunRepository
         ProductionRunId runId,
         string failureDescription,
         CancellationToken cancellationToken = default);
+}
+
+public sealed record ProductionRunAdmission
+{
+    public ProductionRunAdmission(ProductionUnitSnapshot productionUnit, long expectedRevision)
+    {
+        ArgumentNullException.ThrowIfNull(productionUnit);
+        ArgumentOutOfRangeException.ThrowIfNegative(expectedRevision);
+        ProductionUnit = productionUnit;
+        ExpectedRevision = expectedRevision;
+    }
+
+    public ProductionUnitSnapshot ProductionUnit { get; }
+
+    public long ExpectedRevision { get; }
 }
 
 public sealed record ProductionRunTerminalOutboxItem

@@ -37,6 +37,14 @@ public sealed record AddCapabilityContractRequest(
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record AddDriverBindingRequest(
     string? BindingId,
+    string? OwnerSystemId,
+    string? CapabilityId,
+    string? ProviderKind,
+    string? ProviderKey);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record UpdateDriverBindingRequest(
+    string? OwnerSystemId,
     string? CapabilityId,
     string? ProviderKind,
     string? ProviderKey);
@@ -121,7 +129,8 @@ public sealed record AutomationTopologyResponse(
     IReadOnlyCollection<CapabilityContractResponse> Capabilities,
     IReadOnlyCollection<DriverBindingResponse> DriverBindings,
     IReadOnlyCollection<SlotGroupResponse> SlotGroups,
-    IReadOnlyCollection<SlotDefinitionResponse> Slots);
+    IReadOnlyCollection<SlotDefinitionResponse> Slots,
+    string Revision);
 
 public sealed record TopologyTargetDeletionResponse(
     AutomationTopologyResponse Topology,
@@ -157,6 +166,7 @@ public sealed record CapabilityContractResponse(
 
 public sealed record DriverBindingResponse(
     string BindingId,
+    string OwnerSystemId,
     string CapabilityId,
     string ProviderKind,
     string ProviderKey);
@@ -185,7 +195,8 @@ public sealed record SiteLayoutResponse(
     double CanvasWidth,
     double CanvasHeight,
     string Units,
-    IReadOnlyCollection<SiteLayoutElementResponse> Elements);
+    IReadOnlyCollection<SiteLayoutElementResponse> Elements,
+    string Revision);
 
 public sealed record LayoutTargetResponse(
     string Kind,

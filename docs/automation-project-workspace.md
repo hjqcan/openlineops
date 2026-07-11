@@ -1,6 +1,6 @@
 # Automation Project Workspace
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
 ## Purpose
 
@@ -98,8 +98,10 @@ resource or runtime snapshot.
 
 Edit mode operates on Application files. The 2D Layout workbench creates and
 arranges Station Systems, child Systems, Groups, and Slots. The Flow Designer
-authors Blockly, PythonScript, commands, decisions, and transitions. Production
-Lines bind ordered stages to Station Systems and published flows.
+authors Blockly, PythonScript, commands, decisions, and transitions. The Line
+Designer binds `OperationDefinition` nodes to Station Systems and published
+flows, then connects them with sequence, judgement, typed-condition, bounded
+rework, parallel-fork, and parallel-join routes.
 
 ### Publish
 
@@ -111,7 +113,10 @@ published definition is read-only; further edits create a new draft/version.
 
 Run mode is read-only. Studio or Runner opens the release, verifies content
 hashes, maps canonical Flow IR to executable Runtime actions, and projects
-Station/target state onto the published layout.
+Station/target state, active Production Units, queues, material movement, and
+Slot occupancy onto the published layout. A submitted `ProductionRun` is
+asynchronous; the Coordinator can advance different units on different Stations
+at the same time.
 
 Returning to Edit mode never mutates or resumes a published snapshot.
 
@@ -154,7 +159,7 @@ Every action has a stable action id, source mapping, target, capability,
 command, canonical input, timeout, and retry policy.
 
 Valid target kinds are `System`, `Capability`, `Driver`, `SlotGroup`, `Slot`,
-and `Dut`.
+and `ProductionUnit`.
 
 PythonScript is explicit and bounded. It cannot emit an `automation_plan` or
 create runtime actions that were absent from the published Flow IR.
@@ -162,13 +167,22 @@ create runtime actions that were absent from the published Flow IR.
 ## Production resources
 
 `production/lines/<id>/line.json` is an independent Application resource. It
-contains a DUT model, Workstations identified by `stationSystemId`, ordered
-stages, published Flow references, and optional external-test adapters.
+contains one `ProductModelDefinition`, an entry Operation, Station-System-bound
+`OperationDefinition` nodes, `RouteTransition` edges, published Flow references,
+and optional external-program adapters. There is no duplicate Station
+definition: `stationSystemId` points directly at the canonical `StationSystem`.
 
-An external executable path is Application-relative under the line resource,
-or the adapter names an exact provider key. Production never starts it directly;
-the stage compiles to one standard runtime action and uses the frozen provider
-route.
+An external executable path is Application-relative under the line resource, or
+the adapter names an exact provider key. Production never starts it directly;
+the referencing Flow action uses the frozen provider route and the same command,
+timeout, cancellation, judgement, incident, and artifact lifecycle as every
+other action.
+
+The editable definition describes the process, not work in progress. Runtime
+owns `ProductionUnit`, `ProductionLot`, `Carrier`, `MaterialGenealogyLink`,
+`MaterialLocation`, and `SlotOccupancy`. Slot state is exactly `Available`,
+`Reserved`, `Occupied`, `Running`, `Blocked`, or `Offline`, and every reservation
+or occupancy binds a Production Unit or Carrier.
 
 ## Persistence rules
 
@@ -190,7 +204,7 @@ route.
 A release freezes and hashes:
 
 - `.oloapp` and all referenced resource documents;
-- the current Topology v1 and hierarchical Layout v1;
+- the strict current Topology and hierarchical Layout documents;
 - Production line definitions and required Application programs;
 - process graph, Blockly workspace, Python source, Flow IR, and source maps;
 - custom block version and runtime action contract hash;
@@ -207,13 +221,17 @@ Application files.
 ## Headless execution
 
 The Runner opens a `.oloproj`, selects a published snapshot, verifies the
-release, executes it, emits status/trace output, and exits with an outcome code.
-It uses the same release loader and Runtime lifecycle as Studio. It is not a
-second execution implementation.
+release, submits one asynchronous Production Run, waits for its terminal state,
+emits the two status axes plus operation/route/trace details, and exits with an
+outcome code. It uses the same release loader, launcher, Coordinator, and Runtime
+lifecycle as Studio. It is not a second execution implementation.
 
-Future station services, deployment agents, leases, recovery, and signed
-packages must preserve this boundary: immutable release in, monitored runtime
-events out.
+An unattended Windows Agent executes Station jobs from signed `.olopkg` content.
+It verifies signatures and every hash before installing into a read-only
+content-addressed cache, deduplicates commands by idempotency key in a local
+SQLite inbox, checkpoints execution, and durably buffers results in an outbox.
+Normal work uses the job transport; Emergency Stop and Safe Stop use the
+independent safety receiver.
 
 ## Required verification
 

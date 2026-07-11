@@ -1,11 +1,12 @@
 import * as signalR from '@microsoft/signalr';
-import type { ApiResponse } from '../shared/desktop-api';
+import type { ApiResponse, EditorDocumentWriteOptions } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
 import type {
   ActiveProductionRunsResponse,
   AddAutomationSystemRequest,
   AddCapabilityContractRequest,
   AddDriverBindingRequest,
+  UpdateDriverBindingRequest,
   AddSiteLayoutElementRequest,
   AddProjectApplicationRequest,
   ImportProjectApplicationRequest,
@@ -31,6 +32,9 @@ import type {
   EngineeringTraceSearchQuery,
   EngineeringTraceSearchResponse,
   EngineeringProjectResponse,
+  ExternalProgramResourceResponse,
+  ExternalProgramTrialRequest,
+  ExternalProgramTrialResponse,
   HealthResponse,
   PlatformResponse,
   ExternalPluginProcessEventResponse,
@@ -47,12 +51,16 @@ import type {
   ProductionOperationsFilters,
   ProductionRunCommandRequest,
   ProductionRunReadModel,
+  ProductionUnitResponse,
   PluginLifecycleRecordResponse,
   PluginManagementOverviewResponse,
+  ProjectReleaseProductionRunContextResponse,
   PublishConfigurationSnapshotRequest,
   PublishProjectSnapshotRequest,
   RecipeResponse,
   RegisterDeviceInstanceRequest,
+  RegisterProductionUnitRequest,
+  RequestStationEmergencyStopRequest,
   SiteLayoutResponse,
   RuntimeAlarm,
   RuntimeAlarmsResponse,
@@ -64,10 +72,14 @@ import type {
   RuntimeTimelineEntry,
   RuntimeTimelineResponse,
   SaveProductionLineRequest,
+  SaveExternalProgramResourceRequest,
   RegisterProcessBlocklyBlockDefinitionRequest,
-  SubmittedProjectSnapshotProductionRunResponse,
-  SubmitProjectSnapshotProductionRunRequest,
+  SubmitProductionRunRequest,
+  MaterialArrivalRequest,
   StationProfileResponse,
+  StationEmergencyStopResponse,
+  StationSafetyEventsResponse,
+  StationSafetyTraceSearchResponse,
   TraceRecordExportPackageResponse,
   TraceRecordQueryResponse,
   TraceRecordResponse,
@@ -186,13 +198,45 @@ export async function publishProjectSnapshot(
     });
 }
 
-export async function submitProjectSnapshotProductionRun(
+export async function getProjectSnapshotProductionRunContext(
   projectId: string,
-  snapshotId: string,
-  request: SubmitProjectSnapshotProductionRunRequest
-): Promise<ApiResponse<SubmittedProjectSnapshotProductionRunResponse>> {
-  return desktop.apiRequest<SubmittedProjectSnapshotProductionRunResponse>(
-    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/production-runs`,
+  snapshotId: string
+): Promise<ApiResponse<ProjectReleaseProductionRunContextResponse>> {
+  return desktop.apiRequest<ProjectReleaseProductionRunContextResponse>(
+    `/api/automation-projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(snapshotId)}/production-run-context`);
+}
+
+export async function submitProductionRun(
+  request: SubmitProductionRunRequest
+): Promise<ApiResponse<ProductionRunReadModel>> {
+  return desktop.apiRequest<ProductionRunReadModel>('/api/production-runs', {
+    method: 'POST',
+    body: request
+  });
+}
+
+export async function getProductionUnit(
+  productionUnitId: string
+): Promise<ApiResponse<ProductionUnitResponse>> {
+  return desktop.apiRequest<ProductionUnitResponse>(
+    `/api/production-units/${encodeURIComponent(productionUnitId)}`);
+}
+
+export async function registerProductionUnit(
+  request: RegisterProductionUnitRequest
+): Promise<ApiResponse<ProductionUnitResponse>> {
+  return desktop.apiRequest<ProductionUnitResponse>('/api/production-units', {
+    method: 'POST',
+    body: request
+  });
+}
+
+export async function arriveProductionUnit(
+  productionUnitId: string,
+  request: MaterialArrivalRequest
+): Promise<ApiResponse<ProductionUnitResponse>> {
+  return desktop.apiRequest<ProductionUnitResponse>(
+    `/api/production-units/${encodeURIComponent(productionUnitId)}/arrivals`,
     {
       method: 'POST',
       body: request
@@ -236,13 +280,15 @@ export async function createAutomationTopology(
 export async function addAutomationSystem(
   topologyId: string,
   request: AddAutomationSystemRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -250,62 +296,98 @@ export async function updateAutomationSystem(
   topologyId: string,
   systemId: string,
   request: UpdateAutomationSystemRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems/${encodeURIComponent(systemId)}`,
     {
       method: 'PATCH',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
 export async function deleteAutomationSystem(
   topologyId: string,
   systemId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
   return desktop.apiRequest<TopologyTargetDeletionResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/systems/${encodeURIComponent(systemId)}`,
-    { method: 'DELETE' });
+    { method: 'DELETE', headers: editorDocumentHeaders(write) });
 }
 
 export async function addCapabilityContract(
   topologyId: string,
   request: AddCapabilityContractRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/capabilities`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
 export async function addDriverBinding(
   topologyId: string,
   request: AddDriverBindingRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/driver-bindings`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
+}
+
+export async function updateDriverBinding(
+  topologyId: string,
+  bindingId: string,
+  request: UpdateDriverBindingRequest,
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/driver-bindings/${encodeURIComponent(bindingId)}`,
+    {
+      method: 'PUT',
+      body: request,
+      headers: editorDocumentHeaders(write)
+    });
+}
+
+export async function deleteDriverBinding(
+  topologyId: string,
+  bindingId: string,
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
+): Promise<ApiResponse<AutomationTopologyResponse>> {
+  return desktop.apiRequest<AutomationTopologyResponse>(
+    `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/driver-bindings/${encodeURIComponent(bindingId)}`,
+    { method: 'DELETE', headers: editorDocumentHeaders(write) });
 }
 
 export async function addSlotGroup(
   topologyId: string,
   request: AddSlotGroupRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -313,36 +395,41 @@ export async function updateSlotGroup(
   topologyId: string,
   slotGroupId: string,
   request: UpdateSlotGroupRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups/${encodeURIComponent(slotGroupId)}`,
     {
       method: 'PATCH',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
 export async function deleteSlotGroup(
   topologyId: string,
   slotGroupId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
   return desktop.apiRequest<TopologyTargetDeletionResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slot-groups/${encodeURIComponent(slotGroupId)}`,
-    { method: 'DELETE' });
+    { method: 'DELETE', headers: editorDocumentHeaders(write) });
 }
 
 export async function addSlotDefinition(
   topologyId: string,
   request: AddSlotDefinitionRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -350,24 +437,27 @@ export async function updateSlotDefinition(
   topologyId: string,
   slotId: string,
   request: UpdateSlotDefinitionRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<AutomationTopologyResponse>> {
   return desktop.apiRequest<AutomationTopologyResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots/${encodeURIComponent(slotId)}`,
     {
       method: 'PATCH',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
 export async function deleteSlotDefinition(
   topologyId: string,
   slotId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<TopologyTargetDeletionResponse>> {
   return desktop.apiRequest<TopologyTargetDeletionResponse>(
     `${topologyCollectionPath(scope)}/${encodeURIComponent(topologyId)}/slots/${encodeURIComponent(slotId)}`,
-    { method: 'DELETE' });
+    { method: 'DELETE', headers: editorDocumentHeaders(write) });
 }
 
 export async function getSiteLayout(
@@ -394,13 +484,15 @@ export async function createSiteLayout(
 export async function addSiteLayoutElement(
   layoutId: string,
   request: AddSiteLayoutElementRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements`,
     {
       method: 'POST',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -408,13 +500,15 @@ export async function updateSiteLayoutElementGeometry(
   layoutId: string,
   elementId: string,
   request: UpdateSiteLayoutElementGeometryRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<SiteLayoutResponse>> {
   return desktop.apiRequest<SiteLayoutResponse>(
     `${siteLayoutCollectionPath(scope)}/${encodeURIComponent(layoutId)}/elements/${encodeURIComponent(elementId)}/geometry`,
     {
       method: 'PUT',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -505,6 +599,29 @@ export async function searchEngineeringTrace(
 ): Promise<EngineeringTraceSearchResponse | null> {
   const response = await desktop.apiRequest<EngineeringTraceSearchResponse>(
     `/api/traceability/read-models/engineering-search${toQueryString(query)}`);
+  return response.body;
+}
+
+export async function searchStationSafetyTrace({
+  projectId,
+  applicationId,
+  projectSnapshotId,
+  stationSystemId
+}: {
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId?: string;
+  stationSystemId?: string;
+}): Promise<StationSafetyTraceSearchResponse | null> {
+  const query = new URLSearchParams({ projectId, applicationId });
+  if (projectSnapshotId) {
+    query.set('projectSnapshotId', projectSnapshotId);
+  }
+  if (stationSystemId) {
+    query.set('stationSystemId', stationSystemId);
+  }
+  const response = await desktop.apiRequest<StationSafetyTraceSearchResponse>(
+    `/api/traceability/station-safety-evidence?${query.toString()}`);
   return response.body;
 }
 
@@ -782,14 +899,83 @@ export async function createProductionLine(
 export async function replaceProductionLine(
   lineDefinitionId: string,
   request: SaveProductionLineRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<ProductionLineResponse>> {
   return desktop.apiRequest<ProductionLineResponse>(
     `${productionLineCollectionPath(scope)}/${encodeURIComponent(lineDefinitionId)}`,
     {
       method: 'PUT',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
+}
+
+export async function listExternalProgramResources(
+  scope: ProjectApplicationApiScope
+): Promise<ExternalProgramResourceResponse[]> {
+  const response = await desktop.apiRequest<ExternalProgramResourceResponse[]>(
+    externalProgramCollectionPath(scope));
+  return response.body ?? [];
+}
+
+export async function saveExternalProgramResource(
+  resourceId: string,
+  request: SaveExternalProgramResourceRequest,
+  scope: ProjectApplicationApiScope,
+  write?: EditorDocumentWriteOptions
+): Promise<ApiResponse<ExternalProgramResourceResponse>> {
+  return desktop.apiRequest<ExternalProgramResourceResponse>(
+    `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}`,
+    {
+      method: 'PUT',
+      body: request,
+      headers: write ? editorDocumentHeaders(write) : undefined
+    });
+}
+
+export async function importExternalProgramResource(
+  request: SaveExternalProgramResourceRequest,
+  files: Array<{ sourcePath: string; resourceRelativePath: string }>,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ExternalProgramResourceResponse>> {
+  return desktop.uploadExternalProgram<ExternalProgramResourceResponse>(
+    `${externalProgramCollectionPath(scope)}/import`,
+    request,
+    files);
+}
+
+export async function importExternalProgramResourceFile(
+  resourceId: string,
+  file: { sourcePath: string; resourceRelativePath: string },
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
+): Promise<ApiResponse<ExternalProgramResourceResponse>> {
+  return desktop.uploadExternalProgram<ExternalProgramResourceResponse>(
+    `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}/files`,
+    null,
+    [file],
+    editorDocumentHeaders(write));
+}
+
+export async function trialExternalProgramResource(
+  resourceId: string,
+  request: ExternalProgramTrialRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ExternalProgramTrialResponse>> {
+  return desktop.apiRequest<ExternalProgramTrialResponse>(
+    `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}/trial`,
+    { method: 'POST', body: request });
+}
+
+export async function deleteExternalProgramResource(
+  resourceId: string,
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
+): Promise<ApiResponse<unknown>> {
+  return desktop.apiRequest(
+    `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}`,
+    { method: 'DELETE', headers: editorDocumentHeaders(write) });
 }
 
 export async function getActiveProductionRuns(
@@ -807,6 +993,13 @@ export async function getActiveProductionRuns(
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : '';
   return desktop.apiRequest<ActiveProductionRunsResponse>(`/api/operations/active-runs${suffix}`);
+}
+
+export async function getProductionRun(
+  productionRunId: string
+): Promise<ApiResponse<ProductionRunReadModel>> {
+  return desktop.apiRequest<ProductionRunReadModel>(
+    `/api/production-runs/${encodeURIComponent(productionRunId)}`);
 }
 
 export async function getProductionLineRuntimeState(
@@ -827,6 +1020,40 @@ export async function commandProductionRun(
       method: 'POST',
       body: request
     });
+}
+
+export async function requestStationEmergencyStop(
+  stationSystemId: string,
+  request: RequestStationEmergencyStopRequest
+): Promise<ApiResponse<StationEmergencyStopResponse>> {
+  return desktop.apiRequest<StationEmergencyStopResponse>(
+    `/api/operations/stations/${encodeURIComponent(stationSystemId)}/emergency-stop`,
+    {
+      method: 'POST',
+      body: request
+    });
+}
+
+export async function getStationSafetyEvents({
+  projectId,
+  applicationId,
+  projectSnapshotId,
+  stationSystemId
+}: {
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId?: string;
+  stationSystemId?: string;
+}): Promise<ApiResponse<StationSafetyEventsResponse>> {
+  const query = new URLSearchParams({ projectId, applicationId });
+  if (projectSnapshotId) {
+    query.set('projectSnapshotId', projectSnapshotId);
+  }
+  if (stationSystemId) {
+    query.set('stationSystemId', stationSystemId);
+  }
+  return desktop.apiRequest<StationSafetyEventsResponse>(
+    `/api/operations/safety-events?${query.toString()}`);
 }
 
 export async function listProcessBlocklyBlocks(
@@ -873,13 +1100,15 @@ export async function createProcessDefinition(
 export async function updateProcessDefinition(
   processDefinitionId: string,
   request: CreateProcessDefinitionRequest,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}`,
     {
       method: 'PUT',
-      body: request
+      body: request,
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -893,12 +1122,14 @@ export async function getProcessDefinition(
 
 export async function publishProcessDefinition(
   processDefinitionId: string,
-  scope: ProjectApplicationApiScope
+  scope: ProjectApplicationApiScope,
+  write: EditorDocumentWriteOptions
 ): Promise<ApiResponse<ProcessDefinitionResponse>> {
   return desktop.apiRequest<ProcessDefinitionResponse>(
     `${processCollectionPath(scope)}/${encodeURIComponent(processDefinitionId)}/publish`,
     {
-      method: 'POST'
+      method: 'POST',
+      headers: editorDocumentHeaders(write)
     });
 }
 
@@ -913,6 +1144,22 @@ export async function validateProcessDefinition(
 
 function processCollectionPath(scope: ProjectApplicationApiScope): string {
   return `${projectApplicationPath(scope)}/processes`;
+}
+
+function externalProgramCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `/api/automation-projects/${encodeURIComponent(scope.projectId)}`
+    + `/applications/${encodeURIComponent(scope.applicationId)}/external-programs`;
+}
+
+function editorDocumentHeaders(write: EditorDocumentWriteOptions): Record<string, string> {
+  if (write.force) {
+    return {
+      'If-Match': '*',
+      'X-OpenLineOps-Conflict-Resolution': 'overwrite'
+    };
+  }
+
+  return { 'If-Match': `"${write.revision}"` };
 }
 
 function productionLineCollectionPath(scope: ProjectApplicationApiScope): string {

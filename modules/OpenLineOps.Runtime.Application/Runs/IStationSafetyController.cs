@@ -17,6 +17,13 @@ public interface IStationSafetyGateway
         CancellationToken cancellationToken = default);
 }
 
+public interface IStationEmergencyStopGateway
+{
+    ValueTask<EmergencyStopAcknowledged> RequestEmergencyStopAsync(
+        EmergencyStopRequested request,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed record StationSafetyRequest(
     ProductionRunSnapshot Run,
     string ActorId,

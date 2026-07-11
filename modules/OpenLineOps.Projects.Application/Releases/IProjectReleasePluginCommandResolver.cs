@@ -6,6 +6,7 @@ public interface IProjectReleasePluginCommandResolver
         string projectId,
         string applicationId,
         string snapshotId,
+        string stationSystemId,
         string capabilityId,
         string commandName,
         string? targetKind = null,

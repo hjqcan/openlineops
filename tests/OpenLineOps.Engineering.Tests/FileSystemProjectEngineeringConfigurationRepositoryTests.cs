@@ -28,6 +28,34 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public void DeviceCapabilityMayRepeatAcrossOwnerSystemsButNotWithinOneOwner()
+    {
+        var station = StationProfile.Create(
+            new StationProfileId("station.profile"),
+            "station.main",
+            "Main");
+        AssertAccepted(station.AddDeviceBinding(DeviceBinding.Create(
+            new DeviceBindingId("binding.axis-a"),
+            "system.axis-a",
+            new DeviceCapabilityId("motion.axis"),
+            "axis-a")));
+        AssertAccepted(station.AddDeviceBinding(DeviceBinding.Create(
+            new DeviceBindingId("binding.axis-b"),
+            "system.axis-b",
+            new DeviceCapabilityId("motion.axis"),
+            "axis-b")));
+
+        var duplicate = station.AddDeviceBinding(DeviceBinding.Create(
+            new DeviceBindingId("binding.axis-a-duplicate"),
+            "system.axis-a",
+            new DeviceCapabilityId("motion.axis"),
+            "axis-a-backup"));
+
+        Assert.False(duplicate.Succeeded);
+        Assert.Equal("Engineering.CapabilityAlreadyBound", duplicate.Code);
+    }
+
+    [Fact]
     public async Task ConfigurationSurvivesNewRepositoryInstancesAndProjectMoveAndIsolatesApplications()
     {
         var applicationA = Scope("application.a", _projectDirectory);
@@ -439,10 +467,12 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             $"{prefix} Station");
         AssertAccepted(station.AddDeviceBinding(DeviceBinding.Create(
             new DeviceBindingId("binding.primary"),
+            "station.eol",
             new DeviceCapabilityId(primaryCapability),
             primaryDevice)));
         AssertAccepted(station.AddDeviceBinding(DeviceBinding.Create(
             new DeviceBindingId("binding.secondary"),
+            "station.eol",
             new DeviceCapabilityId(secondaryCapability),
             secondaryDevice)));
 
@@ -470,6 +500,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         foreach (var expectedBinding in expected)
         {
             var binding = Assert.Single(actual, candidate => candidate.Id == expectedBinding.Id);
+            Assert.Equal(expectedBinding.OwnerSystemId, binding.OwnerSystemId);
             Assert.Equal(expectedBinding.CapabilityId, binding.CapabilityId);
             Assert.Equal(expectedBinding.DeviceKey, binding.DeviceKey);
         }
@@ -485,6 +516,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             var binding = Assert.Single(
                 actual,
                 candidate => candidate.DeviceBindingId == expectedBinding.DeviceBindingId);
+            Assert.Equal(expectedBinding.OwnerSystemId, binding.OwnerSystemId);
             Assert.Equal(expectedBinding.CapabilityId, binding.CapabilityId);
             Assert.Equal(expectedBinding.DeviceKey, binding.DeviceKey);
         }

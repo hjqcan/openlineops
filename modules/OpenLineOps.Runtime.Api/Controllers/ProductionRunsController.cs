@@ -1,10 +1,13 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Runtime.Api.Models;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Api.Controllers;
 
@@ -15,57 +18,11 @@ public sealed class ProductionRunsController(
     IProductionRunRepository repository,
     IProductionRunCoordinator coordinator) : ControllerBase
 {
-    [HttpPost]
-    [ProducesResponseType<ProductionRunResponse>(StatusCodes.Status202Accepted)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<ProductionRunResponse>> CreateAsync(
-        CreateProductionRunRequest request,
-        CancellationToken cancellationToken)
-    {
-        SubmitProductionRunRequest applicationRequest;
-        try
-        {
-            applicationRequest = ProductionRunRequestMapper.ToApplication(request);
-        }
-        catch (Exception exception) when (exception is ArgumentException
-                                           or InvalidOperationException)
-        {
-            ModelState.AddModelError(string.Empty, exception.Message);
-            return ValidationProblem(ModelState);
-        }
-
-        var result = await coordinator.SubmitAsync(applicationRequest, cancellationToken)
-            .ConfigureAwait(false);
-        if (result.IsFailure)
-        {
-            return result.Error.Code.StartsWith("Conflict.", StringComparison.Ordinal)
-                ? Conflict(new ProblemDetails
-                {
-                    Title = result.Error.Code,
-                    Detail = result.Error.Message,
-                    Status = StatusCodes.Status409Conflict
-                })
-                : BadRequest(new ProblemDetails
-                {
-                    Title = result.Error.Code,
-                    Detail = result.Error.Message,
-                    Status = StatusCodes.Status400BadRequest
-                });
-        }
-
-        var response = ProductionRunResponseMapper.ToResponse(result.Value);
-        return AcceptedAtAction(
-            nameof(GetByIdAsync),
-            new { productionRunId = response.ProductionRunId.ToString("D") },
-            response);
-    }
-
     [HttpGet("{productionRunId}")]
-    [ProducesResponseType<ProductionRunResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProductionRunReadModel>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<ProductionRunResponse>> GetByIdAsync(
+    public async Task<ActionResult<ProductionRunReadModel>> GetByIdAsync(
         string productionRunId,
         CancellationToken cancellationToken)
     {
@@ -78,15 +35,15 @@ public sealed class ProductionRunsController(
             .ConfigureAwait(false);
         return entry is null
             ? NotFound()
-            : Ok(ProductionRunResponseMapper.ToResponse(entry.Run.ToSnapshot()));
+            : Ok(ProductionRunReadModelMapper.ToReadModel(entry.Run.ToSnapshot()));
     }
 
     [HttpPost("{productionRunId}/commands/{command}")]
-    [ProducesResponseType<ProductionRunResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProductionRunReadModel>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<ProductionRunResponse>> CommandAsync(
+    public async Task<ActionResult<ProductionRunReadModel>> CommandAsync(
         string productionRunId,
         string command,
         ProductionRunCommandApiRequest request,
@@ -105,7 +62,8 @@ public sealed class ProductionRunsController(
                 parsedCommand,
                 request.ActorId,
                 request.Reason,
-                request.OperationId);
+                request.OperationId,
+                ToRecoveryDecision(parsedCommand, request));
         }
         catch (ArgumentException exception)
         {
@@ -117,7 +75,7 @@ public sealed class ProductionRunsController(
             .ConfigureAwait(false);
         if (result.IsSuccess)
         {
-            return Ok(ProductionRunResponseMapper.ToResponse(result.Value));
+            return Ok(ProductionRunReadModelMapper.ToReadModel(result.Value));
         }
 
         var problem = new ProblemDetails { Title = result.Error.Code, Detail = result.Error.Message };
@@ -125,6 +83,12 @@ public sealed class ProductionRunsController(
         {
             problem.Status = StatusCodes.Status404NotFound;
             return NotFound(problem);
+        }
+
+        if (result.Error.Code.StartsWith("Validation.", StringComparison.Ordinal))
+        {
+            problem.Status = StatusCodes.Status400BadRequest;
+            return BadRequest(problem);
         }
 
         problem.Status = StatusCodes.Status409Conflict;
@@ -149,4 +113,99 @@ public sealed class ProductionRunsController(
         Enum.TryParse(value, ignoreCase: false, out command)
         && Enum.IsDefined(command)
         && string.Equals(command.ToString(), value, StringComparison.Ordinal);
+
+    private static ProductionRecoveryDecision? ToRecoveryDecision(
+        ProductionRunCommand command,
+        ProductionRunCommandApiRequest request)
+    {
+        if (request.RecoveryDecision is null)
+        {
+            return null;
+        }
+
+        var body = request.RecoveryDecision;
+        if (!Guid.TryParseExact(body.DecisionId, "D", out var decisionId)
+            || decisionId == Guid.Empty
+            || !string.Equals(decisionId.ToString("D"), body.DecisionId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Recovery Decision id must be one non-empty lowercase D-format UUID.",
+                nameof(request));
+        }
+
+        if (!DateTimeOffset.TryParseExact(
+                body.DecidedAtUtc,
+                "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var decidedAtUtc)
+            || decidedAtUtc.Offset != TimeSpan.Zero
+            || !string.Equals(
+                decidedAtUtc.ToString(
+                    "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                    CultureInfo.InvariantCulture),
+                body.DecidedAtUtc,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Recovery Decision timestamp must use canonical ISO 8601 UTC milliseconds.",
+                nameof(request));
+        }
+
+        var kind = command switch
+        {
+            ProductionRunCommand.Reconcile => ProductionRecoveryDecisionKind.Reconcile,
+            ProductionRunCommand.Retry => ProductionRecoveryDecisionKind.Retry,
+            ProductionRunCommand.Abort => ProductionRecoveryDecisionKind.Abort,
+            ProductionRunCommand.Scrap => ProductionRecoveryDecisionKind.Scrap,
+            _ => throw new ArgumentException(
+                $"{command} cannot carry a Recovery Decision.",
+                nameof(request))
+        };
+        ResultJudgement? judgement = body.ObservedJudgement is null
+            ? null
+            : ParseCanonicalEnum<ResultJudgement>(
+                body.ObservedJudgement,
+                "Recovery Decision observed judgement");
+        var outputs = (body.ObservedOutputs
+                ?? new Dictionary<string, ProductionContextValueApiRequest>())
+            .ToDictionary(
+                static output => output.Key,
+                output =>
+                {
+                    var value = output.Value
+                        ?? throw new ArgumentException(
+                            $"Recovery Decision output {output.Key} cannot be null.",
+                            nameof(request));
+                    return new ProductionContextValue(
+                        ParseCanonicalEnum<ProductionContextValueKind>(
+                            value.Kind,
+                            $"Recovery Decision output {output.Key} kind"),
+                        value.CanonicalValue);
+                },
+                StringComparer.Ordinal);
+
+        return new ProductionRecoveryDecision(
+            decisionId,
+            kind,
+            request.ActorId,
+            request.Reason
+                ?? throw new ArgumentException(
+                    "A Recovery Decision requires an operator reason.",
+                    nameof(request)),
+            body.EvidenceReference,
+            decidedAtUtc,
+            body.OperationRunId,
+            body.OperationId,
+            judgement,
+            outputs);
+    }
+
+    private static TEnum ParseCanonicalEnum<TEnum>(string value, string fieldName)
+        where TEnum : struct, Enum =>
+        Enum.TryParse<TEnum>(value, ignoreCase: false, out var parsed)
+        && Enum.IsDefined(parsed)
+        && string.Equals(parsed.ToString(), value, StringComparison.Ordinal)
+            ? parsed
+            : throw new ArgumentException($"{fieldName} '{value}' is invalid.");
 }

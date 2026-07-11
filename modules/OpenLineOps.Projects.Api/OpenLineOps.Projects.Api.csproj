@@ -22,6 +22,7 @@
     <ProjectReference Include="..\OpenLineOps.Production.Domain\OpenLineOps.Production.Domain.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Topology.Application\OpenLineOps.Topology.Application.csproj" />
     <ProjectReference Include="..\OpenLineOps.Topology.Domain\OpenLineOps.Topology.Domain.csproj" />
   </ItemGroup>

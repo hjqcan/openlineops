@@ -11,6 +11,7 @@ using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Safety;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -30,6 +31,7 @@ public static class RuntimeModuleServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration? configuration = null)
     {
+        services.AddLogging();
         services.TryAddSingleton<IConfiguration>(_ => configuration ?? new ConfigurationBuilder().Build());
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<IRuntimeIdProvider, GuidRuntimeIdProvider>();
@@ -81,6 +83,12 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<IProductionMaterialRepository>(_ =>
                     new PostgreSqlProductionMaterialRepository(
                         productionPostgreSqlConnectionString));
+                services.AddSingleton<IStationEmergencyStopRepository>(_ =>
+                    new PostgreSqlStationEmergencyStopRepository(
+                        productionPostgreSqlConnectionString));
+                services.AddSingleton<IProductionMaterialArrivalInbox>(_ =>
+                    new PostgreSqlProductionMaterialArrivalInbox(
+                        productionPostgreSqlConnectionString));
                 break;
             case ProductionCoordinationPersistenceProvider.Sqlite:
                 var productionSqliteConnectionString = coordinationOptions.ResolveSqliteConnectionString();
@@ -97,8 +105,15 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
                 services.AddSingleton<IProductionMaterialRepository>(_ =>
                     new SqliteProductionMaterialRepository(productionSqliteConnectionString));
+                services.AddSingleton<IStationEmergencyStopRepository>(_ =>
+                    new SqliteStationEmergencyStopRepository(productionSqliteConnectionString));
+                services.AddSingleton<IProductionMaterialArrivalInbox>(_ =>
+                    new SqliteProductionMaterialArrivalInbox(productionSqliteConnectionString));
                 break;
             case ProductionCoordinationPersistenceProvider.InMemory:
+                services.AddSingleton<InMemoryProductionMaterialRepository>();
+                services.AddSingleton<IProductionMaterialRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryProductionMaterialRepository>());
                 services.AddSingleton<InMemoryProductionRunRepository>();
                 services.AddSingleton<IProductionRunRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryProductionRunRepository>());
@@ -108,14 +123,25 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<InMemoryStationJobCoordinationStore>();
                 services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
-                services.AddSingleton<IProductionMaterialRepository,
-                    InMemoryProductionMaterialRepository>();
+                services.AddSingleton<IStationEmergencyStopRepository,
+                    InMemoryStationEmergencyStopRepository>();
+                services.AddSingleton<IProductionMaterialArrivalInbox,
+                    InMemoryProductionMaterialArrivalInbox>();
                 break;
         }
 
         services.AddScoped<ProductionMaterialService>();
+        services.AddScoped<ProductionMaterialArrivalIngress>();
+        services.TryAddSingleton<IStationEmergencyStopOperatorAuthorizer,
+            ExplicitStationEmergencyStopOperatorAuthorizer>();
+        services.AddScoped<IStationEmergencyStopProductionRunLinker,
+            StationEmergencyStopProductionRunLinker>();
+        services.AddScoped<StationEmergencyStopService>();
+        services.AddSingleton<IRuntimeCommandResourceFenceValidator, RuntimeCommandResourceFenceValidator>();
+        services.AddScoped<IProductionOperationReadiness, ProductionOperationReadinessEvaluator>();
+        services.AddScoped<IProductionLineRuntimeStateReader, ProductionLineRuntimeStateReader>();
 
-        services.TryAddSingleton<IStationDeploymentResolver, ConfigurationStationDeploymentResolver>();
+        services.TryAddSingleton<IStationDeploymentResolver, FileSystemStationDeploymentResolver>();
         var transportProvider = StationCoordinatorTransportProviders.Parse(transportOptions.Provider);
         switch (transportProvider)
         {
@@ -125,7 +151,13 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<IStationJobOutboxPublisher>(serviceProvider =>
                     serviceProvider.GetRequiredService<RabbitMqStationCoordinatorTransport>());
                 services.TryAddSingleton<IStationJobGateway, DurableStationJobGateway>();
-                services.TryAddSingleton<IStationSafetyGateway, RabbitMqStationSafetyGateway>();
+                services.TryAddSingleton<RabbitMqStationSafetyGateway>();
+                services.TryAddSingleton<IStationEmergencyStopGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<RabbitMqStationSafetyGateway>());
+                services.TryAddSingleton<IStationSafetyGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<RabbitMqStationSafetyGateway>());
+                services.TryAddSingleton<IStationJobCancellationGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<RabbitMqStationSafetyGateway>());
                 services.AddHostedService<StationJobOutboxHostedService>();
                 services.AddHostedService<StationResultInboxHostedService>();
                 break;
@@ -137,7 +169,13 @@ public static class RuntimeModuleServiceCollectionExtensions
                 }
 
                 services.TryAddSingleton<IStationJobGateway, DisabledStationJobGateway>();
-                services.TryAddSingleton<IStationSafetyGateway, DisabledStationSafetyGateway>();
+                services.TryAddSingleton<DisabledStationSafetyGateway>();
+                services.TryAddSingleton<IStationEmergencyStopGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<DisabledStationSafetyGateway>());
+                services.TryAddSingleton<IStationSafetyGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<DisabledStationSafetyGateway>());
+                services.TryAddSingleton<IStationJobCancellationGateway>(serviceProvider =>
+                    serviceProvider.GetRequiredService<DisabledStationSafetyGateway>());
                 break;
         }
 
@@ -178,12 +216,17 @@ public static class RuntimeModuleServiceCollectionExtensions
         // Production composition must provide an Agent gateway and deployment resolver.
         services.AddScoped<InProcessStationOperationDispatcher>();
         services.AddScoped<AgentStationOperationDispatcher>();
+        services.AddScoped<InProcessStationOperationCanceler>();
+        services.AddScoped<AgentStationOperationCanceler>();
+        services.AddSingleton<InProcessStationOperationRegistry>();
         services.AddScoped<AgentStationSafetyController>();
         services.AddScoped<InProcessStationSafetyController>();
         if (stationExecutionProvider == StationExecutionProvider.Agent)
         {
             services.TryAddScoped<IStationOperationDispatcher>(serviceProvider =>
                 serviceProvider.GetRequiredService<AgentStationOperationDispatcher>());
+            services.TryAddScoped<IStationOperationCanceler>(serviceProvider =>
+                serviceProvider.GetRequiredService<AgentStationOperationCanceler>());
             services.TryAddScoped<IStationSafetyController>(serviceProvider =>
                 serviceProvider.GetRequiredService<AgentStationSafetyController>());
         }
@@ -191,6 +234,8 @@ public static class RuntimeModuleServiceCollectionExtensions
         {
             services.TryAddScoped<IStationOperationDispatcher>(serviceProvider =>
                 serviceProvider.GetRequiredService<InProcessStationOperationDispatcher>());
+            services.TryAddScoped<IStationOperationCanceler>(serviceProvider =>
+                serviceProvider.GetRequiredService<InProcessStationOperationCanceler>());
             services.TryAddScoped<IStationSafetyController>(serviceProvider =>
                 serviceProvider.GetRequiredService<InProcessStationSafetyController>());
         }

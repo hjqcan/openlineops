@@ -212,9 +212,9 @@ async function main() {
     + ' && Boolean(document.querySelector("[data-testid=\\"topology-canvas\\"]")))()',
     30000,
     'Application topology and 2D layout to create');
-  await expectApiStatus(
+  const capabilityMutation = await expectApiStatus(
     `${topologyBasePath}/capabilities`,
-    {
+    await editorMutationOptions(topologyBasePath, {
       method: 'POST',
       body: {
         capabilityId,
@@ -225,25 +225,13 @@ async function main() {
         timeoutSeconds: 15,
         safetyClass: 'Motion'
       }
-    },
+    }),
     200,
     'add Application motion capability');
-  await expectApiStatus(
-    `${topologyBasePath}/driver-bindings`,
-    {
-      method: 'POST',
-      body: {
-        bindingId: `${openedApplication.applicationId}.binding.axis.simulator`,
-        capabilityId,
-        providerKind: 'Simulator',
-        providerKey: 'simulator.axis.x'
-      }
-    },
-    200,
-    'bind Application motion simulator');
   await clickByTestId('refresh-topology-layout');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"topology-workbench\\"]")?.textContent?.includes("1 capabilities"))()',
+    `(() => document.body.innerText.includes(${JSON.stringify(`@ ${capabilityMutation.body.revision.slice(0, 12)}`)})`
+    + ' && document.querySelector("[data-testid=\\"topology-workbench\\"]")?.textContent?.includes("1 capabilities"))()',
     30000,
     'capability to refresh into the 2D layout editor');
   await dragPaletteItemToCanvas('add-topology-station', 0.32, 0.38);
@@ -258,6 +246,25 @@ async function main() {
     + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 1"))()',
     30000,
     'child System to be dragged into the Station');
+  const driverBindingMutation = await expectApiStatus(
+    `${topologyBasePath}/driver-bindings`,
+    await editorMutationOptions(topologyBasePath, {
+      method: 'POST',
+      body: {
+        bindingId: `${openedApplication.applicationId}.binding.axis.simulator`,
+        ownerSystemId: `${openedApplication.applicationId}.station.1`,
+        capabilityId,
+        providerKind: 'Simulator',
+        providerKey: 'simulator.axis.x'
+      }
+    }),
+    200,
+    'bind Application motion simulator to its Station System');
+  await clickByTestId('refresh-topology-layout');
+  await waitForExpression(
+    `(() => document.body.innerText.includes(${JSON.stringify(`@ ${driverBindingMutation.body.revision.slice(0, 12)}`)}))()`,
+    30000,
+    'Driver binding mutation revision to refresh into the 2D layout editor');
   await dragPaletteItemToCanvas('add-topology-system', 0.43, 0.31);
   await waitForExpression(
     '(() => document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 2")'
@@ -565,6 +572,12 @@ async function main() {
   if (countedTransition?.loopPolicy !== 'Counted' || countedTransition?.maxTraversals !== 2) {
     throw new Error(`Counted transition policy was not persisted: ${JSON.stringify(countedTransition)}`);
   }
+  await clickByTestId('process-node-pythonscript-1');
+  await clickByTestId('remove-process-node');
+  await waitForExpression(
+    '(() => !document.querySelector("[data-testid=\\"process-node-pythonscript-1\\"]"))()',
+    15000,
+    'validated Python draft node to be removed before Station-scoped publication');
   const updatedProcessDisplayName = `Updated Automation Flow ${Date.now().toString(36)}`;
   await setInputByTestId('process-display-name', updatedProcessDisplayName);
   await clickByTestId('save-process-definition');
@@ -599,6 +612,29 @@ async function main() {
     `(() => document.querySelector('[data-testid="production-operation-configuration-0"]')?.value === ${JSON.stringify(configurationSnapshotId)})()`,
     30000,
     'production Operation to bind its published Station and Flow configuration');
+  await clickByTestId('add-production-operation');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"production-operation-node-operation-2\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"production-transition-edge-route-1\\"]")))()',
+    15000,
+    'second Operation and its default route to appear');
+  await clickByTestId('production-transition-edge-route-1');
+  await setSelectByTestId('route-transition-kind', 'Condition');
+  await setInputByTestId('route-condition-output-key', 'inspectionPassed');
+  await setSelectByTestId('route-condition-expected-kind', 'Boolean');
+  await setInputByTestId('route-condition-expected-value', 'true');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"production-transition-edge-route-1\\"]")?.textContent?.includes("inspectionPassed = true"))()',
+    15000,
+    'typed Production Context Condition to render on the route graph');
+  await clickByTestId('remove-route-transition');
+  await clickByTestId('production-operation-node-operation-2');
+  await clickByTestId('remove-production-operation');
+  await waitForExpression(
+    '(() => !document.querySelector("[data-testid=\\"production-operation-node-operation-2\\"]")'
+    + ' && !document.querySelector("[data-testid=\\"production-transition-edge-route-1\\"]"))()',
+    15000,
+    'Condition editor exercise to return to the single-Operation runtime route');
   await clickByTestId('save-production-line');
   await waitForExpression(
     '(() => document.body.innerText.includes("Production line saved line-"))()',
@@ -636,16 +672,128 @@ async function main() {
     || !publishedProjectSnapshot.blockVersionIds?.some(blockVersionId => blockVersionId.startsWith('openlineops_move_axis@'))) {
     throw new Error(`Project snapshot payload was incomplete: ${JSON.stringify(publishedProjectSnapshot)}`);
   }
+
+  const immutableContextPath = `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
+    + `/snapshots/${encodeURIComponent(projectSnapshotId)}/production-run-context`;
+  const immutableContextBeforeDraftEdit = await expectApiStatus(
+    immutableContextPath,
+    {},
+    200,
+    'read immutable Production Run context before editing the draft line');
+  const frozenContext = immutableContextBeforeDraftEdit.body;
+  const liveLinePath = `/api/automation-projects/${encodeURIComponent(openedProject.projectId)}`
+    + `/applications/${encodeURIComponent(openedApplication.applicationId)}`
+    + `/production-lines/${encodeURIComponent(productionLineDefinitionId)}`;
+  const liveLine = await expectApiStatus(
+    liveLinePath,
+    {},
+    200,
+    'read editable Production line after publishing');
+  if (frozenContext?.projectId !== openedProject.projectId
+      || frozenContext?.applicationId !== openedApplication.applicationId
+      || frozenContext?.snapshotId !== projectSnapshotId
+      || frozenContext?.topologyId !== publishedProjectSnapshot.topologyId
+      || frozenContext?.productionLineDefinitionId !== productionLineDefinitionId
+      || frozenContext?.productModelId !== liveLine.body?.productModel?.productModelId
+      || frozenContext?.productModelIdentityInputKey !== liveLine.body?.productModel?.identityInputKey
+      || frozenContext?.entryOperationId !== liveLine.body?.entryOperationId
+      || !frozenContext?.entryStationSystemId) {
+    throw new Error(`Immutable Production Run context was incomplete: ${JSON.stringify(frozenContext)}`);
+  }
+
+  const editedDraftProductModelId = `${frozenContext.productModelId}.draft-edited`;
+  await expectApiStatus(
+    liveLinePath,
+    {
+      method: 'PUT',
+      headers: { 'If-Match': `"${liveLine.body.revision}"` },
+      body: {
+        lineDefinitionId: liveLine.body.lineDefinitionId,
+        displayName: liveLine.body.displayName,
+        topologyId: liveLine.body.topologyId,
+        productModel: {
+          productModelId: editedDraftProductModelId,
+          modelCode: liveLine.body.productModel.modelCode,
+          identityInputKey: 'draftSerial'
+        },
+        entryOperationId: liveLine.body.entryOperationId,
+        operations: liveLine.body.operations.map(operation => ({
+          operationId: operation.operationId,
+          displayName: operation.displayName,
+          stationSystemId: operation.stationSystemId,
+          flowDefinitionId: operation.flowDefinitionId,
+          configurationSnapshotId: operation.configurationSnapshotId,
+          resources: operation.resources.map(resource => ({
+            bindingId: resource.bindingId,
+            kind: resource.kind,
+            topologyTargetId: resource.topologyTargetId,
+            resolution: resource.resolution
+          }))
+        })),
+        transitions: liveLine.body.transitions.map(transition => ({
+          transitionId: transition.transitionId,
+          sourceOperationId: transition.sourceOperationId,
+          targetOperationId: transition.targetOperationId,
+          kind: transition.kind,
+          requiredJudgement: transition.requiredJudgement,
+          maxTraversals: transition.maxTraversals,
+          parallelGroupId: transition.parallelGroupId,
+          outputKey: transition.outputKey,
+          expectedOutputKind: transition.expectedOutputKind,
+          expectedOutputValue: transition.expectedOutputValue
+        })),
+        lineControllerAuthorizations: liveLine.body.lineControllerAuthorizations.map(
+          authorization => ({ ...authorization }))
+      }
+    },
+    200,
+    'edit the draft Product Model after publishing');
+  const immutableContextAfterDraftEdit = await expectApiStatus(
+    immutableContextPath,
+    {},
+    200,
+    'read immutable Production Run context after editing the draft line');
+  if (immutableContextAfterDraftEdit.body?.productModelId !== frozenContext.productModelId
+      || immutableContextAfterDraftEdit.body?.productModelIdentityInputKey
+        !== frozenContext.productModelIdentityInputKey
+      || immutableContextAfterDraftEdit.body?.productModelId === editedDraftProductModelId) {
+    throw new Error(
+      `Immutable Production Run context changed with the draft line: ${JSON.stringify(immutableContextAfterDraftEdit.body)}`);
+  }
+
+  await clickByTestId('nav-production');
+  await setInputByTestId('production-line-name', `${liveLine.body.displayName} Editor Draft`);
+  await clickByTestId('save-production-line');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"editor-external-conflict\\"]"))'
+    + ' && Boolean(document.querySelector("[data-testid=\\"conflict-reload\\"]"))'
+    + ' && document.querySelector("[data-testid=\\"editor-tab-production\\"]")?.textContent?.includes("Line Designer"))()',
+    30000,
+    'external Production Line conflict to preserve the mounted editor draft');
+  await captureSmokeScreenshot('editor-external-conflict.png');
+  await clickByTestId('conflict-reload');
+  await waitForExpression(
+    `(() => !document.querySelector('[data-testid="editor-external-conflict"]')`
+    + ` && document.querySelector('[data-testid="production-product-model-id"]')?.value === ${JSON.stringify(editedDraftProductModelId)}`
+    + ' && document.querySelectorAll("[data-testid=\\"editor-tab-strip\\"] [role=\\"tab\\"]").length >= 3)()',
+    30000,
+    'conflicted editor to reload without unmounting the other open tabs');
+
   await clickByTestId('run-active-project');
   await waitForExpression(
     '(() => document.querySelector("[data-testid=\\"production-run-dialog\\"]")?.open === true)()',
     15000,
     'Run Project identity dialog to render');
-  await setInputByTestId('production-run-dut-identity', `DUT-${openedProject.projectId}`);
+  const productionUnitId = await waitForExpression(
+    '(() => {'
+    + ' const value = document.querySelector("[data-testid=\\"production-run-unit-id\\"]")?.value ?? "";'
+    + ' return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value)'
+    + '   ? value : "";'
+    + '})()',
+    15000,
+    'Run Project to generate a canonical lowercase Production Unit ID');
+  await setInputByTestId('production-run-unit-identity', `UNIT-${openedProject.projectId}`);
   await setInputByTestId('production-run-actor', 'desktop-smoke-operator');
-  await setInputByTestId('production-run-batch', `BATCH-${openedProject.projectId}`);
-  await setInputByTestId('production-run-fixture', 'fixture.desktop');
-  await setInputByTestId('production-run-device', 'device.desktop');
   await clickByTestId('confirm-production-run');
   await waitForExpression(
     `(() => {
@@ -671,6 +819,17 @@ async function main() {
     })()`,
     45000,
     'formal project snapshot runtime to open the topology Monitor view');
+  const productionUnit = await expectApiStatus(
+    `/api/production-units/${encodeURIComponent(productionUnitId)}`,
+    {},
+    200,
+    'verify Run Project registered the Unit from immutable context');
+  if (productionUnit.body?.productModelId !== frozenContext.productModelId
+      || productionUnit.body?.identityKey !== frozenContext.productModelIdentityInputKey
+      || productionUnit.body?.productModelId === editedDraftProductModelId) {
+    throw new Error(
+      `Run Project used editable draft identity instead of immutable context: ${JSON.stringify(productionUnit.body)}`);
+  }
   await captureSmokeScreenshot('topology-monitor.png');
   await clickByTestId('topology-dimension-3d');
   await waitForExpression(
@@ -690,9 +849,35 @@ async function main() {
   await clickByTestId('nav-dashboard');
   await waitForExpression(
     '(() => document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("Projection connected")'
-    + ' && document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("Line State"))()',
+    + ' && document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("Line State")'
+    + ' && document.querySelector("[data-testid=\\"operations-workbench\\"]")?.textContent?.includes("No matching active runs")'
+    + ' && !document.querySelector("[data-testid=\\"production-command-Cancel\\"]"))()',
     30000,
-    'Operations workbench to reconnect through the formal persisted projection');
+    'Operations workbench to reconnect without exposing controls for a completed Run');
+  const emergencyStationSystemId = `${openedApplication.applicationId}.station.1`;
+  await waitForExpression(
+    `(() => Boolean(document.querySelector('[data-testid="emergency-stop-${emergencyStationSystemId}"]')))()`,
+    15000,
+    'Operations workbench to expose the independent Station Emergency Stop control');
+  await clickByTestId(`emergency-stop-${emergencyStationSystemId}`);
+  await waitForExpression(
+    `(() => {
+      const confirmation = document.querySelector('[data-testid="emergency-stop-confirmation"]');
+      const trigger = document.querySelector('[data-testid="confirm-emergency-stop"]');
+      return confirmation?.textContent?.includes('independent Station safety channel')
+        && confirmation?.textContent?.includes(${JSON.stringify(emergencyStationSystemId)})
+        && trigger?.disabled === true;
+    })()`,
+    10000,
+    'Emergency Stop to require an explicit second confirmation for one Station');
+  await setInputByTestId('emergency-stop-reason', 'Desktop smoke independent safety confirmation');
+  await setInputByTestId('emergency-stop-confirmation-text', emergencyStationSystemId);
+  await waitForExpression(
+    '(() => document.querySelector(\'[data-testid="confirm-emergency-stop"]\')?.disabled === false)()',
+    10000,
+    'Emergency Stop confirmation to require the exact Station System ID');
+  await captureSmokeScreenshot('emergency-stop-confirmation.png');
+  await clickByTestId('cancel-emergency-stop');
   await captureSmokeScreenshot('line-operations.png');
 
   const traceRecordsAfterRuns = await expectApiStatus(
@@ -704,9 +889,9 @@ async function main() {
     || !traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
     || traceRecordsAfterRuns.body?.items?.[0]?.traceRecordId
       !== traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
-    || traceRecordsAfterRuns.body?.items?.[0]?.stageCount < 1) {
+    || traceRecordsAfterRuns.body?.items?.[0]?.operationCount < 1) {
     throw new Error(
-      `Expected one production run to create exactly one staged trace record: ${JSON.stringify(traceRecordsAfterRuns.body)}`);
+      `Expected one production run to create exactly one Operation trace record: ${JSON.stringify(traceRecordsAfterRuns.body)}`);
   }
 
   await clickByTestId('nav-trace');
@@ -717,16 +902,16 @@ async function main() {
     'trace workbench to render production run results');
   await clickByTestId('trace-result-row');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("DUT-")'
-    + ' && Boolean(document.querySelector("[data-testid=\\"trace-stage-card\\"]"))'
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("UNIT-")'
+    + ' && Boolean(document.querySelector("[data-testid=\\"trace-operation-card\\"]"))'
     + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Commands")'
     + ' && document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("Measurements"))()',
     30000,
-    'trace detail to load nested production stage evidence');
+    'trace detail to load nested production Operation evidence');
   await captureSmokeScreenshot('production-run-trace.png');
   await clickByTestId('trace-export-package');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.production-run-trace-package.v1"))()',
+    '(() => document.querySelector("[data-testid=\\"trace-detail-panel\\"]")?.textContent?.includes("openlineops.production-run-trace-package"))()',
     30000,
     'trace export package to load');
 
@@ -822,7 +1007,11 @@ async function clickByTestId(testId) {
     if (!element) {
       throw new Error('Missing element: ${testId}');
     }
-    element.click();
+    if (element instanceof HTMLElement) {
+      element.click();
+    } else {
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    }
     return true;
   })()`);
 }
@@ -1232,6 +1421,7 @@ async function createPublishedEngineeringSnapshot(definition) {
         displayName: 'Desktop Process Runtime Station',
         deviceBindings: requiredCapabilities.map((capabilityId, index) => ({
           deviceBindingId: `runtime-primary-${index + 1}`,
+          ownerSystemId: `${activeProjectApplicationScope.applicationId}.station.1`,
           capabilityId,
           deviceKey: `desktop-smoke-device-${index + 1}`
         }))
@@ -1288,6 +1478,26 @@ async function expectApiStatus(path, options, expectedStatus, description) {
   }
 
   return response;
+}
+
+async function editorMutationOptions(documentPath, options) {
+  const current = await expectApiStatus(
+    documentPath,
+    {},
+    200,
+    `load editor revision for ${documentPath}`);
+  const revision = current.body?.revision;
+  if (typeof revision !== 'string' || revision.length === 0) {
+    throw new Error(`Editor document ${documentPath} did not return a revision: ${current.text}`);
+  }
+
+  return {
+    ...options,
+    headers: {
+      ...(options.headers ?? {}),
+      'If-Match': `"${revision}"`
+    }
+  };
 }
 
 async function apiRequest(path, options = {}) {

@@ -40,10 +40,11 @@ they describe behavior contracts and provider resolution rather than physical
 containment.
 
 A `SlotGroup` belongs to one Station System. A `Slot` belongs to one group and
-the same Station System. A Production `WorkstationDefinition` references only
-`stationSystemId`. Flow IR targets use `System`, `Capability`, `Driver`,
-`SlotGroup`, `Slot`, or `Dut`; an external-test action targets the workstation's
-Station System.
+the same Station System. A Production `OperationDefinition` references that
+Station directly through `stationSystemId`. Flow IR targets use `System`,
+`Capability`, `Driver`, `SlotGroup`, `Slot`, or `ProductionUnit`; an external
+program is invoked through an ordinary Action whose target and resource scope
+are frozen with its Operation.
 
 Replace the flat layout document with a strict hierarchical layout:
 
@@ -68,7 +69,7 @@ processes, bindings, and provider artifacts used by Runtime.
 
 ## Consequences
 
-- A workstation has one identity from the Application canvas through runtime
+- A Station has one identity from the Application canvas through runtime
   monitoring and trace evidence.
 - Moving a Station automatically carries its nested Systems, groups, and slots
   because child coordinates are local to the container.

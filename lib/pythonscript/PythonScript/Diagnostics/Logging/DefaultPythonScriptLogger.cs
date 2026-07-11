@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Threading;
 using Python.Runtime;
@@ -98,7 +99,7 @@ namespace PythonScript.Diagnostics.Logging
             };
         }
 
-        private static IReadOnlyDictionary<string, object?> MergeProperties(ScopeNode? scope, IReadOnlyDictionary<string, object?> properties)
+        private static Dictionary<string, object?> MergeProperties(ScopeNode? scope, IReadOnlyDictionary<string, object?> properties)
         {
             var merged = new Dictionary<string, object?>(StringComparer.Ordinal);
 
@@ -150,7 +151,7 @@ namespace PythonScript.Diagnostics.Logging
         {
             var builder = new StringBuilder();
             builder.Append('[')
-                   .Append(logEvent.Timestamp.ToString("HH:mm:ss"))
+                   .Append(logEvent.Timestamp.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
                    .Append(' ')
                    .Append(logEvent.Level.ToString().ToUpperInvariant())
                    .Append("] ")

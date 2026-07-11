@@ -2,7 +2,13 @@
 
 OpenLineOps is an automation-production-line IDE and immutable runtime platform.
 
-It lets users create and open portable automation projects, compose independent Applications, model DUTs, workstations and ordered production stages, bind semantic topology and site layout, author execution flows primarily with Blockly, use controlled Python for advanced logic, integrate external vendor test programs through the same command lifecycle, run immutable releases, and trace results. OpenLineOps is a ground-up original open-source platform.
+It lets users create and open portable automation projects, compose independent
+Applications, define product models and route graphs over Station Systems, bind
+semantic topology and site layout, author execution flows primarily with
+Blockly, use controlled Python for advanced logic, integrate external vendor
+programs through the same command lifecycle, run immutable releases, and trace
+the location, operation, judgement, genealogy, and evidence of every production
+unit. OpenLineOps is a ground-up original open-source platform.
 
 ## Current Status
 
@@ -36,10 +42,12 @@ This project is in early platform development.
   content-addressed provider packages; runtime has no live-inventory fallback.
 - Production lines: the independent `OpenLineOps.Production` bounded context
   stores strict Application-local line definitions under `production/lines`.
-  Each definition composes a DUT model, Station-System-bound workstations, contiguous
-  stages, published flows, and optional external-test adapters. Vendor programs
-  are declared as Application executables or exact providers and are invoked only
-  through a workstation-targeted Flow IR command.
+  Each definition composes one `ProductModelDefinition`, Station-System-bound
+  `OperationDefinition` nodes, a validated `RouteTransition` graph, published
+  flows, and optional external-program resources. Route graphs support sequence,
+  typed conditions, judgement branches, bounded rework, parallel fork, and
+  parallel join. Vendor programs are Application resources or exact providers
+  and are invoked only through an Operation's Station-scoped Flow IR action.
 - Project workspace: project-folder source is isolated by explicit project and
   application scope across topology, layout, processes, Blockly/Python artifacts,
   blocks, and Engineering configuration. A root `<projectId>.oloproj` composes
@@ -52,9 +60,20 @@ This project is in early platform development.
   migration path. Server-side publication creates an immutable
   release containing frozen source, resolved metadata, per-file hashes, a content
   digest, and canonical Flow IR.
-- Headless execution: `OpenLineOps.Runner` implements one-shot execution of an
-  existing immutable Project Snapshot without opening Studio. It is not yet a
-  service, queue, recovery host, package/deployment tool, or signed-package verifier.
+- Production runtime: asynchronous `ProductionRun` coordination separates
+  `ExecutionStatus` from `ResultJudgement`, manages Station/Slot/Fixture/Device
+  fencing leases, persists typed operation output, and supports multiple units
+  moving through different Stations concurrently. `ProductionUnit`,
+  `ProductionLot`, `Carrier`, material genealogy, location, and Slot occupancy
+  are formal Runtime aggregates.
+- Headless execution: `OpenLineOps.Runner` submits and waits for one asynchronous
+  `ProductionRun` against an existing immutable Project Snapshot without opening
+  Studio. The Windows Agent has durable SQLite inbox/outbox/checkpoints, signed
+  `.olopkg` verification and read-only content caching, normal RabbitMQ job
+  transport, and a separate safety channel. Packaging remains an infrastructure
+  API rather than a Runner CLI command. Production Station account, AppContainer,
+  immutable-cache ACL, and network-capability requirements are documented in
+  [Station Agent Security Boundary](docs/station-agent-security.md).
 - Open source packaging: initial documentation, contribution workflow, CI workflow, CI workflow action reference verification, CI release artifact bundle inspection evidence, sample plugin, bounded-context living template, module scaffolding command, release manifest tooling, artifact kind gates, local release staging script, third-party notice generation, release dependency inventory metadata, release metadata checksums, release provenance metadata, release candidate inspection verification, publication evidence reporting and verification, final publication preflight, unsigned desktop unpacked package staging, optional desktop signing pipeline, manifest/checksum verification, publication readiness gate with strict signed-desktop enforcement, publication metadata finalization script, and CI release artifact upload.
 
 ## Repository Map
@@ -99,6 +118,22 @@ Run the local API:
 dotnet run --project src/OpenLineOps.Api/OpenLineOps.Api.csproj --urls http://localhost:5135
 ```
 
+An independently launched API intentionally has no signing-key fallback. Before
+publishing a Project Snapshot, configure all four
+`OpenLineOps:Projects:StationPackages` values:
+
+- `DistributionDirectory`: content-addressed `.olopkg` output outside every
+  Project directory;
+- `DeploymentCatalogDirectory`: strict Station deployment catalogs;
+- `SigningKeyId`: the trust identity used by Agents;
+- `SigningPrivateKeyPath`: a PKCS#8 RSA private-key PEM outside Project,
+  release, distribution, and catalog roots. RSA must be at least 3072 bits.
+
+Packaged and development Electron Studio provision this local identity and its
+public trust file once under Electron's user-data directory and pass the four
+settings explicitly to the backend. Production API deployments must supply
+their own protected key and paths.
+
 Run the desktop shell:
 
 ```powershell
@@ -107,23 +142,39 @@ npm install
 npm run dev
 ```
 
+An independent Windows Agent reads the same package distribution through
+`OpenLineOps:Agent:PackageDistributionDirectory` and maps trusted key ids to
+public-key PEM files with
+`OpenLineOps:Agent:TrustedPackagePublicKeyFiles:{keyId}`. Coordinator routing is
+stable by Project/Application/Station; configure
+`OpenLineOps:Runtime:AgentTransport:DeploymentCatalogDirectory` plus deployment
+entries containing `ProjectId`, `ApplicationId`, `StationSystemId`, `AgentId`,
+and physical `StationId`. Do not put a Snapshot id or package hash in the stable
+route: each job resolves its requested Snapshot from the signed-package catalog
+without a Coordinator restart.
+
 Run an already-published immutable Project Snapshot without opening Studio:
 
 ```powershell
 dotnet run --project src/OpenLineOps.Runner/OpenLineOps.Runner.csproj -- `
   run C:\Projects\LineA --snapshot active `
-  --dut DUT-001 --batch BATCH-001 --actor operator-a
+  --production-unit-id 8a9d9629-598e-4e96-a8e7-5df8d7da44a9 `
+  --identity UNIT-001 --actor operator-a
 ```
 
-Runner writes one JSON result using Runner output schema v1 to standard output
-and returns a stable exit code. It accepts a project directory or
+`--production-unit-id`, `--identity`, and `--actor` are required. Runner writes
+one strict JSON result with the Production Run's execution status, result
+judgement, disposition, Operations, route decisions, typed outputs, resource
+fencing tokens, and incidents to standard output and returns a stable exit code.
+It accepts a project directory or
 `<projectId>.oloproj` path. It rejects every other project format and refuses
 draft-only projects or snapshots without an immutable release.
 See `docs/automation-ide-product-shell.md` for the current codes and limitations.
 
-The only Production-start path is the Project Snapshot Production Run endpoint
-(or the Runner, which opens the same immutable release). Every line stage uses
-its frozen Flow IR, engineering configuration, Workstation, and Station route.
+The only Production-start path is the asynchronous Project Snapshot Production
+Run endpoint (or the Runner, which submits through the same launcher and waits
+for the terminal Run). Every Operation uses its frozen Flow IR, Engineering
+configuration, Station System, and resource requirements.
 There are no simulated, direct process-definition, global-repository, or
 editable-source fallback start paths.
 
@@ -149,6 +200,9 @@ dotnet test tests/OpenLineOps.SampleInspection.Tests/OpenLineOps.SampleInspectio
 dotnet run --project tools/OpenLineOps.BoundedContext.Scaffolder/OpenLineOps.BoundedContext.Scaffolder.csproj -- --help
 dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --help
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-ci-workflow-actions.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-no-version-suffix-implementations.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-no-legacy-production-contracts.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-no-technical-debt-markers.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-open-source-metadata.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1
 dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj

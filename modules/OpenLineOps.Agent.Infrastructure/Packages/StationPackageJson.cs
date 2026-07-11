@@ -1,14 +1,10 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using OpenLineOps.Agent.Contracts;
 
 namespace OpenLineOps.Agent.Infrastructure.Packages;
 
 internal static class StationPackageJson
 {
-    public static JsonSerializerOptions Options { get; } = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-        WriteIndented = false
-    };
+    public static JsonSerializerOptions Options { get; } =
+        StationPackageCanonicalization.CreateJsonOptions();
 }

@@ -56,14 +56,14 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         command.Transaction = transaction;
         command.CommandText = """
             INSERT OR IGNORE INTO trace_records (
-                trace_id, production_run_id, document_json,
+                trace_id, production_run_id, production_unit_id, document_json,
                 project_id, application_id, project_snapshot_id, topology_id,
                 production_line_definition_id, product_model_id,
                 production_unit_identity_input_key, production_unit_identity_value,
                 lot_id, carrier_id, actor_id, execution_status, judgement, disposition,
                 created_at_utc, started_at_utc, completed_at_utc, updated_at_utc)
             VALUES (
-                $trace_id, $production_run_id, $document_json,
+                $trace_id, $production_run_id, $production_unit_id, $document_json,
                 $project_id, $application_id, $project_snapshot_id, $topology_id,
                 $production_line_definition_id, $product_model_id,
                 $production_unit_identity_input_key, $production_unit_identity_value,
@@ -72,6 +72,7 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             """;
         command.Parameters.AddWithValue("$trace_id", traceRecord.Id.Value.ToString("D"));
         command.Parameters.AddWithValue("$production_run_id", traceRecord.ProductionRunId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$production_unit_id", traceRecord.ProductionUnitId.Value.ToString("D"));
         command.Parameters.AddWithValue("$document_json", documentJson);
         command.Parameters.AddWithValue("$project_id", traceRecord.ProjectId);
         command.Parameters.AddWithValue("$application_id", traceRecord.ApplicationId);
@@ -293,7 +294,6 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
             EnsureDatabaseDirectory();
             await using var connection = CreateConnection();
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            await RecreateObsoleteSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 PRAGMA foreign_keys = ON;
@@ -301,6 +301,7 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                 CREATE TABLE IF NOT EXISTS trace_records (
                     trace_id TEXT NOT NULL PRIMARY KEY,
                     production_run_id TEXT NOT NULL UNIQUE,
+                    production_unit_id TEXT NOT NULL,
                     document_json TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     application_id TEXT NOT NULL,
@@ -360,7 +361,7 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_trace_records_unit_completed
-                    ON trace_records(production_unit_identity_value, completed_at_utc, trace_id);
+                    ON trace_records(production_unit_id, completed_at_utc, trace_id);
                 CREATE INDEX IF NOT EXISTS ix_trace_records_line_completed
                     ON trace_records(production_line_definition_id, completed_at_utc, trace_id);
                 CREATE INDEX IF NOT EXISTS ix_trace_operations_station
@@ -377,41 +378,6 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
         {
             _schemaLock.Release();
         }
-    }
-
-    private static async ValueTask RecreateObsoleteSchemaAsync(
-        SqliteConnection connection,
-        CancellationToken cancellationToken)
-    {
-        await using var check = connection.CreateCommand();
-        check.CommandText = """
-            SELECT CASE
-                WHEN NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_records') THEN 0
-                WHEN EXISTS (SELECT 1 FROM pragma_table_info('trace_records') WHERE name = 'product_model_id')
-                 AND EXISTS (SELECT 1 FROM pragma_table_info('trace_records') WHERE name = 'execution_status')
-                 AND EXISTS (SELECT 1 FROM pragma_table_info('trace_records') WHERE name = 'disposition') THEN 0
-                ELSE 1
-            END;
-            """;
-        var obsolete = Convert.ToInt32(
-            await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
-            CultureInfo.InvariantCulture) == 1;
-        if (!obsolete)
-        {
-            return;
-        }
-
-        await using var recreate = connection.CreateCommand();
-        recreate.CommandText = """
-            PRAGMA foreign_keys = OFF;
-            DROP TABLE IF EXISTS trace_stage_executions;
-            DROP TABLE IF EXISTS trace_operation_resources;
-            DROP TABLE IF EXISTS trace_operation_executions;
-            DROP TABLE IF EXISTS trace_devices;
-            DROP TABLE IF EXISTS trace_records;
-            PRAGMA foreign_keys = ON;
-            """;
-        await recreate.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void EnsureDatabaseDirectory()
@@ -435,6 +401,8 @@ public sealed class SqliteTraceRecordRepository : ITraceRecordRepository, IDispo
     {
         var filters = new List<QueryFilter>();
         Add(filters, query.ProductionRunId, "production_run_id = $production_run_id", "$production_run_id",
+            value => value.ToString("D"));
+        Add(filters, query.ProductionUnitId, "production_unit_id = $production_unit_id", "$production_unit_id",
             value => value.ToString("D"));
         Add(filters, query.ProductModelId, "product_model_id = $product_model_id", "$product_model_id");
         Add(filters, query.ProductionUnitIdentityInputKey,

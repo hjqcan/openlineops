@@ -216,7 +216,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
         string productionUnitIdentityValue,
         string lotId,
         DateTimeOffset completedAtUtc,
-        string runtimeSessionStatus = "Completed",
+        string? runtimeSessionStatus = null,
         string targetKind = "Slot",
         string commandStatus = "Completed",
         string artifactKind = "Image",
@@ -228,6 +228,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
     {
         var runtimeSessionId = Guid.NewGuid();
         var runtimeCommandId = Guid.NewGuid();
+        var productionUnitId = Guid.NewGuid();
         var executionFailed = string.Equals(commandStatus, "Failed", StringComparison.Ordinal);
         var executionStatus = executionFailed ? "Failed" : "Completed";
         var operationJudgement = executionFailed ? "Unknown" : judgement;
@@ -235,6 +236,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
         return new
         {
             productionRunId,
+            productionUnitId,
             projectId = "project-api-trace",
             applicationId = "application-api-trace",
             projectSnapshotId = "snapshot-api-trace",
@@ -275,7 +277,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                     configurationSnapshotId = "config-api-trace",
                     recipeSnapshotId = "recipe-api-trace@1.0.0",
                     runtimeSessionId,
-                    runtimeSessionStatus,
+                    runtimeSessionStatus = runtimeSessionStatus ?? executionStatus,
                     executionStatus,
                     judgement = operationJudgement,
                     startedAtUtc = BaseTimeUtc,

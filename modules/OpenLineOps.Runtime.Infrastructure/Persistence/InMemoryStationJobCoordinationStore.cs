@@ -13,26 +13,41 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
     private readonly ConcurrentDictionary<string, string> _completions =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, StationJobEventInboxItem> _events = [];
+    private readonly object _dispatchGate = new();
 
     public ValueTask<bool> TryEnqueueAsync(
         StationJobRequested request,
+        IReadOnlyCollection<ResourceLeaseChanged> resourceLeaseChanges,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(request);
-        var payload = JsonSerializer.Serialize(request, JsonOptions);
-        var entry = new OutboxEntry(request.MessageId, request.IdempotencyKey, payload, request.RequestedAtUtc);
-        if (_outbox.TryAdd(request.IdempotencyKey, entry))
+        ArgumentNullException.ThrowIfNull(resourceLeaseChanges);
+        var orderedChanges = ValidateDispatch(request, resourceLeaseChanges);
+        lock (_dispatchGate)
         {
-            return ValueTask.FromResult(true);
-        }
+            var jobPayload = JsonSerializer.Serialize(request, JsonOptions);
+            var jobAdded = !_outbox.ContainsKey(request.IdempotencyKey);
+            for (var sequence = 0; sequence < orderedChanges.Length; sequence++)
+            {
+                AddOrValidate(new OutboxEntry(
+                    orderedChanges[sequence].MessageId,
+                    orderedChanges[sequence].IdempotencyKey,
+                    nameof(ResourceLeaseChanged),
+                    sequence,
+                    JsonSerializer.Serialize(orderedChanges[sequence], JsonOptions),
+                    request.RequestedAtUtc));
+            }
 
-        EnsureSameJson(
-            _outbox[request.IdempotencyKey].PayloadJson,
-            payload,
-            request.IdempotencyKey,
-            "Station job");
-        return ValueTask.FromResult(false);
+            AddOrValidate(new OutboxEntry(
+                request.MessageId,
+                request.IdempotencyKey,
+                nameof(StationJobRequested),
+                orderedChanges.Length,
+                jobPayload,
+                request.RequestedAtUtc));
+            return ValueTask.FromResult(jobAdded);
+        }
     }
 
     public ValueTask<StationJobCompleted?> GetCompletionAsync(
@@ -121,11 +136,14 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         IReadOnlyCollection<StationJobOutboxItem> result = _outbox.Values
             .Where(static entry => !entry.Published)
             .OrderBy(static entry => entry.CreatedAtUtc)
+            .ThenBy(static entry => entry.Sequence)
             .ThenBy(static entry => entry.MessageId)
             .Take(maximumCount)
             .Select(static entry => new StationJobOutboxItem(
                 entry.MessageId,
                 entry.IdempotencyKey,
+                entry.Kind,
+                entry.Sequence,
                 entry.PayloadJson,
                 entry.AttemptCount,
                 entry.CreatedAtUtc))
@@ -160,6 +178,61 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         entry => entry.MessageId == messageId)
         ?? throw new InvalidOperationException(
             $"Station job outbox message {messageId:D} does not exist.");
+
+    private void AddOrValidate(OutboxEntry candidate)
+    {
+        if (_outbox.TryAdd(candidate.IdempotencyKey, candidate))
+        {
+            return;
+        }
+
+        var existing = _outbox[candidate.IdempotencyKey];
+        if (existing.MessageId != candidate.MessageId
+            || !string.Equals(existing.Kind, candidate.Kind, StringComparison.Ordinal)
+            || existing.Sequence != candidate.Sequence)
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch idempotency key '{candidate.IdempotencyKey}' was reused with different identity.");
+        }
+
+        EnsureSameJson(
+            existing.PayloadJson,
+            candidate.PayloadJson,
+            candidate.IdempotencyKey,
+            "Station dispatch message");
+    }
+
+    private static ResourceLeaseChanged[] ValidateDispatch(
+        StationJobRequested request,
+        IReadOnlyCollection<ResourceLeaseChanged> changes)
+    {
+        var expected = request.ResourceFences
+            .OrderBy(static fence => fence.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static fence => fence.ResourceId, StringComparer.Ordinal)
+            .Select(fence => OpenLineOps.Runtime.Application.Runs.StationDispatchMessageIdentity
+                .CreateLeaseGranted(request, fence))
+            .ToArray();
+        var supplied = changes
+            .OrderBy(static change => change.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static change => change.ResourceId, StringComparer.Ordinal)
+            .ToArray();
+        if (expected.Length != supplied.Length)
+        {
+            throw new InvalidDataException(
+                "Station dispatch resource lease changes do not match its fences.");
+        }
+
+        for (var index = 0; index < expected.Length; index++)
+        {
+            if (expected[index] != supplied[index])
+            {
+                throw new InvalidDataException(
+                    "Station dispatch resource lease change evidence is not canonical.");
+            }
+        }
+
+        return supplied;
+    }
 
     private ValueTask RecordEventAsync(
         StationJobEventInboxItem item,
@@ -205,12 +278,18 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
     private sealed class OutboxEntry(
         Guid messageId,
         string idempotencyKey,
+        string kind,
+        int sequence,
         string payloadJson,
         DateTimeOffset createdAtUtc)
     {
         public Guid MessageId { get; } = messageId;
 
         public string IdempotencyKey { get; } = idempotencyKey;
+
+        public string Kind { get; } = kind;
+
+        public int Sequence { get; } = sequence;
 
         public string PayloadJson { get; } = payloadJson;
 

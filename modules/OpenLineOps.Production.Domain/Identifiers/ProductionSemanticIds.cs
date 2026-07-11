@@ -10,6 +10,26 @@ public sealed record OperationDefinitionId
     public override string ToString() => Value;
 }
 
+public sealed record OperationResourceBindingId
+{
+    public OperationResourceBindingId(string value) =>
+        Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
+
+    public string Value { get; }
+
+    public override string ToString() => Value;
+}
+
+public sealed record LineControllerAuthorizationId
+{
+    public LineControllerAuthorizationId(string value) =>
+        Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
+
+    public string Value { get; }
+
+    public override string ToString() => Value;
+}
+
 public sealed record RouteTransitionId
 {
     public RouteTransitionId(string value) =>
@@ -23,16 +43,6 @@ public sealed record RouteTransitionId
 public sealed record ProductModelId
 {
     public ProductModelId(string value) =>
-        Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
-
-    public string Value { get; }
-
-    public override string ToString() => Value;
-}
-
-public sealed record ExternalTestProgramAdapterId
-{
-    public ExternalTestProgramAdapterId(string value) =>
         Value = ProductionIdGuard.PortablePathSegment(value, nameof(value));
 
     public string Value { get; }

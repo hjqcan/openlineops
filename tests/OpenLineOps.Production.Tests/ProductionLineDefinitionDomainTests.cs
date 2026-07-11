@@ -41,7 +41,8 @@ public sealed class ProductionLineDefinitionDomainTests
             "Invalid Configuration",
             "station.eol",
             "flow.load",
-            configurationSnapshotId!));
+            configurationSnapshotId!,
+            StationResources("invalid-configuration")));
     }
 
     [Fact]
@@ -53,6 +54,24 @@ public sealed class ProductionLineDefinitionDomainTests
             []));
 
         Assert.Contains("not reachable", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void OperationRequiresOneFixedStationResourceEqualToStationSystemId()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => OperationDefinition.Create(
+            new OperationDefinitionId("operation.invalid-station-resource"),
+            "Invalid Station Resource",
+            "station.eol",
+            "flow.load",
+            "configuration.load",
+            [new OperationResourceBinding(
+                new OperationResourceBindingId("resource.station"),
+                OperationResourceKind.Station,
+                "station.other",
+                OperationResourceResolution.Fixed)]));
+
+        Assert.Contains("exactly one Fixed Station", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -216,57 +235,6 @@ public sealed class ProductionLineDefinitionDomainTests
         Assert.Contains("unique typed expected values", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Theory]
-    [InlineData(" provider.test")]
-    [InlineData("provider.test ")]
-    [InlineData("")]
-    public void ExternalAdapterRejectsNonCanonicalProviderKey(string providerKey)
-    {
-        Assert.Throws<ArgumentException>(() => ExternalTestProgramAdapter.Create(
-            new ExternalTestProgramAdapterId("adapter.test"),
-            "Vendor Test",
-            "test.external",
-            "run",
-            null,
-            providerKey,
-            [],
-            ValidInputs(),
-            ValidResults(),
-            ValidOutcome(),
-            TimeSpan.FromSeconds(1)));
-    }
-
-    [Fact]
-    public void ExternalAdapterRejectsHostAbsoluteExecutableAndMissingProductMappings()
-    {
-        Assert.Throws<ArgumentException>(() => ExternalTestProgramAdapter.Create(
-            new ExternalTestProgramAdapterId("adapter.absolute"),
-            "Absolute",
-            "test.execute",
-            "Execute",
-            "C:/tools/test.exe",
-            null,
-            [],
-            ValidInputs(),
-            ValidResults(),
-            ValidOutcome(),
-            TimeSpan.FromSeconds(30)));
-
-        var exception = Assert.Throws<ArgumentException>(() => ExternalTestProgramAdapter.Create(
-            new ExternalTestProgramAdapterId("adapter.no-product"),
-            "No Product",
-            "test.execute",
-            "Execute",
-            null,
-            "provider.test",
-            [],
-            [new ExternalTestProgramInputMapping("$product.identity", "serial")],
-            ValidResults(),
-            ValidOutcome(),
-            TimeSpan.FromSeconds(30)));
-        Assert.Contains("product identity and product model", exception.Message, StringComparison.Ordinal);
-    }
-
     internal static ProductionLineDefinition Definition(string lineDefinitionId = "line.main")
     {
         return Create(
@@ -276,19 +244,27 @@ public sealed class ProductionLineDefinitionDomainTests
                 Operation("operation.test", "flow.test")
             ],
             [Sequence("load-test", "operation.load", "operation.test")],
-            lineDefinitionId,
-            [Adapter()]);
+            lineDefinitionId);
     }
 
     internal static OperationDefinition Operation(string id, string? flowId = null)
     {
+        var resolvedFlowId = flowId ?? $"flow.{id.Split('.').Last()}";
         return OperationDefinition.Create(
             new OperationDefinitionId(id),
             id,
             "station.eol",
-            flowId ?? $"flow.{id.Split('.').Last()}",
-            $"configuration.{flowId ?? $"flow.{id.Split('.').Last()}"}");
+            resolvedFlowId,
+            $"configuration.{resolvedFlowId}",
+            StationResources(id));
     }
+
+    private static OperationResourceBinding[] StationResources(string suffix) =>
+        [new OperationResourceBinding(
+            new OperationResourceBindingId($"resource.station.{suffix}"),
+            OperationResourceKind.Station,
+            "station.eol",
+            OperationResourceResolution.Fixed)];
 
     internal static RouteTransition Sequence(string id, string source, string target)
     {
@@ -299,28 +275,11 @@ public sealed class ProductionLineDefinitionDomainTests
             RouteTransitionKind.Sequence);
     }
 
-    internal static ExternalTestProgramAdapter Adapter()
-    {
-        return ExternalTestProgramAdapter.Create(
-            new ExternalTestProgramAdapterId("adapter.test"),
-            "Vendor Test",
-            "test.external",
-            "ExecuteTestProgram",
-            null,
-            "provider.test",
-            ["--serial", "{{product.identity}}"],
-            ValidInputs(),
-            ValidResults(),
-            ValidOutcome(),
-            TimeSpan.FromSeconds(30));
-    }
-
     private static ProductionLineDefinition Create(
         string entryOperationId,
         IReadOnlyCollection<OperationDefinition> operations,
         IReadOnlyCollection<RouteTransition> transitions,
-        string lineDefinitionId = "line.main",
-        IReadOnlyCollection<ExternalTestProgramAdapter>? adapters = null)
+        string lineDefinitionId = "line.main")
     {
         return ProductionLineDefinition.Create(
             new ProductionLineDefinitionId(lineDefinitionId),
@@ -333,7 +292,7 @@ public sealed class ProductionLineDefinitionDomainTests
             new OperationDefinitionId(entryOperationId),
             operations,
             transitions,
-            adapters ?? [],
+            [],
             CreatedAtUtc);
     }
 
@@ -399,15 +358,4 @@ public sealed class ProductionLineDefinitionDomainTests
             parallelGroupId: "parallel.inspect");
     }
 
-    private static ExternalTestProgramInputMapping[] ValidInputs() =>
-    [
-        new ExternalTestProgramInputMapping("$product.identity", "serial"),
-        new ExternalTestProgramInputMapping("$product.model", "model")
-    ];
-
-    private static ExternalTestProgramResultMapping[] ValidResults() =>
-        [new ExternalTestProgramResultMapping("$.outcome", "test.outcome")];
-
-    private static ExternalTestProgramOutcomeMapping ValidOutcome() =>
-        new("$.outcome", "Passed", "Failed", "Aborted");
 }

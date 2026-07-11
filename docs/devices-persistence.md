@@ -51,4 +51,4 @@ runtime persistence path.
 - Use `InMemory` only when persistence loss is intentional.
 - Keep stable device identifiers across schema changes.
 - Validate a migrated database with normal device-definition and device-instance
-  reads before returning a workstation to service.
+  reads before returning a Station to service.

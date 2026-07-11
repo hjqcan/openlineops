@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using RabbitMQ.Client;
@@ -15,23 +13,69 @@ public sealed record RabbitMqStationSafetyOptions(
     string EventExchange = "openlineops.station.safety-events",
     bool RequireTls = true);
 
+public sealed class StationSafetyChannelSupervisor
+{
+    private int _running;
+
+    public async Task RunAsync(
+        Func<CancellationToken, Task> emergencyChannel,
+        Func<CancellationToken, Task> controlChannel,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(emergencyChannel);
+        ArgumentNullException.ThrowIfNull(controlChannel);
+        if (Interlocked.Exchange(ref _running, 1) != 0)
+        {
+            throw new InvalidOperationException("Station safety channel supervisor is already running.");
+        }
+
+        try
+        {
+            using var channelLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            var emergency = emergencyChannel(channelLifetime.Token);
+            var control = controlChannel(channelLifetime.Token);
+            var ended = await Task.WhenAny(emergency, control).ConfigureAwait(false);
+            channelLifetime.Cancel();
+            var sibling = ReferenceEquals(ended, emergency) ? control : emergency;
+            try
+            {
+                await sibling.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (channelLifetime.IsCancellationRequested)
+            {
+            }
+
+            await ended.ConfigureAwait(false);
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                throw new IOException(
+                    "An independent Station safety channel ended unexpectedly.");
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _running, 0);
+        }
+    }
+}
+
 public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
-    };
-
     private readonly RabbitMqStationSafetyOptions _options;
-    private readonly StationSafetyCommandCoordinator _coordinator;
-    private readonly ConnectionFactory _factory;
-    private IConnection? _connection;
-    private IChannel? _channel;
+    private readonly StationSafetyDeliveryProcessor _processor;
+    private readonly ConnectionFactory _emergencyFactory;
+    private readonly ConnectionFactory _controlFactory;
+    private readonly StationSafetyChannelSupervisor _supervisor;
+    private IConnection? _emergencyConnection;
+    private IConnection? _controlConnection;
+    private IChannel? _emergencyChannel;
+    private IChannel? _controlChannel;
 
     public RabbitMqStationSafetyReceiver(
         RabbitMqStationSafetyOptions options,
-        StationSafetyCommandCoordinator coordinator)
+        StationSafetyCommandCoordinator coordinator,
+        StationSafetyChannelSupervisor? supervisor = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.BrokerUri);
@@ -40,6 +84,13 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         _ = Required(options.StationId, nameof(options.StationId));
         _ = Required(options.CommandExchange, nameof(options.CommandExchange));
         _ = Required(options.EventExchange, nameof(options.EventExchange));
+        if (options.BrokerUri.Scheme is not ("amqp" or "amqps"))
+        {
+            throw new ArgumentException(
+                "Station safety BrokerUri must use amqp or amqps.",
+                nameof(options));
+        }
+
         if (options.RequireTls
             && !string.Equals(options.BrokerUri.Scheme, "amqps", StringComparison.OrdinalIgnoreCase))
         {
@@ -49,93 +100,65 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         }
 
         _options = options;
-        _coordinator = coordinator;
-        _factory = new ConnectionFactory
-        {
-            Uri = options.BrokerUri,
-            ClientProvidedName = $"OpenLineOps.Agent.Safety/{options.AgentId}/{options.StationId}",
-            AutomaticRecoveryEnabled = true,
-            TopologyRecoveryEnabled = true,
-            ConsumerDispatchConcurrency = 1
-        };
+        _processor = new StationSafetyDeliveryProcessor(options, coordinator);
+        _supervisor = supervisor ?? new StationSafetyChannelSupervisor();
+        _emergencyFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Agent.Emergency/{options.AgentId}/{options.StationId}");
+        _controlFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Agent.Control/{options.AgentId}/{options.StationId}");
     }
 
-    public async Task RunAsync(
+    public Task RunAsync(
         Func<EmergencyStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> emergencyStopHandler,
         Func<StationSafeStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> safeStopHandler,
+        Func<StationJobCancelRequested, CancellationToken, ValueTask<StationJobCancelExecutionResult>> jobCancelHandler,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(emergencyStopHandler);
         ArgumentNullException.ThrowIfNull(safeStopHandler);
-        _connection = await _factory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-        _channel = await _connection.CreateChannelAsync(
-                new CreateChannelOptions(
-                    publisherConfirmationsEnabled: true,
-                    publisherConfirmationTrackingEnabled: true),
+        ArgumentNullException.ThrowIfNull(jobCancelHandler);
+        return _supervisor.RunAsync(
+            token => RunEmergencyChannelAsync(emergencyStopHandler, token),
+            token => RunControlChannelAsync(safeStopHandler, jobCancelHandler, token),
+            cancellationToken);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await DisposeChannelAsync(_emergencyChannel).ConfigureAwait(false);
+        await DisposeChannelAsync(_controlChannel).ConfigureAwait(false);
+        await DisposeConnectionAsync(_emergencyConnection).ConfigureAwait(false);
+        await DisposeConnectionAsync(_controlConnection).ConfigureAwait(false);
+    }
+
+    private async Task RunEmergencyChannelAsync(
+        Func<EmergencyStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> handler,
+        CancellationToken cancellationToken)
+    {
+        _emergencyConnection = await _emergencyFactory
+            .CreateConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        _emergencyChannel = await CreateConfirmedChannelAsync(
+                _emergencyConnection,
                 cancellationToken)
             .ConfigureAwait(false);
-        await DeclareTopologyAsync(_channel, cancellationToken).ConfigureAwait(false);
-        var consumer = new AsyncEventingBasicConsumer(_channel);
-        consumer.ReceivedAsync += async (_, delivery) =>
-        {
-            try
-            {
-                if (!string.Equals(
-                        delivery.BasicProperties.ContentType,
-                        "application/json",
-                        StringComparison.Ordinal))
-                {
-                    throw new InvalidDataException(
-                        "Emergency stop message content type must be application/json.");
-                }
+        await DeclareEmergencyTopologyAsync(_emergencyChannel, cancellationToken)
+            .ConfigureAwait(false);
 
-                var request = JsonSerializer.Deserialize<EmergencyStopRequested>(
-                    delivery.Body.Span,
-                    JsonOptions)
-                    ?? throw new InvalidDataException("Emergency stop request is null.");
-                Validate(request);
-                var acknowledgement = await _coordinator
-                    .HandleEmergencyStopAsync(request, emergencyStopHandler, cancellationToken)
-                    .ConfigureAwait(false);
-                await PublishAcknowledgementAsync(_channel, acknowledgement, cancellationToken)
-                    .ConfigureAwait(false);
-                await _channel.BasicAckAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is JsonException
-                                               or InvalidDataException
-                                               or ArgumentException)
-            {
-                await _channel.BasicRejectAsync(
-                        delivery.DeliveryTag,
-                        requeue: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await _channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                await _channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-        };
-        await _channel.BasicConsumeAsync(
-                QueueName(),
+        var settlement = new RabbitMqSettlement(_emergencyChannel);
+        var publisher = new RabbitMqAcknowledgementPublisher(_emergencyChannel);
+        var consumer = new AsyncEventingBasicConsumer(_emergencyChannel);
+        consumer.ReceivedAsync += (_, delivery) => _processor.ProcessEmergencyStopAsync(
+                ToDelivery(delivery),
+                handler,
+                publisher,
+                settlement,
+                cancellationToken)
+            .AsTask();
+        await _emergencyChannel.BasicConsumeAsync(
+                EmergencyQueueName(),
                 autoAck: false,
                 consumerTag: string.Empty,
                 noLocal: false,
@@ -144,66 +167,33 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
                 consumer,
                 cancellationToken)
             .ConfigureAwait(false);
-        var safeStopConsumer = new AsyncEventingBasicConsumer(_channel);
-        safeStopConsumer.ReceivedAsync += async (_, delivery) =>
-        {
-            try
-            {
-                if (!string.Equals(
-                        delivery.BasicProperties.ContentType,
-                        "application/json",
-                        StringComparison.Ordinal))
-                {
-                    throw new InvalidDataException(
-                        "Safe stop message content type must be application/json.");
-                }
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+    }
 
-                var request = JsonSerializer.Deserialize<StationSafeStopRequested>(
-                    delivery.Body.Span,
-                    JsonOptions)
-                    ?? throw new InvalidDataException("Safe stop request is null.");
-                Validate(request);
-                var acknowledgement = await _coordinator
-                    .HandleSafeStopAsync(request, safeStopHandler, cancellationToken)
-                    .ConfigureAwait(false);
-                await PublishAcknowledgementAsync(_channel, acknowledgement, cancellationToken)
-                    .ConfigureAwait(false);
-                await _channel.BasicAckAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is JsonException
-                                               or InvalidDataException
-                                               or ArgumentException)
-            {
-                await _channel.BasicRejectAsync(
-                        delivery.DeliveryTag,
-                        requeue: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await _channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                await _channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-        };
-        await _channel.BasicConsumeAsync(
+    private async Task RunControlChannelAsync(
+        Func<StationSafeStopRequested, CancellationToken, ValueTask<StationSafetyExecutionResult>> safeStopHandler,
+        Func<StationJobCancelRequested, CancellationToken, ValueTask<StationJobCancelExecutionResult>> jobCancelHandler,
+        CancellationToken cancellationToken)
+    {
+        _controlConnection = await _controlFactory
+            .CreateConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        _controlChannel = await CreateConfirmedChannelAsync(_controlConnection, cancellationToken)
+            .ConfigureAwait(false);
+        await DeclareControlTopologyAsync(_controlChannel, cancellationToken)
+            .ConfigureAwait(false);
+
+        var settlement = new RabbitMqSettlement(_controlChannel);
+        var publisher = new RabbitMqAcknowledgementPublisher(_controlChannel);
+        var safeStopConsumer = new AsyncEventingBasicConsumer(_controlChannel);
+        safeStopConsumer.ReceivedAsync += (_, delivery) => _processor.ProcessSafeStopAsync(
+                ToDelivery(delivery),
+                safeStopHandler,
+                publisher,
+                settlement,
+                cancellationToken)
+            .AsTask();
+        await _controlChannel.BasicConsumeAsync(
                 SafeStopQueueName(),
                 autoAck: false,
                 consumerTag: string.Empty,
@@ -213,23 +203,65 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
                 safeStopConsumer,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        var jobCancelConsumer = new AsyncEventingBasicConsumer(_controlChannel);
+        jobCancelConsumer.ReceivedAsync += (_, delivery) => _processor.ProcessJobCancelAsync(
+                ToDelivery(delivery),
+                jobCancelHandler,
+                publisher,
+                settlement,
+                cancellationToken)
+            .AsTask();
+        await _controlChannel.BasicConsumeAsync(
+                JobCancelQueueName(),
+                autoAck: false,
+                consumerTag: string.Empty,
+                noLocal: false,
+                exclusive: false,
+                arguments: null,
+                jobCancelConsumer,
+                cancellationToken)
+            .ConfigureAwait(false);
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask DisposeAsync()
+    private async ValueTask DeclareEmergencyTopologyAsync(
+        IChannel channel,
+        CancellationToken cancellationToken)
     {
-        if (_channel is not null)
-        {
-            await _channel.DisposeAsync().ConfigureAwait(false);
-        }
-
-        if (_connection is not null)
-        {
-            await _connection.DisposeAsync().ConfigureAwait(false);
-        }
+        await DeclareExchangesAsync(channel, cancellationToken).ConfigureAwait(false);
+        await DeclarePriorityQueueAsync(
+                channel,
+                EmergencyQueueName(),
+                $"station.{_options.StationId}.emergency-stop",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    private async ValueTask DeclareTopologyAsync(
+    private async ValueTask DeclareControlTopologyAsync(
+        IChannel channel,
+        CancellationToken cancellationToken)
+    {
+        await DeclareExchangesAsync(channel, cancellationToken).ConfigureAwait(false);
+        await DeclarePriorityQueueAsync(
+                channel,
+                SafeStopQueueName(),
+                $"station.{_options.StationId}.safe-stop",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await DeclarePriorityQueueAsync(
+                channel,
+                JobCancelQueueName(),
+                $"station.{_options.StationId}.job-cancel",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask DeclareExchangesAsync(
         IChannel channel,
         CancellationToken cancellationToken)
     {
@@ -253,12 +285,20 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
                 noWait: false,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private async ValueTask DeclarePriorityQueueAsync(
+        IChannel channel,
+        string queueName,
+        string routingKey,
+        CancellationToken cancellationToken)
+    {
         var queueArguments = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["x-max-priority"] = (byte)10
         };
         await channel.QueueDeclareAsync(
-                QueueName(),
+                queueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
@@ -268,137 +308,123 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
                 cancellationToken)
             .ConfigureAwait(false);
         await channel.QueueBindAsync(
-                QueueName(),
+                queueName,
                 _options.CommandExchange,
-                $"station.{_options.StationId}.emergency-stop",
+                routingKey,
                 arguments: null,
                 noWait: false,
                 cancellationToken)
             .ConfigureAwait(false);
-        await channel.QueueDeclareAsync(
-                SafeStopQueueName(),
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                queueArguments,
-                passive: false,
-                noWait: false,
-                cancellationToken)
-            .ConfigureAwait(false);
-        await channel.QueueBindAsync(
-                SafeStopQueueName(),
-                _options.CommandExchange,
-                $"station.{_options.StationId}.safe-stop",
-                arguments: null,
-                noWait: false,
-                cancellationToken)
-            .ConfigureAwait(false);
-        await channel.BasicQosAsync(0, 1, global: false, cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask PublishAcknowledgementAsync(
-        IChannel channel,
-        EmergencyStopAcknowledged response,
-        CancellationToken cancellationToken)
-    {
-        var properties = new BasicProperties
+    private static ConnectionFactory CreateFactory(
+        RabbitMqStationSafetyOptions options,
+        string clientProvidedName) => new()
         {
-            Persistent = true,
-            ContentType = "application/json",
-            ContentEncoding = "utf-8",
-            Type = nameof(EmergencyStopAcknowledged),
-            AppId = _options.AgentId,
-            MessageId = response.MessageId.ToString("D"),
-            CorrelationId = response.RequestMessageId.ToString("D")
+            Uri = options.BrokerUri,
+            ClientProvidedName = clientProvidedName,
+            AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true,
+            ConsumerDispatchConcurrency = 1
         };
-        await channel.BasicPublishAsync(
-                _options.EventExchange,
-                $"station.{_options.StationId}.emergency-stop-acknowledged",
-                mandatory: true,
-                properties,
-                JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions),
-                cancellationToken)
-            .ConfigureAwait(false);
-    }
 
-    private async ValueTask PublishAcknowledgementAsync(
-        IChannel channel,
-        StationSafeStopAcknowledged response,
-        CancellationToken cancellationToken)
+    private static Task<IChannel> CreateConfirmedChannelAsync(
+        IConnection connection,
+        CancellationToken cancellationToken) => connection.CreateChannelAsync(
+            new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true),
+            cancellationToken);
+
+    private static StationTransportDelivery ToDelivery(BasicDeliverEventArgs delivery) => new(
+        delivery.DeliveryTag,
+        delivery.BasicProperties.ContentType,
+        delivery.BasicProperties.ContentEncoding,
+        delivery.BasicProperties.Type,
+        delivery.BasicProperties.AppId,
+        delivery.BasicProperties.MessageId,
+        delivery.BasicProperties.CorrelationId,
+        delivery.RoutingKey,
+        delivery.Redelivered,
+        delivery.Body);
+
+    private string EmergencyQueueName() =>
+        $"openlineops.station.{_options.StationId}.emergency-stop";
+
+    private string SafeStopQueueName() =>
+        $"openlineops.station.{_options.StationId}.safe-stop";
+
+    private string JobCancelQueueName() =>
+        $"openlineops.station.{_options.StationId}.job-cancel";
+
+    private static async ValueTask DisposeChannelAsync(IChannel? channel)
     {
-        var properties = new BasicProperties
+        if (channel is not null)
         {
-            Persistent = true,
-            ContentType = "application/json",
-            ContentEncoding = "utf-8",
-            Type = nameof(StationSafeStopAcknowledged),
-            AppId = _options.AgentId,
-            MessageId = response.MessageId.ToString("D"),
-            CorrelationId = response.RequestMessageId.ToString("D")
-        };
-        await channel.BasicPublishAsync(
-                _options.EventExchange,
-                $"station.{_options.StationId}.safe-stop-acknowledged",
-                mandatory: true,
-                properties,
-                JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions),
-                cancellationToken)
-            .ConfigureAwait(false);
+            await channel.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
-    private void Validate(EmergencyStopRequested request)
+    private static async ValueTask DisposeConnectionAsync(IConnection? connection)
     {
-        if (request.MessageId == Guid.Empty
-            || !string.Equals(request.AgentId, _options.AgentId, StringComparison.Ordinal)
-            || !string.Equals(request.StationId, _options.StationId, StringComparison.Ordinal))
+        if (connection is not null)
         {
-            throw new InvalidDataException(
-                "Emergency stop request identity does not target this Agent and Station.");
-        }
-
-        _ = Required(request.IdempotencyKey, nameof(request.IdempotencyKey));
-        _ = Required(request.Reason, nameof(request.Reason));
-        _ = Required(request.RequestedBy, nameof(request.RequestedBy));
-        if (request.RequestedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new InvalidDataException("Emergency stop timestamp must use UTC offset zero.");
+            await connection.DisposeAsync().ConfigureAwait(false);
         }
     }
-
-    private void Validate(StationSafeStopRequested request)
-    {
-        if (request.MessageId == Guid.Empty
-            || request.ProductionRunId == Guid.Empty
-            || !string.Equals(request.AgentId, _options.AgentId, StringComparison.Ordinal)
-            || !string.Equals(request.StationId, _options.StationId, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "Safe stop request identity does not target this Agent and Station.");
-        }
-
-        _ = Required(request.IdempotencyKey, nameof(request.IdempotencyKey));
-        _ = Required(request.StationSystemId, nameof(request.StationSystemId));
-        _ = Required(request.ActorId, nameof(request.ActorId));
-        _ = Required(request.Reason, nameof(request.Reason));
-        if (request.OperationRunId is not null)
-        {
-            _ = Required(request.OperationRunId, nameof(request.OperationRunId));
-        }
-
-        if (request.RequestedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new InvalidDataException("Safe stop timestamp must use UTC offset zero.");
-        }
-    }
-
-    private string QueueName() => $"openlineops.station.{_options.StationId}.emergency-stop";
-
-    private string SafeStopQueueName() => $"openlineops.station.{_options.StationId}.safe-stop";
 
     private static string Required(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)
         || char.IsWhiteSpace(value[0])
         || char.IsWhiteSpace(value[^1])
-            ? throw new ArgumentException($"{parameterName} must be canonical non-empty text.", parameterName)
+            ? throw new ArgumentException(
+                $"{parameterName} must be canonical non-empty text.",
+                parameterName)
             : value;
+
+    private sealed class RabbitMqSettlement(IChannel channel) : IStationTransportSettlement
+    {
+        public ValueTask AcknowledgeAsync(
+            ulong deliveryTag,
+            CancellationToken cancellationToken = default) => channel.BasicAckAsync(
+                deliveryTag,
+                multiple: false,
+                cancellationToken);
+
+        public ValueTask RejectAsync(
+            ulong deliveryTag,
+            bool requeue,
+            CancellationToken cancellationToken = default) => channel.BasicNackAsync(
+                deliveryTag,
+                multiple: false,
+                requeue,
+                cancellationToken);
+    }
+
+    private sealed class RabbitMqAcknowledgementPublisher(IChannel channel)
+        : IStationSafetyAcknowledgementPublisher
+    {
+        public ValueTask PublishAsync(
+            StationAgentEventPublication publication,
+            CancellationToken cancellationToken = default)
+        {
+            var properties = new BasicProperties
+            {
+                Persistent = true,
+                ContentType = "application/json",
+                ContentEncoding = "utf-8",
+                Type = publication.Type,
+                AppId = publication.AppId,
+                MessageId = publication.MessageId.ToString("D"),
+                CorrelationId = publication.CorrelationId.ToString("D")
+            };
+            return channel.BasicPublishAsync(
+                publication.Exchange,
+                publication.RoutingKey,
+                mandatory: true,
+                properties,
+                publication.Body,
+                cancellationToken);
+        }
+    }
 }

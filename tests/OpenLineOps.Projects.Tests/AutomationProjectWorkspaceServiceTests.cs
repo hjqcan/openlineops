@@ -52,7 +52,9 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
                         "motion.axis.move",
                         "binding.axis.x",
                         "Simulator",
-                        "simulator.axis.x")
+                        "simulator.axis.x",
+                        "station.main",
+                        "station.main")
                 ],
                 [new ProjectTargetReferenceRequest("slot", "slot.left.1")],
                 ["block.motion.axis.move@1.0.0"],

@@ -4,6 +4,8 @@ using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
@@ -68,8 +70,10 @@ internal static class RuntimeSessionSnapshotMapper
     {
         return new PersistedRuntimeTraceMetadata(
             traceMetadata.ProductionRunId.Value,
+            traceMetadata.ProductionUnitId.Value,
             traceMetadata.ProductionLineDefinitionId,
             traceMetadata.OperationId,
+            traceMetadata.OperationRunId,
             traceMetadata.OperationAttempt,
             traceMetadata.StationSystemId,
             traceMetadata.ProductionUnitIdentity.ModelId,
@@ -83,7 +87,12 @@ internal static class RuntimeSessionSnapshotMapper
             traceMetadata.ProjectId,
             traceMetadata.ApplicationId,
             traceMetadata.ProjectSnapshotId,
-            traceMetadata.TopologyId);
+            traceMetadata.TopologyId,
+            traceMetadata.ResourceLeaseFences.Select(fence => new PersistedResourceLeaseFence(
+                fence.Resource.Kind.ToString(),
+                fence.Resource.ResourceId,
+                fence.FencingToken,
+                fence.ExpiresAtUtc)).ToArray());
     }
 
     private static PersistedRuntimeStep ToSnapshot(RuntimeStep step)
@@ -213,10 +222,15 @@ internal static class RuntimeSessionSnapshotMapper
 
         return new RuntimeSessionTraceMetadata(
             RequiredProductionRunId(traceMetadata.ProductionRunId),
+            traceMetadata.ProductionUnitId == Guid.Empty
+                ? throw new InvalidDataException(
+                    "Persisted runtime session trace metadata does not declare Production Unit id.")
+                : new ProductionUnitId(traceMetadata.ProductionUnitId),
             RequiredTraceIdentity(
                 traceMetadata.ProductionLineDefinitionId,
                 "production line definition id"),
             RequiredTraceIdentity(traceMetadata.OperationId, "operation id"),
+            RequiredTraceIdentity(traceMetadata.OperationRunId, "operation run id"),
             RequiredPositiveAttempt(traceMetadata.OperationAttempt),
             RequiredTraceIdentity(traceMetadata.StationSystemId, "station system id"),
             new ProductionUnitIdentity(
@@ -235,7 +249,16 @@ internal static class RuntimeSessionSnapshotMapper
             RequiredTraceIdentity(traceMetadata.ProjectId, "project id"),
             RequiredTraceIdentity(traceMetadata.ApplicationId, "application id"),
             RequiredTraceIdentity(traceMetadata.ProjectSnapshotId, "project snapshot id"),
-            RequiredTraceIdentity(traceMetadata.TopologyId, "topology id"));
+            RequiredTraceIdentity(traceMetadata.TopologyId, "topology id"),
+            (traceMetadata.ResourceLeaseFences
+                ?? throw new InvalidDataException(
+                    "Persisted runtime session trace metadata does not declare resource lease fences."))
+                .Select(fence => new ResourceLeaseFenceEvidence(
+                    new ResourceRequirement(
+                        ParseEnum<ResourceKind>(fence.ResourceKind, nameof(fence.ResourceKind)),
+                        RequiredTraceIdentity(fence.ResourceId, "resource id")),
+                    fence.FencingToken,
+                    fence.ExpiresAtUtc)));
     }
 
     private static void RequireCurrentSchema(PersistedRuntimeSession snapshot)
@@ -316,8 +339,10 @@ internal sealed record PersistedRuntimeSession(
 
 internal sealed record PersistedRuntimeTraceMetadata(
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string? ProductionLineDefinitionId,
     string? OperationId,
+    string? OperationRunId,
     int OperationAttempt,
     string? StationSystemId,
     string? ProductModelId,
@@ -331,7 +356,14 @@ internal sealed record PersistedRuntimeTraceMetadata(
     string? ProjectId,
     string? ApplicationId,
     string? ProjectSnapshotId,
-    string? TopologyId);
+    string? TopologyId,
+    PersistedResourceLeaseFence[]? ResourceLeaseFences);
+
+internal sealed record PersistedResourceLeaseFence(
+    string ResourceKind,
+    string ResourceId,
+    long FencingToken,
+    DateTimeOffset ExpiresAtUtc);
 
 internal sealed record PersistedRuntimeStep(
     Guid StepId,

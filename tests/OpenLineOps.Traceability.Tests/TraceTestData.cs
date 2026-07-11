@@ -108,6 +108,7 @@ internal static class TraceTestData
         return TraceRecord.Create(
             new TraceRecordId(productionRunId),
             new ProductionRunId(productionRunId),
+            new ProductionUnitId(Guid.Parse("91000000-0000-0000-0000-000000000001")),
             "project-trace-a",
             "application-trace-a",
             projectSnapshotId,
@@ -131,6 +132,60 @@ internal static class TraceTestData
             null,
             [operation],
             [],
+            [
+                new TraceMaterialGenealogy(
+                    Guid.Parse("91000000-0000-0000-0000-000000000011"),
+                    Guid.Parse("91000000-0000-0000-0000-000000000010"),
+                    Guid.Parse("91000000-0000-0000-0000-000000000001"),
+                    "ComponentOf",
+                    "operation-a",
+                    "operator-a",
+                    BaseTimeUtc)
+            ],
+            [
+                new TraceMaterialLocationTransition(
+                    Guid.Parse("91000000-0000-0000-0000-000000000012"),
+                    productionRunId,
+                    "ProductionUnit",
+                    "91000000-0000-0000-0000-000000000001",
+                    null,
+                    new TraceMaterialLocation(
+                        "StationQueue",
+                        "line-a",
+                        "station-a",
+                        null,
+                        null,
+                        null),
+                    "scanner-a",
+                    BaseTimeUtc)
+            ],
+            [
+                new TraceSlotOccupancyTransition(
+                    Guid.Parse("91000000-0000-0000-0000-000000000013"),
+                    productionRunId,
+                    "line-a",
+                    "station-a",
+                    "slot-a",
+                    "ProductionUnit",
+                    "91000000-0000-0000-0000-000000000001",
+                    "Available",
+                    "Reserved",
+                    "coordinator-a",
+                    BaseTimeUtc)
+            ],
+            [
+                new TraceDispositionTransition(
+                    Guid.Parse("91000000-0000-0000-0000-000000000014"),
+                    Guid.Parse("91000000-0000-0000-0000-000000000001"),
+                    productionRunId,
+                    ProductDisposition.InProcess,
+                    judgement == ResultJudgement.Failed
+                        ? ProductDisposition.Nonconforming
+                        : ProductDisposition.Completed,
+                    judgement == ResultJudgement.Failed ? "quality failure" : null,
+                    "operator-a",
+                    completedAtUtc)
+            ],
             [
                 new AuditEntry(
                     AuditEntryId.New(),

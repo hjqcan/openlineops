@@ -12,6 +12,7 @@ internal static class TraceRecordSnapshotMapper
         return new PersistedTraceRecord(
             record.Id.Value,
             record.ProductionRunId.Value,
+            record.ProductionUnitId.Value,
             record.ProjectId,
             record.ApplicationId,
             record.ProjectSnapshotId,
@@ -33,6 +34,10 @@ internal static class TraceRecordSnapshotMapper
             record.FailureReason,
             record.Operations.Select(ToSnapshot).ToArray(),
             record.RouteDecisions.Select(ToSnapshot).ToArray(),
+            record.Genealogy.Select(ToSnapshot).ToArray(),
+            record.MaterialLocationTransitions.Select(ToSnapshot).ToArray(),
+            record.SlotOccupancyTransitions.Select(ToSnapshot).ToArray(),
+            record.DispositionTransitions.Select(ToSnapshot).ToArray(),
             record.AuditEntries.Select(ToSnapshot).ToArray());
     }
 
@@ -42,6 +47,7 @@ internal static class TraceRecordSnapshotMapper
         return TraceRecord.Restore(
             new TraceRecordId(snapshot.TraceRecordId),
             new ProductionRunId(snapshot.ProductionRunId),
+            new ProductionUnitId(snapshot.ProductionUnitId),
             snapshot.ProjectId,
             snapshot.ApplicationId,
             snapshot.ProjectSnapshotId,
@@ -63,6 +69,10 @@ internal static class TraceRecordSnapshotMapper
             snapshot.FailureReason,
             snapshot.Operations.Select(ToAggregate),
             snapshot.RouteDecisions.Select(ToAggregate),
+            snapshot.Genealogy.Select(ToAggregate),
+            snapshot.MaterialLocationTransitions.Select(ToAggregate),
+            snapshot.SlotOccupancyTransitions.Select(ToAggregate),
+            snapshot.DispositionTransitions.Select(ToAggregate),
             snapshot.AuditEntries.Select(ToAggregate));
     }
 
@@ -153,6 +163,112 @@ internal static class TraceRecordSnapshotMapper
             decision.Traversal,
             decision.DecidedAtUtc);
     }
+
+    private static PersistedTraceMaterialGenealogy ToSnapshot(TraceMaterialGenealogy link) => new(
+        link.LinkId,
+        link.ParentProductionUnitId,
+        link.ChildProductionUnitId,
+        link.Relationship,
+        link.OperationId,
+        link.LinkedBy,
+        link.LinkedAtUtc);
+
+    private static TraceMaterialGenealogy ToAggregate(PersistedTraceMaterialGenealogy link) => new(
+        link.LinkId,
+        link.ParentProductionUnitId,
+        link.ChildProductionUnitId,
+        link.Relationship,
+        link.OperationId,
+        link.LinkedBy,
+        link.LinkedAtUtc);
+
+    private static PersistedTraceMaterialLocationTransition ToSnapshot(
+        TraceMaterialLocationTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.Source is null ? null : ToSnapshot(transition.Source),
+        ToSnapshot(transition.Destination),
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceMaterialLocationTransition ToAggregate(
+        PersistedTraceMaterialLocationTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.Source is null ? null : ToAggregate(transition.Source),
+        ToAggregate(transition.Destination),
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static PersistedTraceMaterialLocation ToSnapshot(TraceMaterialLocation location) => new(
+        location.Kind,
+        location.LineId,
+        location.StationSystemId,
+        location.SlotId,
+        location.CarrierId,
+        location.CarrierPositionId);
+
+    private static TraceMaterialLocation ToAggregate(PersistedTraceMaterialLocation location) => new(
+        location.Kind,
+        location.LineId,
+        location.StationSystemId,
+        location.SlotId,
+        location.CarrierId,
+        location.CarrierPositionId);
+
+    private static PersistedTraceSlotOccupancyTransition ToSnapshot(
+        TraceSlotOccupancyTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.LineId,
+        transition.StationSystemId,
+        transition.SlotId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.PreviousStatus,
+        transition.CurrentStatus,
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceSlotOccupancyTransition ToAggregate(
+        PersistedTraceSlotOccupancyTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.LineId,
+        transition.StationSystemId,
+        transition.SlotId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.PreviousStatus,
+        transition.CurrentStatus,
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static PersistedTraceDispositionTransition ToSnapshot(
+        TraceDispositionTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionUnitId,
+        transition.ProductionRunId,
+        transition.PreviousDisposition.ToString(),
+        transition.CurrentDisposition.ToString(),
+        transition.Reason,
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceDispositionTransition ToAggregate(
+        PersistedTraceDispositionTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionUnitId,
+        transition.ProductionRunId,
+        ParseEnum<ProductDisposition>(transition.PreviousDisposition, nameof(transition.PreviousDisposition)),
+        ParseEnum<ProductDisposition>(transition.CurrentDisposition, nameof(transition.CurrentDisposition)),
+        transition.Reason,
+        transition.ActorId,
+        transition.OccurredAtUtc);
 
     private static PersistedTraceOperationOutput ToSnapshot(TraceOperationOutput output) =>
         new(output.Key, output.ValueKind, output.CanonicalJson);
@@ -331,6 +447,7 @@ internal static class TraceRecordSnapshotMapper
 internal sealed record PersistedTraceRecord(
     Guid TraceRecordId,
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
@@ -352,7 +469,61 @@ internal sealed record PersistedTraceRecord(
     string? FailureReason,
     PersistedTraceOperationExecution[] Operations,
     PersistedTraceRouteDecision[] RouteDecisions,
+    PersistedTraceMaterialGenealogy[] Genealogy,
+    PersistedTraceMaterialLocationTransition[] MaterialLocationTransitions,
+    PersistedTraceSlotOccupancyTransition[] SlotOccupancyTransitions,
+    PersistedTraceDispositionTransition[] DispositionTransitions,
     PersistedAuditEntry[] AuditEntries);
+
+internal sealed record PersistedTraceMaterialLocation(
+    string Kind,
+    string? LineId,
+    string? StationSystemId,
+    string? SlotId,
+    string? CarrierId,
+    string? CarrierPositionId);
+
+internal sealed record PersistedTraceMaterialLocationTransition(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string MaterialKind,
+    string MaterialId,
+    PersistedTraceMaterialLocation? Source,
+    PersistedTraceMaterialLocation Destination,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+internal sealed record PersistedTraceSlotOccupancyTransition(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string LineId,
+    string StationSystemId,
+    string SlotId,
+    string? MaterialKind,
+    string? MaterialId,
+    string PreviousStatus,
+    string CurrentStatus,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+internal sealed record PersistedTraceDispositionTransition(
+    Guid EvidenceId,
+    Guid ProductionUnitId,
+    Guid? ProductionRunId,
+    string PreviousDisposition,
+    string CurrentDisposition,
+    string? Reason,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+internal sealed record PersistedTraceMaterialGenealogy(
+    Guid LinkId,
+    Guid ParentProductionUnitId,
+    Guid ChildProductionUnitId,
+    string Relationship,
+    string OperationId,
+    string LinkedBy,
+    DateTimeOffset LinkedAtUtc);
 
 internal sealed record PersistedTraceOperationExecution(
     string OperationRunId,

@@ -3,6 +3,7 @@ namespace OpenLineOps.Traceability.Api.Models;
 public sealed record TraceRecordResponse(
     Guid TraceRecordId,
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
@@ -24,11 +25,66 @@ public sealed record TraceRecordResponse(
     string? FailureReason,
     IReadOnlyCollection<TraceOperationExecutionResponse> Operations,
     IReadOnlyCollection<TraceRouteDecisionResponse> RouteDecisions,
+    IReadOnlyCollection<TraceMaterialGenealogyResponse> Genealogy,
+    IReadOnlyCollection<TraceMaterialLocationTransitionResponse> MaterialLocationTransitions,
+    IReadOnlyCollection<TraceSlotOccupancyTransitionResponse> SlotOccupancyTransitions,
+    IReadOnlyCollection<TraceDispositionTransitionResponse> DispositionTransitions,
     IReadOnlyCollection<AuditEntryResponse> AuditEntries);
+
+public sealed record TraceMaterialLocationResponse(
+    string Kind,
+    string? LineId,
+    string? StationSystemId,
+    string? SlotId,
+    string? CarrierId,
+    string? CarrierPositionId);
+
+public sealed record TraceMaterialLocationTransitionResponse(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string MaterialKind,
+    string MaterialId,
+    TraceMaterialLocationResponse? Source,
+    TraceMaterialLocationResponse Destination,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record TraceSlotOccupancyTransitionResponse(
+    Guid EvidenceId,
+    Guid? ProductionRunId,
+    string LineId,
+    string StationSystemId,
+    string SlotId,
+    string? MaterialKind,
+    string? MaterialId,
+    string PreviousStatus,
+    string CurrentStatus,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record TraceDispositionTransitionResponse(
+    Guid EvidenceId,
+    Guid ProductionUnitId,
+    Guid? ProductionRunId,
+    string PreviousDisposition,
+    string CurrentDisposition,
+    string? Reason,
+    string ActorId,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record TraceMaterialGenealogyResponse(
+    Guid LinkId,
+    Guid ParentProductionUnitId,
+    Guid ChildProductionUnitId,
+    string Relationship,
+    string OperationId,
+    string LinkedBy,
+    DateTimeOffset LinkedAtUtc);
 
 public sealed record TraceRecordSummaryResponse(
     Guid TraceRecordId,
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
@@ -50,7 +106,11 @@ public sealed record TraceRecordSummaryResponse(
     int MeasurementCount,
     int ArtifactCount,
     int IncidentCount,
-    int RouteDecisionCount);
+    int RouteDecisionCount,
+    int GenealogyCount,
+    int MaterialLocationTransitionCount,
+    int SlotOccupancyTransitionCount,
+    int DispositionTransitionCount);
 
 public sealed record TraceOperationExecutionResponse(
     string OperationRunId,

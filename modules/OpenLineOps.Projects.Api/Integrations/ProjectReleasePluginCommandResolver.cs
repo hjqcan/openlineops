@@ -26,6 +26,7 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
         string projectId,
         string applicationId,
         string snapshotId,
+        string stationSystemId,
         string capabilityId,
         string commandName,
         string? targetKind = null,
@@ -35,6 +36,7 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
         if (string.IsNullOrWhiteSpace(projectId)
             || string.IsNullOrWhiteSpace(applicationId)
             || string.IsNullOrWhiteSpace(snapshotId)
+            || string.IsNullOrWhiteSpace(stationSystemId)
             || string.IsNullOrWhiteSpace(capabilityId)
             || string.IsNullOrWhiteSpace(commandName)
             || (string.IsNullOrWhiteSpace(targetKind) != string.IsNullOrWhiteSpace(targetId)))
@@ -98,6 +100,10 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
                                   binding.CapabilityId,
                                   capabilityId,
                                   StringComparison.Ordinal)
+                              && string.Equals(
+                                  binding.OwnerStationSystemId,
+                                  stationSystemId,
+                                  StringComparison.Ordinal)
                               && (!string.Equals(targetKind, "Driver", StringComparison.Ordinal)
                                   || string.Equals(binding.BindingId, targetId, StringComparison.Ordinal)))
             .Take(2)
@@ -129,6 +135,14 @@ public sealed class ProjectReleasePluginCommandResolver : IProjectReleasePluginC
                                  && string.Equals(
                                      dependency.ProviderKey,
                                      binding.ProviderKey,
+                                     StringComparison.Ordinal)
+                                 && string.Equals(
+                                     dependency.OwnerSystemId,
+                                     binding.OwnerSystemId,
+                                     StringComparison.Ordinal)
+                                 && string.Equals(
+                                     dependency.OwnerStationSystemId,
+                                     binding.OwnerStationSystemId,
                                      StringComparison.Ordinal))
             .SelectMany(dependency => dependency.Commands
                 .Where(command => string.Equals(command.Kind, "Process", StringComparison.Ordinal)

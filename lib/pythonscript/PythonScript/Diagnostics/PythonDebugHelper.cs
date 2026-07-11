@@ -12,10 +12,12 @@ namespace PythonScript.Diagnostics
     /// </summary>
     internal sealed class PythonDebugHelper
     {
+        private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
         /// <summary>
         /// 查看对象公共成员变量值。
         /// </summary>
-        public string Watch(object? obj, string name)
+        public static string Watch(object? obj, string name)
         {
             string message = XRay(obj, name);
             Write(LogLevel.Debug, "watch", message, name, obj);
@@ -25,7 +27,7 @@ namespace PythonScript.Diagnostics
         /// <summary>
         /// 查看对象类型。
         /// </summary>
-        public string WatchType(object? obj)
+        public static string WatchType(object? obj)
         {
             string result = obj == null ? "null" : obj.GetType().FullName ?? obj.GetType().Name;
             Write(LogLevel.Debug, "watch_type", result, target: obj);
@@ -35,7 +37,7 @@ namespace PythonScript.Diagnostics
         /// <summary>
         /// 查看对象类型定义，仅输出类型名称。
         /// </summary>
-        public string WatchTypeDefine(object? obj)
+        public static string WatchTypeDefine(object? obj)
         {
             string result = obj?.GetType().ToString() ?? "null";
             Write(LogLevel.Debug, "watch_type_define", result, target: obj);
@@ -45,7 +47,7 @@ namespace PythonScript.Diagnostics
         /// <summary>
         /// 将对象透视为字符串。
         /// </summary>
-        public string XRay(object? obj, string name)
+        public static string XRay(object? obj, string name)
         {
             if (obj == null)
             {
@@ -92,7 +94,7 @@ namespace PythonScript.Diagnostics
         {
             try
             {
-                return JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
+                return JsonSerializer.Serialize(obj, JsonOptions);
             }
             catch
             {

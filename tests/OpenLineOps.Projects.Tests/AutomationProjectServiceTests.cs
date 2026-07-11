@@ -40,7 +40,9 @@ public sealed class AutomationProjectServiceTests
                         "motion.axis.move",
                         "binding.axis.x.simulator",
                         "Simulator",
-                        "simulator.axis.x")
+                        "simulator.axis.x",
+                        "station.main",
+                        "station.main")
                 ],
                 [new ProjectTargetReferenceRequest("slot", "slot.left-nest.1")],
                 ["block.move-axis@1.0.0"],

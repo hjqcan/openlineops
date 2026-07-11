@@ -1,6 +1,6 @@
 # Composable Building Block Architecture
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
 ## Scope
 
@@ -24,9 +24,14 @@ hardware providers directly.
 | Driver | Topology binding plus frozen provider package |
 | Group | Topology / `SlotGroup` |
 | Slot | Topology / `SlotDefinition` |
-| DUT/work item | Production identity plus Runtime/Trace facts |
+| Product model | Production / `ProductModelDefinition` |
+| Physical item | Runtime / `ProductionUnit` |
+| Lot | Runtime / `ProductionLot` |
+| Carrier | Runtime / `Carrier` |
+| Material location | Runtime / `MaterialLocation` and `SlotOccupancy` |
 | 2D layout | Topology / hierarchical `SiteLayout` |
 | Production line | Production / `ProductionLineDefinition` |
+| Operation route | Production / `OperationDefinition` and `RouteTransition` |
 | Flow | Processes / `ProcessDefinition` and published Flow IR |
 | Live state | Runtime projections keyed by published identities |
 
@@ -68,10 +73,12 @@ occupancy, progress, alarms, and results are projections elsewhere.
 
 Production owns:
 
-- DUT model and identity input;
-- Workstation definitions bound to Station System ids;
-- ordered stages bound to published flows;
-- external test adapter declarations and result mapping.
+- Product model and identity input;
+- Operation definitions bound directly to Station System ids and published
+  Flows;
+- route transitions for sequence, judgement, typed conditions, bounded rework,
+  parallel fork, and parallel join;
+- external-program adapter declarations and result mapping.
 
 Production validates references through read-only ports to Topology and
 Processes. It does not launch providers or mutate either aggregate.
@@ -84,7 +91,7 @@ Processes owns:
 - Blockly workspace parsing and block catalogs;
 - declarative runtime action contracts;
 - explicit PythonScript source;
-- versioned Flow IR compilation and canonical serialization;
+- strict Flow IR compilation and canonical serialization;
 - source maps and graph validation.
 
 Processes only records stable domain target references. It does not resolve
@@ -108,8 +115,14 @@ inventory and mutable Engineering data are not fallback paths.
 ### Runtime
 
 Runtime owns sessions, steps, actions, commands, timeouts, retries, incidents,
-alarms, and live projections. It accepts an executable process produced from a
-verified Project Snapshot.
+alarms, asynchronous Production Runs, Operation Runs, typed Production Context,
+Production Units, Lots, Carriers, material genealogy/location, Slot occupancy,
+resource leases, recovery decisions, and live projections. It accepts an
+executable process produced from a verified Project Snapshot.
+
+`ExecutionStatus` and `ResultJudgement` are independent axes. Product
+disposition is a third independent fact. A vendor's valid nonconforming result
+therefore completes execution without becoming a system Incident.
 
 Runtime cannot discover a process, topology, configuration, or provider from a
 global repository when a release resource is absent. Absence is a hard failure.
@@ -117,7 +130,9 @@ global repository when a release resource is absent. Absence is a hard failure.
 ### Traceability
 
 Traceability records evidence with Project, Application, snapshot, Flow,
-Station System, target, Driver package, command, DUT, Group, and Slot identity.
+Production Run, Production Unit, Lot, genealogy, location transition, Operation,
+route decision, Station System, target, Driver package, command, judgement,
+Incident, Group, Slot, and hashed Artifact identity.
 
 ## Aggregate relationships
 
@@ -137,11 +152,17 @@ flowchart LR
   Layout -. "targets" .-> Group
   Layout -. "targets" .-> Slot
   Application --> Line["ProductionLineDefinition"]
-  Line -. "stationSystemId" .-> Station
-  Line -. "published flow" .-> Flow["ProcessDefinition"]
+  Line --> Product["ProductModelDefinition"]
+  Line --> Operation["OperationDefinition"]
+  Line --> Route["RouteTransition"]
+  Operation -. "stationSystemId" .-> Station
+  Operation -. "published flow" .-> Flow["ProcessDefinition"]
+  Unit["ProductionUnit"] -. "model" .-> Product
+  Unit --> Location["MaterialLocation"]
+  Location -. "occupies" .-> Slot
 ```
 
-## Strict current Topology v1 contract
+## Strict current Topology contract
 
 The Application topology document has one supported schema version and these
 collections:
@@ -163,7 +184,7 @@ Unknown JSON fields, unknown enum values, missing required collections, and
 non-current schema versions fail loading. Repositories do not normalize or
 migrate older resource documents.
 
-## Strict hierarchical Layout v1
+## Strict hierarchical Layout
 
 An element is:
 
@@ -205,7 +226,7 @@ Capability
 Driver
 SlotGroup
 Slot
-Dut
+ProductionUnit
 ```
 
 An action carries target kind/id, capability, command, canonical input,
@@ -227,13 +248,15 @@ flowchart LR
   Resolve --> Lock["Hash complete package trees"]
   Lock --> Freeze["Write immutable release"]
   Freeze --> Snapshot["Record Project Snapshot"]
-  Snapshot --> Runner["Runtime or headless Runner"]
+  Snapshot --> Submit["Submit asynchronous ProductionRun"]
+  Submit --> Coordinator["Coordinator and resource leases"]
+  Coordinator --> Agent["Station Agent and signed package"]
 ```
 
 Publisher freezes:
 
 - current Application project file;
-- Topology v1 and Layout v1 documents;
+- strict Topology and Layout documents;
 - Production line definitions;
 - Process graphs, Blockly workspaces, Python source, and canonical Flow IR;
 - exact block versions and action contract hashes;
@@ -245,6 +268,13 @@ Publisher freezes:
 Runtime validates the release manifest and every referenced hash before it
 creates a session.
 
+The Coordinator persists work before dispatch and uses transactional outbox
+messages to request Station work. Each Windows Agent has one Station identity,
+a durable SQLite inbox/outbox/checkpoint store, global idempotency-key
+deduplication, offline result buffering, and independent normal/safety message
+paths. It verifies the `.olopkg` signature and every declared hash before
+installing content into its read-only cache.
+
 ## Runtime and monitor projection
 
 Design resources remain immutable during execution. Runtime projections are
@@ -252,7 +282,10 @@ keyed by `systemId` and target kind/id:
 
 - Station status summarizes the latest/current session;
 - target status summarizes the latest/current action or command;
-- Slot occupancy is a material-state projection;
+- product and Carrier locations, Station queues, and current route edges are
+  material-state projections;
+- Slot occupancy exposes `Available`, `Reserved`, `Occupied`, `Running`,
+  `Blocked`, or `Offline` and binds a Production Unit or Carrier when applicable;
 - alarms and trace facts reference the same identities.
 
 The 2D monitor joins these projections to the published layout. Draft Edit mode

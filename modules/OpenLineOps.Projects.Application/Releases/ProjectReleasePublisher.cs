@@ -14,6 +14,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
     private readonly IProjectApplicationWorkspaceScopeResolver _scopeResolver;
     private readonly IProjectReleaseSourceResolver _sourceResolver;
     private readonly IProjectReleaseArtifactStore _artifactStore;
+    private readonly IProjectReleaseStationPackagePublisher _stationPackagePublisher;
     private readonly IClock _clock;
 
     public ProjectReleasePublisher(
@@ -22,6 +23,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         IProjectApplicationWorkspaceScopeResolver scopeResolver,
         IProjectReleaseSourceResolver sourceResolver,
         IProjectReleaseArtifactStore artifactStore,
+        IProjectReleaseStationPackagePublisher stationPackagePublisher,
         IClock clock)
     {
         _projectService = projectService;
@@ -29,6 +31,7 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         _scopeResolver = scopeResolver;
         _sourceResolver = sourceResolver;
         _artifactStore = artifactStore;
+        _stationPackagePublisher = stationPackagePublisher;
         _clock = clock;
     }
 
@@ -122,6 +125,24 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             return Result.Failure<AutomationProjectDetails>(sourceValidation);
         }
 
+        try
+        {
+            await _stationPackagePublisher.ValidateConfigurationAsync(
+                    new ProjectReleaseStationPackagePreflightRequest(scope, request.SnapshotId),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsArtifactStorageException(exception))
+        {
+            return Result.Failure<AutomationProjectDetails>(ApplicationError.Conflict(
+                "Projects.StationPackageConfigurationInvalid",
+                exception.Message));
+        }
+
         ProjectReleaseArtifactDescriptor release;
         try
         {
@@ -140,6 +161,12 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 exception.Message));
         }
 
+        await using var transaction = new ProjectReleasePublicationTransaction(
+            _workspaceService,
+            _artifactStore,
+            _stationPackagePublisher,
+            scope,
+            release);
         var descriptorValidation = ValidateReleaseDescriptor(scope, request.SnapshotId, release);
         if (descriptorValidation is not null)
         {
@@ -189,6 +216,37 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             return Result.Failure<AutomationProjectDetails>(relativeManifestPathResult.Error);
         }
 
+        ProjectReleaseStationPackageSet stationPackages;
+        try
+        {
+            stationPackages = await _stationPackagePublisher.PublishAsync(
+                    new ProjectReleaseStationPackageRequest(
+                        release,
+                        copiedSourceResult.Value,
+                        release.PublishedAtUtc),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsArtifactStorageException(exception))
+        {
+            return Result.Failure<AutomationProjectDetails>(ApplicationError.Conflict(
+                "Projects.StationPackagePublicationFailed",
+                exception.Message));
+        }
+
+        transaction.SetStationPackages(stationPackages);
+
+        var stationPackageValidation = ValidateStationPackages(release, metadata, stationPackages);
+        if (stationPackageValidation is not null)
+        {
+            return Result.Failure<AutomationProjectDetails>(stationPackageValidation);
+        }
+
+        transaction.MarkAggregateMutationPossible();
         var publishResult = await _projectService
             .PublishSnapshotAsync(
                 projectId,
@@ -202,7 +260,9 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                         binding.CapabilityId,
                         binding.BindingId,
                         binding.ProviderKind,
-                        binding.ProviderKey)).ToArray(),
+                        binding.ProviderKey,
+                        binding.OwnerSystemId,
+                        binding.OwnerStationSystemId)).ToArray(),
                     metadata.TargetReferences.Select(target => new ProjectTargetReferenceRequest(
                         target.Kind,
                         target.TargetId)).ToArray(),
@@ -221,19 +281,8 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             .ConfigureAwait(false);
         if (manifestResult.IsSuccess)
         {
+            transaction.Commit();
             return Result.Success(manifestResult.Value.Project);
-        }
-
-        var restoreResult = await _workspaceService
-            .OpenAsync(
-                new OpenAutomationProjectWorkspaceRequest(scope.ProjectPath),
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (restoreResult.IsFailure)
-        {
-            return Result.Failure<AutomationProjectDetails>(ApplicationError.Conflict(
-                "Projects.ProjectManifestRollbackFailed",
-                $"Project manifest save failed ({manifestResult.Error.Message}) and the prior manifest could not be restored ({restoreResult.Error.Message})."));
         }
 
         return Result.Failure<AutomationProjectDetails>(manifestResult.Error);
@@ -297,7 +346,6 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         if (metadata.ProductionLine.Operations is null
             || metadata.ProductionLine.Operations.Count == 0
             || metadata.ProductionLine.Transitions is null
-            || metadata.ProductionLine.ExternalTestProgramAdapters is null
             || metadata.ProductionLine.ProductModel is null
             || string.IsNullOrWhiteSpace(metadata.ProductionLine.EntryOperationId)
             || metadata.ProductionLine.Operations.All(operation => !string.Equals(
@@ -310,7 +358,29 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 "Resolved release source does not contain complete frozen Production line semantics.");
         }
 
-        if (metadata.CapabilityBindings is null || metadata.CapabilityBindings.Count == 0)
+        if (metadata.ExternalProgramResources is null
+            || metadata.ExternalProgramResources.Any(resource =>
+                resource is null
+                || string.IsNullOrWhiteSpace(resource.ResourceId)
+                || string.IsNullOrWhiteSpace(resource.ContentSha256)
+                || resource.Files is null
+                || resource.PermissionProfile is null
+                || resource.ExecutionLimits is null))
+        {
+            return ApplicationError.Conflict(
+                "Projects.ReleaseExternalProgramResourcesInvalid",
+                "Resolved release source contains incomplete external program resources.");
+        }
+
+        if (metadata.CapabilityBindings is null
+            || metadata.CapabilityBindings.Count == 0
+            || metadata.CapabilityBindings.Any(binding => binding is null
+                || string.IsNullOrWhiteSpace(binding.OwnerSystemId)
+                || string.IsNullOrWhiteSpace(binding.OwnerStationSystemId))
+            || metadata.CapabilityBindings
+                .Select(binding => (binding.OwnerSystemId, binding.CapabilityId))
+                .Distinct()
+                .Count() != metadata.CapabilityBindings.Count)
         {
             return ApplicationError.Conflict(
                 "Projects.ReleaseCapabilityBindingsMissing",
@@ -332,11 +402,47 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                 || string.IsNullOrWhiteSpace(operation.FlowIrSchema)
                 || string.IsNullOrWhiteSpace(operation.FlowIrCanonicalJson)
                 || !IsSha256(operation.FlowIrSha256)
-                || operation.BlockVersionIds is null))
+                || operation.BlockVersionIds is null
+                || operation.Resources is null
+                || operation.Resources.Count == 0
+                || operation.AuthorizedActions is null
+                || operation.Resources.Count(resource =>
+                    string.Equals(resource.Kind, "Station", StringComparison.Ordinal)
+                    && string.Equals(resource.Resolution, "Fixed", StringComparison.Ordinal)
+                    && string.Equals(
+                        resource.TopologyTargetId,
+                        operation.StationSystemId,
+                        StringComparison.Ordinal)) != 1))
         {
             return ApplicationError.Conflict(
                 "Projects.ReleaseProductionOperationInvalid",
-                "Every resolved Production operation must contain its Station, configuration, Flow identity, canonical Flow IR, SHA-256, and block locks.");
+                "Every resolved Production operation must contain its Station, configuration, Flow identity, canonical Flow IR, SHA-256, block locks, resources, and authorized actions.");
+        }
+
+        if (metadata.ProductionLine.LineControllerAuthorizations is null
+            || metadata.ProductionLine.LineControllerAuthorizations.Any(authorization =>
+                authorization is null
+                || metadata.ProductionLine.Operations.Count(operation => string.Equals(
+                    operation.OperationId,
+                    authorization.OperationId,
+                    StringComparison.Ordinal)) != 1
+                || metadata.ProductionLine.Operations
+                    .Single(operation => string.Equals(
+                        operation.OperationId,
+                        authorization.OperationId,
+                        StringComparison.Ordinal))
+                    .AuthorizedActions.Count(action => string.Equals(
+                        action.ActionId,
+                        authorization.ActionId,
+                        StringComparison.Ordinal)
+                        && string.Equals(
+                            action.LineControllerAuthorizationId,
+                            authorization.AuthorizationId,
+                            StringComparison.Ordinal)) != 1))
+        {
+            return ApplicationError.Conflict(
+                "Projects.ReleaseLineControllerAuthorizationInvalid",
+                "Every Line Controller authorization must bind one exact frozen Operation Flow action.");
         }
 
         if (metadata.BlockVersionIds is null)
@@ -357,7 +463,12 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
                    string.Equals(binding.CapabilityId, dependency.CapabilityId, StringComparison.Ordinal)
                    && string.Equals(binding.BindingId, dependency.BindingId, StringComparison.Ordinal)
                    && string.Equals(binding.ProviderKind, dependency.ProviderKind, StringComparison.Ordinal)
-                   && string.Equals(binding.ProviderKey, dependency.ProviderKey, StringComparison.Ordinal)) == 1)
+                   && string.Equals(binding.ProviderKey, dependency.ProviderKey, StringComparison.Ordinal)
+                   && string.Equals(binding.OwnerSystemId, dependency.OwnerSystemId, StringComparison.Ordinal)
+                   && string.Equals(
+                       binding.OwnerStationSystemId,
+                       dependency.OwnerStationSystemId,
+                       StringComparison.Ordinal)) == 1)
             ? null
             : ApplicationError.Conflict(
                 "Projects.ReleasePackageDependencyCoverageMismatch",
@@ -390,12 +501,47 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         return null;
     }
 
+    private static ApplicationError? ValidateStationPackages(
+        ProjectReleaseArtifactDescriptor release,
+        ProjectReleaseSourceMetadata metadata,
+        ProjectReleaseStationPackageSet packages)
+    {
+        var expectedStations = metadata.ProductionLine.Operations
+            .Select(operation => operation.StationSystemId)
+            .Concat(metadata.ProductionLine.LineControllerAuthorizations.Select(
+                authorization => authorization.TargetStationSystemId))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var actualStations = packages.Packages
+            .Select(package => package.StationSystemId)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (!string.Equals(packages.ProjectId, release.ProjectId, StringComparison.Ordinal)
+            || !string.Equals(packages.ApplicationId, release.ApplicationId, StringComparison.Ordinal)
+            || !string.Equals(packages.ProjectSnapshotId, release.SnapshotId, StringComparison.Ordinal)
+            || !expectedStations.SequenceEqual(actualStations, StringComparer.Ordinal)
+            || packages.Packages.Any(package =>
+                !IsSha256(package.PackageContentSha256)
+                || string.IsNullOrWhiteSpace(package.PackagePath)
+                || string.IsNullOrWhiteSpace(package.DeploymentCatalogPath)))
+        {
+            return ApplicationError.Conflict(
+                "Projects.StationPackagePublicationInvalid",
+                "Published Station packages do not exactly cover the frozen Production line Stations.");
+        }
+
+        return null;
+    }
+
     private static bool SemanticMetadataEquals(
         ProjectReleaseSourceMetadata left,
         ProjectReleaseSourceMetadata right)
     {
         if (!string.Equals(left.TopologyId, right.TopologyId, StringComparison.Ordinal)
-            || !ProductionLineEquals(left.ProductionLine, right.ProductionLine))
+            || !ProductionLineEquals(left.ProductionLine, right.ProductionLine)
+            || !JsonSerializer.SerializeToUtf8Bytes(left.ExternalProgramResources).AsSpan().SequenceEqual(
+                JsonSerializer.SerializeToUtf8Bytes(right.ExternalProgramResources)))
         {
             return false;
         }
@@ -408,15 +554,19 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
         }
 
         var leftBindings = left.CapabilityBindings
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
+            .OrderBy(binding => binding.OwnerSystemId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.CapabilityId, StringComparer.Ordinal)
             .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
             .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal);
+            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
+            .ThenBy(binding => binding.OwnerStationSystemId, StringComparer.Ordinal);
         var rightBindings = right.CapabilityBindings
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
+            .OrderBy(binding => binding.OwnerSystemId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.CapabilityId, StringComparer.Ordinal)
             .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
             .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
-            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal);
+            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
+            .ThenBy(binding => binding.OwnerStationSystemId, StringComparer.Ordinal);
         if (!leftBindings.SequenceEqual(rightBindings))
         {
             return false;
@@ -552,6 +702,110 @@ public sealed class ProjectReleasePublisher : IProjectReleasePublisher
             or UnauthorizedAccessException
             or InvalidDataException
             or ArgumentException;
+    }
+
+    private sealed class ProjectReleasePublicationTransaction : IAsyncDisposable
+    {
+        private readonly IAutomationProjectWorkspaceService _workspaceService;
+        private readonly IProjectReleaseArtifactStore _artifactStore;
+        private readonly IProjectReleaseStationPackagePublisher _stationPackagePublisher;
+        private readonly ProjectApplicationWorkspaceScope _scope;
+        private readonly ProjectReleaseArtifactDescriptor _release;
+        private ProjectReleaseStationPackageSet? _stationPackages;
+        private bool _aggregateMutationPossible;
+        private bool _committed;
+
+        public ProjectReleasePublicationTransaction(
+            IAutomationProjectWorkspaceService workspaceService,
+            IProjectReleaseArtifactStore artifactStore,
+            IProjectReleaseStationPackagePublisher stationPackagePublisher,
+            ProjectApplicationWorkspaceScope scope,
+            ProjectReleaseArtifactDescriptor release)
+        {
+            _workspaceService = workspaceService;
+            _artifactStore = artifactStore;
+            _stationPackagePublisher = stationPackagePublisher;
+            _scope = scope;
+            _release = release;
+        }
+
+        public void SetStationPackages(ProjectReleaseStationPackageSet packages)
+        {
+            ArgumentNullException.ThrowIfNull(packages);
+            if (_stationPackages is not null)
+            {
+                throw new InvalidOperationException("Station packages were already attached to the release transaction.");
+            }
+
+            _stationPackages = packages;
+        }
+
+        public void MarkAggregateMutationPossible() => _aggregateMutationPossible = true;
+
+        public void Commit() => _committed = true;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_committed)
+            {
+                return;
+            }
+
+            var rollbackErrors = new List<string>();
+            if (_aggregateMutationPossible)
+            {
+                try
+                {
+                    var restore = await _workspaceService.OpenAsync(
+                            new OpenAutomationProjectWorkspaceRequest(_scope.ProjectPath),
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (restore.IsFailure)
+                    {
+                        rollbackErrors.Add($"Aggregate restore failed: {restore.Error.Message}");
+                    }
+                }
+                catch (Exception exception) when (IsArtifactStorageException(exception))
+                {
+                    rollbackErrors.Add($"Aggregate restore failed: {exception.Message}");
+                }
+            }
+
+            if (_stationPackages is not null)
+            {
+                try
+                {
+                    await _stationPackagePublisher.RollbackAsync(
+                            _stationPackages,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception) when (IsArtifactStorageException(exception))
+                {
+                    rollbackErrors.Add($"Station package rollback failed: {exception.Message}");
+                }
+            }
+
+            try
+            {
+                await _artifactStore.RollbackPublicationAsync(
+                        _scope,
+                        _release.SnapshotId,
+                        _release.ContentSha256,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (IsArtifactStorageException(exception))
+            {
+                rollbackErrors.Add($"Release rollback failed: {exception.Message}");
+            }
+
+            if (rollbackErrors.Count != 0)
+            {
+                throw new IOException(
+                    $"Project release transaction rollback failed. {string.Join(' ', rollbackErrors)}");
+            }
+        }
     }
 
     private static ApplicationError Required(string code, string fieldName)

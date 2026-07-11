@@ -62,7 +62,7 @@ public sealed class ProductionMaterialsApiTests :
         using var lotPostBody = await ReadJsonAsync(lotPost);
 
         Assert.Equal(HttpStatusCode.Created, lotPost.StatusCode);
-        Assert.Equal($"/api/production-lots/{lotId}", lotPost.Headers.Location?.AbsolutePath);
+        Assert.Equal($"/api/production-lots/{lotId}", lotPost.Headers.Location?.OriginalString);
         Assert.Equal(lotId, lotPostBody.RootElement.GetProperty("lotId").GetString());
         Assert.Equal("product.board", lotPostBody.RootElement.GetProperty("productModelId").GetString());
         Assert.Equal(24, lotPostBody.RootElement.GetProperty("declaredQuantity").GetInt32());
@@ -82,7 +82,7 @@ public sealed class ProductionMaterialsApiTests :
         Assert.Equal(HttpStatusCode.Created, unitPost.StatusCode);
         Assert.Equal(
             $"/api/production-units/{productionUnitId:D}",
-            unitPost.Headers.Location?.AbsolutePath);
+            unitPost.Headers.Location?.OriginalString);
         Assert.Equal(productionUnitId, unitPostBody.RootElement
             .GetProperty("productionUnitId").GetGuid());
         Assert.Equal("serialNumber", unitPostBody.RootElement.GetProperty("identityKey").GetString());
@@ -213,6 +213,53 @@ public sealed class ProductionMaterialsApiTests :
             "StationQueue",
             lineId,
             stationSystemId);
+    }
+
+    [Fact]
+    public async Task SlotAvailabilityCommandsPersistBlockedAndOfflineLifecycle()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var lineId = $"line-availability-{suffix}";
+        var stationSystemId = $"station-availability-{suffix}";
+        var slotId = "slot-maintenance";
+        await RegisterSlotAsync(lineId, stationSystemId, slotId);
+
+        async Task AssertCommandAsync(
+            string command,
+            DateTimeOffset occurredAtUtc,
+            string expectedStatus,
+            string? reason = null)
+        {
+            using var response = await _client.PostAsJsonAsync(
+                SlotCommandRoute(lineId, stationSystemId, slotId, command),
+                new
+                {
+                    materialKind = (string?)null,
+                    materialId = (string?)null,
+                    destination = (object?)null,
+                    reason,
+                    actorId = "operator.material-api",
+                    occurredAtUtc
+                });
+            using var body = await ReadJsonAsync(response);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            AssertSlot(body.RootElement, expectedStatus, null, null);
+        }
+
+        await AssertCommandAsync(
+            "Block",
+            BaseTimeUtc.AddSeconds(1),
+            "Blocked",
+            "Planned fixture maintenance.");
+        await AssertCommandAsync("Unblock", BaseTimeUtc.AddSeconds(2), "Available");
+        await AssertCommandAsync("SetOffline", BaseTimeUtc.AddSeconds(3), "Offline");
+        await AssertCommandAsync("BringOnline", BaseTimeUtc.AddSeconds(4), "Available");
+
+        using var get = await _client.GetAsync(
+            $"/api/slot-occupancies/{lineId}/{stationSystemId}/{slotId}");
+        using var getBody = await ReadJsonAsync(get);
+        Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+        AssertSlot(getBody.RootElement, "Available", null, null);
     }
 
     [Fact]

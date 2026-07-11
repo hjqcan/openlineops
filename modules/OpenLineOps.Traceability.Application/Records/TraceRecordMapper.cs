@@ -8,6 +8,7 @@ internal static class TraceRecordMapper
     public static TraceRecordDetails ToDetails(TraceRecord record) => new(
         record.Id.Value,
         record.ProductionRunId.Value,
+        record.ProductionUnitId.Value,
         record.ProjectId,
         record.ApplicationId,
         record.ProjectSnapshotId,
@@ -29,11 +30,16 @@ internal static class TraceRecordMapper
         record.FailureReason,
         record.Operations.Select(ToDetails).ToArray(),
         record.RouteDecisions.Select(ToDetails).ToArray(),
+        record.Genealogy.Select(ToDetails).ToArray(),
+        record.MaterialLocationTransitions.Select(ToDetails).ToArray(),
+        record.SlotOccupancyTransitions.Select(ToDetails).ToArray(),
+        record.DispositionTransitions.Select(ToDetails).ToArray(),
         record.AuditEntries.Select(ToDetails).ToArray());
 
     public static TraceRecordSummary ToSummary(TraceRecord record) => new(
         record.Id.Value,
         record.ProductionRunId.Value,
+        record.ProductionUnitId.Value,
         record.ProjectId,
         record.ApplicationId,
         record.ProjectSnapshotId,
@@ -55,7 +61,11 @@ internal static class TraceRecordMapper
         record.Operations.Sum(operation => operation.Measurements.Count),
         record.Operations.Sum(operation => operation.Artifacts.Count),
         record.Operations.Sum(operation => operation.Incidents.Count),
-        record.RouteDecisions.Count);
+        record.RouteDecisions.Count,
+        record.Genealogy.Count,
+        record.MaterialLocationTransitions.Count,
+        record.SlotOccupancyTransitions.Count,
+        record.DispositionTransitions.Count);
 
     private static TraceOperationExecutionDetails ToDetails(TraceOperationExecution operation) => new(
         operation.OperationRunId,
@@ -98,6 +108,59 @@ internal static class TraceRecordMapper
         decision.SourceJudgement.ToString(),
         decision.Traversal,
         decision.DecidedAtUtc);
+
+    private static TraceMaterialGenealogyDetails ToDetails(TraceMaterialGenealogy link) => new(
+        link.LinkId,
+        link.ParentProductionUnitId,
+        link.ChildProductionUnitId,
+        link.Relationship,
+        link.OperationId,
+        link.LinkedBy,
+        link.LinkedAtUtc);
+
+    private static TraceMaterialLocationTransitionDetails ToDetails(
+        TraceMaterialLocationTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.Source is null ? null : ToDetails(transition.Source),
+        ToDetails(transition.Destination),
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceMaterialLocationDetails ToDetails(TraceMaterialLocation location) => new(
+        location.Kind,
+        location.LineId,
+        location.StationSystemId,
+        location.SlotId,
+        location.CarrierId,
+        location.CarrierPositionId);
+
+    private static TraceSlotOccupancyTransitionDetails ToDetails(
+        TraceSlotOccupancyTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.LineId,
+        transition.StationSystemId,
+        transition.SlotId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.PreviousStatus,
+        transition.CurrentStatus,
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceDispositionTransitionDetails ToDetails(
+        TraceDispositionTransition transition) => new(
+        transition.EvidenceId,
+        transition.ProductionUnitId,
+        transition.ProductionRunId,
+        transition.PreviousDisposition.ToString(),
+        transition.CurrentDisposition.ToString(),
+        transition.Reason,
+        transition.ActorId,
+        transition.OccurredAtUtc);
 
     private static TraceCommandDetails ToDetails(TraceCommandRecord command) => new(
         command.RuntimeCommandId.Value,

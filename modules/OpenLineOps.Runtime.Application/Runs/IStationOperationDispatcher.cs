@@ -33,12 +33,14 @@ public sealed record StationOperationDispatchRequest
         ArgumentNullException.ThrowIfNull(resourceLeases);
         ResourceLeases = resourceLeases.ToArray();
         IdempotencyKey = $"{run.RunId.Value:D}/{operation.OperationRunId}";
-        if (ResourceLeases.Count != operation.Definition.ResourceRequirements.Count
+        if (ResourceLeases.Count != operation.FencingTokens.Count
             || ResourceLeases.Any(lease => lease.ProductionRunId != run.RunId
                 || !string.Equals(
                     lease.OperationRunId,
                     operation.OperationRunId,
-                    StringComparison.Ordinal)))
+                    StringComparison.Ordinal)
+                || !operation.FencingTokens.TryGetValue(lease.Resource, out var token)
+                || token != lease.FencingToken))
         {
             throw new ArgumentException(
                 "Station operation dispatch requires every resource lease owned by the Operation Run.",

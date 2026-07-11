@@ -11,6 +11,7 @@ public sealed record TraceRecordQuery
 
     public TraceRecordQuery(
         Guid? productionRunId = null,
+        Guid? productionUnitId = null,
         string? productModelId = null,
         string? productionUnitIdentityInputKey = null,
         string? productionUnitIdentityValue = null,
@@ -40,6 +41,7 @@ public sealed record TraceRecordQuery
         PagedRequest? paging = null)
     {
         ProductionRunId = productionRunId;
+        ProductionUnitId = productionUnitId;
         ProductModelId = productModelId;
         ProductionUnitIdentityInputKey = productionUnitIdentityInputKey;
         ProductionUnitIdentityValue = productionUnitIdentityValue;
@@ -70,6 +72,7 @@ public sealed record TraceRecordQuery
     }
 
     public Guid? ProductionRunId { get; }
+    public Guid? ProductionUnitId { get; }
     public string? ProductModelId { get; }
     public string? ProductionUnitIdentityInputKey { get; }
     public string? ProductionUnitIdentityValue { get; }
@@ -105,6 +108,13 @@ public sealed record TraceRecordQuery
             return ApplicationError.Validation(
                 "Traceability.ProductionRunIdInvalid",
                 "ProductionRunId cannot be an empty GUID.");
+        }
+
+        if (ProductionUnitId == Guid.Empty)
+        {
+            return ApplicationError.Validation(
+                "Traceability.ProductionUnitIdInvalid",
+                "ProductionUnitId cannot be an empty GUID.");
         }
 
         if (CompletedFromUtc is not null

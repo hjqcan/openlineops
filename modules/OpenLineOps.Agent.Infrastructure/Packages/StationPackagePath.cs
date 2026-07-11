@@ -4,24 +4,9 @@ internal static class StationPackagePath
 {
     public static string NormalizeRelative(string path, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(path)
-            || path.Contains('\\')
-            || path.StartsWith('/')
-            || path.EndsWith('/'))
-        {
-            throw new InvalidDataException($"{parameterName} must be a canonical relative package path.");
-        }
-
-        var segments = path.Split('/');
-        if (segments.Any(segment => segment.Length == 0
-            || segment is "." or ".."
-            || segment.EndsWith(' ')
-            || segment.EndsWith('.')))
-        {
-            throw new InvalidDataException($"{parameterName} contains an invalid path segment.");
-        }
-
-        return string.Join('/', segments);
+        return OpenLineOps.Agent.Contracts.StationPackageCanonicalization.NormalizeRelativePath(
+            path,
+            parameterName);
     }
 
     public static string FromFile(string rootPath, string filePath)

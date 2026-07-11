@@ -32,10 +32,7 @@ namespace PythonScript.Runtime
             ArgumentNullException.ThrowIfNull(action);
             EnsureAccessOnCreatingThread();
 
-            if (Volatile.Read(ref disposed))
-            {
-                throw new ObjectDisposedException(nameof(PythonRuntimeSession));
-            }
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed), this);
 
             scopeLock.EnterReadLock();
             try
@@ -55,10 +52,7 @@ namespace PythonScript.Runtime
             ArgumentNullException.ThrowIfNull(action);
             EnsureAccessOnCreatingThread();
 
-            if (Volatile.Read(ref disposed))
-            {
-                throw new ObjectDisposedException(nameof(PythonRuntimeSession));
-            }
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed), this);
 
             scopeLock.EnterReadLock();
             try
@@ -161,10 +155,7 @@ namespace PythonScript.Runtime
 
         private void EnsureNotDisposed()
         {
-            if (disposed)
-            {
-                throw new ObjectDisposedException(nameof(PythonRuntimeSession));
-            }
+            ObjectDisposedException.ThrowIf(disposed, this);
         }
 
         private void EnsureAccessOnCreatingThread()

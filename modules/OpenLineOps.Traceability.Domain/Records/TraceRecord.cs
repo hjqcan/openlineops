@@ -7,11 +7,16 @@ public sealed class TraceRecord
 {
     private readonly List<TraceOperationExecution> _operations;
     private readonly List<TraceRouteDecision> _routeDecisions;
+    private readonly List<TraceMaterialGenealogy> _genealogy;
+    private readonly List<TraceMaterialLocationTransition> _materialLocationTransitions;
+    private readonly List<TraceSlotOccupancyTransition> _slotOccupancyTransitions;
+    private readonly List<TraceDispositionTransition> _dispositionTransitions;
     private readonly List<AuditEntry> _auditEntries;
 
     private TraceRecord(
         TraceRecordId id,
         ProductionRunId productionRunId,
+        ProductionUnitId productionUnitId,
         string projectId,
         string applicationId,
         string projectSnapshotId,
@@ -33,10 +38,18 @@ public sealed class TraceRecord
         string? failureReason,
         IEnumerable<TraceOperationExecution> operations,
         IEnumerable<TraceRouteDecision> routeDecisions,
+        IEnumerable<TraceMaterialGenealogy> genealogy,
+        IEnumerable<TraceMaterialLocationTransition> materialLocationTransitions,
+        IEnumerable<TraceSlotOccupancyTransition> slotOccupancyTransitions,
+        IEnumerable<TraceDispositionTransition> dispositionTransitions,
         IEnumerable<AuditEntry> auditEntries)
     {
         ArgumentNullException.ThrowIfNull(operations);
         ArgumentNullException.ThrowIfNull(routeDecisions);
+        ArgumentNullException.ThrowIfNull(genealogy);
+        ArgumentNullException.ThrowIfNull(materialLocationTransitions);
+        ArgumentNullException.ThrowIfNull(slotOccupancyTransitions);
+        ArgumentNullException.ThrowIfNull(dispositionTransitions);
         ArgumentNullException.ThrowIfNull(auditEntries);
         if (id.Value != productionRunId.Value)
         {
@@ -45,6 +58,7 @@ public sealed class TraceRecord
 
         Id = id;
         ProductionRunId = productionRunId;
+        ProductionUnitId = productionUnitId;
         ProjectId = TraceabilityIdGuard.NotBlank(projectId, nameof(projectId));
         ApplicationId = TraceabilityIdGuard.NotBlank(applicationId, nameof(applicationId));
         ProjectSnapshotId = TraceabilityIdGuard.NotBlank(projectSnapshotId, nameof(projectSnapshotId));
@@ -84,6 +98,19 @@ public sealed class TraceRecord
                 decision => decision.TransitionId,
                 StringComparer.Ordinal)
             .ToList();
+        _genealogy = genealogy.OrderBy(link => link.LinkedAtUtc).ThenBy(link => link.LinkId).ToList();
+        _materialLocationTransitions = materialLocationTransitions
+            .OrderBy(transition => transition.OccurredAtUtc)
+            .ThenBy(transition => transition.EvidenceId)
+            .ToList();
+        _slotOccupancyTransitions = slotOccupancyTransitions
+            .OrderBy(transition => transition.OccurredAtUtc)
+            .ThenBy(transition => transition.EvidenceId)
+            .ToList();
+        _dispositionTransitions = dispositionTransitions
+            .OrderBy(transition => transition.OccurredAtUtc)
+            .ThenBy(transition => transition.EvidenceId)
+            .ToList();
         _auditEntries = auditEntries.OrderBy(entry => entry.OccurredAtUtc).ToList();
 
         if (StartedAtUtc < CreatedAtUtc || CompletedAtUtc < (StartedAtUtc ?? CreatedAtUtc))
@@ -97,6 +124,7 @@ public sealed class TraceRecord
 
     public TraceRecordId Id { get; }
     public ProductionRunId ProductionRunId { get; }
+    public ProductionUnitId ProductionUnitId { get; }
     public string ProjectId { get; }
     public string ApplicationId { get; }
     public string ProjectSnapshotId { get; }
@@ -118,11 +146,19 @@ public sealed class TraceRecord
     public string? FailureReason { get; }
     public IReadOnlyList<TraceOperationExecution> Operations => _operations;
     public IReadOnlyList<TraceRouteDecision> RouteDecisions => _routeDecisions;
+    public IReadOnlyList<TraceMaterialGenealogy> Genealogy => _genealogy;
+    public IReadOnlyList<TraceMaterialLocationTransition> MaterialLocationTransitions =>
+        _materialLocationTransitions;
+    public IReadOnlyList<TraceSlotOccupancyTransition> SlotOccupancyTransitions =>
+        _slotOccupancyTransitions;
+    public IReadOnlyList<TraceDispositionTransition> DispositionTransitions =>
+        _dispositionTransitions;
     public IReadOnlyList<AuditEntry> AuditEntries => _auditEntries;
 
     public static TraceRecord Create(
         TraceRecordId id,
         ProductionRunId productionRunId,
+        ProductionUnitId productionUnitId,
         string projectId,
         string applicationId,
         string projectSnapshotId,
@@ -144,9 +180,14 @@ public sealed class TraceRecord
         string? failureReason,
         IEnumerable<TraceOperationExecution> operations,
         IEnumerable<TraceRouteDecision> routeDecisions,
+        IEnumerable<TraceMaterialGenealogy> genealogy,
+        IEnumerable<TraceMaterialLocationTransition> materialLocationTransitions,
+        IEnumerable<TraceSlotOccupancyTransition> slotOccupancyTransitions,
+        IEnumerable<TraceDispositionTransition> dispositionTransitions,
         IEnumerable<AuditEntry> auditEntries) => new(
         id,
         productionRunId,
+        productionUnitId,
         projectId,
         applicationId,
         projectSnapshotId,
@@ -168,11 +209,16 @@ public sealed class TraceRecord
         failureReason,
         operations,
         routeDecisions,
+        genealogy,
+        materialLocationTransitions,
+        slotOccupancyTransitions,
+        dispositionTransitions,
         auditEntries);
 
     public static TraceRecord Restore(
         TraceRecordId id,
         ProductionRunId productionRunId,
+        ProductionUnitId productionUnitId,
         string projectId,
         string applicationId,
         string projectSnapshotId,
@@ -194,9 +240,14 @@ public sealed class TraceRecord
         string? failureReason,
         IEnumerable<TraceOperationExecution> operations,
         IEnumerable<TraceRouteDecision> routeDecisions,
+        IEnumerable<TraceMaterialGenealogy> genealogy,
+        IEnumerable<TraceMaterialLocationTransition> materialLocationTransitions,
+        IEnumerable<TraceSlotOccupancyTransition> slotOccupancyTransitions,
+        IEnumerable<TraceDispositionTransition> dispositionTransitions,
         IEnumerable<AuditEntry> auditEntries) => Create(
         id,
         productionRunId,
+        productionUnitId,
         projectId,
         applicationId,
         projectSnapshotId,
@@ -218,6 +269,10 @@ public sealed class TraceRecord
         failureReason,
         operations,
         routeDecisions,
+        genealogy,
+        materialLocationTransitions,
+        slotOccupancyTransitions,
+        dispositionTransitions,
         auditEntries);
 
     private void ValidateCollections()
@@ -241,6 +296,20 @@ public sealed class TraceRecord
             _routeDecisions.Select(decision =>
                 $"{decision.SourceOperationRunId}/{decision.TransitionId}/{decision.Traversal}"),
             "Route Decision identities");
+        EnsureUnique(_genealogy.Select(link => link.LinkId.ToString("D")), "genealogy link ids");
+        EnsureUnique(
+            _materialLocationTransitions.Select(transition => transition.EvidenceId.ToString("D"))
+                .Concat(_slotOccupancyTransitions.Select(transition => transition.EvidenceId.ToString("D")))
+                .Concat(_dispositionTransitions.Select(transition => transition.EvidenceId.ToString("D"))),
+            "Material evidence ids");
+        if (_genealogy.Any(link => link.LinkedAtUtc > CompletedAtUtc)
+            || _materialLocationTransitions.Any(transition => transition.OccurredAtUtc > CompletedAtUtc)
+            || _slotOccupancyTransitions.Any(transition => transition.OccurredAtUtc > CompletedAtUtc)
+            || _dispositionTransitions.Any(transition => transition.OccurredAtUtc > CompletedAtUtc))
+        {
+            throw new ArgumentException(
+                "Trace Material evidence cannot occur after Production Run completion.");
+        }
 
         var operationsByRunId = _operations.ToDictionary(
             operation => operation.OperationRunId,

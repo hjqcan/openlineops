@@ -1,17 +1,25 @@
 using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Materials;
 
 public sealed class ProductionMaterialService
 {
     private readonly IProductionMaterialRepository _repository;
+    private readonly IProductionRunRepository _productionRuns;
 
-    public ProductionMaterialService(IProductionMaterialRepository repository)
+    public ProductionMaterialService(
+        IProductionMaterialRepository repository,
+        IProductionRunRepository productionRuns)
     {
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+        _productionRuns = productionRuns ?? throw new ArgumentNullException(nameof(productionRuns));
     }
 
     public async ValueTask<RuntimeOperationResult> RegisterLotAsync(
@@ -161,7 +169,14 @@ public sealed class ProductionMaterialService
             return result;
         }
 
-        await CommitSlotWithMaterialFenceAsync(slot, material, cancellationToken)
+        await CommitSlotWithMaterialFenceAsync(
+                slot,
+                material,
+                command.Material,
+                SlotOccupancyStatus.Available,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
             .ConfigureAwait(false);
         return result;
     }
@@ -192,7 +207,14 @@ public sealed class ProductionMaterialService
             return result;
         }
 
-        await CommitSlotWithMaterialFenceAsync(slot, material, cancellationToken)
+        await CommitSlotWithMaterialFenceAsync(
+                slot,
+                material,
+                command.Material,
+                SlotOccupancyStatus.Reserved,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
             .ConfigureAwait(false);
         return result;
     }
@@ -203,6 +225,15 @@ public sealed class ProductionMaterialService
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateEnvelope(command.ActorId, command.OccurredAtUtc);
+        var movement = await RequireMaterialMovementAllowedAsync(
+                command.Material,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!movement.Succeeded)
+        {
+            return movement;
+        }
+
         var slot = await _repository.GetSlotAsync(command.Slot, cancellationToken)
             .ConfigureAwait(false);
         if (slot is null)
@@ -226,6 +257,8 @@ public sealed class ProductionMaterialService
                 slot,
                 result,
                 null,
+                SlotOccupancyStatus.Reserved,
+                command.ActorId,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -270,7 +303,14 @@ public sealed class ProductionMaterialService
             return result;
         }
 
-        await CommitSlotWithMaterialFenceAsync(slot, material, cancellationToken)
+        await CommitSlotWithMaterialFenceAsync(
+                slot,
+                material,
+                command.Material,
+                SlotOccupancyStatus.Occupied,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
             .ConfigureAwait(false);
         return result;
     }
@@ -281,6 +321,16 @@ public sealed class ProductionMaterialService
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateEnvelope(command.ActorId, command.OccurredAtUtc);
+        var ownership = await RequireMaterialMovementAllowedAsync(
+                command.Material,
+                cancellationToken,
+                allowActiveRunWithoutRunningOperation: false)
+            .ConfigureAwait(false);
+        if (!ownership.Succeeded)
+        {
+            return ownership;
+        }
+
         var slot = await _repository.GetSlotAsync(command.Slot, cancellationToken)
             .ConfigureAwait(false);
         if (slot is null)
@@ -310,9 +360,81 @@ public sealed class ProductionMaterialService
 
         await _repository.CommitAsync(
             new ProductionMaterialCommit(
-                slots: [new SlotOccupancyUpdate(slot.Aggregate, slot.Revision)]),
+                slots: [new SlotOccupancyUpdate(slot.Aggregate, slot.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        command.Slot,
+                        command.Material,
+                        MaterialProductionRunId(material),
+                        SlotOccupancyStatus.Running,
+                        SlotOccupancyStatus.Occupied,
+                        command.ActorId,
+                        command.OccurredAtUtc)
+                ]),
             cancellationToken).ConfigureAwait(false);
         return result;
+    }
+
+    public ValueTask<RuntimeOperationResult> BlockSlotAsync(
+        BlockSlotCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return TransitionUnboundSlotAsync(
+            command.Slot,
+            command.ActorId,
+            command.OccurredAtUtc,
+            occupancy => occupancy.Block(command.Reason, command.OccurredAtUtc),
+            SlotOccupancyStatus.Available,
+            SlotOccupancyStatus.Blocked,
+            cancellationToken);
+    }
+
+    public ValueTask<RuntimeOperationResult> UnblockSlotAsync(
+        UnblockSlotCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return TransitionUnboundSlotAsync(
+            command.Slot,
+            command.ActorId,
+            command.OccurredAtUtc,
+            occupancy => occupancy.Unblock(command.OccurredAtUtc),
+            SlotOccupancyStatus.Blocked,
+            SlotOccupancyStatus.Available,
+            cancellationToken);
+    }
+
+    public ValueTask<RuntimeOperationResult> SetSlotOfflineAsync(
+        SetSlotOfflineCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return TransitionUnboundSlotAsync(
+            command.Slot,
+            command.ActorId,
+            command.OccurredAtUtc,
+            occupancy => occupancy.SetOffline(command.OccurredAtUtc),
+            null,
+            SlotOccupancyStatus.Offline,
+            cancellationToken);
+    }
+
+    public ValueTask<RuntimeOperationResult> BringSlotOnlineAsync(
+        BringSlotOnlineCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return TransitionUnboundSlotAsync(
+            command.Slot,
+            command.ActorId,
+            command.OccurredAtUtc,
+            occupancy => occupancy.BringOnline(command.OccurredAtUtc),
+            SlotOccupancyStatus.Offline,
+            SlotOccupancyStatus.Available,
+            cancellationToken);
     }
 
     public async ValueTask<RuntimeOperationResult> UnloadSlotAsync(
@@ -321,6 +443,15 @@ public sealed class ProductionMaterialService
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateEnvelope(command.ActorId, command.OccurredAtUtc);
+        var movement = await RequireMaterialMovementAllowedAsync(
+                command.Material,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!movement.Succeeded)
+        {
+            return movement;
+        }
+
         var slot = await _repository.GetSlotAsync(command.Slot, cancellationToken)
             .ConfigureAwait(false);
         if (slot is null)
@@ -352,6 +483,8 @@ public sealed class ProductionMaterialService
                 slot,
                 result,
                 destination.CarrierFence,
+                SlotOccupancyStatus.Occupied,
+                command.ActorId,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -362,6 +495,15 @@ public sealed class ProductionMaterialService
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateEnvelope(command.ActorId, command.OccurredAtUtc);
+        var movement = await RequireMaterialMovementAllowedAsync(
+                command.Material,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!movement.Succeeded)
+        {
+            return movement;
+        }
+
         if (command.ExpectedLocation.Kind == MaterialLocationKind.Slot
             || command.Destination.Kind == MaterialLocationKind.Slot)
         {
@@ -390,6 +532,8 @@ public sealed class ProductionMaterialService
                     command.OccurredAtUtc,
                     null,
                     destination.CarrierFence,
+                    null,
+                    command.ActorId,
                     cancellationToken)
                 .ConfigureAwait(false),
             MaterialKind.Carrier => await TransferCarrierAsync(
@@ -399,6 +543,8 @@ public sealed class ProductionMaterialService
                     command.OccurredAtUtc,
                     null,
                     null,
+                    null,
+                    command.ActorId,
                     cancellationToken)
                 .ConfigureAwait(false),
             _ => throw new InvalidOperationException(
@@ -428,8 +574,16 @@ public sealed class ProductionMaterialService
                 $"Production Unit {command.ProductionUnitId} must stop before it can be held.");
         }
 
+        var previousDisposition = unit.Aggregate.Disposition;
         var result = unit.Aggregate.Hold(command.Reason, command.OccurredAtUtc);
-        return await CommitUnitAsync(unit, result, cancellationToken).ConfigureAwait(false);
+        return await CommitDispositionAsync(
+                unit,
+                previousDisposition,
+                result,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask<RuntimeOperationResult> ReleaseAsync(
@@ -445,8 +599,16 @@ public sealed class ProductionMaterialService
             return NotFound("Production Unit", command.ProductionUnitId.ToString());
         }
 
+        var previousDisposition = unit.Aggregate.Disposition;
         var result = unit.Aggregate.Release(command.OccurredAtUtc);
-        return await CommitUnitAsync(unit, result, cancellationToken).ConfigureAwait(false);
+        return await CommitDispositionAsync(
+                unit,
+                previousDisposition,
+                result,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask<RuntimeOperationResult> ScrapAsync(
@@ -471,8 +633,16 @@ public sealed class ProductionMaterialService
                 $"Production Unit {command.ProductionUnitId} must stop before it can be scrapped.");
         }
 
+        var previousDisposition = unit.Aggregate.Disposition;
         var result = unit.Aggregate.Scrap(command.Reason, command.OccurredAtUtc);
-        return await CommitUnitAsync(unit, result, cancellationToken).ConfigureAwait(false);
+        return await CommitDispositionAsync(
+                unit,
+                previousDisposition,
+                result,
+                command.ActorId,
+                command.OccurredAtUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask<RuntimeOperationResult> LinkGenealogyAsync(
@@ -526,6 +696,63 @@ public sealed class ProductionMaterialService
             : Duplicate("Material genealogy link", command.LinkId.ToString());
     }
 
+    private async ValueTask<RuntimeOperationResult> TransitionUnboundSlotAsync(
+        SlotAddress address,
+        string actorId,
+        DateTimeOffset occurredAtUtc,
+        Func<SlotOccupancy, RuntimeOperationResult> transition,
+        SlotOccupancyStatus? expectedPreviousStatus,
+        SlotOccupancyStatus targetStatus,
+        CancellationToken cancellationToken)
+    {
+        ValidateEnvelope(actorId, occurredAtUtc);
+        var slot = await _repository.GetSlotAsync(address, cancellationToken)
+            .ConfigureAwait(false);
+        if (slot is null)
+        {
+            return NotFound("Slot", address.ToString());
+        }
+
+        var previousStatus = slot.Aggregate.Status;
+        if (slot.Aggregate.Material is not null
+            || expectedPreviousStatus is not null && previousStatus != expectedPreviousStatus)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.SlotAvailabilityTransitionRejected",
+                $"Slot {address} cannot change availability from {previousStatus} while bound to material.");
+        }
+
+        var result = transition(slot.Aggregate);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
+
+        if (slot.Aggregate.Status != targetStatus)
+        {
+            throw new InvalidOperationException(
+                $"Slot {address} transition did not reach {targetStatus}.");
+        }
+
+        await _repository.CommitAsync(
+            new ProductionMaterialCommit(
+                slots: [new SlotOccupancyUpdate(slot.Aggregate, slot.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        null,
+                        null,
+                        previousStatus,
+                        targetStatus,
+                        actorId,
+                        occurredAtUtc)
+                ]),
+            cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
     private async ValueTask<RuntimeOperationResult> ArriveProductionUnitAsync(
         ArriveMaterialCommand command,
         CancellationToken cancellationToken)
@@ -539,7 +766,27 @@ public sealed class ProductionMaterialService
         }
 
         var result = entry.Aggregate.Arrive(command.StationLocation, command.OccurredAtUtc);
-        return await CommitUnitAsync(entry, result, cancellationToken).ConfigureAwait(false);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
+
+        await _repository.CommitAsync(
+            new ProductionMaterialCommit(
+                productionUnits: [new ProductionUnitUpdate(entry.Aggregate, entry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        command.Material,
+                        entry.Aggregate.ActiveProductionRunId,
+                        null,
+                        command.StationLocation,
+                        command.ActorId,
+                        command.OccurredAtUtc)
+                ]),
+            cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     private async ValueTask<RuntimeOperationResult> ArriveCarrierAsync(
@@ -563,7 +810,18 @@ public sealed class ProductionMaterialService
 
         await _repository.CommitAsync(
             new ProductionMaterialCommit(
-                carriers: [new CarrierUpdate(entry.Aggregate, entry.Revision)]),
+                carriers: [new CarrierUpdate(entry.Aggregate, entry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        command.Material,
+                        null,
+                        null,
+                        command.StationLocation,
+                        command.ActorId,
+                        command.OccurredAtUtc)
+                ]),
             cancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -576,6 +834,8 @@ public sealed class ProductionMaterialService
         ProductionMaterialPersistenceEntry<SlotOccupancy> slot,
         RuntimeOperationResult slotResult,
         CarrierUpdate? destinationCarrierFence,
+        SlotOccupancyStatus previousSlotStatus,
+        string actorId,
         CancellationToken cancellationToken)
     {
         return material.Kind switch
@@ -587,6 +847,8 @@ public sealed class ProductionMaterialService
                     occurredAtUtc,
                     new SlotOccupancyUpdate(slot.Aggregate, slot.Revision),
                     destinationCarrierFence,
+                    previousSlotStatus,
+                    actorId,
                     cancellationToken)
                 .ConfigureAwait(false),
             MaterialKind.Carrier => await TransferCarrierAsync(
@@ -596,6 +858,8 @@ public sealed class ProductionMaterialService
                     occurredAtUtc,
                     new SlotOccupancyUpdate(slot.Aggregate, slot.Revision),
                     null,
+                    previousSlotStatus,
+                    actorId,
                     cancellationToken)
                 .ConfigureAwait(false),
             _ => slotResult
@@ -609,6 +873,8 @@ public sealed class ProductionMaterialService
         DateTimeOffset occurredAtUtc,
         SlotOccupancyUpdate? slotUpdate,
         CarrierUpdate? destinationCarrierFence,
+        SlotOccupancyStatus? previousSlotStatus,
+        string actorId,
         CancellationToken cancellationToken)
     {
         var unit = await _repository.GetProductionUnitAsync(productionUnitId, cancellationToken)
@@ -628,7 +894,16 @@ public sealed class ProductionMaterialService
             new ProductionMaterialCommit(
                 productionUnits: [new ProductionUnitUpdate(unit.Aggregate, unit.Revision)],
                 carriers: destinationCarrierFence is null ? null : [destinationCarrierFence],
-                slots: slotUpdate is null ? null : [slotUpdate]),
+                slots: slotUpdate is null ? null : [slotUpdate],
+                timeline: CreateTransferTimeline(
+                    MaterialReference.ForProductionUnit(unit.Aggregate.Id),
+                    unit.Aggregate.ActiveProductionRunId,
+                    expectedLocation,
+                    destination,
+                    occurredAtUtc,
+                    slotUpdate,
+                    previousSlotStatus,
+                    actorId)),
             cancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -640,6 +915,8 @@ public sealed class ProductionMaterialService
         DateTimeOffset occurredAtUtc,
         SlotOccupancyUpdate? slotUpdate,
         CarrierUpdate? destinationCarrierFence,
+        SlotOccupancyStatus? previousSlotStatus,
+        string actorId,
         CancellationToken cancellationToken)
     {
         var carrier = await _repository.GetCarrierAsync(carrierId, cancellationToken)
@@ -660,14 +937,26 @@ public sealed class ProductionMaterialService
                 carriers: destinationCarrierFence is null
                     ? [new CarrierUpdate(carrier.Aggregate, carrier.Revision)]
                     : throw new InvalidOperationException("A Carrier cannot target a Carrier position."),
-                slots: slotUpdate is null ? null : [slotUpdate]),
+                slots: slotUpdate is null ? null : [slotUpdate],
+                timeline: CreateTransferTimeline(
+                    MaterialReference.ForCarrier(carrier.Aggregate.Id),
+                    null,
+                    expectedLocation,
+                    destination,
+                    occurredAtUtc,
+                    slotUpdate,
+                    previousSlotStatus,
+                    actorId)),
             cancellationToken).ConfigureAwait(false);
         return result;
     }
 
-    private async ValueTask<RuntimeOperationResult> CommitUnitAsync(
+    private async ValueTask<RuntimeOperationResult> CommitDispositionAsync(
         ProductionMaterialPersistenceEntry<ProductionUnit> entry,
+        ProductDisposition previousDisposition,
         RuntimeOperationResult result,
+        string actorId,
+        DateTimeOffset occurredAtUtc,
         CancellationToken cancellationToken)
     {
         if (!result.Succeeded)
@@ -677,7 +966,19 @@ public sealed class ProductionMaterialService
 
         await _repository.CommitAsync(
             new ProductionMaterialCommit(
-                productionUnits: [new ProductionUnitUpdate(entry.Aggregate, entry.Revision)]),
+                productionUnits: [new ProductionUnitUpdate(entry.Aggregate, entry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Disposition(
+                        Guid.NewGuid(),
+                        entry.Aggregate.Id,
+                        entry.Aggregate.ActiveProductionRunId,
+                        previousDisposition,
+                        entry.Aggregate.Disposition,
+                        entry.Aggregate.DispositionReason,
+                        actorId,
+                        occurredAtUtc)
+                ]),
             cancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -685,6 +986,10 @@ public sealed class ProductionMaterialService
     private async ValueTask CommitSlotWithMaterialFenceAsync(
         ProductionMaterialPersistenceEntry<SlotOccupancy> slot,
         MaterialState material,
+        MaterialReference materialReference,
+        SlotOccupancyStatus previousStatus,
+        string actorId,
+        DateTimeOffset occurredAtUtc,
         CancellationToken cancellationToken)
     {
         await _repository.CommitAsync(
@@ -695,9 +1000,62 @@ public sealed class ProductionMaterialService
                 carriers: material.CarrierFence is null
                     ? null
                     : [material.CarrierFence],
-                slots: [new SlotOccupancyUpdate(slot.Aggregate, slot.Revision)]),
+                slots: [new SlotOccupancyUpdate(slot.Aggregate, slot.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        slot.Aggregate.Address,
+                        materialReference,
+                        MaterialProductionRunId(material),
+                        previousStatus,
+                        slot.Aggregate.Status,
+                        actorId,
+                        occurredAtUtc)
+                ]),
             cancellationToken).ConfigureAwait(false);
     }
+
+    private static List<ProductionMaterialTimelineEntry> CreateTransferTimeline(
+        MaterialReference material,
+        ProductionRunId? productionRunId,
+        MaterialLocation source,
+        MaterialLocation destination,
+        DateTimeOffset occurredAtUtc,
+        SlotOccupancyUpdate? slotUpdate,
+        SlotOccupancyStatus? previousSlotStatus,
+        string actorId)
+    {
+        var timeline = new List<ProductionMaterialTimelineEntry>
+        {
+            ProductionMaterialTimelineEntry.Location(
+                Guid.NewGuid(),
+                material,
+                productionRunId,
+                source,
+                destination,
+                actorId,
+                occurredAtUtc)
+        };
+        if (slotUpdate is not null)
+        {
+            timeline.Add(ProductionMaterialTimelineEntry.SlotOccupancy(
+                Guid.NewGuid(),
+                slotUpdate.Aggregate.Address,
+                material,
+                productionRunId,
+                previousSlotStatus ?? throw new InvalidOperationException(
+                    "A Slot transfer requires its previous occupancy status."),
+                slotUpdate.Aggregate.Status,
+                actorId,
+                occurredAtUtc));
+        }
+
+        return timeline;
+    }
+
+    private static ProductionRunId? MaterialProductionRunId(MaterialState material) =>
+        material.ProductionUnitFence?.Aggregate.ActiveProductionRunId;
 
     private async ValueTask<MaterialState> GetMaterialStateAsync(
         MaterialReference material,
@@ -715,8 +1073,8 @@ public sealed class ProductionMaterialService
                     : new MaterialState(
                         true,
                         entry.Aggregate.Location,
-                        entry.Aggregate.Disposition is ProductionUnitDisposition.InProcess
-                            or ProductionUnitDisposition.Nonconforming,
+                        entry.Aggregate.Disposition is ProductDisposition.InProcess
+                            or ProductDisposition.Nonconforming,
                         new ProductionUnitUpdate(entry.Aggregate, entry.Revision),
                         null);
             }
@@ -819,6 +1177,77 @@ public sealed class ProductionMaterialService
         var slot = await _repository.GetSlotAsync(slotAddress, cancellationToken)
             .ConfigureAwait(false);
         return slot?.Aggregate.Status == SlotOccupancyStatus.Running;
+    }
+
+    private async ValueTask<RuntimeOperationResult> RequireMaterialMovementAllowedAsync(
+        MaterialReference material,
+        CancellationToken cancellationToken,
+        bool allowActiveRunWithoutRunningOperation = true)
+    {
+        var units = material.Kind switch
+        {
+            MaterialKind.ProductionUnit =>
+                await LoadSingleUnitAsync(material.RequireProductionUnitId(), cancellationToken)
+                    .ConfigureAwait(false),
+            MaterialKind.Carrier => (await _repository.ListProductionUnitsAsync(cancellationToken)
+                    .ConfigureAwait(false))
+                .Select(static entry => entry.Aggregate)
+                .Where(unit => unit.Location is
+                {
+                    Kind: MaterialLocationKind.CarrierPosition,
+                    CarrierId: { } carrierId
+                } && carrierId == material.RequireCarrierId())
+                .ToArray(),
+            _ => throw new InvalidOperationException($"Unsupported material kind {material.Kind}.")
+        };
+
+        foreach (var unit in units)
+        {
+            if (unit.ActiveProductionRunId is not { } runId)
+            {
+                continue;
+            }
+
+            if (!allowActiveRunWithoutRunningOperation)
+            {
+                return RuntimeOperationResult.Rejected(
+                    "Runtime.ProductionMaterialRunOwnsSlotLifecycle",
+                    $"Production Run {runId} owns Slot completion for Production Unit {unit.Id}.");
+            }
+
+            var run = await _productionRuns.GetByIdAsync(runId, cancellationToken)
+                .ConfigureAwait(false);
+            if (run is null
+                || run.Run.IsTerminal
+                || run.Run.ProductionUnitId != unit.Id)
+            {
+                return RuntimeOperationResult.Rejected(
+                    "Runtime.ProductionMaterialRunEvidenceMismatch",
+                    $"Production Unit {unit.Id} active run evidence is inconsistent; recovery is required.");
+            }
+
+            if (run.Run.ControlState != ProductionRunControlState.Active
+                || run.Run.Operations.Any(operation =>
+                    operation.ExecutionStatus == ExecutionStatus.Running))
+            {
+                return RuntimeOperationResult.Rejected(
+                    "Runtime.ProductionMaterialOperationRunning",
+                    $"Production Unit {unit.Id} cannot move while Production Run {runId} is "
+                    + $"{run.Run.ControlState} or has a Running Operation.");
+            }
+        }
+
+        return RuntimeOperationResult.Accepted(
+            "Material has no Running Operation and may be handed off.");
+    }
+
+    private async ValueTask<ProductionUnit[]> LoadSingleUnitAsync(
+        ProductionUnitId productionUnitId,
+        CancellationToken cancellationToken)
+    {
+        var unit = await _repository.GetProductionUnitAsync(productionUnitId, cancellationToken)
+            .ConfigureAwait(false);
+        return unit is null ? [] : [unit.Aggregate];
     }
 
     private static bool WouldCreateGenealogyCycle(

@@ -11,9 +11,11 @@ using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Infrastructure.Persistence;
 using OpenLineOps.Devices.Infrastructure.Persistence.Ef;
 using OpenLineOps.Devices.Infrastructure.Time;
+using OpenLineOps.Devices.Api.ExternalPrograms;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -39,6 +41,7 @@ public static class DevicesModuleServiceCollectionExtensions
         var externalProgramHostOptions = LoadExternalProgramHostOptions(configuration);
         services.AddSingleton(externalProgramHostOptions);
         services.TryAddSingleton<IExternalProgramHost, ExternalProgramHost>();
+        services.TryAddSingleton<IExternalProgramTrialExecutor, ExternalProgramResourceTrialExecutor>();
 
         services.TryAddSingleton<ProjectReleaseSimulatorDeviceCommandExecutor>();
         services.TryAddSingleton<PluginDeviceCommandExecutor>();
@@ -145,22 +148,55 @@ public static class DevicesModuleServiceCollectionExtensions
                 section?["MaximumTotalArtifactBytes"],
                 512L * 1024 * 1024,
                 $"{ExternalProgramHostOptions.SectionName}:MaximumTotalArtifactBytes"),
-            ProcessMemoryLimitBytes = ReadOptionalLong(
-                section?["ProcessMemoryLimitBytes"],
+            MaximumWorkingSetBytes = ReadOptionalLong(
+                section?["MaximumWorkingSetBytes"],
                 1024L * 1024 * 1024,
-                $"{ExternalProgramHostOptions.SectionName}:ProcessMemoryLimitBytes"),
-            ActiveProcessLimit = ReadOptionalInt(
-                section?["ActiveProcessLimit"],
+                $"{ExternalProgramHostOptions.SectionName}:MaximumWorkingSetBytes"),
+            MaximumJobMemoryBytes = ReadOptionalLong(
+                section?["MaximumJobMemoryBytes"],
+                4L * 1024 * 1024 * 1024,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumJobMemoryBytes"),
+            MaximumProcessCount = ReadOptionalInt(
+                section?["MaximumProcessCount"],
                 32,
-                $"{ExternalProgramHostOptions.SectionName}:ActiveProcessLimit"),
-            CpuTimeLimitSeconds = ReadOptionalInt(
-                section?["CpuTimeLimitSeconds"],
-                3600,
-                $"{ExternalProgramHostOptions.SectionName}:CpuTimeLimitSeconds"),
-            RequireWindowsJobObject = ReadOptionalBoolean(
-                section?["RequireWindowsJobObject"],
-                defaultValue: true,
-                $"{ExternalProgramHostOptions.SectionName}:RequireWindowsJobObject")
+                $"{ExternalProgramHostOptions.SectionName}:MaximumProcessCount"),
+            MaximumCpuTimeMilliseconds = ReadOptionalLong(
+                section?["MaximumCpuTimeMilliseconds"],
+                3_600_000,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumCpuTimeMilliseconds"),
+            MaximumExecutionTimeMilliseconds = ReadOptionalLong(
+                section?["MaximumExecutionTimeMilliseconds"],
+                3_600_000,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumExecutionTimeMilliseconds"),
+            MaximumOutputDirectoryEntries = ReadOptionalInt(
+                section?["MaximumOutputDirectoryEntries"],
+                512,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumOutputDirectoryEntries"),
+            MaximumOutputDirectoryDepth = ReadOptionalInt(
+                section?["MaximumOutputDirectoryDepth"],
+                8,
+                $"{ExternalProgramHostOptions.SectionName}:MaximumOutputDirectoryDepth"),
+            OutputDirectoryScanIntervalMilliseconds = ReadOptionalInt(
+                section?["OutputDirectoryScanIntervalMilliseconds"],
+                50,
+                $"{ExternalProgramHostOptions.SectionName}:OutputDirectoryScanIntervalMilliseconds"),
+            RequireRestrictedHostIdentity = ReadOptionalBoolean(
+                section?["RequireRestrictedHostIdentity"],
+                defaultValue: false,
+                $"{ExternalProgramHostOptions.SectionName}:RequireRestrictedHostIdentity"),
+            RequireImmutableContentProtection = ReadOptionalBoolean(
+                section?["RequireImmutableContentProtection"],
+                defaultValue: false,
+                $"{ExternalProgramHostOptions.SectionName}:RequireImmutableContentProtection"),
+            RequireAppContainerIsolation = ReadOptionalBoolean(
+                section?["RequireAppContainerIsolation"],
+                defaultValue: false,
+                $"{ExternalProgramHostOptions.SectionName}:RequireAppContainerIsolation"),
+            AppContainerProfileName = section?["AppContainerProfileName"],
+            AppContainerProfileExternallyOwned = ReadOptionalBoolean(
+                section?["AppContainerProfileExternallyOwned"],
+                defaultValue: false,
+                $"{ExternalProgramHostOptions.SectionName}:AppContainerProfileExternallyOwned")
         };
         options.AllowedInheritedEnvironmentVariables.Clear();
         foreach (var variable in section?
@@ -169,6 +205,22 @@ public static class DevicesModuleServiceCollectionExtensions
                  ?? ["SystemRoot", "WINDIR"])
         {
             options.AllowedInheritedEnvironmentVariables.Add(variable);
+        }
+
+        foreach (var account in section?
+                     .GetSection("AllowedRestrictedHostAccounts")
+                     .Get<string[]>()
+                 ?? [])
+        {
+            options.AllowedRestrictedHostAccounts.Add(account);
+        }
+
+        foreach (var sid in section?
+                     .GetSection("AllowedRestrictedHostSids")
+                     .Get<string[]>()
+                 ?? [])
+        {
+            options.AllowedRestrictedHostSids.Add(sid);
         }
 
         options.Validate();
@@ -245,8 +297,8 @@ public static class DevicesModuleServiceCollectionExtensions
 
         return value switch
         {
-            "true" => true,
-            "false" => false,
+            "true" or "True" => true,
+            "false" or "False" => false,
             _ => throw new InvalidOperationException(
                 $"Configuration '{configurationPath}' must be exactly 'true' or 'false'.")
         };

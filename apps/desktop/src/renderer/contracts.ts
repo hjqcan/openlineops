@@ -469,6 +469,7 @@ export interface StationProfileResponse {
 
 export interface DeviceBindingResponse {
   deviceBindingId: string;
+  ownerSystemId: string;
   capabilityId: string;
   deviceKey: string;
 }
@@ -540,11 +541,26 @@ export interface SnapshotCapabilityBindingResponse {
   bindingId: string;
   providerKind: string;
   providerKey: string;
+  ownerSystemId: string;
+  ownerStationSystemId: string;
 }
 
 export interface ProjectTargetReferenceResponse {
   kind: string;
   targetId: string;
+}
+
+export interface ProjectReleaseProductionRunContextResponse {
+  projectId: string;
+  applicationId: string;
+  snapshotId: string;
+  topologyId: string;
+  productionLineDefinitionId: string;
+  productModelId: string;
+  productModelIdentityInputKey: string;
+  entryOperationId: string;
+  entryStationSystemId: string;
+  stationSystemIds: string[];
 }
 
 export interface PublishProjectSnapshotRequest {
@@ -558,6 +574,8 @@ export interface SnapshotCapabilityBindingRequest {
   bindingId: string;
   providerKind: string;
   providerKey: string;
+  ownerSystemId: string;
+  ownerStationSystemId: string;
 }
 
 export interface ProjectTargetReferenceRequest {
@@ -565,65 +583,49 @@ export interface ProjectTargetReferenceRequest {
   targetId: string;
 }
 
-export interface SubmitProjectSnapshotProductionRunRequest {
-  productionRunId: string;
-  productionUnitIdentityValue: string;
-  actorId: string;
-  lotId?: string | null;
-  carrierId?: string | null;
-  slotId?: string | null;
-  fixtureId?: string | null;
-  deviceId?: string | null;
-}
-
-export interface SubmittedProjectSnapshotProductionRunResponse {
-  snapshotId: string;
+export interface SubmitProductionRunRequest {
   projectId: string;
-  applicationId: string;
-  topologyId: string;
-  productionLineDefinitionId: string;
+  projectSnapshotId: string;
   productionRunId: string;
-  productModelId: string;
-  productionUnitIdentityInputKey: string;
-  productionUnitIdentityValue: string;
+  productionUnitId: string;
   actorId: string;
-  lotId: string | null;
-  carrierId: string | null;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
-  disposition: ProductionDisposition;
-  controlState: ProductionRunControlState;
-  isTerminal: boolean;
-  createdAtUtc: string;
-  lastTransitionAtUtc: string;
-  startedAtUtc: string | null;
-  completedAtUtc: string | null;
-  failureCode: string | null;
-  failureReason: string | null;
-  operations: SubmittedProductionOperationRunResponse[];
-  routeDecisions: ProductionRouteDecisionReadModel[];
 }
 
-export interface SubmittedProductionOperationRunResponse {
-  operationId: string;
-  operationRunId: string;
-  attempt: number;
+export interface RegisterProductionUnitRequest {
+  productionUnitId: string;
+  productModelId: string;
+  identityKey: string;
+  identityValue: string;
+  lotId: string | null;
+  actorId: string;
+  occurredAtUtc: string;
+}
+
+export interface MaterialArrivalRequest {
+  lineId: string;
   stationSystemId: string;
-  runtimeStationId: string;
-  processDefinitionId: string;
-  processVersionId: string;
-  configurationSnapshotId: string;
-  recipeSnapshotId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
-  runtimeSessionId: string | null;
-  startedAtUtc: string | null;
-  completedAtUtc: string | null;
-  failureCode: string | null;
-  failureReason: string | null;
-  completedStepCount: number;
-  commandCount: number;
-  incidentCount: number;
+  actorId: string;
+  occurredAtUtc: string;
+}
+
+export interface ProductionUnitResponse {
+  productionUnitId: string;
+  productModelId: string;
+  identityKey: string;
+  identityValue: string;
+  lotId: string | null;
+  registeredBy: string;
+  registeredAtUtc: string;
+  lastTransitionAtUtc: string;
+  lastLocationTransitionAtUtc: string;
+  lastDispositionTransitionAtUtc: string;
+  disposition: ProductionDisposition;
+  dispositionBeforeHold: ProductionDisposition | null;
+  activeProductionRunId: string | null;
+  lastProductionRunId: string | null;
+  lastProductionRunRevision: number;
+  dispositionReason: string | null;
+  location: MaterialLocationResponse | null;
 }
 
 export type ProductionExecutionStatus =
@@ -654,17 +656,22 @@ export type ProductionRunControlState =
   | 'Paused'
   | 'Held'
   | 'RecoveryRequired'
+  | 'StopRequested'
   | 'SafeStopped';
 
 export type OperatorProductionRunCommand =
   | 'Pause'
   | 'Continue'
   | 'Stop'
+  | 'Cancel'
   | 'Hold'
   | 'Release'
   | 'Rework'
   | 'Scrap'
-  | 'SafeStop';
+  | 'SafeStop'
+  | 'Reconcile'
+  | 'Retry'
+  | 'Abort';
 
 export interface RuntimeProductionUnitIdentityResponse {
   modelId: string;
@@ -674,6 +681,7 @@ export interface RuntimeProductionUnitIdentityResponse {
 
 export interface ProductionRunReadModel {
   productionRunId: string;
+  productionUnitId: string;
   projectId: string;
   applicationId: string;
   projectSnapshotId: string;
@@ -701,6 +709,7 @@ export interface ProductionRunReadModel {
   incidentCount: number;
   operations: ProductionOperationRunReadModel[];
   routeDecisions: ProductionRouteDecisionReadModel[];
+  recoveryDecisions: ProductionRecoveryDecisionReadModel[];
 }
 
 export interface ProductionOperationRunReadModel {
@@ -749,6 +758,19 @@ export interface ProductionRouteDecisionReadModel {
   decidedAtUtc: string;
 }
 
+export interface ProductionRecoveryDecisionReadModel {
+  decisionId: string;
+  kind: 'Reconcile' | 'Retry' | 'Abort' | 'Scrap';
+  actorId: string;
+  reason: string;
+  evidenceReference: string;
+  decidedAtUtc: string;
+  operationRunId: string | null;
+  operationId: string | null;
+  observedJudgement: ProductionResultJudgement | null;
+  observedOutputs: ProductionRunOutputReadModel[];
+}
+
 export interface ActiveProductionRunsResponse {
   runs: ProductionRunReadModel[];
 }
@@ -758,6 +780,120 @@ export interface ProductionLineRuntimeStateResponse {
   generatedAtUtc: string;
   activeRunCount: number;
   activeRuns: ProductionRunReadModel[];
+  productionUnits: ProductionLineProductionUnitStateResponse[];
+  stations: ProductionLineStationStateResponse[];
+  slots: ProductionLineSlotStateResponse[];
+  carriers: ProductionLineCarrierStateResponse[];
+}
+
+export type MaterialLocationKind = 'StationQueue' | 'Slot' | 'CarrierPosition';
+
+export interface MaterialLocationResponse {
+  kind: MaterialLocationKind;
+  lineId: string | null;
+  stationSystemId: string | null;
+  slotId: string | null;
+  carrierId: string | null;
+  carrierPositionId: string | null;
+}
+
+export interface ProductionLineProductionUnitStateResponse {
+  productionUnitId: string;
+  productModelId: string;
+  identityKey: string;
+  identityValue: string;
+  disposition: ProductionDisposition;
+  judgement: ProductionResultJudgement;
+  productionRunId: string | null;
+  location: MaterialLocationResponse | null;
+  lastTransitionAtUtc: string;
+  activeOperationRunIds: string[];
+}
+
+export type ProductionLineStationRuntimeStatus =
+  | 'Idle'
+  | 'Queued'
+  | 'WaitingForResources'
+  | 'Running'
+  | 'Blocked'
+  | 'Offline';
+
+export type ProductionMaterialKind = 'ProductionUnit' | 'Carrier';
+
+export interface ProductionLineStationStateResponse {
+  stationSystemId: string;
+  status: ProductionLineStationRuntimeStatus;
+  queue: ProductionLineQueuedMaterialResponse[];
+  activeOperations: ProductionLineStationOperationStateResponse[];
+}
+
+export interface ProductionLineQueuedMaterialResponse {
+  materialKind: ProductionMaterialKind;
+  materialId: string;
+  queuedAtUtc: string;
+}
+
+export interface ProductionLineStationOperationStateResponse {
+  productionRunId: string;
+  productionUnitId: string | null;
+  productionUnitIdentity: RuntimeProductionUnitIdentityResponse;
+  operationRunId: string;
+  operationId: string;
+  executionStatus: ProductionExecutionStatus;
+  judgement: ProductionResultJudgement;
+  startedAtUtc: string | null;
+  resources: ProductionLineResourceStateResponse[];
+}
+
+export type ProductionResourceKind = 'Station' | 'Slot' | 'Fixture' | 'Device' | 'SlotGroup';
+
+export type ProductionLineResourceRuntimeStatus =
+  | 'Waiting'
+  | 'Leased'
+  | 'RecoveryHeld'
+  | 'Expired'
+  | 'Missing';
+
+export interface ProductionLineResourceStateResponse {
+  kind: ProductionResourceKind;
+  resourceId: string;
+  status: ProductionLineResourceRuntimeStatus;
+  fencingToken: number | null;
+  acquiredAtUtc: string | null;
+  expiresAtUtc: string | null;
+}
+
+export type ProductionSlotOccupancyStatus =
+  | 'Available'
+  | 'Reserved'
+  | 'Occupied'
+  | 'Running'
+  | 'Blocked'
+  | 'Offline';
+
+export interface ProductionLineSlotStateResponse {
+  stationSystemId: string;
+  slotId: string;
+  status: ProductionSlotOccupancyStatus;
+  materialKind: ProductionMaterialKind | null;
+  materialId: string | null;
+  lastTransitionAtUtc: string;
+}
+
+export interface ProductionLineCarrierStateResponse {
+  carrierId: string;
+  carrierTypeId: string;
+  capacity: number;
+  location: MaterialLocationResponse | null;
+  lastTransitionAtUtc: string;
+  productionUnits: ProductionLineCarrierPositionStateResponse[];
+}
+
+export interface ProductionLineCarrierPositionStateResponse {
+  carrierPositionId: string;
+  productionUnitId: string;
+  disposition: ProductionDisposition;
+  judgement: ProductionResultJudgement;
 }
 
 export interface ProductionOperationsFilters {
@@ -770,6 +906,80 @@ export interface ProductionRunCommandRequest {
   actorId: string;
   reason: string | null;
   operationId: string | null;
+  recoveryDecision: ProductionRecoveryDecisionRequest | null;
+}
+
+export interface ProductionContextValueRequest {
+  kind: 'Text' | 'Boolean' | 'WholeNumber' | 'FixedPoint' | 'DateTimeUtc';
+  canonicalValue: string;
+}
+
+export interface ProductionRecoveryDecisionRequest {
+  decisionId: string;
+  evidenceReference: string;
+  decidedAtUtc: string;
+  operationRunId: string | null;
+  operationId: string | null;
+  observedJudgement: 'Passed' | 'Failed' | 'NotApplicable' | null;
+  observedOutputs: Record<string, ProductionContextValueRequest>;
+}
+
+export type StationEmergencyStopStatus = 'Pending' | 'Acknowledged' | 'Rejected';
+
+export interface RequestStationEmergencyStopRequest {
+  messageId: string;
+  idempotencyKey: string;
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId: string;
+  actorId: string;
+  reason: string;
+  requestedAtUtc: string;
+}
+
+export interface StationSafetyEvidenceResponse {
+  sequence: number;
+  kind: 'EmergencyStopRequested'
+    | 'EmergencyStopDispatchFailed'
+    | 'EmergencyStopAcknowledged'
+    | 'EmergencyStopRejected';
+  messageId: string;
+  occurredAtUtc: string;
+  failureCode: string | null;
+  failureReason: string | null;
+}
+
+export interface StationEmergencyStopResponse {
+  messageId: string;
+  idempotencyKey: string;
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId: string;
+  stationSystemId: string;
+  agentId: string;
+  stationId: string;
+  relatedProductionRunIds: string[];
+  actorId: string;
+  reason: string;
+  requestedAtUtc: string;
+  status: StationEmergencyStopStatus;
+  acknowledgementMessageId: string | null;
+  acknowledgedAtUtc: string | null;
+  failureCode: string | null;
+  failureReason: string | null;
+  dispatchAttemptCount: number;
+  lastDispatchFailure: string | null;
+  lastUpdatedAtUtc: string;
+  replayed: boolean;
+  evidence: StationSafetyEvidenceResponse[];
+}
+
+export interface StationSafetyEventsResponse {
+  events: StationEmergencyStopResponse[];
+}
+
+export interface StationSafetyTraceSearchResponse {
+  items: StationEmergencyStopResponse[];
 }
 
 export interface AutomationProjectWorkspaceResponse {
@@ -860,6 +1070,14 @@ export interface AddCapabilityContractRequest {
 
 export interface AddDriverBindingRequest {
   bindingId: string;
+  ownerSystemId: string;
+  capabilityId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
+export interface UpdateDriverBindingRequest {
+  ownerSystemId: string;
   capabilityId: string;
   providerKind: string;
   providerKey: string;
@@ -948,6 +1166,7 @@ export interface AutomationTopologyResponse {
   driverBindings: DriverBindingRouteResponse[];
   slotGroups: SlotGroupResponse[];
   slots: SlotDefinitionResponse[];
+  revision: string;
 }
 
 export interface TopologyTargetDeletionResponse {
@@ -980,6 +1199,7 @@ export interface CapabilityContractResponse {
 
 export interface DriverBindingRouteResponse {
   bindingId: string;
+  ownerSystemId: string;
   capabilityId: string;
   providerKind: string;
   providerKey: string;
@@ -1012,6 +1232,7 @@ export interface SiteLayoutResponse {
   canvasHeight: number;
   units: string;
   elements: SiteLayoutElementResponse[];
+  revision: string;
 }
 
 export interface SiteLayoutElementResponse {
@@ -1050,9 +1271,10 @@ export interface ProductionLineResponse {
   entryOperationId: string;
   operations: ProductionOperationResponse[];
   transitions: RouteTransitionResponse[];
-  externalTestProgramAdapters: ExternalTestProgramAdapterResponse[];
+  lineControllerAuthorizations: LineControllerAuthorization[];
   createdAtUtc: string;
   updatedAtUtc: string;
+  revision: string;
 }
 
 export interface ProductModelResponse {
@@ -1067,6 +1289,33 @@ export interface ProductionOperationResponse {
   stationSystemId: string;
   flowDefinitionId: string;
   configurationSnapshotId: string;
+  resources: OperationResourceBinding[];
+}
+
+export type OperationResourceKind = 'Station' | 'Fixture' | 'Device' | 'SlotGroup' | 'Slot';
+
+export type OperationResourceResolution = 'Fixed' | 'CurrentMaterialSlot' | 'AvailableSlotInGroup';
+
+export interface OperationResourceBinding {
+  bindingId: string;
+  kind: OperationResourceKind;
+  topologyTargetId: string;
+  resolution: OperationResourceResolution;
+}
+
+export interface LineControllerAuthorization {
+  authorizationId: string;
+  operationId: string;
+  actionId: string;
+  controllerSystemId: string;
+  controllerBindingId: string;
+  controllerCapabilityId: string;
+  controllerAction: string;
+  targetStationSystemId: string;
+  targetSystemId: string;
+  targetBindingId: string;
+  targetCapabilityId: string;
+  targetAction: string;
 }
 
 export type RouteTransitionKind =
@@ -1104,38 +1353,6 @@ export interface RouteTransitionResponse {
   expectedOutputValue: string | null;
 }
 
-export interface ExternalTestProgramAdapterResponse {
-  adapterId: string;
-  displayName: string;
-  capabilityId: string;
-  commandName: string;
-  launchKind: string;
-  executable: string | null;
-  providerKey: string | null;
-  argumentTemplates: string[];
-  inputMappings: ExternalTestProgramInputMappingResponse[];
-  resultMappings: ExternalTestProgramResultMappingResponse[];
-  outcomeMapping: ExternalTestProgramOutcomeMappingResponse;
-  timeoutMilliseconds: number;
-}
-
-export interface ExternalTestProgramInputMappingResponse {
-  source: string;
-  target: string;
-}
-
-export interface ExternalTestProgramResultMappingResponse {
-  sourcePath: string;
-  targetKey: string;
-}
-
-export interface ExternalTestProgramOutcomeMappingResponse {
-  sourcePath: string;
-  passedToken: string;
-  failedToken: string;
-  abortedToken: string;
-}
-
 export interface SaveProductionLineRequest {
   lineDefinitionId: string;
   displayName: string;
@@ -1144,7 +1361,7 @@ export interface SaveProductionLineRequest {
   entryOperationId: string;
   operations: ProductionOperationRequest[];
   transitions: RouteTransitionRequest[];
-  externalTestProgramAdapters: ExternalTestProgramAdapterRequest[];
+  lineControllerAuthorizations: LineControllerAuthorization[];
 }
 
 export interface ProductModelRequest {
@@ -1159,6 +1376,7 @@ export interface ProductionOperationRequest {
   stationSystemId: string;
   flowDefinitionId: string;
   configurationSnapshotId: string;
+  resources: OperationResourceBinding[];
 }
 
 export interface RouteTransitionRequest {
@@ -1174,35 +1392,120 @@ export interface RouteTransitionRequest {
   expectedOutputValue: string | null;
 }
 
-export interface ExternalTestProgramAdapterRequest {
-  adapterId: string;
+export type ExternalProgramLaunchKind = 'ApplicationExecutable' | 'Provider';
+
+export interface ExternalProgramResourceResponse {
+  resourceId: string;
   displayName: string;
   capabilityId: string;
   commandName: string;
-  executable: string | null;
+  launchKind: ExternalProgramLaunchKind;
+  entryPoint: string | null;
+  providerKind: string | null;
   providerKey: string | null;
   argumentTemplates: string[];
-  inputMappings: ExternalTestProgramInputMappingRequest[];
-  resultMappings: ExternalTestProgramResultMappingRequest[];
-  outcomeMapping: ExternalTestProgramOutcomeMappingRequest;
-  timeoutMilliseconds: number;
+  inputMappings: ExternalProgramInputMapping[];
+  resultMappings: ExternalProgramResultMapping[];
+  outcomeMapping: ExternalProgramOutcomeMapping;
+  permissionProfile: ExternalProgramPermissionProfile;
+  executionLimits: ExternalProgramExecutionLimits;
+  files: ExternalProgramFileResponse[];
+  contentSha256: string;
+  updatedAtUtc: string;
+  revision: string;
 }
 
-export interface ExternalTestProgramInputMappingRequest {
+export interface SaveExternalProgramResourceRequest {
+  resourceId: string;
+  displayName: string;
+  capabilityId: string;
+  commandName: string;
+  launchKind: ExternalProgramLaunchKind;
+  entryPoint: string | null;
+  providerKind: string | null;
+  providerKey: string | null;
+  argumentTemplates: string[];
+  inputMappings: ExternalProgramInputMapping[];
+  resultMappings: ExternalProgramResultMapping[];
+  outcomeMapping: ExternalProgramOutcomeMapping;
+  permissionProfile: ExternalProgramPermissionProfile;
+  executionLimits: ExternalProgramExecutionLimits;
+}
+
+export interface ExternalProgramInputMapping {
   source: string;
   target: string;
 }
 
-export interface ExternalTestProgramResultMappingRequest {
+export interface ExternalProgramResultMapping {
   sourcePath: string;
   targetKey: string;
+  valueKind: ProductionContextValueKind;
 }
 
-export interface ExternalTestProgramOutcomeMappingRequest {
+export interface ExternalProgramOutcomeMapping {
   sourcePath: string;
   passedToken: string;
   failedToken: string;
   abortedToken: string;
+}
+
+export interface ExternalProgramPermissionProfile {
+  profileName: 'Restricted';
+  networkAccessAllowed: boolean;
+  allowedEnvironmentVariables: string[];
+}
+
+export interface ExternalProgramExecutionLimits {
+  timeoutMilliseconds: number;
+  maximumProcessCount: number;
+  maximumWorkingSetBytes: number;
+  maximumCpuTimeMilliseconds: number;
+  maximumStandardOutputBytes: number;
+  maximumStandardErrorBytes: number;
+  maximumArtifactCount: number;
+  maximumArtifactBytes: number;
+  maximumTotalArtifactBytes: number;
+}
+
+export interface ExternalProgramFileResponse {
+  relativePath: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export type ExternalProgramTrialInputKind =
+  | 'Text'
+  | 'IntegralNumber'
+  | 'FractionalNumber'
+  | 'Logical';
+
+export interface ExternalProgramTrialInput {
+  kind: ExternalProgramTrialInputKind;
+  canonicalValue: string;
+}
+
+export interface ExternalProgramTrialRequest {
+  inputs: Record<string, ExternalProgramTrialInput>;
+}
+
+export interface ExternalProgramTrialResponse {
+  resourceId: string;
+  launchKind: ExternalProgramLaunchKind;
+  contentSha256: string;
+  executionStatus: string;
+  judgement: string;
+  resultPayload: string | null;
+  failureReason: string | null;
+  artifacts: ExternalProgramTrialArtifactResponse[];
+}
+
+export interface ExternalProgramTrialArtifactResponse {
+  name: string;
+  kind: string;
+  mediaType: string | null;
+  sizeBytes: number;
+  sha256: string;
 }
 
 export interface CreateWorkspaceRequest {
@@ -1237,6 +1540,7 @@ export interface CreateStationProfileRequest {
 
 export interface CreateDeviceBindingRequest {
   deviceBindingId: string;
+  ownerSystemId: string;
   capabilityId: string;
   deviceKey: string;
 }
@@ -1335,6 +1639,7 @@ export interface ProcessDefinitionSummary {
 export interface ProcessDefinitionResponse extends ProcessDefinitionSummary {
   nodes: ProcessNodeResponse[];
   transitions: ProcessTransitionResponse[];
+  revision: string;
 }
 
 export interface ProcessNodeResponse {

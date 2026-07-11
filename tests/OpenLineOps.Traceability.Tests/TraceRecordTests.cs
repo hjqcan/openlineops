@@ -77,6 +77,7 @@ public sealed class TraceRecordTests
         var exception = Assert.Throws<ArgumentException>(() => TraceRecord.Create(
             TraceRecordId.New(),
             runId,
+            new ProductionUnitId(Guid.NewGuid()),
             "project-a",
             "application-a",
             "snapshot-a",
@@ -96,6 +97,10 @@ public sealed class TraceRecordTests
             TraceTestData.BaseTimeUtc.AddMinutes(1),
             null,
             null,
+            [],
+            [],
+            [],
+            [],
             [],
             [],
             []));

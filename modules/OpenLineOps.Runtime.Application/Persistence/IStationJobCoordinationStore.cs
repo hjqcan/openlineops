@@ -6,6 +6,7 @@ public interface IStationJobCoordinationStore
 {
     ValueTask<bool> TryEnqueueAsync(
         StationJobRequested request,
+        IReadOnlyCollection<ResourceLeaseChanged> resourceLeaseChanges,
         CancellationToken cancellationToken = default);
 
     ValueTask<StationJobCompleted?> GetCompletionAsync(
@@ -45,6 +46,8 @@ public interface IStationJobCoordinationStore
 public sealed record StationJobOutboxItem(
     Guid MessageId,
     string IdempotencyKey,
+    string Kind,
+    int Sequence,
     string PayloadJson,
     int AttemptCount,
     DateTimeOffset CreatedAtUtc);

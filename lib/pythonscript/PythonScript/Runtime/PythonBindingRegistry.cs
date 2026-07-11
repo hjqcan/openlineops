@@ -174,10 +174,7 @@ namespace PythonScript.Runtime
 
         public void RehydrateBindings(PyModule scope)
         {
-            if (scope == null)
-            {
-                throw new ArgumentNullException(nameof(scope));
-            }
+            ArgumentNullException.ThrowIfNull(scope);
 
             lock (resetLock)
             {
@@ -215,10 +212,7 @@ namespace PythonScript.Runtime
 
         private void ImportClassInternal(Type type, string alias, bool record, PyModule? scope)
         {
-            if (type == null)
-            {
-                throw new ArgumentNullException(nameof(type));
-            }
+            ArgumentNullException.ThrowIfNull(type);
 
             TypeRegistry.RegisterType(type);
             ImportAssembly(type.Assembly);
@@ -275,10 +269,7 @@ namespace PythonScript.Runtime
 
         private void ImportStaticMethodInternal(Type type, string methodName, Type[]? parameterTypes, string alias, bool record, PyModule? scope)
         {
-            if (type == null)
-            {
-                throw new ArgumentNullException(nameof(type));
-            }
+            ArgumentNullException.ThrowIfNull(type);
 
             if (string.IsNullOrWhiteSpace(methodName))
             {
@@ -387,7 +378,7 @@ namespace PythonScript.Runtime
                     
                     // 生成 Python 包装函数
                     var code = new StringBuilder();
-                    code.Append("def ").Append(pythonName).Append("(");
+                    code.Append("def ").Append(pythonName).Append('(');
                     for (int i = 0; i < paramCount; i++)
                     {
                         if (i > 0) code.Append(", ");

@@ -11,12 +11,8 @@ public sealed record RunnerRunOptions(
     string ProjectTarget,
     string Snapshot,
     Guid ProductionRunId,
+    Guid ProductionUnitId,
     string ProductionUnitIdentityValue,
-    string? LotId,
-    string? CarrierId,
-    string? SlotId,
-    string? FixtureId,
-    string? DeviceId,
     string ActorId);
 
 public sealed record RunnerParseResult(
@@ -30,12 +26,8 @@ public static class RunnerCommandLineParser
         [
             "snapshot",
             "run-id",
-            "production-unit",
-            "lot",
-            "carrier",
-            "slot",
-            "fixture",
-            "device",
+            "production-unit-id",
+            "identity",
             "actor"
         ],
         StringComparer.Ordinal);
@@ -146,10 +138,19 @@ public static class RunnerCommandLineParser
             return Error("A project directory or .oloproj path is required.");
         }
 
-        var productionUnitIdentityValue = GetOption(optionValues, "production-unit");
+        var productionUnitIdentityValue = GetOption(optionValues, "identity");
         if (productionUnitIdentityValue is null)
         {
-            return Error("Option '--production-unit' is required.");
+            return Error("Option '--identity' is required.");
+        }
+
+        if (!Guid.TryParseExact(
+                GetOption(optionValues, "production-unit-id"),
+                "D",
+                out var productionUnitId)
+            || productionUnitId == Guid.Empty)
+        {
+            return Error("Option '--production-unit-id' must be a non-empty GUID in D format.");
         }
 
         var actorId = GetOption(optionValues, "actor");
@@ -173,12 +174,8 @@ public static class RunnerCommandLineParser
                 projectTarget,
                 GetOption(optionValues, "snapshot") ?? "active",
                 productionRunId,
+                productionUnitId,
                 productionUnitIdentityValue,
-                GetOption(optionValues, "lot"),
-                GetOption(optionValues, "carrier"),
-                GetOption(optionValues, "slot"),
-                GetOption(optionValues, "fixture"),
-                GetOption(optionValues, "device"),
                 actorId),
             ErrorMessage: null);
     }

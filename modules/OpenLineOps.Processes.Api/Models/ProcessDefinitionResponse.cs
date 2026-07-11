@@ -8,4 +8,5 @@ public sealed record ProcessDefinitionResponse(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? PublishedAtUtc,
     IReadOnlyCollection<ProcessNodeResponse> Nodes,
-    IReadOnlyCollection<ProcessTransitionResponse> Transitions);
+    IReadOnlyCollection<ProcessTransitionResponse> Transitions,
+    string Revision);

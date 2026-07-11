@@ -187,6 +187,47 @@ public sealed class InMemoryStationJobStore : IStationJobStore
         }
     }
 
+    public ValueTask<IReadOnlyCollection<StationJobOutboxMessage>> ListPendingArtifactCleanupAsync(
+        int maximumCount,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var result = _outbox.Values
+                .Where(message => message.AcknowledgedAtUtc is not null
+                    && string.Equals(
+                        message.Kind,
+                        StationAgentMessageKinds.JobCompletionPendingArtifactTransfer,
+                        StringComparison.Ordinal))
+                .OrderBy(message => message.AcknowledgedAtUtc)
+                .ThenBy(message => message.MessageId)
+                .Take(maximumCount)
+                .ToArray();
+            return ValueTask.FromResult<IReadOnlyCollection<StationJobOutboxMessage>>(result);
+        }
+    }
+
+    public ValueTask DeleteAcknowledgedOutboxAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_outbox.TryGetValue(messageId, out var message)
+                || message.AcknowledgedAtUtc is null)
+            {
+                throw new InvalidOperationException(
+                    $"Acknowledged Station job outbox message {messageId:D} does not exist.");
+            }
+
+            _outbox.Remove(messageId);
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private static StationJobPersistenceEntry ToEntry(StoredJob stored) => new(
         StationJob.Restore(stored.Snapshot).ToSnapshot(),
         stored.Revision);

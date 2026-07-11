@@ -49,6 +49,12 @@ public sealed class StationAgentWorker(
             new EventId(1006, nameof(LogSafeStop)),
             "Safe stop request {RequestId} completed. Accepted={Accepted}, FailureCode={FailureCode}.");
 
+    private static readonly Action<ILogger, Guid, Guid, bool, string?, Exception?> LogJobCancel =
+        LoggerMessage.Define<Guid, Guid, bool, string?>(
+            LogLevel.Warning,
+            new EventId(1007, nameof(LogJobCancel)),
+            "Station job cancellation request {RequestId} for job {JobId} completed. Accepted={Accepted}, FailureCode={FailureCode}.");
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var recovered = await coordinator.RecoverAsync(stoppingToken).ConfigureAwait(false);
@@ -74,6 +80,7 @@ public sealed class StationAgentWorker(
                 await safetyReceiver.RunAsync(
                         HandleEmergencyStopAsync,
                         HandleSafeStopAsync,
+                        HandleJobCancelAsync,
                         stoppingToken)
                     .ConfigureAwait(false);
                 retryDelay = TimeSpan.FromMilliseconds(250);
@@ -116,6 +123,22 @@ public sealed class StationAgentWorker(
             LogSafeStop(
                 logger,
                 request.MessageId,
+                result.Accepted,
+                result.FailureCode,
+                null);
+            return result;
+        }
+
+        async ValueTask<StationJobCancelExecutionResult> HandleJobCancelAsync(
+            StationJobCancelRequested request,
+            CancellationToken cancellationToken)
+        {
+            var result = await coordinator.CancelAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            LogJobCancel(
+                logger,
+                request.MessageId,
+                request.JobId,
                 result.Accepted,
                 result.FailureCode,
                 null);

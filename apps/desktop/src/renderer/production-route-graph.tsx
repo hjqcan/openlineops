@@ -219,6 +219,15 @@ const OperationNode = memo(function OperationNode({
         invalid ? 'invalid' : ''
       ].filter(Boolean).join(' ')}
       style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
       onPointerDown={event => {
         event.stopPropagation();
         onSelect();

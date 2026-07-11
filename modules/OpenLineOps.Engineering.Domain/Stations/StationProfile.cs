@@ -51,11 +51,16 @@ public sealed class StationProfile : Entity<StationProfileId>
                 $"Device binding {binding.Id} already exists.");
         }
 
-        if (_deviceBindings.Any(candidate => candidate.CapabilityId == binding.CapabilityId))
+        if (_deviceBindings.Any(candidate =>
+                string.Equals(
+                    candidate.OwnerSystemId,
+                    binding.OwnerSystemId,
+                    StringComparison.Ordinal)
+                && candidate.CapabilityId == binding.CapabilityId))
         {
             return EngineeringOperationResult.Rejected(
                 "Engineering.CapabilityAlreadyBound",
-                $"Capability {binding.CapabilityId} is already bound in station profile {Id}.");
+                $"Capability {binding.CapabilityId} is already bound for System {binding.OwnerSystemId} in station profile {Id}.");
         }
 
         _deviceBindings.Add(binding);

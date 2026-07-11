@@ -95,6 +95,14 @@ programs. The Agent accepts exactly one strict manifest shape, verifies the
 trusted signature and every file hash, rejects unlisted content and unsafe
 paths, and installs into a read-only content-addressed cache.
 
+The release adapter publishes one Station-bound package per Station and a
+strict deployment catalog. Physical routing is configured once by
+Project/Application/Station; Snapshot identity remains dynamic catalog data.
+Package signatures use only RSA-PSS-SHA256 with RSA keys of at least 3072 bits.
+Production signing keys are externally provisioned and must remain outside all
+Project and package-content roots. Packaged local Studio provisions its own
+user-data signing identity explicitly; this is not a Production fallback.
+
 The IDE and public API expose only the current formal contract. API Explorer
 groups and Flow IR names use stable capability names without implementation
 generation suffixes. Old DUT, Workstation, Stage, synchronous line execution,

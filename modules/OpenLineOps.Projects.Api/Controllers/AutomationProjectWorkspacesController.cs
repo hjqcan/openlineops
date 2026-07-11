@@ -228,7 +228,9 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             binding.CapabilityId,
             binding.BindingId,
             binding.ProviderKind,
-            binding.ProviderKey);
+            binding.ProviderKey,
+            binding.OwnerSystemId,
+            binding.OwnerStationSystemId);
     }
 
     private static SnapshotCapabilityBindingResponse ToResponse(SnapshotCapabilityBindingManifest binding)
@@ -237,7 +239,9 @@ public sealed class AutomationProjectWorkspacesController : ControllerBase
             binding.CapabilityId,
             binding.BindingId,
             binding.ProviderKind,
-            binding.ProviderKey);
+            binding.ProviderKey,
+            binding.OwnerSystemId,
+            binding.OwnerStationSystemId);
     }
 
     private static ProjectTargetReferenceResponse ToResponse(ProjectTargetReferenceDetails target)

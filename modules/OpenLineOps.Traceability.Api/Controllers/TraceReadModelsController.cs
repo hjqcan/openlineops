@@ -149,7 +149,11 @@ public sealed class TraceReadModelsController : ControllerBase
             trace.MeasurementCount,
             trace.FailedMeasurementCount,
             trace.ArtifactCount,
-            trace.IncidentCount);
+            trace.IncidentCount,
+            trace.GenealogyCount,
+            trace.MaterialLocationTransitionCount,
+            trace.SlotOccupancyTransitionCount,
+            trace.DispositionTransitionCount);
 
     private static EngineeringTraceSearchResponse ToResponse(EngineeringTraceSearchReadModel search) =>
         new(
@@ -191,7 +195,11 @@ public sealed class TraceReadModelsController : ControllerBase
             row.FailedMeasurementCount,
             row.ArtifactCount,
             row.IncidentCount,
-            row.RouteDecisionCount);
+            row.RouteDecisionCount,
+            row.GenealogyCount,
+            row.MaterialLocationTransitionCount,
+            row.SlotOccupancyTransitionCount,
+            row.DispositionTransitionCount);
 
     private static EngineeringTraceSearchFacetsResponse ToResponse(
         EngineeringTraceSearchFacetsReadModel facets) =>

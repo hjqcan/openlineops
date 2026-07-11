@@ -50,6 +50,7 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
         }
 
         var response = ProcessDefinitionApiContractMapper.ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/processes/{Uri.EscapeDataString(response.ProcessDefinitionId)}",
             response);
@@ -67,6 +68,21 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
         CreateApiDefinitionRequest request,
         CancellationToken cancellationToken)
     {
+        var documentKey = $"process:{projectId}:{applicationId}:{processDefinitionId}";
+        await using var lease = await EditorDocumentConcurrency
+            .AcquireAsync(documentKey, cancellationToken)
+            .ConfigureAwait(false);
+        var precondition = await RequireCurrentRevisionAsync(
+                projectId,
+                applicationId,
+                processDefinitionId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (precondition is not null)
+        {
+            return precondition;
+        }
+
         var validationErrors = ProcessDefinitionApiContractMapper.Validate(request);
         if (validationErrors.Count > 0)
         {
@@ -82,9 +98,14 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var response = ProcessDefinitionApiContractMapper.ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
+        return Ok(response);
     }
 
     [HttpGet]
@@ -119,9 +140,14 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
             .GetByIdAsync(projectId, applicationId, processDefinitionId, cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var response = ProcessDefinitionApiContractMapper.ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
+        return Ok(response);
     }
 
     [HttpGet("{processDefinitionId}/validation")]
@@ -152,13 +178,57 @@ public sealed class ProjectApplicationProcessDefinitionsController : ControllerB
         string processDefinitionId,
         CancellationToken cancellationToken)
     {
+        var documentKey = $"process:{projectId}:{applicationId}:{processDefinitionId}";
+        await using var lease = await EditorDocumentConcurrency
+            .AcquireAsync(documentKey, cancellationToken)
+            .ConfigureAwait(false);
+        var precondition = await RequireCurrentRevisionAsync(
+                projectId,
+                applicationId,
+                processDefinitionId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (precondition is not null)
+        {
+            return precondition;
+        }
+
         var result = await _definitionService
             .PublishAsync(projectId, applicationId, processDefinitionId, cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ProcessDefinitionApiContractMapper.ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var response = ProcessDefinitionApiContractMapper.ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
+        return Ok(response);
+    }
+
+    private async Task<ObjectResult?> RequireCurrentRevisionAsync(
+        string projectId,
+        string applicationId,
+        string processDefinitionId,
+        CancellationToken cancellationToken)
+    {
+        var current = await _definitionService
+            .GetByIdAsync(projectId, applicationId, processDefinitionId, cancellationToken)
+            .ConfigureAwait(false);
+        if (current.IsFailure)
+        {
+            return ToProblem(current.Error);
+        }
+
+        var currentResponse = ProcessDefinitionApiContractMapper.ToResponse(current.Value);
+        var precondition = EditorDocumentConcurrency.Evaluate(
+            Request.Headers[EditorDocumentConcurrency.IfMatchHeaderName].ToString(),
+            Request.Headers[EditorDocumentConcurrency.ConflictResolutionHeaderName].ToString(),
+            currentResponse.Revision);
+        return precondition == EditorDocumentPrecondition.Satisfied
+            ? null
+            : this.EditorDocumentPreconditionProblem(precondition, currentResponse.Revision);
     }
 
     private ObjectResult ToProblem(ApplicationError error)

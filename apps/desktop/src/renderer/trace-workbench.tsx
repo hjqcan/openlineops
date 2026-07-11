@@ -11,6 +11,7 @@ import {
   ListFilter,
   RefreshCw,
   Search,
+  ShieldAlert,
   XCircle
 } from 'lucide-react';
 import type {
@@ -19,9 +20,15 @@ import type {
   TraceFacetCountResponse,
   TraceOperationExecutionResponse,
   TraceRecordExportPackageResponse,
-  TraceRecordResponse
+  TraceRecordResponse,
+  StationEmergencyStopResponse
 } from './contracts';
-import { exportTraceRecord, getTraceRecord, searchEngineeringTrace } from './api';
+import {
+  exportTraceRecord,
+  getTraceRecord,
+  searchEngineeringTrace,
+  searchStationSafetyTrace
+} from './api';
 
 interface TraceWorkbenchProps {
   isBackendHealthy: boolean;
@@ -73,6 +80,7 @@ export function TraceWorkbench({
   const [selectedTraceId, setSelectedTraceId] = useState('');
   const [details, setDetails] = useState<TraceRecordResponse | null>(null);
   const [exportPackage, setExportPackage] = useState<TraceRecordExportPackageResponse | null>(null);
+  const [safetyEvidence, setSafetyEvidence] = useState<StationEmergencyStopResponse[]>([]);
   const [busy, setBusy] = useState(false);
   const selectedRow = useMemo(
     () => searchResult.results.items.find(row => row.traceRecordId === selectedTraceId) ?? null,
@@ -83,6 +91,7 @@ export function TraceWorkbench({
     setSelectedTraceId('');
     setDetails(null);
     setExportPackage(null);
+    setSafetyEvidence([]);
   }, [applicationId, projectId]);
 
   const runSearch = useCallback(async () => {
@@ -91,7 +100,7 @@ export function TraceWorkbench({
     }
     setBusy(true);
     try {
-      const result = await searchEngineeringTrace({
+      const [result, safetyResult] = await Promise.all([searchEngineeringTrace({
         productionUnitIdentityValue: filters.productionUnitIdentityValue,
         lotId: filters.lotId,
         carrierId: filters.carrierId,
@@ -107,9 +116,17 @@ export function TraceWorkbench({
         productionLineDefinitionId: filters.productionLineDefinitionId,
         pageNumber: 1,
         pageSize: 25
-      });
+      }), filters.projectId && filters.applicationId
+        ? searchStationSafetyTrace({
+            projectId: filters.projectId,
+            applicationId: filters.applicationId,
+            projectSnapshotId: filters.projectSnapshotId || undefined,
+            stationSystemId: filters.stationSystemId || undefined
+          })
+        : Promise.resolve(null)]);
       const next = result ?? emptySearch;
       setSearchResult(next);
+      setSafetyEvidence(safetyResult?.items ?? []);
       setExportPackage(null);
       setSelectedTraceId(current => next.results.items.some(row => row.traceRecordId === current)
         ? current
@@ -190,6 +207,27 @@ export function TraceWorkbench({
             <FacetGroup title="Device" facets={searchResult.facets.devices} />
             <FacetGroup title="Process Version" facets={searchResult.facets.processVersions} />
             <FacetGroup title="Project Snapshot" facets={searchResult.facets.projectSnapshots} />
+          </div>
+        </details>
+        <details className="trace-safety-evidence" open data-testid="trace-station-safety-evidence">
+          <summary>
+            <div><ShieldAlert size={15} /><strong>Station safety evidence</strong></div>
+            <span>{safetyEvidence.length} events</span>
+          </summary>
+          <div>
+            {safetyEvidence.map(event => (
+              <article key={event.idempotencyKey} className={`status-${event.status.toLowerCase()}`}>
+                <span><strong>{event.status}</strong><small>{event.stationSystemId} · {formatDateTime(event.requestedAtUtc)}</small></span>
+                <p>{event.reason}</p>
+                <small>{event.actorId} · {event.evidence.length} evidence records · {event.dispatchAttemptCount} dispatch attempts</small>
+                {event.relatedProductionRunIds.map(runId => (
+                  <button type="button" key={runId} onClick={() => setSelectedTraceId(runId)}>
+                    Open related run {runId}
+                  </button>
+                ))}
+              </article>
+            ))}
+            {safetyEvidence.length === 0 ? <p>No Station Emergency Stop evidence matches this Trace scope.</p> : null}
           </div>
         </details>
       </div>

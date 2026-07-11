@@ -7,7 +7,7 @@ namespace PythonScript.Analysis.Visitors
 {
     internal sealed class PythonExpressionVisitor
     {
-        private static readonly IReadOnlyDictionary<string, Type> BuiltinTypes = new Dictionary<string, Type>(StringComparer.Ordinal)
+        private static readonly Dictionary<string, Type> BuiltinTypes = new(StringComparer.Ordinal)
         {
             { "True", typeof(bool) },
             { "False", typeof(bool) },
@@ -72,7 +72,7 @@ namespace PythonScript.Analysis.Visitors
             };
         }
 
-        private Type? ResolveConstant(PyObject node)
+        private static Type? ResolveConstant(PyObject node)
         {
             using PyObject valueObj = node.GetAttr("value");
             if (valueObj == null || valueObj.IsNone())
@@ -259,7 +259,7 @@ namespace PythonScript.Analysis.Visitors
             return ResolveNode(value);
         }
 
-        private Type? ResolveMemberType(Type targetType, string memberName, bool isStatic)
+        private static Type? ResolveMemberType(Type targetType, string memberName, bool isStatic)
         {
             BindingFlags flags = BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
 
@@ -284,7 +284,7 @@ namespace PythonScript.Analysis.Visitors
             return null;
         }
 
-        private MethodInfo? ResolveMethod(Type targetType, string methodName, int argCount, bool isStatic)
+        private static MethodInfo? ResolveMethod(Type targetType, string methodName, int argCount, bool isStatic)
         {
             BindingFlags flags = BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
             var methods = targetType.GetMethods(flags)

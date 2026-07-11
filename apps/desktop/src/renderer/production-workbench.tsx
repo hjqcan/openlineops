@@ -1,13 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowRight,
-  Boxes,
   CheckCircle2,
   CircleDot,
   Cpu,
   Factory,
-  FileCode2,
   GitBranch,
   Link2,
   Plus,
@@ -21,9 +18,10 @@ import type {
   AutomationProjectWorkspaceResponse,
   AutomationTopologyResponse,
   ConfigurationSnapshotResponse,
-  ExternalTestProgramAdapterRequest,
-  ExternalTestProgramInputMappingRequest,
-  ExternalTestProgramResultMappingRequest,
+  LineControllerAuthorization,
+  OperationResourceBinding,
+  OperationResourceKind,
+  OperationResourceResolution,
   ProcessDefinitionSummary,
   ProductionContextValueKind,
   ProductionLineResponse,
@@ -58,6 +56,12 @@ import {
   validateProductionLine,
   type ProductionDesignerProblem
 } from './production-route-validation';
+import { useEditorDocument } from './editor-workspace';
+import {
+  readEditorConflictRevision,
+  type EditorDocumentConflict,
+  type EditorProblem
+} from './editor-workspace-model';
 
 export interface ProductionWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
@@ -68,17 +72,10 @@ export interface ProductionWorkbenchProps {
   onProblemsChanged?(problems: ProductionDesignerProblem[]): void;
 }
 
-interface ProductionLineDraft extends Omit<SaveProductionLineRequest, 'externalTestProgramAdapters'> {
+interface ProductionLineDraft extends SaveProductionLineRequest {
   persisted: boolean;
   dirty: boolean;
-  externalTestProgramAdapters: ExternalAdapterDraft[];
-}
-
-type AdapterLaunchKind = 'Provider' | 'ApplicationExecutable';
-type DesignerView = 'route' | 'resources';
-
-interface ExternalAdapterDraft extends ExternalTestProgramAdapterRequest {
-  launchKind: AdapterLaunchKind;
+  revision: string;
 }
 
 const transitionKinds: RouteTransitionKind[] = [
@@ -120,8 +117,8 @@ export function ProductionWorkbench({
   const [draft, setDraft] = useState<ProductionLineDraft>(() => createEmptyDraft(null, [], [], []));
   const [nodePositions, setNodePositions] = useState<Record<string, GraphPoint>>({});
   const [selection, setSelection] = useState<DesignerSelection>(null);
-  const [view, setView] = useState<DesignerView>('route');
   const [busy, setBusy] = useState(false);
+  const [conflict, setConflict] = useState<EditorDocumentConflict | null>(null);
 
   const activeApplication = activeWorkspace?.project.applications.find(
     application => application.applicationId === activeApplicationId)
@@ -214,7 +211,6 @@ export function ProductionWorkbench({
     setDraft(next);
     setNodePositions({});
     setSelection(null);
-    setView('route');
   }, [scope?.applicationId]);
 
   useEffect(() => {
@@ -254,7 +250,7 @@ export function ProductionWorkbench({
     setDraft(next);
     setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
     setSelection({ kind: 'operation', id: next.entryOperationId });
-    setView('route');
+    setConflict(null);
     onMessage('New production line route created');
   }, [configurationSnapshots, onMessage, publishedFlows, stationProfiles, topology]);
 
@@ -273,7 +269,7 @@ export function ProductionWorkbench({
       setDraft(next);
       setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
       setSelection({ kind: 'operation', id: next.entryOperationId });
-      setView('route');
+      setConflict(null);
       onMessage(`Production line opened ${response.body.lineDefinitionId}`);
     } catch (error) {
       onMessage(`Production line load failed: ${String(error)}`);
@@ -282,36 +278,77 @@ export function ProductionWorkbench({
     }
   }, [onMessage, scope, topology]);
 
-  const save = useCallback(async () => {
-    if (!scope || !isBackendHealthy) {
-      onMessage('Open an Application with a healthy backend before saving a production line');
+  const reloadLine = useCallback(async () => {
+    if (!scope || !draft.persisted) {
+      const next = createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles);
+      setDraft(next);
+      setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
+      setSelection({ kind: 'operation', id: next.entryOperationId });
       return;
+    }
+
+    const response = await getProductionLine(draft.lineDefinitionId, scope);
+    if (!response.ok || !response.body) {
+      throw new Error(`Production line reload failed: ${response.status} ${response.text}`);
+    }
+    const next = fromResponse(response.body);
+    setDraft(next);
+    setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
+    setSelection({ kind: 'operation', id: next.entryOperationId });
+  }, [configurationSnapshots, draft.lineDefinitionId, draft.persisted, publishedFlows, scope, stationProfiles, topology]);
+
+  const save = useCallback(async (force = false) => {
+    if (!scope || !isBackendHealthy) {
+      throw new Error('Open an Application with a healthy backend before saving a production line');
     }
     const firstError = problems.find(problem => problem.severity === 'Error');
     if (firstError) {
       onMessage(`Cannot save: ${firstError.message}`);
-      focusProblem(firstError, setView, setSelection);
-      return;
+      focusProblem(firstError, setSelection);
+      throw new Error(firstError.message);
     }
 
     setBusy(true);
     try {
       const response = draft.persisted
-        ? await replaceProductionLine(draft.lineDefinitionId, request, scope)
+        ? await replaceProductionLine(
+          draft.lineDefinitionId,
+          request,
+          scope,
+          { revision: draft.revision, force })
         : await createProductionLine(request, scope);
       if (!response.ok || !response.body) {
+        if (response.status === 412) {
+          const currentRevision = readEditorConflictRevision(response.text);
+          if (currentRevision) {
+            setConflict({
+              loadedRevision: draft.revision,
+              currentRevision,
+              reload: async () => {
+                await reloadLine();
+                setConflict(null);
+              },
+              overwrite: async () => {
+                await save(true);
+                setConflict(null);
+              }
+            });
+          }
+        }
         onMessage(`Production line save failed: ${response.status} ${response.text}`);
-        return;
+        throw new Error(`Production line save failed: ${response.status}`);
       }
       setDraft(fromResponse(response.body));
+      setConflict(null);
       await refresh();
       onMessage(`Production line saved ${response.body.lineDefinitionId}`);
     } catch (error) {
       onMessage(`Production line save failed: ${String(error)}`);
+      throw error;
     } finally {
       setBusy(false);
     }
-  }, [draft.lineDefinitionId, draft.persisted, isBackendHealthy, onMessage, problems, refresh, request, scope]);
+  }, [draft.lineDefinitionId, draft.persisted, draft.revision, isBackendHealthy, onMessage, problems, refresh, reloadLine, request, scope]);
 
   const publishSnapshot = useCallback(async () => {
     if (!scope || !activeWorkspace || !isBackendHealthy) {
@@ -377,7 +414,8 @@ export function ProductionWorkbench({
       displayName: `Operation ${draft.operations.length + 1}`,
       stationSystemId,
       flowDefinitionId,
-      configurationSnapshotId
+      configurationSnapshotId,
+      resources: [createStationResource(operationId, stationSystemId)]
     };
     const candidateSource = selectedOperation ?? draft.operations[draft.operations.length - 1];
     const canAutoConnect = candidateSource
@@ -409,7 +447,6 @@ export function ProductionWorkbench({
     const auto = createAutoRouteLayout(nextOperations, nextTransitions, topology).positions;
     setNodePositions(current => ({ ...auto, ...current, [operationId]: auto[operationId] }));
     setSelection({ kind: 'operation', id: operationId });
-    setView('route');
   }, [configurationSnapshots, draft.operations, draft.transitions, mutateDraft, publishedFlows, selection, stationProfiles, stationSystems, topology]);
 
   const addTransition = useCallback(() => {
@@ -436,25 +473,21 @@ export function ProductionWorkbench({
     };
     mutateDraft(current => ({ ...current, transitions: [...current.transitions, transition] }));
     setSelection({ kind: 'transition', id: transition.transitionId });
-    setView('route');
   }, [draft.entryOperationId, draft.operations, draft.transitions, mutateDraft, onMessage, selection]);
-
-  const addAdapter = useCallback(() => {
-    const adapter = createExternalAdapter(
-      nextPortableId('external-program', draft.externalTestProgramAdapters.map(candidate => candidate.adapterId)),
-      topology);
-    mutateDraft(current => ({
-      ...current,
-      externalTestProgramAdapters: [...current.externalTestProgramAdapters, adapter]
-    }));
-    setView('resources');
-  }, [draft.externalTestProgramAdapters, mutateDraft, topology]);
 
   const updateOperation = useCallback((originalId: string, next: ProductionOperationRequest) => {
     mutateDraft(current => ({
       ...current,
       entryOperationId: current.entryOperationId === originalId ? next.operationId : current.entryOperationId,
       operations: current.operations.map(operation => operation.operationId === originalId ? next : operation),
+      lineControllerAuthorizations: current.operations.find(operation =>
+        operation.operationId === originalId)?.stationSystemId !== next.stationSystemId
+        ? current.lineControllerAuthorizations.filter(authorization =>
+          authorization.operationId !== originalId)
+        : current.lineControllerAuthorizations.map(authorization =>
+          authorization.operationId === originalId
+            ? { ...authorization, operationId: next.operationId }
+            : authorization),
       transitions: current.transitions.map(transition => ({
         ...transition,
         sourceOperationId: transition.sourceOperationId === originalId
@@ -481,6 +514,8 @@ export function ProductionWorkbench({
       return {
         ...current,
         operations,
+        lineControllerAuthorizations: current.lineControllerAuthorizations.filter(
+          authorization => authorization.operationId !== operationId),
         transitions: current.transitions.filter(transition => (
           transition.sourceOperationId !== operationId && transition.targetOperationId !== operationId)),
         entryOperationId: current.entryOperationId === operationId
@@ -526,6 +561,25 @@ export function ProductionWorkbench({
     ? draft.transitions.find(transition => transition.transitionId === selection.id) ?? null
     : null;
 
+  const editorProblems = useMemo<EditorProblem[]>(() => problems.map(problem => ({
+    id: problem.id,
+    severity: problem.severity,
+    message: problem.message,
+    targetId: problem.entityId
+  })), [problems]);
+  useEditorDocument({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && errorCount === 0,
+    save: () => save(),
+    revert: reloadLine,
+    focus: targetId => {
+      const problem = problems.find(candidate => candidate.entityId === targetId);
+      if (problem) focusProblem(problem, setSelection);
+    },
+    problems: editorProblems,
+    conflict
+  });
+
   if (!activeWorkspace || !activeApplication) {
     return (
       <section className="production-workbench production-empty">
@@ -558,7 +612,7 @@ export function ProductionWorkbench({
           <button
             type="button"
             className="button primary"
-            onClick={() => void save()}
+            onClick={() => void save().catch(() => undefined)}
             disabled={busy || !isBackendHealthy || errorCount > 0}
             data-testid="save-production-line"
             title={errorCount > 0 ? `Resolve ${errorCount} Line Designer errors before saving` : 'Save line'}
@@ -659,6 +713,7 @@ export function ProductionWorkbench({
                     ...current,
                     productModel: { ...current.productModel, productModelId: event.target.value }
                   }))}
+                  data-testid="production-product-model-id"
                 />
               </Field>
               <Field label="Model Code">
@@ -684,30 +739,17 @@ export function ProductionWorkbench({
           </section>
 
           <div className="production-designer-tabs">
-            <button
-              type="button"
-              className={view === 'route' ? 'active' : ''}
-              onClick={() => setView('route')}
-            >
+            <button type="button" className="active">
               <Workflow size={14} /> Route Graph
               <small>{draft.operations.length}</small>
             </button>
             <button
               type="button"
-              className={view === 'resources' ? 'active' : ''}
-              onClick={() => setView('resources')}
-            >
-              <Boxes size={14} /> External Program Resources
-              <small>{draft.externalTestProgramAdapters.length}</small>
-            </button>
-            <button
-              type="button"
               className={errorCount > 0 ? 'problems' : ''}
               onClick={() => {
-                setView('route');
                 const first = problems[0];
                 if (first) {
-                  focusProblem(first, setView, setSelection);
+                  focusProblem(first, setSelection);
                 }
               }}
             >
@@ -716,8 +758,7 @@ export function ProductionWorkbench({
             </button>
           </div>
 
-          {view === 'route' ? (
-            <section className="production-route-workspace">
+          <section className="production-route-workspace">
               <div className="production-graph-panel">
                 <header className="production-graph-toolbar">
                   <div>
@@ -762,6 +803,17 @@ export function ProductionWorkbench({
                     flows={publishedFlows}
                     configurationSnapshots={configurationSnapshots}
                     stationProfiles={stationProfiles}
+                    topology={topology}
+                    lineControllerAuthorizations={draft.lineControllerAuthorizations.filter(
+                      authorization => authorization.operationId === selectedOperation.operationId)}
+                    onLineControllerAuthorizationsChange={authorizations => mutateDraft(current => ({
+                      ...current,
+                      lineControllerAuthorizations: [
+                        ...current.lineControllerAuthorizations.filter(authorization =>
+                          authorization.operationId !== selectedOperation.operationId),
+                        ...authorizations
+                      ]
+                    }))}
                     onChange={next => updateOperation(selectedOperation.operationId, next)}
                     onMakeEntry={() => mutateDraft(current => ({
                       ...current,
@@ -791,55 +843,10 @@ export function ProductionWorkbench({
                 )}
                 <ProblemsPanel
                   problems={problems}
-                  onSelect={problem => focusProblem(problem, setView, setSelection)}
+                  onSelect={problem => focusProblem(problem, setSelection)}
                 />
               </aside>
-            </section>
-          ) : (
-            <section className="production-resource-library">
-              <header>
-                <div>
-                  <FileCode2 size={19} />
-                  <span>
-                    <strong>Application External Program Resources</strong>
-                    <small>Flows reference Adapter IDs. Programs and provider bindings travel with this Application without file rewriting.</small>
-                  </span>
-                </div>
-                <button type="button" className="button ghost" onClick={addAdapter} data-testid="add-external-program-adapter">
-                  <Plus size={14} /> Add Resource
-                </button>
-              </header>
-              <div className="production-adapter-list">
-                {draft.externalTestProgramAdapters.map((adapter, index) => (
-                  <AdapterCard
-                    key={`${adapter.adapterId}-${index}`}
-                    adapter={adapter}
-                    index={index}
-                    topology={topology}
-                    onChange={next => mutateDraft(current => ({
-                      ...current,
-                      externalTestProgramAdapters: replaceAt(
-                        current.externalTestProgramAdapters,
-                        index,
-                        next)
-                    }))}
-                    onRemove={() => mutateDraft(current => ({
-                      ...current,
-                      externalTestProgramAdapters: current.externalTestProgramAdapters
-                        .filter((_, candidateIndex) => candidateIndex !== index)
-                    }))}
-                  />
-                ))}
-                {draft.externalTestProgramAdapters.length === 0 ? (
-                  <div className="production-inline-empty">
-                    <Boxes size={22} />
-                    <strong>No external program resources</strong>
-                    <span>Add one only when a Flow action needs to invoke a vendor program or provider.</span>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          )}
+          </section>
         </main>
       </div>
     </section>
@@ -855,6 +862,9 @@ function OperationInspector({
   flows,
   configurationSnapshots,
   stationProfiles,
+  topology,
+  lineControllerAuthorizations,
+  onLineControllerAuthorizationsChange,
   onChange,
   onMakeEntry,
   onMarkTerminal,
@@ -868,6 +878,9 @@ function OperationInspector({
   flows: ProcessDefinitionSummary[];
   configurationSnapshots: ConfigurationSnapshotResponse[];
   stationProfiles: StationProfileResponse[];
+  topology: AutomationTopologyResponse | null;
+  lineControllerAuthorizations: LineControllerAuthorization[];
+  onLineControllerAuthorizationsChange(authorizations: LineControllerAuthorization[]): void;
   onChange(next: ProductionOperationRequest): void;
   onMakeEntry(): void;
   onMarkTerminal(): void;
@@ -883,6 +896,10 @@ function OperationInspector({
     transition.sourceOperationId === operation.operationId && transition.kind !== 'Rework'));
   const updateBinding = (changes: Partial<Pick<ProductionOperationRequest, 'stationSystemId' | 'flowDefinitionId'>>): void => {
     const next = { ...operation, ...changes };
+    if (changes.stationSystemId !== undefined
+        && changes.stationSystemId !== operation.stationSystemId) {
+      next.resources = [createStationResource(operation.operationId, changes.stationSystemId)];
+    }
     const matches = findMatchingConfigurationSnapshots(
       next.stationSystemId,
       next.flowDefinitionId,
@@ -948,6 +965,17 @@ function OperationInspector({
           </select>
         </Field>
       </div>
+      <OperationResourcesEditor
+        operation={operation}
+        topology={topology}
+        onChange={resources => onChange({ ...operation, resources })}
+      />
+      <LineControllerAuthorizationEditor
+        operation={operation}
+        topology={topology}
+        authorizations={lineControllerAuthorizations}
+        onChange={onLineControllerAuthorizationsChange}
+      />
       <div className="production-disposition-card">
         <span>ROUTE DISPOSITION</span>
         <strong>{forwardTransitions.length === 0 ? 'Completed (terminal)' : 'In process'}</strong>
@@ -968,12 +996,473 @@ function OperationInspector({
         <button type="button" className="button ghost" onClick={onMakeEntry} disabled={entryOperationId === operation.operationId}>
           <GitBranch size={13} /> {entryOperationId === operation.operationId ? 'Route entry' : 'Make entry'}
         </button>
-        <button type="button" className="button danger" onClick={onRemove}>
+        <button type="button" className="button danger" onClick={onRemove} data-testid="remove-production-operation">
           <Trash2 size={13} /> Remove
         </button>
       </footer>
     </section>
   );
+}
+
+function OperationResourcesEditor({
+  operation,
+  topology,
+  onChange
+}: {
+  operation: ProductionOperationRequest;
+  topology: AutomationTopologyResponse | null;
+  onChange(resources: OperationResourceBinding[]): void;
+}): React.ReactElement {
+  const nonStationResources = operation.resources.filter(resource => resource.kind !== 'Station');
+  const addResource = (): void => {
+    const bindingId = nextPortableId(
+      'resource',
+      operation.resources.map(resource => resource.bindingId));
+    onChange([
+      ...operation.resources,
+      {
+        bindingId,
+        kind: 'Slot',
+        topologyTargetId: operation.stationSystemId,
+        resolution: 'CurrentMaterialSlot'
+      }
+    ]);
+  };
+  const replace = (bindingId: string, next: OperationResourceBinding): void => {
+    onChange(operation.resources.map(resource => resource.bindingId === bindingId ? next : resource));
+  };
+  const remove = (bindingId: string): void => {
+    onChange(operation.resources.filter(resource => resource.bindingId !== bindingId));
+  };
+
+  return (
+    <section className="production-resource-editor" data-testid="operation-resource-editor">
+      <header>
+        <span><small>RESOURCE AUTHORIZATION</small><strong>Station execution scope</strong></span>
+        <button type="button" className="button ghost" onClick={addResource}>
+          <Plus size={13} /> Resource
+        </button>
+      </header>
+      <div className="production-resource-station">
+        <Cpu size={14} />
+        <span>
+          <strong>{operation.stationSystemId || 'Select a Station'}</strong>
+          <small>Exactly one fixed Station lease is always frozen.</small>
+        </span>
+      </div>
+      {nonStationResources.length === 0 ? (
+        <p className="production-resource-empty">
+          Add Fixture, Device, Slot Group or material Slot requirements when this Operation needs them.
+        </p>
+      ) : (
+        <div className="production-resource-list">
+          {nonStationResources.map(resource => {
+            const targets = operationResourceTargets(resource, operation.stationSystemId, topology);
+            return (
+              <article key={resource.bindingId}>
+                <label>
+                  <span>Binding ID</span>
+                  <input
+                    value={resource.bindingId}
+                    onChange={event => replace(resource.bindingId, {
+                      ...resource,
+                      bindingId: event.target.value
+                    })}
+                  />
+                </label>
+                <label>
+                  <span>Kind</span>
+                  <select
+                    value={resource.kind}
+                    onChange={event => {
+                      const kind = event.target.value as OperationResourceKind;
+                      const resolution: OperationResourceResolution = kind === 'Slot'
+                        ? 'CurrentMaterialSlot'
+                        : 'Fixed';
+                      const candidate: OperationResourceBinding = {
+                        ...resource,
+                        kind,
+                        resolution,
+                        topologyTargetId: kind === 'Slot'
+                          ? operation.stationSystemId
+                          : ''
+                      };
+                      const nextTargets = operationResourceTargets(
+                        candidate,
+                        operation.stationSystemId,
+                        topology);
+                      replace(resource.bindingId, {
+                        ...candidate,
+                        topologyTargetId: nextTargets[0]?.id ?? candidate.topologyTargetId
+                      });
+                    }}
+                  >
+                    <option value="Fixture">Fixture</option>
+                    <option value="Device">Device</option>
+                    <option value="SlotGroup">Slot Group</option>
+                    <option value="Slot">Slot</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Resolution</span>
+                  <select
+                    value={resource.resolution}
+                    disabled={resource.kind !== 'Slot'}
+                    onChange={event => {
+                      const resolution = event.target.value as OperationResourceResolution;
+                      const candidate = {
+                        ...resource,
+                        resolution,
+                        topologyTargetId: resolution === 'CurrentMaterialSlot'
+                          ? operation.stationSystemId
+                          : ''
+                      };
+                      const nextTargets = operationResourceTargets(
+                        candidate,
+                        operation.stationSystemId,
+                        topology);
+                      replace(resource.bindingId, {
+                        ...candidate,
+                        topologyTargetId: nextTargets[0]?.id ?? candidate.topologyTargetId
+                      });
+                    }}
+                  >
+                    <option value="Fixed">Fixed</option>
+                    <option value="CurrentMaterialSlot">Current material Slot</option>
+                    <option value="AvailableSlotInGroup">Available Slot in Group</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Topology target</span>
+                  <select
+                    value={resource.topologyTargetId}
+                    onChange={event => replace(resource.bindingId, {
+                      ...resource,
+                      topologyTargetId: event.target.value
+                    })}
+                  >
+                    <option value="">Select target</option>
+                    {targets.map(target => (
+                      <option key={`${target.kind}:${target.id}`} value={target.id}>
+                        {target.label} · {target.kind}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="button danger"
+                  aria-label={`Remove resource ${resource.bindingId}`}
+                  onClick={() => remove(resource.bindingId)}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function createStationResource(operationId: string, stationSystemId: string): OperationResourceBinding {
+  return {
+    bindingId: `resource.station.${operationId}`,
+    kind: 'Station',
+    topologyTargetId: stationSystemId,
+    resolution: 'Fixed'
+  };
+}
+
+function operationResourceTargets(
+  resource: OperationResourceBinding,
+  stationSystemId: string,
+  topology: AutomationTopologyResponse | null
+): Array<{ id: string; label: string; kind: string }> {
+  if (!topology) {
+    return [];
+  }
+  if (resource.kind === 'Fixture') {
+    return topology.slotGroups
+      .filter(group => group.parentSystemId === stationSystemId && group.kind === 'FixtureNest')
+      .map(group => ({ id: group.slotGroupId, label: group.displayName, kind: 'FixtureNest' }));
+  }
+  if (resource.kind === 'Device') {
+    return [
+      ...topology.systems
+        .filter(system => systemWithinStation(system.systemId, stationSystemId, topology))
+        .map(system => ({ id: system.systemId, label: system.displayName, kind: 'System' })),
+      ...topology.driverBindings
+        .filter(binding => systemWithinStation(binding.ownerSystemId, stationSystemId, topology)
+          && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+            binding.providerKind))
+        .map(binding => ({ id: binding.bindingId, label: binding.providerKey, kind: binding.providerKind }))
+    ];
+  }
+  if (resource.kind === 'SlotGroup'
+      || (resource.kind === 'Slot' && resource.resolution === 'AvailableSlotInGroup')) {
+    return topology.slotGroups
+      .filter(group => group.parentSystemId === stationSystemId)
+      .map(group => ({ id: group.slotGroupId, label: group.displayName, kind: group.kind }));
+  }
+  if (resource.kind === 'Slot' && resource.resolution === 'CurrentMaterialSlot') {
+    const station = topology.systems.find(system => system.systemId === stationSystemId);
+    return station
+      ? [{ id: station.systemId, label: station.displayName, kind: 'Current material' }]
+      : [];
+  }
+  return topology.slots
+    .filter(slot => slot.parentSystemId === stationSystemId && slot.isEnabled)
+    .map(slot => ({ id: slot.slotId, label: slot.displayName, kind: slot.materialKind }));
+}
+
+function LineControllerAuthorizationEditor({
+  operation,
+  topology,
+  authorizations,
+  onChange
+}: {
+  operation: ProductionOperationRequest;
+  topology: AutomationTopologyResponse | null;
+  authorizations: LineControllerAuthorization[];
+  onChange(authorizations: LineControllerAuthorization[]): void;
+}): React.ReactElement {
+  const controllerResourceIds = new Set(operation.resources
+    .filter(resource => resource.kind === 'Device' && resource.resolution === 'Fixed')
+    .map(resource => resource.topologyTargetId));
+  const controllerBindings = (topology?.driverBindings ?? []).filter(binding => (
+    controllerResourceIds.has(binding.bindingId)
+    && systemWithinStation(binding.ownerSystemId, operation.stationSystemId, topology)
+    && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+      binding.providerKind)));
+  const remoteStations = (topology?.systems ?? []).filter(system => (
+    system.kind === 'Station' && system.systemId !== operation.stationSystemId));
+
+  const replace = (
+    authorizationId: string,
+    next: LineControllerAuthorization
+  ): void => onChange(authorizations.map(authorization => (
+    authorization.authorizationId === authorizationId ? next : authorization)));
+  const add = (): void => {
+    if (!topology || controllerBindings.length === 0 || remoteStations.length === 0) {
+      return;
+    }
+    const controller = controllerBindings[0];
+    const targetStation = remoteStations[0];
+    const target = topology.driverBindings.find(binding => systemWithinStation(
+      binding.ownerSystemId,
+      targetStation.systemId,
+      topology));
+    if (!target) {
+      return;
+    }
+    const controllerCapability = topology.capabilities.find(capability =>
+      capability.capabilityId === controller.capabilityId);
+    const targetCapability = topology.capabilities.find(capability =>
+      capability.capabilityId === target.capabilityId);
+    if (!controllerCapability || !targetCapability) {
+      return;
+    }
+    onChange([
+      ...authorizations,
+      {
+        authorizationId: nextPortableId(
+          'line-controller',
+          authorizations.map(authorization => authorization.authorizationId)),
+        operationId: operation.operationId,
+        actionId: nextPortableId(
+          'remote-action',
+          authorizations.map(authorization => authorization.actionId)),
+        controllerSystemId: controller.ownerSystemId,
+        controllerBindingId: controller.bindingId,
+        controllerCapabilityId: controller.capabilityId,
+        controllerAction: controllerCapability.commandName,
+        targetStationSystemId: targetStation.systemId,
+        targetSystemId: target.ownerSystemId,
+        targetBindingId: target.bindingId,
+        targetCapabilityId: target.capabilityId,
+        targetAction: targetCapability.commandName
+      }
+    ]);
+  };
+
+  return (
+    <section className="production-resource-editor" data-testid="line-controller-authorization-editor">
+      <header>
+        <span><small>CROSS-STATION AUTHORIZATION</small><strong>Line Controller grants</strong></span>
+        <button
+          type="button"
+          className="button ghost"
+          onClick={add}
+          disabled={controllerBindings.length === 0 || remoteStations.length === 0}
+        >
+          <Plus size={13} /> Authorization
+        </button>
+      </header>
+      {controllerBindings.length === 0 ? (
+        <p className="production-resource-empty">
+          Add the local Line Controller Binding as a Fixed Device resource before granting a remote action.
+        </p>
+      ) : authorizations.length === 0 ? (
+        <p className="production-resource-empty">
+          No cross-Station access. Flow actions remain confined to this Station subtree.
+        </p>
+      ) : (
+        <div className="production-resource-list">
+          {authorizations.map(authorization => {
+            const targetBindings = (topology?.driverBindings ?? []).filter(binding =>
+              systemWithinStation(
+                binding.ownerSystemId,
+                authorization.targetStationSystemId,
+                topology));
+            return (
+              <article key={authorization.authorizationId}>
+                <label>
+                  <span>Authorization ID</span>
+                  <input
+                    value={authorization.authorizationId}
+                    onChange={event => replace(authorization.authorizationId, {
+                      ...authorization,
+                      authorizationId: event.target.value
+                    })}
+                  />
+                </label>
+                <label>
+                  <span>Flow Action ID</span>
+                  <input
+                    value={authorization.actionId}
+                    onChange={event => replace(authorization.authorizationId, {
+                      ...authorization,
+                      actionId: event.target.value
+                    })}
+                  />
+                </label>
+                <label>
+                  <span>Controller Binding / Capability / Action</span>
+                  <select
+                    value={authorization.controllerBindingId}
+                    onChange={event => {
+                      const binding = controllerBindings.find(candidate =>
+                        candidate.bindingId === event.target.value);
+                      const capability = topology?.capabilities.find(candidate =>
+                        candidate.capabilityId === binding?.capabilityId);
+                      if (binding && capability) {
+                        replace(authorization.authorizationId, {
+                          ...authorization,
+                          controllerSystemId: binding.ownerSystemId,
+                          controllerBindingId: binding.bindingId,
+                          controllerCapabilityId: binding.capabilityId,
+                          controllerAction: capability.commandName
+                        });
+                      }
+                    }}
+                  >
+                    {controllerBindings.map(binding => {
+                      const capability = topology?.capabilities.find(candidate =>
+                        candidate.capabilityId === binding.capabilityId);
+                      return (
+                        <option key={binding.bindingId} value={binding.bindingId}>
+                          {binding.ownerSystemId} / {binding.bindingId} / {binding.capabilityId} / {capability?.commandName}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                <label>
+                  <span>Target Station</span>
+                  <select
+                    value={authorization.targetStationSystemId}
+                    onChange={event => {
+                      const stationSystemId = event.target.value;
+                      const binding = topology?.driverBindings.find(candidate =>
+                        systemWithinStation(candidate.ownerSystemId, stationSystemId, topology));
+                      const capability = topology?.capabilities.find(candidate =>
+                        candidate.capabilityId === binding?.capabilityId);
+                      if (binding && capability) {
+                        replace(authorization.authorizationId, {
+                          ...authorization,
+                          targetStationSystemId: stationSystemId,
+                          targetSystemId: binding.ownerSystemId,
+                          targetBindingId: binding.bindingId,
+                          targetCapabilityId: binding.capabilityId,
+                          targetAction: capability.commandName
+                        });
+                      }
+                    }}
+                  >
+                    {remoteStations.map(station => (
+                      <option key={station.systemId} value={station.systemId}>
+                        {station.displayName} / {station.systemId}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Target System / Binding / Capability / Action</span>
+                  <select
+                    value={authorization.targetBindingId}
+                    onChange={event => {
+                      const binding = targetBindings.find(candidate =>
+                        candidate.bindingId === event.target.value);
+                      const capability = topology?.capabilities.find(candidate =>
+                        candidate.capabilityId === binding?.capabilityId);
+                      if (binding && capability) {
+                        replace(authorization.authorizationId, {
+                          ...authorization,
+                          targetSystemId: binding.ownerSystemId,
+                          targetBindingId: binding.bindingId,
+                          targetCapabilityId: binding.capabilityId,
+                          targetAction: capability.commandName
+                        });
+                      }
+                    }}
+                  >
+                    {targetBindings.map(binding => {
+                      const capability = topology?.capabilities.find(candidate =>
+                        candidate.capabilityId === binding.capabilityId);
+                      return (
+                        <option key={binding.bindingId} value={binding.bindingId}>
+                          {binding.ownerSystemId} / {binding.bindingId} / {binding.capabilityId} / {capability?.commandName}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="button danger"
+                  aria-label={`Remove Line Controller authorization ${authorization.authorizationId}`}
+                  onClick={() => onChange(authorizations.filter(candidate =>
+                    candidate.authorizationId !== authorization.authorizationId))}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function systemWithinStation(
+  systemId: string,
+  stationSystemId: string,
+  topology: AutomationTopologyResponse | null
+): boolean {
+  if (!topology) {
+    return false;
+  }
+  let currentId: string | null = systemId;
+  for (let depth = 0; depth <= topology.systems.length && currentId; depth += 1) {
+    if (currentId === stationSystemId) {
+      return true;
+    }
+    currentId = topology.systems.find(system => system.systemId === currentId)?.parentSystemId ?? null;
+  }
+  return false;
 }
 
 function TransitionInspector({
@@ -1101,7 +1590,7 @@ function TransitionInspector({
       </div>
       <footer>
         <span />
-        <button type="button" className="button danger" onClick={onRemove}>
+        <button type="button" className="button danger" onClick={onRemove} data-testid="remove-route-transition">
           <Trash2 size={13} /> Remove
         </button>
       </footer>
@@ -1163,238 +1652,6 @@ function ProblemsPanel({
   );
 }
 
-function AdapterCard({
-  adapter,
-  index,
-  topology,
-  onChange,
-  onRemove
-}: {
-  adapter: ExternalAdapterDraft;
-  index: number;
-  topology: AutomationTopologyResponse | null;
-  onChange(next: ExternalAdapterDraft): void;
-  onRemove(): void;
-}): React.ReactElement {
-  const selectCapability = (capabilityId: string): void => {
-    const capability = topology?.capabilities.find(candidate => candidate.capabilityId === capabilityId);
-    const binding = topology?.driverBindings.find(candidate => candidate.capabilityId === capabilityId);
-    onChange({
-      ...adapter,
-      capabilityId,
-      commandName: capability?.commandName ?? '',
-      providerKey: adapter.launchKind === 'Provider' ? binding?.providerKey ?? '' : null,
-      timeoutMilliseconds: (capability?.timeoutSeconds ?? 30) * 1000
-    });
-  };
-  return (
-    <article className="production-adapter-card" data-testid={`production-external-program-${index}`}>
-      <header>
-        <div><FileCode2 size={15} /><strong>{adapter.displayName || adapter.adapterId}</strong></div>
-        <button type="button" className="icon-button danger" onClick={onRemove} title="Remove external program resource">
-          <Trash2 size={14} />
-        </button>
-      </header>
-      <div className="production-adapter-grid">
-        <Field label="Adapter ID">
-          <input value={adapter.adapterId} onChange={event => onChange({ ...adapter, adapterId: event.target.value })} />
-        </Field>
-        <Field label="Display Name">
-          <input value={adapter.displayName} onChange={event => onChange({ ...adapter, displayName: event.target.value })} />
-        </Field>
-        <Field label="Capability">
-          <select value={adapter.capabilityId} onChange={event => selectCapability(event.target.value)}>
-            <option value="">Select Capability</option>
-            {(topology?.capabilities ?? []).map(capability => (
-              <option key={capability.capabilityId} value={capability.capabilityId}>
-                {capability.capabilityId} · {capability.commandName}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Command Name">
-          <input value={adapter.commandName} onChange={event => onChange({ ...adapter, commandName: event.target.value })} />
-        </Field>
-        <Field label="Launch Boundary">
-          <select
-            value={adapter.launchKind}
-            onChange={event => {
-              const launchKind = event.target.value as AdapterLaunchKind;
-              onChange({
-                ...adapter,
-                launchKind,
-                executable: launchKind === 'ApplicationExecutable'
-                  ? adapter.executable ?? 'programs/vendor/helper.exe'
-                  : null,
-                providerKey: launchKind === 'Provider'
-                  ? adapter.providerKey ?? ''
-                  : null
-              });
-            }}
-          >
-            <option value="Provider">Provider plugin</option>
-            <option value="ApplicationExecutable">Application executable</option>
-          </select>
-        </Field>
-        {adapter.launchKind === 'Provider' ? (
-          <Field label="Provider Key">
-            <input value={adapter.providerKey ?? ''} onChange={event => onChange({ ...adapter, providerKey: event.target.value })} />
-          </Field>
-        ) : (
-          <Field label="Portable Executable Path">
-            <input value={adapter.executable ?? ''} onChange={event => onChange({ ...adapter, executable: event.target.value })} />
-          </Field>
-        )}
-        <Field label="Timeout (ms)">
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={adapter.timeoutMilliseconds}
-            onChange={event => onChange({ ...adapter, timeoutMilliseconds: Number(event.target.value) })}
-          />
-        </Field>
-        <Field label="Argument Templates (one per line)">
-          <textarea
-            value={adapter.argumentTemplates.join('\n')}
-            onChange={event => onChange({ ...adapter, argumentTemplates: event.target.value.split('\n') })}
-          />
-        </Field>
-      </div>
-
-      <MappingEditor
-        title="Typed Product Inputs"
-        sourceLabel="Production Context source"
-        targetLabel="Program input"
-        rows={adapter.inputMappings}
-        onChange={inputMappings => onChange({ ...adapter, inputMappings })}
-      />
-      <ResultMappingEditor
-        rows={adapter.resultMappings}
-        onChange={resultMappings => onChange({ ...adapter, resultMappings })}
-      />
-      <div className="production-outcome-grid">
-        <Field label="Judgement JSON Path">
-          <input
-            value={adapter.outcomeMapping.sourcePath}
-            onChange={event => onChange({
-              ...adapter,
-              outcomeMapping: { ...adapter.outcomeMapping, sourcePath: event.target.value }
-            })}
-          />
-        </Field>
-        <Field label="Passed Token">
-          <input
-            value={adapter.outcomeMapping.passedToken}
-            onChange={event => onChange({
-              ...adapter,
-              outcomeMapping: { ...adapter.outcomeMapping, passedToken: event.target.value }
-            })}
-          />
-        </Field>
-        <Field label="Failed Token">
-          <input
-            value={adapter.outcomeMapping.failedToken}
-            onChange={event => onChange({
-              ...adapter,
-              outcomeMapping: { ...adapter.outcomeMapping, failedToken: event.target.value }
-            })}
-          />
-        </Field>
-        <Field label="Aborted Token">
-          <input
-            value={adapter.outcomeMapping.abortedToken}
-            onChange={event => onChange({
-              ...adapter,
-              outcomeMapping: { ...adapter.outcomeMapping, abortedToken: event.target.value }
-            })}
-          />
-        </Field>
-      </div>
-    </article>
-  );
-}
-
-function MappingEditor({
-  title,
-  sourceLabel,
-  targetLabel,
-  rows,
-  onChange
-}: {
-  title: string;
-  sourceLabel: string;
-  targetLabel: string;
-  rows: ExternalTestProgramInputMappingRequest[];
-  onChange(rows: ExternalTestProgramInputMappingRequest[]): void;
-}): React.ReactElement {
-  return (
-    <div className="production-mapping-editor">
-      <header>
-        <span>{title}</span>
-        <button type="button" onClick={() => onChange([...rows, { source: '', target: '' }])}>
-          <Plus size={12} /> Add mapping
-        </button>
-      </header>
-      {rows.map((row, index) => (
-        <div className="production-mapping-row" key={index}>
-          <input
-            aria-label={sourceLabel}
-            value={row.source}
-            onChange={event => onChange(replaceAt(rows, index, { ...row, source: event.target.value }))}
-          />
-          <ArrowRight size={13} />
-          <input
-            aria-label={targetLabel}
-            value={row.target}
-            onChange={event => onChange(replaceAt(rows, index, { ...row, target: event.target.value }))}
-          />
-          <button type="button" className="icon-button danger" onClick={() => onChange(rows.filter((_, candidate) => candidate !== index))}>
-            <Trash2 size={13} />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ResultMappingEditor({
-  rows,
-  onChange
-}: {
-  rows: ExternalTestProgramResultMappingRequest[];
-  onChange(rows: ExternalTestProgramResultMappingRequest[]): void;
-}): React.ReactElement {
-  return (
-    <div className="production-mapping-editor">
-      <header>
-        <span>Typed Production Context Results</span>
-        <button type="button" onClick={() => onChange([...rows, { sourcePath: '', targetKey: '' }])}>
-          <Plus size={12} /> Add mapping
-        </button>
-      </header>
-      {rows.map((row, index) => (
-        <div className="production-mapping-row" key={index}>
-          <input
-            aria-label="Program result JSON path"
-            value={row.sourcePath}
-            onChange={event => onChange(replaceAt(rows, index, { ...row, sourcePath: event.target.value }))}
-          />
-          <ArrowRight size={13} />
-          <input
-            aria-label="Production Context target key"
-            value={row.targetKey}
-            onChange={event => onChange(replaceAt(rows, index, { ...row, targetKey: event.target.value }))}
-          />
-          <button type="button" className="icon-button danger" onClick={() => onChange(rows.filter((_, candidate) => candidate !== index))}>
-            <Trash2 size={13} />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function Field({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return <label><span>{label}</span>{children}</label>;
 }
@@ -1419,11 +1676,13 @@ function createEmptyDraft(
     displayName: 'Operation 1',
     stationSystemId: station?.systemId ?? '',
     flowDefinitionId,
-    configurationSnapshotId
+    configurationSnapshotId,
+    resources: [createStationResource('operation-1', station?.systemId ?? '')]
   };
   return {
     persisted: false,
     dirty: true,
+    revision: '',
     lineDefinitionId: `line-${seed}`,
     displayName: 'New Production Line',
     topologyId: topology?.topologyId ?? '',
@@ -1435,37 +1694,7 @@ function createEmptyDraft(
     entryOperationId: operation.operationId,
     operations: [operation],
     transitions: [],
-    externalTestProgramAdapters: []
-  };
-}
-
-function createExternalAdapter(
-  adapterId: string,
-  topology: AutomationTopologyResponse | null
-): ExternalAdapterDraft {
-  const capability = topology?.capabilities[0];
-  const binding = topology?.driverBindings.find(candidate => candidate.capabilityId === capability?.capabilityId);
-  return {
-    adapterId,
-    displayName: 'External Program',
-    capabilityId: capability?.capabilityId ?? '',
-    commandName: capability?.commandName ?? '',
-    launchKind: 'Provider',
-    executable: null,
-    providerKey: binding?.providerKey ?? '',
-    argumentTemplates: ['--serial={{product.identity}}', '--model={{product.model}}'],
-    inputMappings: [
-      { source: '$product.identity', target: 'serialNumber' },
-      { source: '$product.model', target: 'modelCode' }
-    ],
-    resultMappings: [{ sourcePath: '$.judgement', targetKey: 'test.judgement' }],
-    outcomeMapping: {
-      sourcePath: '$.judgement',
-      passedToken: 'Passed',
-      failedToken: 'Failed',
-      abortedToken: 'Aborted'
-    },
-    timeoutMilliseconds: (capability?.timeoutSeconds ?? 30) * 1000
+    lineControllerAuthorizations: []
   };
 }
 
@@ -1473,27 +1702,19 @@ function fromResponse(response: ProductionLineResponse): ProductionLineDraft {
   return {
     persisted: true,
     dirty: false,
+    revision: response.revision,
     lineDefinitionId: response.lineDefinitionId,
     displayName: response.displayName,
     topologyId: response.topologyId,
     productModel: { ...response.productModel },
     entryOperationId: response.entryOperationId,
-    operations: response.operations.map(operation => ({ ...operation })),
+    operations: response.operations.map(operation => ({
+      ...operation,
+      resources: operation.resources.map(resource => ({ ...resource }))
+    })),
     transitions: response.transitions.map(transition => ({ ...transition })),
-    externalTestProgramAdapters: response.externalTestProgramAdapters.map(adapter => ({
-      adapterId: adapter.adapterId,
-      displayName: adapter.displayName,
-      capabilityId: adapter.capabilityId,
-      commandName: adapter.commandName,
-      launchKind: parseAdapterLaunchKind(adapter.launchKind),
-      executable: adapter.executable,
-      providerKey: adapter.providerKey,
-      argumentTemplates: [...adapter.argumentTemplates],
-      inputMappings: adapter.inputMappings.map(mapping => ({ ...mapping })),
-      resultMappings: adapter.resultMappings.map(mapping => ({ ...mapping })),
-      outcomeMapping: { ...adapter.outcomeMapping },
-      timeoutMilliseconds: adapter.timeoutMilliseconds
-    }))
+    lineControllerAuthorizations: response.lineControllerAuthorizations.map(
+      authorization => ({ ...authorization }))
   };
 }
 
@@ -1504,33 +1725,14 @@ function toRequest(draft: ProductionLineDraft): SaveProductionLineRequest {
     topologyId: draft.topologyId,
     productModel: { ...draft.productModel },
     entryOperationId: draft.entryOperationId,
-    operations: draft.operations.map(operation => ({ ...operation })),
+    operations: draft.operations.map(operation => ({
+      ...operation,
+      resources: operation.resources.map(resource => ({ ...resource }))
+    })),
     transitions: draft.transitions.map(transition => ({ ...transition })),
-    externalTestProgramAdapters: draft.externalTestProgramAdapters.map(adapter => ({
-      adapterId: adapter.adapterId,
-      displayName: adapter.displayName,
-      capabilityId: adapter.capabilityId,
-      commandName: adapter.commandName,
-      executable: adapter.launchKind === 'ApplicationExecutable' && adapter.executable !== ''
-        ? adapter.executable
-        : null,
-      providerKey: adapter.launchKind === 'Provider' && adapter.providerKey !== ''
-        ? adapter.providerKey
-        : null,
-      argumentTemplates: [...adapter.argumentTemplates],
-      inputMappings: adapter.inputMappings.map(mapping => ({ ...mapping })),
-      resultMappings: adapter.resultMappings.map(mapping => ({ ...mapping })),
-      outcomeMapping: { ...adapter.outcomeMapping },
-      timeoutMilliseconds: adapter.timeoutMilliseconds
-    }))
+    lineControllerAuthorizations: draft.lineControllerAuthorizations.map(
+      authorization => ({ ...authorization }))
   };
-}
-
-function parseAdapterLaunchKind(value: string): AdapterLaunchKind {
-  if (value === 'Provider' || value === 'ApplicationExecutable') {
-    return value;
-  }
-  throw new Error(`Unsupported external program launch kind: ${value}`);
 }
 
 function findMatchingConfigurationSnapshots(
@@ -1650,19 +1852,13 @@ function conditionValuePlaceholder(kind: ProductionContextValueKind | null): str
 
 function focusProblem(
   problem: ProductionDesignerProblem,
-  setView: React.Dispatch<React.SetStateAction<DesignerView>>,
   setSelection: React.Dispatch<React.SetStateAction<DesignerSelection>>
 ): void {
   if (problem.scope === 'Operation') {
-    setView('route');
     setSelection({ kind: 'operation', id: problem.entityId });
   } else if (problem.scope === 'Transition') {
-    setView('route');
     setSelection({ kind: 'transition', id: problem.entityId });
-  } else if (problem.scope === 'Resource') {
-    setView('resources');
   } else {
-    setView('route');
     setSelection(null);
   }
 }
@@ -1674,8 +1870,4 @@ function nextPortableId(prefix: string, existingIds: string[]): string {
     index += 1;
   }
   return `${prefix}-${index}`;
-}
-
-function replaceAt<T>(items: T[], index: number, value: T): T[] {
-  return items.map((item, candidateIndex) => candidateIndex === index ? value : item);
 }

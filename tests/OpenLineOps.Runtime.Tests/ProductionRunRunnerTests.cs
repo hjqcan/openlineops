@@ -1,10 +1,13 @@
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Identifiers;
+using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Events;
@@ -29,7 +32,7 @@ public sealed class ProductionRunRunnerTests
             Now.AddSeconds(2)));
         var request = CreateRequest();
 
-        var submitted = await fixture.Coordinator.SubmitAsync(request);
+        var submitted = await fixture.SubmitAsync(request);
         Assert.True(submitted.IsSuccess);
         Assert.Equal(ExecutionStatus.Pending, submitted.Value.ExecutionStatus);
         Assert.Empty(fixture.Dispatcher.Requests);
@@ -56,7 +59,7 @@ public sealed class ProductionRunRunnerTests
             0,
             Now.AddSeconds(2)));
         var request = CreateRequest();
-        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
 
         var result = await fixture.Runner.ExecuteAsync(request.RunId);
 
@@ -71,7 +74,7 @@ public sealed class ProductionRunRunnerTests
     {
         var fixture = new Fixture(new InvalidOperationException("Broker disconnected."));
         var request = CreateRequest();
-        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
 
         var result = await fixture.Runner.ExecuteAsync(request.RunId);
 
@@ -81,6 +84,56 @@ public sealed class ProductionRunRunnerTests
         Assert.Single(fixture.Dispatcher.Requests);
         _ = await fixture.Runner.ExecuteAsync(request.RunId);
         Assert.Single(fixture.Dispatcher.Requests);
+    }
+
+    [Fact]
+    public async Task ReconcileUsesObservedEvidenceWithoutRedispatchAndReleasesOnlyResolvedLease()
+    {
+        var fixture = new Fixture(new InvalidOperationException("Broker disconnected after actuation."));
+        var request = CreateRequest();
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
+        var interrupted = await fixture.Runner.ExecuteAsync(request.RunId);
+        var operation = Assert.Single(interrupted.Value.Run.Operations);
+        Assert.Single(await fixture.Leases.ListAsync());
+        var decision = new ProductionRecoveryDecision(
+            Guid.Parse("77777777-7777-7777-7777-777777777777"),
+            ProductionRecoveryDecisionKind.Reconcile,
+            "operator.recovery",
+            "Inspection confirms completed output.",
+            "inspection:runner-recovery-001",
+            Now,
+            operationRunId: operation.OperationRunId,
+            observedJudgement: ResultJudgement.Passed,
+            observedOutputs: new Dictionary<string, ProductionContextValue>
+            {
+                ["inspection"] = new(ProductionContextValueKind.Text, "confirmed")
+            });
+
+        var result = await fixture.Coordinator.CommandAsync(
+            request.RunId,
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.Reconcile,
+                decision.ActorId,
+                decision.Reason,
+                recoveryDecision: decision));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(ExecutionStatus.Completed, result.Value.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, result.Value.Judgement);
+        Assert.Single(fixture.Dispatcher.Requests);
+        Assert.Empty(await fixture.Leases.ListAsync());
+        var persistedRevision = (await fixture.Repository.GetByIdAsync(request.RunId))!.Revision;
+        var duplicate = await fixture.Coordinator.CommandAsync(
+            request.RunId,
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.Reconcile,
+                decision.ActorId,
+                decision.Reason,
+                recoveryDecision: decision));
+        Assert.True(duplicate.IsSuccess);
+        Assert.Equal(
+            persistedRevision,
+            (await fixture.Repository.GetByIdAsync(request.RunId))!.Revision);
     }
 
     [Fact]
@@ -97,7 +150,7 @@ public sealed class ProductionRunRunnerTests
                 Now),
             new RejectingSafetyController());
         var request = CreateRequest();
-        Assert.True((await fixture.Coordinator.SubmitAsync(request)).IsSuccess);
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
 
         var result = await fixture.Coordinator.CommandAsync(
             request.RunId,
@@ -113,44 +166,242 @@ public sealed class ProductionRunRunnerTests
     }
 
     [Fact]
-    public async Task ParallelForkDispatchesIndependentStationsBeforeEitherBranchCompletes()
+    public async Task StopWaitsForCurrentOperationBoundaryAndThenEndsCanceled()
     {
-        var repository = new InMemoryProductionRunRepository();
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
         var leases = new InMemoryResourceLeaseRepository();
         var clock = new FixedClock(Now);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
-        var dispatcher = new ParallelBranchDispatcher();
+        var registry = new InProcessStationOperationRegistry();
+        var dispatcher = new BoundaryDispatcher(registry, completeOnRelease: true);
         var coordinator = new ProductionRunCoordinator(
             repository,
+            materials,
             leases,
             new AcceptingSafetyController(),
+            new InProcessStationOperationCanceler(registry),
             publisher,
             clock);
         var runner = new ProductionRunRunner(
             repository,
             repository,
             leases,
+            new ProductionOperationReadinessEvaluator(materials),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
             clock);
-        var request = CreateParallelRequest();
+        var request = CreateRequest();
+        await RegisterRequestUnitAsync(materials, request);
         Assert.True((await coordinator.SubmitAsync(request)).IsSuccess);
-
         var execution = runner.ExecuteAsync(request.RunId).AsTask();
-        await dispatcher.BothBranchesStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        await dispatcher.Started.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.False(execution.IsCompleted);
-        Assert.Contains(dispatcher.OperationIds, id => id == "operation.left");
-        Assert.Contains(dispatcher.OperationIds, id => id == "operation.right");
-        dispatcher.ReleaseBranches();
+        var stop = await coordinator.CommandAsync(
+            request.RunId,
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.Stop,
+                "operator.stop",
+                "Finish the current station operation, then stop."));
+
+        Assert.True(stop.IsSuccess);
+        Assert.Equal(ExecutionStatus.Running, stop.Value.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.StopRequested, stop.Value.ControlState);
+        Assert.False(dispatcher.ExecutionToken.IsCancellationRequested);
+        dispatcher.Release();
         var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
-
         Assert.True(result.IsSuccess);
-        Assert.Equal(ExecutionStatus.Completed, result.Value.Run.ExecutionStatus);
-        Assert.Equal(ResultJudgement.Passed, result.Value.Run.Judgement);
-        Assert.Equal(4, dispatcher.OperationIds.Count);
-        Assert.Equal("operation.join", dispatcher.OperationIds[^1]);
+        Assert.Equal(ExecutionStatus.Canceled, result.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, result.Value.Run.Judgement);
+        Assert.Equal(ProductDisposition.Held, result.Value.Run.Disposition);
+    }
+
+    [Fact]
+    public async Task OperatorCancelPropagatesToActiveOperationAndPersistsCanceledAxes()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
+        var leases = new InMemoryResourceLeaseRepository();
+        var clock = new FixedClock(Now);
+        var publisher = new InMemoryRuntimeDomainEventPublisher();
+        var registry = new InProcessStationOperationRegistry();
+        var dispatcher = new BoundaryDispatcher(registry, completeOnRelease: false);
+        var coordinator = new ProductionRunCoordinator(
+            repository,
+            materials,
+            leases,
+            new AcceptingSafetyController(),
+            new InProcessStationOperationCanceler(registry),
+            publisher,
+            clock);
+        var runner = new ProductionRunRunner(
+            repository,
+            repository,
+            leases,
+            new ProductionOperationReadinessEvaluator(materials),
+            dispatcher,
+            publisher,
+            new GuidRuntimeIdProvider(),
+            clock);
+        var request = CreateRequest();
+        await RegisterRequestUnitAsync(materials, request);
+        Assert.True((await coordinator.SubmitAsync(request)).IsSuccess);
+        var execution = runner.ExecuteAsync(request.RunId).AsTask();
+        await dispatcher.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var cancellation = coordinator.CommandAsync(
+            request.RunId,
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.Cancel,
+                "operator.cancel",
+                "Terminate the vendor execution now."))
+            .AsTask();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+        var command = await cancellation.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(command.IsSuccess);
+        Assert.True(result.IsSuccess);
+        Assert.True(dispatcher.ExecutionToken.IsCancellationRequested);
+        Assert.Equal(ExecutionStatus.Canceled, result.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, result.Value.Run.Judgement);
+        Assert.Equal(ProductDisposition.Held, result.Value.Run.Disposition);
+        Assert.Equal("Runtime.ProductionRunCanceled", result.Value.Run.FailureCode);
+    }
+
+    [Fact]
+    public async Task SafeStopCancelsActiveExecutionAndPreventsNextOperationDispatch()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
+        var leases = new InMemoryResourceLeaseRepository();
+        var clock = new FixedClock(Now);
+        var publisher = new InMemoryRuntimeDomainEventPublisher();
+        var registry = new InProcessStationOperationRegistry();
+        var dispatcher = new SafeStopDispatcher(registry);
+        var coordinator = new ProductionRunCoordinator(
+            repository,
+            materials,
+            leases,
+            new AcceptingSafetyController(),
+            new InProcessStationOperationCanceler(registry),
+            publisher,
+            clock);
+        var runner = new ProductionRunRunner(
+            repository,
+            repository,
+            leases,
+            new ProductionOperationReadinessEvaluator(materials),
+            dispatcher,
+            publisher,
+            new GuidRuntimeIdProvider(),
+            clock);
+        var request = CreateSequentialRequest();
+        await RegisterRequestUnitAsync(materials, request);
+        Assert.True((await coordinator.SubmitAsync(request)).IsSuccess);
+        var execution = runner.ExecuteAsync(request.RunId).AsTask();
+        await dispatcher.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var safeStopTask = coordinator.CommandAsync(
+                request.RunId,
+                new ProductionRunCommandRequest(
+                    ProductionRunCommand.SafeStop,
+                    "operator.safety",
+                    "Guard opened; stop the station and terminate active execution."))
+            .AsTask();
+        await dispatcher.CancellationObserved.WaitAsync(TimeSpan.FromSeconds(5));
+        dispatcher.ReleaseCancellationResult();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+        var safeStop = await safeStopTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(safeStop.IsSuccess);
+        Assert.True(result.IsSuccess);
+        Assert.Equal(ExecutionStatus.Canceled, result.Value.Run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, result.Value.Run.Judgement);
+        Assert.Equal(ProductDisposition.Held, result.Value.Run.Disposition);
+        Assert.Equal(["operation.main"], dispatcher.OperationIds);
+    }
+
+    [Fact]
+    public async Task TwoProductionUnitsDispatchAtIndependentStationsBeforeEitherCompletes()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
+        var leases = new InMemoryResourceLeaseRepository();
+        var clock = new FixedClock(Now);
+        var publisher = new InMemoryRuntimeDomainEventPublisher();
+        var dispatcher = new ConcurrentRunDispatcher();
+        var coordinator = new ProductionRunCoordinator(
+            repository,
+            materials,
+            leases,
+            new AcceptingSafetyController(),
+            new AcceptingCanceler(),
+            publisher,
+            clock);
+        var runner = new ProductionRunRunner(
+            repository,
+            repository,
+            leases,
+            new ProductionOperationReadinessEvaluator(materials),
+            dispatcher,
+            publisher,
+            new GuidRuntimeIdProvider(),
+            clock);
+        var requestA = CreateSingleStationRequest("a");
+        var requestB = CreateSingleStationRequest("b");
+        await RegisterRequestUnitAsync(materials, requestA);
+        await RegisterRequestUnitAsync(materials, requestB);
+        Assert.True((await coordinator.SubmitAsync(requestA)).IsSuccess);
+        Assert.True((await coordinator.SubmitAsync(requestB)).IsSuccess);
+
+        var executionA = runner.ExecuteAsync(requestA.RunId).AsTask();
+        var executionB = runner.ExecuteAsync(requestB.RunId).AsTask();
+        await dispatcher.BothRunsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(executionA.IsCompleted);
+        Assert.False(executionB.IsCompleted);
+        Assert.Contains(dispatcher.StationIds, id => id == "station.a");
+        Assert.Contains(dispatcher.StationIds, id => id == "station.b");
+        dispatcher.ReleaseRuns();
+        var results = await Task.WhenAll(executionA, executionB)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.All(results, result =>
+        {
+            Assert.True(result.IsSuccess);
+            Assert.Equal(ExecutionStatus.Completed, result.Value.Run.ExecutionStatus);
+            Assert.Equal(ResultJudgement.Passed, result.Value.Run.Judgement);
+        });
+    }
+
+    private static async ValueTask RegisterRequestUnitAsync(
+        InMemoryProductionMaterialRepository materials,
+        SubmitProductionRunRequest request)
+    {
+        var entryOperation = request.Operations.Single(operation => string.Equals(
+            operation.Definition.OperationId,
+            request.EntryOperationId,
+            StringComparison.Ordinal));
+        var unit = ProductionUnit.Register(
+            request.ProductionUnitId,
+            request.FrozenProductModelId,
+            request.FrozenIdentityInputKey,
+            $"UNIT-{request.ProductionUnitId.Value:N}",
+            null,
+            request.ActorId,
+            Now.AddTicks(-1));
+        Assert.True(await materials.TryAddAsync(unit));
+        var materialService = new ProductionMaterialService(
+            materials,
+            new InMemoryProductionRunRepository(materials));
+        Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            MaterialReference.ForProductionUnit(unit.Id),
+            MaterialLocation.AtStation(
+                request.ProductionLineDefinitionId,
+                entryOperation.Definition.StationSystemId),
+            request.ActorId,
+            Now))).Succeeded);
     }
 
     private static SubmitProductionRunRequest CreateRequest()
@@ -166,11 +417,7 @@ public sealed class ProductionRunRunnerTests
             new ConfigurationSnapshotId("configuration.main"),
             new RecipeSnapshotId("recipe.main"),
             process,
-            [
-                new ResourceRequirement(ResourceKind.Station, "station.main"),
-                new ResourceRequirement(ResourceKind.Slot, "slot.01"),
-                new ResourceRequirement(ResourceKind.Device, "device.tester")
-            ]);
+            [new ResourceRequirement(ResourceKind.Station, "station.main")]);
         return new SubmitProductionRunRequest(
             ProductionRunId.New(),
             "project.main",
@@ -178,13 +425,44 @@ public sealed class ProductionRunRunnerTests
             "snapshot.main",
             "topology.main",
             "line.main",
-            new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
+            ProductionUnitId.New(),
+            "product.board",
+            "serialNumber",
             "operator.main",
             operation.Definition.OperationId,
             [operation],
-            [],
-            "lot-001",
-            "carrier-001");
+            []);
+    }
+
+    private static SubmitProductionRunRequest CreateSingleStationRequest(string suffix)
+    {
+        var stationId = $"station.{suffix}";
+        var operationId = $"operation.{suffix}";
+        var operation = new OperationExecutionPlan(
+            operationId,
+            stationId,
+            new StationId(stationId),
+            new ConfigurationSnapshotId($"configuration.{suffix}"),
+            new RecipeSnapshotId($"recipe.{suffix}"),
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId($"process.{suffix}"),
+                new ProcessVersionId($"process-version.{suffix}"),
+                []),
+            [new ResourceRequirement(ResourceKind.Station, stationId)]);
+        return new SubmitProductionRunRequest(
+            ProductionRunId.New(),
+            $"project.{suffix}",
+            $"application.{suffix}",
+            $"snapshot.{suffix}",
+            $"topology.{suffix}",
+            $"line.{suffix}",
+            ProductionUnitId.New(),
+            "product.board",
+            "serialNumber",
+            "operator.parallel",
+            operationId,
+            [operation],
+            []);
     }
 
     private static SubmitProductionRunRequest CreateParallelRequest()
@@ -200,7 +478,7 @@ public sealed class ProductionRunRunnerTests
             new ConfigurationSnapshotId($"configuration.{operationId}"),
             new RecipeSnapshotId($"recipe.{operationId}"),
             process,
-            [new ResourceRequirement(ResourceKind.Station, stationId)]);
+            [new ResourceRequirement(ResourceKind.Device, $"device.{operationId}")]);
         return new SubmitProductionRunRequest(
             ProductionRunId.New(),
             "project.parallel",
@@ -208,14 +486,16 @@ public sealed class ProductionRunRunnerTests
             "snapshot.parallel",
             "topology.parallel",
             "line.parallel",
-            new ProductionUnitIdentity("product.board", "serialNumber", "SN-PARALLEL"),
+            ProductionUnitId.New(),
+            "product.board",
+            "serialNumber",
             "operator.parallel",
             "operation.entry",
             [
                 Operation("operation.entry", "station.entry"),
-                Operation("operation.left", "station.left"),
-                Operation("operation.right", "station.right"),
-                Operation("operation.join", "station.join")
+                Operation("operation.left", "station.entry"),
+                Operation("operation.right", "station.entry"),
+                Operation("operation.join", "station.entry")
             ],
             [
                 new RouteTransitionDefinition(
@@ -245,9 +525,47 @@ public sealed class ProductionRunRunnerTests
             ]);
     }
 
+    private static SubmitProductionRunRequest CreateSequentialRequest()
+    {
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.sequential"),
+            new ProcessVersionId("process-version.sequential"),
+            []);
+        OperationExecutionPlan Operation(string operationId, string stationId) => new(
+            operationId,
+            stationId,
+            new StationId(stationId),
+            new ConfigurationSnapshotId($"configuration.{operationId}"),
+            new RecipeSnapshotId($"recipe.{operationId}"),
+            process,
+            [new ResourceRequirement(ResourceKind.Station, stationId)]);
+        return new SubmitProductionRunRequest(
+            ProductionRunId.New(),
+            "project.sequential",
+            "application.sequential",
+            "snapshot.sequential",
+            "topology.sequential",
+            "line.sequential",
+            ProductionUnitId.New(),
+            "product.board",
+            "serialNumber",
+            "operator.sequential",
+            "operation.main",
+            [
+                Operation("operation.main", "station.main"),
+                Operation("operation.next", "station.next")
+            ],
+            [new RouteTransitionDefinition(
+                "route.next",
+                "operation.main",
+                "operation.next",
+                RuntimeRouteTransitionKind.Sequence)]);
+    }
+
     private sealed class Fixture
     {
-        private readonly InMemoryProductionRunRepository _repository = new();
+        private readonly InMemoryProductionMaterialRepository _materials;
+        private readonly InMemoryProductionRunRepository _repository;
         private readonly InMemoryResourceLeaseRepository _leases = new();
         private readonly FixedClock _clock = new(Now);
         private readonly InMemoryRuntimeDomainEventPublisher _publisher = new();
@@ -268,17 +586,22 @@ public sealed class ProductionRunRunnerTests
             RecordingDispatcher dispatcher,
             IStationSafetyController safetyController)
         {
+            _materials = new InMemoryProductionMaterialRepository();
+            _repository = new InMemoryProductionRunRepository(_materials);
             Dispatcher = dispatcher;
             Coordinator = new ProductionRunCoordinator(
                 _repository,
+                _materials,
                 _leases,
                 safetyController,
+                new AcceptingCanceler(),
                 _publisher,
                 _clock);
             Runner = new ProductionRunRunner(
                 _repository,
                 _repository,
                 _leases,
+                new ProductionOperationReadinessEvaluator(_materials),
                 dispatcher,
                 _publisher,
                 new GuidRuntimeIdProvider(),
@@ -289,9 +612,38 @@ public sealed class ProductionRunRunnerTests
 
         public InMemoryProductionRunRepository Repository => _repository;
 
+        public InMemoryResourceLeaseRepository Leases => _leases;
+
         public ProductionRunCoordinator Coordinator { get; }
 
         public ProductionRunRunner Runner { get; }
+
+        public async ValueTask<OpenLineOps.Application.Abstractions.Results.Result<ProductionRunSnapshot>>
+            SubmitAsync(SubmitProductionRunRequest request)
+        {
+            var entryOperation = request.Operations.Single(operation => string.Equals(
+                operation.Definition.OperationId,
+                request.EntryOperationId,
+                StringComparison.Ordinal));
+            var unit = ProductionUnit.Register(
+                request.ProductionUnitId,
+                request.FrozenProductModelId,
+                request.FrozenIdentityInputKey,
+                $"UNIT-{request.ProductionUnitId.Value:N}",
+                null,
+                request.ActorId,
+                Now.AddTicks(-1));
+            Assert.True(await _materials.TryAddAsync(unit));
+            var materialService = new ProductionMaterialService(_materials, _repository);
+            Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+                MaterialReference.ForProductionUnit(unit.Id),
+                MaterialLocation.AtStation(
+                    request.ProductionLineDefinitionId,
+                    entryOperation.Definition.StationSystemId),
+                request.ActorId,
+                Now))).Succeeded);
+            return await Coordinator.SubmitAsync(request);
+        }
     }
 
     private sealed class RecordingDispatcher : IStationOperationDispatcher
@@ -316,18 +668,18 @@ public sealed class ProductionRunRunnerTests
         }
     }
 
-    private sealed class ParallelBranchDispatcher : IStationOperationDispatcher
+    private sealed class ConcurrentRunDispatcher : IStationOperationDispatcher
     {
         private readonly Lock _sync = new();
-        private readonly TaskCompletionSource _bothBranchesStarted = new(
+        private readonly TaskCompletionSource _bothRunsStarted = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _releaseBranches = new(
+        private readonly TaskCompletionSource _releaseRuns = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        private int _branchCount;
+        private int _runCount;
 
-        public Task BothBranchesStarted => _bothBranchesStarted.Task;
+        public Task BothRunsStarted => _bothRunsStarted.Task;
 
-        public List<string> OperationIds { get; } = [];
+        public List<string> StationIds { get; } = [];
 
         public async ValueTask<StationOperationDispatchResult> DispatchAsync(
             StationOperationDispatchRequest request,
@@ -335,24 +687,19 @@ public sealed class ProductionRunRunnerTests
         {
             lock (_sync)
             {
-                OperationIds.Add(request.Operation.Definition.OperationId);
+                StationIds.Add(request.Operation.Definition.StationSystemId);
             }
 
-            if (request.Operation.Definition.OperationId is "operation.left" or "operation.right")
+            if (Interlocked.Increment(ref _runCount) == 2)
             {
-                if (Interlocked.Increment(ref _branchCount) == 2)
-                {
-                    _bothBranchesStarted.TrySetResult();
-                }
-
-                await _releaseBranches.Task.WaitAsync(cancellationToken);
+                _bothRunsStarted.TrySetResult();
             }
+
+            await _releaseRuns.Task.WaitAsync(cancellationToken);
 
             return new StationOperationDispatchResult(
                 ExecutionStatus.Completed,
-                request.Operation.Definition.OperationId == "operation.entry"
-                    ? ResultJudgement.NotApplicable
-                    : ResultJudgement.Passed,
+                ResultJudgement.Passed,
                 null,
                 0,
                 0,
@@ -360,7 +707,111 @@ public sealed class ProductionRunRunnerTests
                 Now.AddSeconds(1));
         }
 
-        public void ReleaseBranches() => _releaseBranches.TrySetResult();
+        public void ReleaseRuns() => _releaseRuns.TrySetResult();
+    }
+
+    private sealed class BoundaryDispatcher(
+        InProcessStationOperationRegistry registry,
+        bool completeOnRelease) : IStationOperationDispatcher
+    {
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+
+        public CancellationToken ExecutionToken { get; private set; }
+
+        public async ValueTask<StationOperationDispatchResult> DispatchAsync(
+            StationOperationDispatchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            using var execution = registry.Register(request.IdempotencyKey, cancellationToken);
+            ExecutionToken = execution.CancellationToken;
+            _started.TrySetResult();
+            if (completeOnRelease)
+            {
+                await _release.Task.WaitAsync(execution.CancellationToken);
+                return new StationOperationDispatchResult(
+                    ExecutionStatus.Completed,
+                    ResultJudgement.Passed,
+                    null,
+                    1,
+                    1,
+                    0,
+                    Now.AddSeconds(1));
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, execution.CancellationToken);
+                throw new InvalidOperationException("Infinite delay completed without cancellation.");
+            }
+            catch (OperationCanceledException) when (execution.CancellationToken.IsCancellationRequested)
+            {
+                return new StationOperationDispatchResult(
+                    ExecutionStatus.Canceled,
+                    ResultJudgement.Aborted,
+                    null,
+                    0,
+                    0,
+                    0,
+                    Now.AddSeconds(1),
+                    "Runtime.OperationCanceled",
+                    "Station operation cancellation reached the active execution token.");
+            }
+        }
+
+        public void Release() => _release.TrySetResult();
+    }
+
+    private sealed class SafeStopDispatcher(InProcessStationOperationRegistry registry)
+        : IStationOperationDispatcher
+    {
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _cancellationObserved =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseCancellationResult =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+
+        public Task CancellationObserved => _cancellationObserved.Task;
+
+        public List<string> OperationIds { get; } = [];
+
+        public async ValueTask<StationOperationDispatchResult> DispatchAsync(
+            StationOperationDispatchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            OperationIds.Add(request.Operation.Definition.OperationId);
+            using var execution = registry.Register(request.IdempotencyKey, cancellationToken);
+            _started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, execution.CancellationToken);
+                throw new InvalidOperationException("Infinite delay completed without cancellation.");
+            }
+            catch (OperationCanceledException) when (execution.CancellationToken.IsCancellationRequested)
+            {
+                _cancellationObserved.TrySetResult();
+                await _releaseCancellationResult.Task;
+                return new StationOperationDispatchResult(
+                    ExecutionStatus.Canceled,
+                    ResultJudgement.Aborted,
+                    null,
+                    0,
+                    0,
+                    0,
+                    Now.AddSeconds(1),
+                    "Runtime.OperationCanceled",
+                    "Safe Stop canceled the active station operation.");
+            }
+        }
+
+        public void ReleaseCancellationResult() => _releaseCancellationResult.TrySetResult();
     }
 
     private sealed class FixedClock(DateTimeOffset value) : IClock
@@ -384,5 +835,13 @@ public sealed class ProductionRunRunnerTests
             ValueTask.FromResult(StationSafetyResult.Failure(
                 "Safety.AgentUnavailable",
                 "Station Agent did not acknowledge Safe Stop."));
+    }
+
+    private sealed class AcceptingCanceler : IStationOperationCanceler
+    {
+        public ValueTask<StationOperationCancellationResult> CancelAsync(
+            StationOperationCancellationRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(StationOperationCancellationResult.Success());
     }
 }

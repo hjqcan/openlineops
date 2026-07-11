@@ -625,13 +625,13 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                 }
                 """),
             BuiltIn(
-                "openlineops_run_external_test",
+                "openlineops_run_external_program",
                 "Production",
-                "Run External Test",
+                "Run External Program",
                 """
                 {
-                  "type": "openlineops_run_external_test",
-                  "message0": "run external test target %1 %2 capability %3 command %4 adapter %5 timeout %6 ms",
+                  "type": "openlineops_run_external_program",
+                  "message0": "run external program target %1 %2 capability %3 command %4 resource %5 timeout %6 ms",
                   "args0": [
                     {
                       "type": "field_dropdown",
@@ -641,12 +641,12 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     {
                       "type": "field_input",
                       "name": "TARGET_ID",
-                      "text": "workstation.main"
+                      "text": "station.main"
                     },
                     {
                       "type": "field_input",
                       "name": "CAPABILITY",
-                      "text": "production.external-test"
+                      "text": "application.external-program"
                     },
                     {
                       "type": "field_input",
@@ -655,8 +655,8 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                     },
                     {
                       "type": "field_input",
-                      "name": "ADAPTER_ID",
-                      "text": "adapter.main"
+                      "name": "RESOURCE_ID",
+                      "text": "resource.main"
                     },
                     {
                       "type": "field_number",
@@ -669,7 +669,7 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "previousStatement": null,
                   "nextStatement": null,
                   "colour": 12,
-                  "tooltip": "Run an external production test through an explicitly bound adapter."
+                  "tooltip": "Run an Application external program resource through an explicitly bound capability."
                 }
                 """),
             BuiltIn(

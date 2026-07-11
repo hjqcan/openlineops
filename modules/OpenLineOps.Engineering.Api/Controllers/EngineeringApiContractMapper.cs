@@ -57,6 +57,7 @@ internal static class EngineeringApiContractMapper
             request.DeviceBindings!
                 .Select(binding => new CreateApplicationDeviceBindingRequest(
                     binding.DeviceBindingId!,
+                    binding.OwnerSystemId!,
                     binding.CapabilityId!,
                     binding.DeviceKey!))
                 .ToArray());
@@ -107,6 +108,7 @@ internal static class EngineeringApiContractMapper
             snapshot.DeviceBindings
                 .Select(binding => new DeviceBindingSnapshotResponse(
                     binding.DeviceBindingId,
+                    binding.OwnerSystemId,
                     binding.CapabilityId,
                     binding.DeviceKey))
                 .ToArray());
@@ -135,6 +137,7 @@ internal static class EngineeringApiContractMapper
             stationProfile.DeviceBindings
                 .Select(binding => new DeviceBindingResponse(
                     binding.DeviceBindingId,
+                    binding.OwnerSystemId,
                     binding.CapabilityId,
                     binding.DeviceKey))
                 .ToArray());

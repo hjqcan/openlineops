@@ -171,6 +171,142 @@ public sealed class StationSafetyCommandCoordinatorTests
         }
     }
 
+    [Fact]
+    public async Task JobCancellationDuplicateAfterRestartReplaysPersistedAcknowledgement()
+    {
+        var path = DatabasePath();
+        var request = JobCancel();
+        var executionCount = 0;
+        try
+        {
+            StationJobCancelAcknowledged first;
+            using (var store = Store(path))
+            {
+                var coordinator = new StationSafetyCommandCoordinator(store, new FixedClock(Now));
+                first = await coordinator.HandleJobCancelAsync(
+                    request,
+                    (_, _) =>
+                    {
+                        executionCount++;
+                        return ValueTask.FromResult(StationJobCancelExecutionResult.Success());
+                    });
+            }
+
+            using (var store = Store(path))
+            {
+                var restarted = new StationSafetyCommandCoordinator(
+                    store,
+                    new FixedClock(Now.AddMinutes(1)));
+                var duplicate = await restarted.HandleJobCancelAsync(
+                    request with
+                    {
+                        MessageId = Guid.NewGuid(),
+                        RequestedAtUtc = Now.AddMinutes(1)
+                    },
+                    (_, _) => throw new InvalidOperationException(
+                        "A persisted Station job cancellation must not be replayed."));
+
+                Assert.Equal(first, duplicate);
+                Assert.Equal(request.MessageId, duplicate.RequestMessageId);
+                Assert.Equal(request.JobId, duplicate.JobId);
+                Assert.Equal(1, executionCount);
+            }
+        }
+        finally
+        {
+            DeleteDatabase(path);
+        }
+    }
+
+    [Fact]
+    public async Task JobCancellationRejectsSameIdempotencyKeyWithDifferentOperatorEvidence()
+    {
+        var path = DatabasePath();
+        var request = JobCancel();
+        var executionCount = 0;
+        try
+        {
+            using var store = Store(path);
+            var coordinator = new StationSafetyCommandCoordinator(store, new FixedClock(Now));
+            _ = await coordinator.HandleJobCancelAsync(
+                request,
+                (_, _) =>
+                {
+                    executionCount++;
+                    return ValueTask.FromResult(StationJobCancelExecutionResult.Success());
+                });
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await coordinator.HandleJobCancelAsync(
+                    request with
+                    {
+                        MessageId = Guid.NewGuid(),
+                        ActorId = "operator-002",
+                        Reason = "Different cancellation evidence",
+                        RequestedAtUtc = Now.AddSeconds(1)
+                    },
+                    (_, _) => throw new InvalidOperationException(
+                        "A mismatched idempotency key must not reach execution.")));
+
+            Assert.Contains("reused with different evidence", exception.Message, StringComparison.Ordinal);
+            Assert.Equal(1, executionCount);
+        }
+        finally
+        {
+            DeleteDatabase(path);
+        }
+    }
+
+    [Fact]
+    public async Task PendingJobCancellationAfterRestartRequiresRecoveryWithoutReplay()
+    {
+        var path = DatabasePath();
+        var request = JobCancel();
+        var executionCount = 0;
+        try
+        {
+            using (var store = Store(path))
+            {
+                var coordinator = new StationSafetyCommandCoordinator(store, new FixedClock(Now));
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                    await coordinator.HandleJobCancelAsync(
+                        request,
+                        (_, _) =>
+                        {
+                            executionCount++;
+                            throw new InvalidOperationException(
+                                "Simulated Agent loss after cancellation dispatch.");
+                        }));
+            }
+
+            using (var store = Store(path))
+            {
+                var restarted = new StationSafetyCommandCoordinator(
+                    store,
+                    new FixedClock(Now.AddMinutes(1)));
+                var acknowledgement = await restarted.HandleJobCancelAsync(
+                    request with
+                    {
+                        MessageId = Guid.NewGuid(),
+                        RequestedAtUtc = Now.AddMinutes(1)
+                    },
+                    (_, _) => throw new InvalidOperationException(
+                        "An uncertain cancellation must not be replayed."));
+
+                Assert.False(acknowledgement.Accepted);
+                Assert.Equal(
+                    "Agent.JobCancellationRecoveryRequired",
+                    acknowledgement.FailureCode);
+                Assert.Contains("not replayed", acknowledgement.FailureReason, StringComparison.Ordinal);
+                Assert.Equal(1, executionCount);
+            }
+        }
+        finally
+        {
+            DeleteDatabase(path);
+        }
+    }
+
     private static EmergencyStopRequested EmergencyStop() => new(
         Guid.NewGuid(),
         "safety/emergency/station-assembly/0001",
@@ -190,6 +326,20 @@ public sealed class StationSafetyCommandCoordinatorTests
         "operation-assemble@1",
         "operator-001",
         "Stop after the current safe boundary",
+        Now);
+
+    private static StationJobCancelRequested JobCancel() => new(
+        Guid.NewGuid(),
+        "run-0001/operation-assemble@1/cancel",
+        Guid.NewGuid(),
+        "run-0001/operation-assemble@1",
+        "agent-station-assembly",
+        "station-assembly",
+        "system-station-assembly",
+        Guid.NewGuid(),
+        "operation-assemble@1",
+        "operator-001",
+        "Terminate the active vendor process tree",
         Now);
 
     private static string DatabasePath() =>

@@ -1,6 +1,13 @@
+using System.Text.Json;
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Occupancy;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
@@ -173,7 +180,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
         var run = CreateRun();
         Assert.True(run.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
-        Assert.True(run.Stop("Operator stopped before dispatch.", BaseTimeUtc.AddSeconds(2)).Succeeded);
+        Assert.True(run.Cancel("Operator stopped before dispatch.", BaseTimeUtc.AddSeconds(2)).Succeeded);
 
         await subscriber.HandleAsync(run.ToSnapshot());
 
@@ -190,6 +197,377 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Empty(operation.FencingTokens);
     }
 
+    [Fact]
+    public async Task ReconciledInterruptedOperationFreezesOperatorEvidenceWithoutRuntimeReplay()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out _);
+        Assert.True(run.MarkRecoveryRequired(
+            "Agent disappeared after device actuation.",
+            BaseTimeUtc.AddSeconds(2)).Succeeded);
+        var decision = new ProductionRecoveryDecision(
+            Guid.Parse("44444444-4444-4444-4444-444444444444"),
+            ProductionRecoveryDecisionKind.Reconcile,
+            "operator-board",
+            "Inspection confirms the vendor test completed and passed.",
+            "inspection:report-0042",
+            BaseTimeUtc.AddSeconds(3),
+            operationRunId: operation.OperationRunId,
+            observedJudgement: ResultJudgement.Passed,
+            observedOutputs: new Dictionary<string, ProductionContextValue>
+            {
+                ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
+            });
+        Assert.True(run.ReconcileRecovery(decision).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(TraceRuntimeSessionStatus.Reconciled, storedOperation.RuntimeSessionStatus);
+        Assert.Equal(ResultJudgement.Passed, storedOperation.Judgement);
+        Assert.Empty(storedOperation.Commands);
+        Assert.Empty(storedOperation.Incidents);
+        Assert.Equal("Passed", Assert.Single(storedOperation.Outputs).CanonicalJson.Trim('"'));
+        var audit = Assert.Single(trace.AuditEntries, entry =>
+            entry.Action == "ProductionRun.Recovery.Reconcile");
+        Assert.Equal("operator-board", audit.ActorId.Value);
+        Assert.Contains("inspection:report-0042", audit.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemoteStationCompletionFreezesDetailedEvidenceAndCentralArtifactKey()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var stationJobs = new InMemoryStationJobCoordinationStore();
+        var materials = new InMemoryProductionMaterialRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var service = new TraceRecordService(traceRepository, new SystemClock());
+        var subscriber = new ProductionRunTraceDomainEventSubscriber(
+            runtimeRepository,
+            stationJobs,
+            materials,
+            service);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var stepId = Guid.NewGuid();
+        var commandId = Guid.NewGuid();
+        var outputs = TypedOutputs("Passed");
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
+            },
+            1,
+            1,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
+        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+            Guid.NewGuid(),
+            StationJobIdentity.CreateJobId(idempotencyKey),
+            idempotencyKey,
+            "agent.functional-test",
+            operation.StationId.Value,
+            sessionId.Value,
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            outputs,
+            1,
+            1,
+            0,
+            [
+                new StationJobStepEvidence(
+                    stepId,
+                    "node.board-test",
+                    "action.board-test",
+                    "System",
+                    operation.StationSystemId,
+                    "Execute vendor program",
+                    "Completed",
+                    BaseTimeUtc.AddSeconds(2),
+                    BaseTimeUtc.AddSeconds(6),
+                    null)
+            ],
+            [
+                new StationJobCommandEvidence(
+                    commandId,
+                    stepId,
+                    "node.board-test",
+                    "action.board-test",
+                    "System",
+                    operation.StationSystemId,
+                    "test.external",
+                    "ExecuteProgram",
+                    "Completed",
+                    BaseTimeUtc.AddSeconds(2),
+                    BaseTimeUtc.AddSeconds(32),
+                    BaseTimeUtc.AddSeconds(2),
+                    BaseTimeUtc.AddSeconds(3),
+                    BaseTimeUtc.AddSeconds(6),
+                    "{\"outcome\":\"Passed\"}",
+                    null,
+                    ResultJudgement.Passed)
+            ],
+            [],
+            [
+                new StationJobArtifact(
+                    "vendor-report.pdf",
+                    "Report",
+                    "sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "application/pdf",
+                    512,
+                    new string('a', 64))
+            ],
+            null,
+            null,
+            BaseTimeUtc.AddSeconds(7)));
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(sessionId.Value, storedOperation.RuntimeSessionId?.Value);
+        Assert.Equal(commandId, Assert.Single(storedOperation.Commands).RuntimeCommandId.Value);
+        var artifact = Assert.Single(storedOperation.Artifacts);
+        Assert.Equal(
+            "sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifact.StorageKey);
+        Assert.Equal(new string('a', 64), artifact.Sha256);
+    }
+
+    [Fact]
+    public async Task RemoteStationCompletionRejectsTamperedIdentityAndCounts()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var stationJobs = new InMemoryStationJobCoordinationStore();
+        var materials = new InMemoryProductionMaterialRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = new ProductionRunTraceDomainEventSubscriber(
+            runtimeRepository,
+            stationJobs,
+            materials,
+            new TraceRecordService(traceRepository, new SystemClock()));
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            0,
+            0,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
+        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            idempotencyKey,
+            "agent.functional-test",
+            operation.StationId.Value,
+            sessionId.Value,
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            TypedOutputs(),
+            1,
+            0,
+            0,
+            [],
+            [],
+            [],
+            [],
+            null,
+            null,
+            BaseTimeUtc.AddSeconds(7)));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await subscriber.HandleAsync(run.ToSnapshot()));
+        Assert.Contains("Station job id", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+    }
+
+    [Fact]
+    public async Task RemoteStationCompletionRejectsTamperedEvidenceCount()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var stationJobs = new InMemoryStationJobCoordinationStore();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = new ProductionRunTraceDomainEventSubscriber(
+            runtimeRepository,
+            stationJobs,
+            new InMemoryProductionMaterialRepository(),
+            new TraceRecordService(traceRepository, new SystemClock()));
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            0,
+            0,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
+        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+            Guid.NewGuid(),
+            StationJobIdentity.CreateJobId(idempotencyKey),
+            idempotencyKey,
+            "agent.functional-test",
+            operation.StationId.Value,
+            sessionId.Value,
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            TypedOutputs(),
+            1,
+            0,
+            0,
+            [],
+            [],
+            [],
+            [],
+            null,
+            null,
+            BaseTimeUtc.AddSeconds(7)));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await subscriber.HandleAsync(run.ToSnapshot()));
+        Assert.Contains("completed step count", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+    }
+
+    [Fact]
+    public async Task TerminalTraceIncludesUnitCarrierSlotDispositionAndGenealogyTimeline()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var stationJobs = new InMemoryStationJobCoordinationStore();
+        var materials = new InMemoryProductionMaterialRepository();
+        var materialService = new ProductionMaterialService(
+            materials,
+            new InMemoryProductionRunRepository(materials));
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = new ProductionRunTraceDomainEventSubscriber(
+            runtimeRepository,
+            stationJobs,
+            materials,
+            new TraceRecordService(traceRepository, new SystemClock()));
+        var run = CreateRun();
+        var parentId = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New();
+        var carrierId = new CarrierId(run.CarrierId!);
+        var station = MaterialLocation.AtStation(
+            run.ProductionLineDefinitionId,
+            "station.functional-test");
+        var slot = new SlotAddress(
+            run.ProductionLineDefinitionId,
+            "station.functional-test",
+            "slot-01");
+        Assert.True((await materialService.RegisterUnitAsync(new RegisterProductionUnitCommand(
+            run.ProductionUnitId,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            null,
+            run.ActorId,
+            BaseTimeUtc.AddSeconds(-1)))).Succeeded);
+        Assert.True((await materialService.RegisterUnitAsync(new RegisterProductionUnitCommand(
+            parentId,
+            run.ProductionUnitIdentity.ModelId,
+            "serialNumber",
+            "UNIT-PARENT-0001",
+            null,
+            run.ActorId,
+            BaseTimeUtc.AddSeconds(-1)))).Succeeded);
+        Assert.True((await materialService.RegisterCarrierAsync(new RegisterCarrierCommand(
+            carrierId,
+            "tray-4",
+            4,
+            run.ActorId,
+            BaseTimeUtc.AddSeconds(-1)))).Succeeded);
+        Assert.True((await materialService.RegisterSlotAsync(new RegisterSlotCommand(
+            slot,
+            "engineer-a",
+            BaseTimeUtc.AddSeconds(-1)))).Succeeded);
+        Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            MaterialReference.ForProductionUnit(run.ProductionUnitId),
+            station,
+            "scanner-a",
+            BaseTimeUtc))).Succeeded);
+        Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            MaterialReference.ForCarrier(carrierId),
+            station,
+            "scanner-a",
+            BaseTimeUtc))).Succeeded);
+        Assert.True((await materialService.HoldAsync(new HoldProductionUnitCommand(
+            run.ProductionUnitId,
+            "quality gate",
+            "quality-a",
+            BaseTimeUtc))).Succeeded);
+        Assert.True((await materialService.ReleaseAsync(new ReleaseProductionUnitCommand(
+            run.ProductionUnitId,
+            "quality-a",
+            BaseTimeUtc))).Succeeded);
+        Assert.True((await materialService.ReserveSlotAsync(new ReserveSlotCommand(
+            slot,
+            MaterialReference.ForProductionUnit(run.ProductionUnitId),
+            "coordinator-a",
+            BaseTimeUtc))).Succeeded);
+        Assert.True((await materialService.LinkGenealogyAsync(new LinkMaterialGenealogyCommand(
+            MaterialGenealogyLinkId.New(),
+            parentId,
+            run.ProductionUnitId,
+            "ComponentOf",
+            "operation.board-test",
+            "operator-a",
+            BaseTimeUtc))).Succeeded);
+
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            "{\"outcome\":\"Passed\"}",
+            BaseTimeUtc.AddSeconds(4),
+            ResultJudgement.Passed).Succeeded);
+        Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
+        await runtimeRepository.SaveAsync(session);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Single(trace.Genealogy);
+        Assert.Equal(2, trace.MaterialLocationTransitions.Count);
+        Assert.Single(trace.SlotOccupancyTransitions);
+        Assert.Equal(2, trace.DispositionTransitions.Count);
+        Assert.Contains(trace.MaterialLocationTransitions, transition =>
+            transition.MaterialKind == "Carrier" && transition.MaterialId == carrierId.Value);
+        Assert.Equal("Reserved", Assert.Single(trace.SlotOccupancyTransitions).CurrentStatus);
+    }
+
+    private static JsonElement TypedOutputs(string? outcome = null)
+    {
+        var json = outcome is null
+            ? "{}"
+            : $"{{\"test.outcome\":{{\"kind\":\"Text\",\"value\":\"{outcome}\"}}}}";
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
+    }
+
     private static ProductionRunTraceDomainEventSubscriber CreateSubscriber(
         InMemoryRuntimeSessionRepository runtimeRepository,
         InMemoryTraceRecordRepository traceRepository)
@@ -197,7 +575,11 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var service = new TraceRecordService(
             traceRepository,
             new SystemClock());
-        return new ProductionRunTraceDomainEventSubscriber(runtimeRepository, service);
+        return new ProductionRunTraceDomainEventSubscriber(
+            runtimeRepository,
+            new InMemoryStationJobCoordinationStore(),
+            new InMemoryProductionMaterialRepository(),
+            service);
     }
 
     private static ProductionRun CreateRun()
@@ -222,6 +604,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             "snapshot-board-test",
             "topology-board-test",
             "line-board-test",
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             new ProductionUnitIdentity("board-model", "serialNumber", "UNIT-BOARD-0001"),
             "lot-board",
             "carrier-board",
@@ -271,8 +654,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             BaseTimeUtc,
             new RuntimeSessionTraceMetadata(
                 run.Id,
+                run.ProductionUnitId,
                 run.ProductionLineDefinitionId,
                 operation.OperationId,
+                operation.OperationRunId,
                 operation.Attempt,
                 operation.StationSystemId,
                 run.ProductionUnitIdentity,
@@ -284,7 +669,11 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                 run.ProjectId,
                 run.ApplicationId,
                 run.ProjectSnapshotId,
-                run.TopologyId));
+                run.TopologyId,
+                [new ResourceLeaseFenceEvidence(
+                    new ResourceRequirement(ResourceKind.Station, operation.StationSystemId),
+                    1,
+                    BaseTimeUtc.AddHours(1))]));
         Assert.True(session.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
         return session;
     }

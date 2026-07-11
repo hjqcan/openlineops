@@ -9,6 +9,7 @@ using OpenLineOps.Runtime.Api.Models;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
@@ -517,8 +518,10 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
     {
         return new RuntimeSessionTraceMetadata(
             new ProductionRunId(ProductionRunGuid(suffix)),
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             $"line-{suffix}",
             $"operation-{suffix}",
+            $"operation-{suffix}@0001",
             1,
             stationSystemId,
             new ProductionUnitIdentity($"product-model-{suffix}", "serialNumber", $"UNIT-{suffix}"),
@@ -530,7 +533,11 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             $"project-{suffix}",
             $"application-{suffix}",
             $"snapshot-{suffix}",
-            $"topology-{suffix}");
+            $"topology-{suffix}",
+            [new ResourceLeaseFenceEvidence(
+                new ResourceRequirement(ResourceKind.Station, stationSystemId),
+                1,
+                DateTimeOffset.MaxValue)]);
     }
 
     private static Guid ProductionRunGuid(string suffix)

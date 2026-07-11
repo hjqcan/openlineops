@@ -13,7 +13,7 @@ internal sealed record ProductionLineResourceDocument(
     string EntryOperationId,
     OperationDefinitionDocument[] Operations,
     RouteTransitionDocument[] Transitions,
-    ExternalTestProgramAdapterDocument[] ExternalTestProgramAdapters,
+    LineControllerAuthorizationDocument[] LineControllerAuthorizations,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc)
 {
@@ -32,7 +32,28 @@ internal sealed record OperationDefinitionDocument(
     string DisplayName,
     string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId);
+    string ConfigurationSnapshotId,
+    OperationResourceBindingDocument[] Resources);
+
+internal sealed record OperationResourceBindingDocument(
+    string BindingId,
+    string Kind,
+    string TopologyTargetId,
+    string Resolution);
+
+internal sealed record LineControllerAuthorizationDocument(
+    string AuthorizationId,
+    string OperationId,
+    string ActionId,
+    string ControllerSystemId,
+    string ControllerBindingId,
+    string ControllerCapabilityId,
+    string ControllerAction,
+    string TargetStationSystemId,
+    string TargetSystemId,
+    string TargetBindingId,
+    string TargetCapabilityId,
+    string TargetAction);
 
 internal sealed record RouteTransitionDocument(
     string TransitionId,
@@ -45,26 +66,3 @@ internal sealed record RouteTransitionDocument(
     string? OutputKey,
     string? ExpectedOutputKind,
     string? ExpectedOutputValue);
-
-internal sealed record ExternalTestProgramAdapterDocument(
-    string AdapterId,
-    string DisplayName,
-    string CapabilityId,
-    string CommandName,
-    string? Executable,
-    string? ProviderKey,
-    string[] ArgumentTemplates,
-    ExternalTestProgramInputMappingDocument[] InputMappings,
-    ExternalTestProgramResultMappingDocument[] ResultMappings,
-    ExternalTestProgramOutcomeMappingDocument OutcomeMapping,
-    long TimeoutMilliseconds);
-
-internal sealed record ExternalTestProgramInputMappingDocument(string Source, string Target);
-
-internal sealed record ExternalTestProgramResultMappingDocument(string SourcePath, string TargetKey);
-
-internal sealed record ExternalTestProgramOutcomeMappingDocument(
-    string SourcePath,
-    string PassedToken,
-    string FailedToken,
-    string AbortedToken);

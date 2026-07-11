@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 
@@ -45,6 +46,9 @@ public interface IProductionMaterialRepository
     ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<ProductionUnit>>>
         ListProductionUnitsAsync(CancellationToken cancellationToken = default);
 
+    ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>
+        ListCarriersAsync(CancellationToken cancellationToken = default);
+
     ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<SlotOccupancy>>>
         ListSlotsAsync(
             string? lineId = null,
@@ -52,6 +56,10 @@ public interface IProductionMaterialRepository
             CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<MaterialGenealogyLink>> ListGenealogyLinksAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyCollection<ProductionMaterialTimelineEntry>> ListTimelineAsync(
+        ProductionMaterialTimelineQuery query,
         CancellationToken cancellationToken = default);
 
     ValueTask CommitAsync(
@@ -125,14 +133,22 @@ public sealed record ProductionMaterialCommit
     public ProductionMaterialCommit(
         IEnumerable<ProductionUnitUpdate>? productionUnits = null,
         IEnumerable<CarrierUpdate>? carriers = null,
-        IEnumerable<SlotOccupancyUpdate>? slots = null)
+        IEnumerable<SlotOccupancyUpdate>? slots = null,
+        IEnumerable<ProductionMaterialTimelineEntry>? timeline = null)
     {
         ProductionUnits = productionUnits?.ToArray() ?? [];
         Carriers = carriers?.ToArray() ?? [];
         Slots = slots?.ToArray() ?? [];
+        Timeline = timeline?.ToArray() ?? [];
         if (ProductionUnits.Count + Carriers.Count + Slots.Count == 0)
         {
             throw new ArgumentException("A Production Material commit cannot be empty.");
+        }
+
+        if (Timeline.Count == 0)
+        {
+            throw new ArgumentException(
+                "A Production Material state commit requires append-only timeline evidence.");
         }
 
         RequireUnique(
@@ -140,6 +156,7 @@ public sealed record ProductionMaterialCommit
             "Production Unit");
         RequireUnique(Carriers.Select(update => update.Aggregate.Id), "Carrier");
         RequireUnique(Slots.Select(update => update.Aggregate.Address), "Slot");
+        RequireUnique(Timeline.Select(entry => entry.EvidenceId), "Production Material evidence");
     }
 
     public IReadOnlyList<ProductionUnitUpdate> ProductionUnits { get; }
@@ -147,6 +164,8 @@ public sealed record ProductionMaterialCommit
     public IReadOnlyList<CarrierUpdate> Carriers { get; }
 
     public IReadOnlyList<SlotOccupancyUpdate> Slots { get; }
+
+    public IReadOnlyList<ProductionMaterialTimelineEntry> Timeline { get; }
 
     private static void RequireUnique<T>(IEnumerable<T> values, string resourceKind)
         where T : notnull
@@ -157,6 +176,57 @@ public sealed record ProductionMaterialCommit
             throw new ArgumentException(
                 $"A Production Material commit cannot update the same {resourceKind} twice.");
         }
+    }
+}
+
+public sealed record ProductionMaterialTimelineQuery
+{
+    public ProductionMaterialTimelineQuery(
+        ProductionUnitId? productionUnitId = null,
+        ProductionRunId? productionRunId = null,
+        CarrierId? carrierId = null,
+        DateTimeOffset? throughUtc = null)
+    {
+        if (productionUnitId is null && productionRunId is null && carrierId is null)
+        {
+            throw new ArgumentException(
+                "A Production Material timeline query requires Unit, Run, or Carrier identity.");
+        }
+
+        if (throughUtc is { } timestamp)
+        {
+            if (timestamp == default || timestamp.Offset != TimeSpan.Zero)
+            {
+                throw new ArgumentException(
+                    "Production Material timeline boundary must use UTC offset zero.",
+                    nameof(throughUtc));
+            }
+        }
+
+        ProductionUnitId = productionUnitId;
+        ProductionRunId = productionRunId;
+        CarrierId = carrierId;
+        ThroughUtc = throughUtc;
+    }
+
+    public ProductionUnitId? ProductionUnitId { get; }
+
+    public ProductionRunId? ProductionRunId { get; }
+
+    public CarrierId? CarrierId { get; }
+
+    public DateTimeOffset? ThroughUtc { get; }
+
+    public bool Matches(ProductionMaterialTimelineEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return (ThroughUtc is null || entry.OccurredAtUtc <= ThroughUtc)
+            && (ProductionUnitId is not null && (
+                    entry.ProductionUnitId == ProductionUnitId
+                    || entry.Genealogy?.ParentUnitId == ProductionUnitId
+                    || entry.Genealogy?.ChildUnitId == ProductionUnitId)
+                || ProductionRunId is not null && entry.ProductionRunId == ProductionRunId
+                || CarrierId is not null && entry.CarrierId == CarrierId);
     }
 }
 

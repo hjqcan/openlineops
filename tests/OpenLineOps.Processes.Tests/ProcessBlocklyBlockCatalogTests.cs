@@ -31,7 +31,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
             && block.BlockType == "openlineops_result_from_input");
         Assert.Contains(result.Value, block =>
             block.IsBuiltIn
-            && block.BlockType == "openlineops_run_external_test");
+            && block.BlockType == "openlineops_run_external_program");
         var builtIns = result.Value.Where(block => block.IsBuiltIn).ToArray();
         Assert.Equal(6, builtIns.Length);
         var serializer = new RuntimeActionContractCanonicalSerializer();

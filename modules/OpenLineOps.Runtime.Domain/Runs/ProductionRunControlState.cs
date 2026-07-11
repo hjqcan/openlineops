@@ -6,5 +6,6 @@ public enum ProductionRunControlState
     Paused = 2,
     Held = 3,
     RecoveryRequired = 4,
-    SafeStopped = 5
+    StopRequested = 5,
+    SafeStopped = 6
 }

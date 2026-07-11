@@ -16,6 +16,10 @@
     "package:win:ci": "node scripts/package-win-unpacked.mjs",
     "smoke:e2e": "npm run build && node scripts/electron-smoke.mjs",
     "smoke:e2e:packaged": "npm run package:win && node scripts/electron-smoke.mjs --packaged",
+    "e2e:production-closure:packaged": "node --check scripts/electron-cdp-harness.mjs && node --check scripts/production-closure-e2e.mjs && node scripts/production-closure-e2e.mjs",
+    "e2e:production-closure:package-and-run": "npm run package:win && npm run e2e:production-closure:packaged",
+    "test:line-projection": "node scripts/line-runtime-projection-test.mjs",
+    "test:editor-workspace": "node scripts/editor-workspace-test.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {

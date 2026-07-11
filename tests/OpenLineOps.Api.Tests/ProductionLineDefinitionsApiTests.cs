@@ -53,103 +53,74 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             lineDefinitionId = "line.main",
             displayName = "Main Production Line",
             topologyId = "topology.main",
-            dutModel = new
+            productModel = new
             {
-                dutModelId = "dut.model-a",
+                productModelId = "product.model-a",
                 modelCode = "MODEL-A",
                 identityInputKey = "serialNumber"
             },
-            workstations = new[]
+            entryOperationId = "operation.load",
+            operations = new object[]
             {
                 new
                 {
-                    workstationId = "workstation.eol",
-                    displayName = "EOL",
-                    stationSystemId = "station.eol"
-                }
-            },
-            stages = new object[]
-            {
-                new
-                {
-                    stageId = "stage.load",
-                    sequence = 1,
+                    operationId = "operation.load",
                     displayName = "Load",
-                    workstationId = "workstation.eol",
+                    stationSystemId = "station.eol",
                     flowDefinitionId = "flow.load",
                     configurationSnapshotId = "configuration.load",
-                    externalTestProgramAdapterId = (string?)null
+                    resources = StationResources("load")
                 },
                 new
                 {
-                    stageId = "stage.test",
-                    sequence = 2,
-                    displayName = "External Test",
-                    workstationId = "workstation.eol",
+                    operationId = "operation.test",
+                    displayName = "External Program",
+                    stationSystemId = "station.eol",
                     flowDefinitionId = "flow.test",
                     configurationSnapshotId = "configuration.test",
-                    externalTestProgramAdapterId = "adapter.test"
+                    resources = StationResources("test")
                 }
             },
-            externalTestProgramAdapters = new[]
+            transitions = new[]
             {
                 new
                 {
-                    adapterId = "adapter.test",
-                    displayName = "External EOL",
-                    capabilityId = "test.external",
-                    commandName = "ExecuteTestProgram",
-                    executable = (string?)null,
-                    providerKey = "provider.test",
-                    argumentTemplates = new[] { "--serial", "{{dut.identity}}" },
-                    inputMappings = new[]
-                    {
-                        new { source = "$dut.identity", target = "serial" },
-                        new { source = "$dut.model", target = "model" }
-                    },
-                    resultMappings = new[]
-                    {
-                        new { sourcePath = "$.outcome", targetKey = "test.outcome" }
-                    },
-                    outcomeMapping = new
-                    {
-                        sourcePath = "$.outcome",
-                        passedToken = "Passed",
-                        failedToken = "Failed",
-                        abortedToken = "Aborted"
-                    },
-                    timeoutMilliseconds = 30_000L
+                    transitionId = "load-test",
+                    sourceOperationId = "operation.load",
+                    targetOperationId = "operation.test",
+                    kind = "Sequence",
+                    requiredJudgement = (string?)null,
+                    maxTraversals = (int?)null,
+                    parallelGroupId = (string?)null,
+                    outputKey = (string?)null,
+                    expectedOutputKind = (string?)null,
+                    expectedOutputValue = (string?)null
                 }
-            }
+            },
+            lineControllerAuthorizations = Array.Empty<object>()
         };
 
         using var createResponse = await _client.PostAsJsonAsync(route, request);
         var createBody = await createResponse.Content.ReadAsStringAsync();
-        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        Assert.True(
+            createResponse.StatusCode == HttpStatusCode.Created,
+            $"Production Line create returned {(int)createResponse.StatusCode}: {createBody}");
         using var created = JsonDocument.Parse(createBody);
         Assert.Equal("line.main", created.RootElement.GetProperty("lineDefinitionId").GetString());
         Assert.Equal(
             "configuration.load",
-            created.RootElement.GetProperty("stages")[0].GetProperty("configurationSnapshotId").GetString());
-        Assert.Equal("stage.test", created.RootElement.GetProperty("stages")[0].GetProperty("nextStageId").GetString());
-        Assert.Equal("Provider", created.RootElement
-            .GetProperty("externalTestProgramAdapters")[0]
-            .GetProperty("launchKind")
-            .GetString());
-        Assert.Equal("Passed", created.RootElement
-            .GetProperty("externalTestProgramAdapters")[0]
-            .GetProperty("outcomeMapping")
-            .GetProperty("passedToken")
-            .GetString());
-
+            created.RootElement.GetProperty("operations")[0].GetProperty("configurationSnapshotId").GetString());
+        Assert.Equal(
+            "operation.test",
+            created.RootElement.GetProperty("transitions")[0].GetProperty("targetOperationId").GetString());
         using var getResponse = await _client.GetAsync($"{route}/line.main");
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
         using var restored = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
-        Assert.Equal("MODEL-A", restored.RootElement.GetProperty("dutModel").GetProperty("modelCode").GetString());
-        Assert.Equal(2, restored.RootElement.GetProperty("stages").GetArrayLength());
+        Assert.Equal("MODEL-A", restored.RootElement.GetProperty("productModel").GetProperty("modelCode").GetString());
+        Assert.Equal(2, restored.RootElement.GetProperty("operations").GetArrayLength());
         Assert.Equal(
             "configuration.test",
-            restored.RootElement.GetProperty("stages")[1].GetProperty("configurationSnapshotId").GetString());
+            restored.RootElement.GetProperty("operations")[1].GetProperty("configurationSnapshotId").GetString());
     }
 
     [Theory]
@@ -158,7 +129,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
     [InlineData("   ")]
     [InlineData(" configuration.load")]
     [InlineData("configuration.load ")]
-    public async Task ApiRejectsMissingOrNonCanonicalStageConfigurationSnapshotId(
+    public async Task ApiRejectsMissingOrNonCanonicalOperationConfigurationSnapshotId(
         string? configurationSnapshotId)
     {
         var suffix = Guid.NewGuid().ToString("N");
@@ -172,39 +143,40 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             lineDefinitionId = "line.invalid-configuration",
             displayName = "Invalid Configuration Production Line",
             topologyId = "topology.main",
-            dutModel = new
+            productModel = new
             {
-                dutModelId = "dut.model-a",
+                productModelId = "product.model-a",
                 modelCode = "MODEL-A",
                 identityInputKey = "serialNumber"
             },
-            workstations = new[]
+            entryOperationId = "operation.load",
+            operations = new[]
             {
                 new
                 {
-                    workstationId = "workstation.eol",
-                    displayName = "EOL",
-                    stationSystemId = "station.eol"
-                }
-            },
-            stages = new[]
-            {
-                new
-                {
-                    stageId = "stage.load",
-                    sequence = 1,
+                    operationId = "operation.load",
                     displayName = "Load",
-                    workstationId = "workstation.eol",
+                    stationSystemId = "station.eol",
                     flowDefinitionId = "flow.load",
                     configurationSnapshotId,
-                    externalTestProgramAdapterId = (string?)null
+                    resources = StationResources("invalid")
                 }
             },
-            externalTestProgramAdapters = Array.Empty<object>()
+            transitions = Array.Empty<object>(),
+            lineControllerAuthorizations = Array.Empty<object>()
         });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
+
+    private static object[] StationResources(string suffix) =>
+        [new
+        {
+            bindingId = $"resource.station.{suffix}",
+            kind = "Station",
+            topologyTargetId = "station.eol",
+            resolution = "Fixed"
+        }];
 
     public void Dispose()
     {
@@ -240,13 +212,11 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         await processRepository.SaveAsync(scope, CreatePublishedFlow(
             "flow.load",
             "native.inspect",
-            "Inspect",
-            adapterId: null));
+            "Inspect"));
         await processRepository.SaveAsync(scope, CreatePublishedFlow(
             "flow.test",
             "test.external",
-            "ExecuteTestProgram",
-            "adapter.test"));
+            "ExecuteExternalProgram"));
     }
 
     private static AutomationTopology CreateTopology()
@@ -257,7 +227,14 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             CreatedAtUtc);
         Assert.True(topology.AddCapability(CapabilityContract.Create(
             new CapabilityContractId("test.external"),
-            "ExecuteTestProgram",
+            "ExecuteExternalProgram",
+            new Version(1, 0),
+            "{}",
+            "{}",
+            TimeSpan.FromSeconds(30))).Succeeded);
+        Assert.True(topology.AddCapability(CapabilityContract.Create(
+            new CapabilityContractId("native.inspect"),
+            "Inspect",
             new Version(1, 0),
             "{}",
             "{}",
@@ -268,21 +245,31 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             SystemKind.Station,
             "TestSystem",
             "Tester",
-            providedCapabilities: [new CapabilityContractId("test.external")],
+            providedCapabilities:
+            [
+                new CapabilityContractId("test.external"),
+                new CapabilityContractId("native.inspect")
+            ],
             metadata: new Dictionary<string, string>())).Succeeded);
         Assert.True(topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.external"),
+            new AutomationSystemId("station.eol"),
             new CapabilityContractId("test.external"),
             DriverProviderKind.ExternalSystem,
             "provider.test")).Succeeded);
+        Assert.True(topology.AddDriverBinding(DriverBinding.Create(
+            new DriverBindingId("binding.inspect"),
+            new AutomationSystemId("station.eol"),
+            new CapabilityContractId("native.inspect"),
+            DriverProviderKind.Simulator,
+            "simulator.inspect")).Succeeded);
         return topology;
     }
 
     private static ProcessDefinition CreatePublishedFlow(
         string id,
         string capability,
-        string command,
-        string? adapterId)
+        string command)
     {
         var definition = ProcessDefinition.Create(
             new ProcessDefinitionId(id),
@@ -290,21 +277,15 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             id,
             CreatedAtUtc);
         Assert.True(definition.AddNode(ProcessNode.Start(new ProcessNodeId("start"), "Start")).Succeeded);
-        var action = adapterId is null
-            ? ProcessNode.Command(
-                new ProcessNodeId("action"),
-                "Action",
-                new ProcessCapabilityId(capability),
-                ProcessActionTargetKind.Capability,
-                capability,
-                command,
-                TimeSpan.FromSeconds(30),
-                "{}")
-            : ProcessNode.Blockly(
-                new ProcessNodeId("action"),
-                "External Test Action",
-                ExternalTestWorkspace(capability, command, adapterId),
-                TimeSpan.FromSeconds(30));
+        var action = ProcessNode.Command(
+            new ProcessNodeId("action"),
+            "Action",
+            new ProcessCapabilityId(capability),
+            ProcessActionTargetKind.Capability,
+            capability,
+            command,
+            TimeSpan.FromSeconds(30),
+            "{}");
         Assert.True(definition.AddNode(action).Succeeded);
         Assert.True(definition.AddNode(ProcessNode.End(new ProcessNodeId("end"), "End")).Succeeded);
         Assert.True(definition.AddTransition(ProcessTransition.Create(
@@ -319,29 +300,4 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         return definition;
     }
 
-    private static string ExternalTestWorkspace(
-        string capability,
-        string command,
-        string adapterId) =>
-        $$"""
-        {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "openlineops_run_external_test",
-                "id": "external-test",
-                "fields": {
-                  "TARGET_KIND": "System",
-                  "TARGET_ID": "station.eol",
-                  "CAPABILITY": "{{capability}}",
-                  "COMMAND": "{{command}}",
-                  "ADAPTER_ID": "{{adapterId}}",
-                  "TIMEOUT_MS": 30000
-                }
-              }
-            ]
-          }
-        }
-        """;
 }

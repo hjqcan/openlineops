@@ -1,6 +1,20 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  openAsBlob,
+  readFileSync,
+  statSync,
+  writeFileSync
+} from 'node:fs';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync
+} from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -9,8 +23,11 @@ import type {
   ApiResponse,
   BackendStatus,
   DesktopConfig,
+  ExternalProgramUploadFile,
   SelectDirectoryOptions,
   SelectDirectoryResult,
+  SelectExternalProgramFilesOptions,
+  SelectFilesResult,
   SelectProjectFileOptions
 } from '../shared/desktop-api.js';
 
@@ -21,6 +38,9 @@ let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendStartedAtUtc: string | null = null;
 let lastExitCode: number | null = null;
+let closeRequestSequence = 0;
+let pendingCloseRequestId: number | null = null;
+let closeApproved = false;
 const recentLogs: string[] = [];
 
 const config = createDesktopConfig();
@@ -30,6 +50,10 @@ interface BackendLaunchConfig {
   executablePath: string;
   arguments: string[];
   workingDirectory: string;
+  environment: NodeJS.ProcessEnv;
+}
+
+interface LocalStationPackageProvisioning {
   environment: NodeJS.ProcessEnv;
 }
 
@@ -47,8 +71,11 @@ function createDesktopConfig(): DesktopConfig {
 }
 
 function createBackendLaunchConfig(): BackendLaunchConfig {
+  const stationPackages = provisionLocalStationPackages();
   if (!app.isPackaged) {
     const appPath = app.getAppPath();
+    const dataDirectory = path.join(app.getPath('userData'), 'data');
+    mkdirSync(dataDirectory, { recursive: true });
     const repoRoot = process.env.OPENLINEOPS_REPO_ROOT
       ? path.resolve(process.env.OPENLINEOPS_REPO_ROOT)
       : path.resolve(appPath, '..', '..');
@@ -62,6 +89,7 @@ function createBackendLaunchConfig(): BackendLaunchConfig {
       workingDirectory: repoRoot,
       environment: {
         ...process.env,
+        ...stationPackages.environment,
         ASPNETCORE_ENVIRONMENT: process.env.ASPNETCORE_ENVIRONMENT ?? 'Development',
         OpenLineOps__Runtime__Scripting__Python__ExecutionMode: 'ProcessIsolated',
         OpenLineOps__Runtime__Scripting__Python__WorkerFileName: 'dotnet',
@@ -69,7 +97,18 @@ function createBackendLaunchConfig(): BackendLaunchConfig {
           `run --project "${path.join(repoRoot, 'src', 'OpenLineOps.ScriptWorker', 'OpenLineOps.ScriptWorker.csproj')}" --no-launch-profile`,
         OpenLineOps__Runtime__Scripting__Python__WorkerWorkingDirectory: repoRoot,
         OpenLineOps__Runtime__Scripting__Python__Sandbox__IsolationMode: 'ExternalProcess',
-        OpenLineOps__Runtime__Scripting__Python__Sandbox__RequireLeastPrivilegeExecution: 'false'
+        OpenLineOps__Runtime__Scripting__Python__Sandbox__RequireLeastPrivilegeExecution: 'false',
+        OpenLineOps__Devices__ExternalProgramHost__RequireRestrictedHostIdentity: 'false',
+        OpenLineOps__Devices__ExternalProgramHost__RequireImmutableContentProtection: 'false',
+        OpenLineOps__Devices__ExternalProgramHost__RequireAppContainerIsolation: 'true',
+        OpenLineOps__Devices__ExternalProgramHost__WorkspaceRootPath: path.join(
+          dataDirectory,
+          'external-program-workspaces'),
+        OpenLineOps__Devices__ExternalProgramHost__EvidenceRootPath: path.join(
+          dataDirectory,
+          'external-program-evidence'),
+        OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName:
+          'OpenLineOps.Studio.ExternalPrograms'
       }
     };
   }
@@ -86,6 +125,7 @@ function createBackendLaunchConfig(): BackendLaunchConfig {
     workingDirectory: apiDirectory,
     environment: {
       ...process.env,
+      ...stationPackages.environment,
       ASPNETCORE_ENVIRONMENT: 'Production',
       DOTNET_ENVIRONMENT: 'Production',
       OpenLineOps__Runtime__Persistence__DatabasePath: path.join(
@@ -120,7 +160,79 @@ function createBackendLaunchConfig(): BackendLaunchConfig {
       OpenLineOps__Runtime__Scripting__Python__WorkerWorkingDirectory: scriptWorkerDirectory,
       OpenLineOps__Runtime__Scripting__Python__Sandbox__IsolationMode: 'ExternalProcess',
       OpenLineOps__Runtime__Scripting__Python__Sandbox__RequireLeastPrivilegeExecution: 'false',
+      OpenLineOps__Devices__ExternalProgramHost__RequireRestrictedHostIdentity: 'false',
+      OpenLineOps__Devices__ExternalProgramHost__RequireImmutableContentProtection: 'false',
+      OpenLineOps__Devices__ExternalProgramHost__RequireAppContainerIsolation: 'true',
+      OpenLineOps__Devices__ExternalProgramHost__WorkspaceRootPath: path.join(
+        dataDirectory,
+        'external-program-workspaces'),
+      OpenLineOps__Devices__ExternalProgramHost__EvidenceRootPath: path.join(
+        dataDirectory,
+        'external-program-evidence'),
+      OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName:
+        'OpenLineOps.Studio.ExternalPrograms',
       OpenLineOps__Desktop__AllowedOrigins__0: 'null'
+    }
+  };
+}
+
+function provisionLocalStationPackages(): LocalStationPackageProvisioning {
+  const root = path.join(app.getPath('userData'), 'data', 'station-packages');
+  const keyDirectory = path.join(root, 'keys');
+  const distributionDirectory = path.join(root, 'distribution');
+  const deploymentCatalogDirectory = path.join(root, 'deployment-catalog');
+  const privateKeyPath = path.join(keyDirectory, 'release-signing-private.pem');
+  const publicKeyPath = path.join(keyDirectory, 'release-signing-public.pem');
+  mkdirSync(keyDirectory, { recursive: true });
+  mkdirSync(distributionDirectory, { recursive: true });
+  mkdirSync(deploymentCatalogDirectory, { recursive: true });
+
+  const privateKeyExists = existsSync(privateKeyPath);
+  const publicKeyExists = existsSync(publicKeyPath);
+  if (privateKeyExists !== publicKeyExists) {
+    throw new Error(
+      `Local Station package signing identity is incomplete under ${keyDirectory}. `
+      + 'Restore both key files or remove both to provision a new identity.');
+  }
+
+  if (!privateKeyExists) {
+    const pair = generateKeyPairSync('rsa', {
+      modulusLength: 3072,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+    writeFileSync(privateKeyPath, pair.privateKey, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    writeFileSync(publicKeyPath, pair.publicKey, { encoding: 'utf8', flag: 'wx' });
+  }
+
+  const privateKeyPem = readFileSync(privateKeyPath, 'utf8');
+  const publicKeyPem = readFileSync(publicKeyPath, 'utf8');
+  const privateKey = createPrivateKey(privateKeyPem);
+  const derivedPublicKeyPem = createPublicKey(privateKey)
+    .export({ type: 'spki', format: 'pem' })
+    .toString();
+  const configuredPublicKeyPem = createPublicKey(publicKeyPem)
+    .export({ type: 'spki', format: 'pem' })
+    .toString();
+  if (derivedPublicKeyPem !== configuredPublicKeyPem) {
+    throw new Error('Local Station package signing private key does not match its trust public key.');
+  }
+
+  const keyId = `studio-${createHash('sha256')
+    .update(configuredPublicKeyPem, 'utf8')
+    .digest('hex')
+    .slice(0, 24)}`;
+  return {
+    environment: {
+      OpenLineOps__Projects__StationPackages__DistributionDirectory: distributionDirectory,
+      OpenLineOps__Projects__StationPackages__DeploymentCatalogDirectory:
+        deploymentCatalogDirectory,
+      OpenLineOps__Projects__StationPackages__SigningKeyId: keyId,
+      OpenLineOps__Projects__StationPackages__SigningPrivateKeyPath: privateKeyPath,
+      OpenLineOps__Runtime__AgentTransport__DeploymentCatalogDirectory:
+        deploymentCatalogDirectory,
+      OpenLineOps__Agent__PackageDistributionDirectory: distributionDirectory,
+      [`OpenLineOps__Agent__TrustedPackagePublicKeyFiles__${keyId}`]: publicKeyPath
     }
   };
 }
@@ -141,6 +253,23 @@ async function createWindow(): Promise<void> {
     }
   });
 
+  mainWindow.on('close', event => {
+    if (closeApproved || !mainWindow || mainWindow.webContents.isDestroyed()) {
+      return;
+    }
+    event.preventDefault();
+    if (pendingCloseRequestId !== null) {
+      return;
+    }
+    pendingCloseRequestId = ++closeRequestSequence;
+    mainWindow.webContents.send('desktop:close-requested', pendingCloseRequestId);
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    pendingCloseRequestId = null;
+    closeApproved = false;
+  });
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://127.0.0.1:5173';
   if (!app.isPackaged) {
     await mainWindow.loadURL(devServerUrl);
@@ -153,6 +282,19 @@ async function createWindow(): Promise<void> {
 ipcMain.handle('desktop:get-config', () => config);
 ipcMain.handle('backend:get-status', async () => getBackendStatus());
 ipcMain.handle('backend:start', async () => startBackend());
+ipcMain.on('desktop:close-response', (event, requestId: number, allowClose: boolean) => {
+  if (!mainWindow
+      || event.sender !== mainWindow.webContents
+      || requestId !== pendingCloseRequestId) {
+    return;
+  }
+  pendingCloseRequestId = null;
+  if (!allowClose) {
+    return;
+  }
+  closeApproved = true;
+  mainWindow.close();
+});
 
 async function startBackend(): Promise<BackendStatus> {
   if (!backendProcess) {
@@ -262,8 +404,34 @@ ipcMain.handle('desktop:select-application-project-file', async (
     path: result.filePaths[0] ?? null
   };
 });
+ipcMain.handle('desktop:select-external-program-files', async (
+  _event,
+  options?: SelectExternalProgramFilesOptions
+): Promise<SelectFilesResult> => {
+  const properties: Array<'openFile' | 'multiSelections'> = ['openFile'];
+  if (options?.multiple) {
+    properties.push('multiSelections');
+  }
+  const dialogOptions = {
+    title: options?.title ?? 'Import external program files',
+    defaultPath: options?.defaultPath,
+    buttonLabel: options?.buttonLabel ?? 'Import',
+    properties
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+  return { canceled: result.canceled, paths: result.filePaths };
+});
 ipcMain.handle('api:request', async (_event, requestPath: string, options?: ApiRequestOptions) =>
   apiRequest(requestPath, options));
+ipcMain.handle('api:upload-external-program', async (
+  _event,
+  requestPath: string,
+  definition: unknown | null,
+  files: ExternalProgramUploadFile[],
+  headers?: Record<string, string>
+) => uploadExternalProgram(requestPath, definition, files, headers));
 
 app.whenReady().then(async () => {
   await startBackend();
@@ -340,6 +508,66 @@ async function apiRequest<T = unknown>(
     body: parseBody<T>(text),
     text
   };
+}
+
+async function uploadExternalProgram<T = unknown>(
+  requestPath: string,
+  definition: unknown | null,
+  files: ExternalProgramUploadFile[],
+  requestHeaders: Record<string, string> = {}
+): Promise<ApiResponse<T>> {
+  if (files.length === 0 || files.length > 64) {
+    throw new Error('External program uploads require between one and 64 files.');
+  }
+
+  const form = new FormData();
+  if (definition !== null) {
+    form.set('definition', JSON.stringify(definition));
+  }
+  const manifest = [];
+  for (const [index, file] of files.entries()) {
+    const fieldName = `file-${index + 1}`;
+    const metadata = statSync(file.sourcePath, { throwIfNoEntry: false });
+    if (!metadata?.isFile()) {
+      throw new Error(`External program upload source is not a regular file: ${file.sourcePath}`);
+    }
+    const sha256 = await calculateFileSha256(file.sourcePath);
+    manifest.push({
+      fieldName,
+      resourceRelativePath: file.resourceRelativePath,
+      sizeBytes: metadata.size,
+      sha256
+    });
+    form.append(fieldName, await openAsBlob(file.sourcePath), path.basename(file.sourcePath));
+  }
+  form.set('uploadManifest', JSON.stringify(manifest));
+
+  const url = new URL(requestPath, `${config.apiBaseUrl}/`);
+  try {
+    const response = await fetch(url, { method: 'POST', body: form, headers: requestHeaders });
+    const text = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: parseBody<T>(text),
+      text
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      body: null,
+      text: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function calculateFileSha256(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) {
+    hash.update(chunk);
+  }
+  return hash.digest('hex');
 }
 
 async function probeHealth(): Promise<BackendStatus['health']> {

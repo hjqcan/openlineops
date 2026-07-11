@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
@@ -15,7 +16,9 @@ public sealed class ProductionMaterialServiceTests
     public async Task ServiceExecutesProductionUnitAndSlotLifecycle()
     {
         var repository = new InMemoryProductionMaterialRepository();
-        var service = new ProductionMaterialService(repository);
+        var service = new ProductionMaterialService(
+            repository,
+            new InMemoryProductionRunRepository(repository));
         var lotId = new ProductionLotId("lot-a");
         var unitId = ProductionUnitId.New();
         var material = MaterialReference.ForProductionUnit(unitId);
@@ -106,19 +109,51 @@ public sealed class ProductionMaterialServiceTests
             await repository.GetProductionUnitAsync(unitId));
         var persistedSlot = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
             await repository.GetSlotAsync(slot));
-        Assert.Equal(ProductionUnitDisposition.Scrapped, persistedUnit.Aggregate.Disposition);
+        Assert.Equal(ProductDisposition.Scrapped, persistedUnit.Aggregate.Disposition);
         Assert.Equal(nextStation, persistedUnit.Aggregate.Location);
         Assert.Equal(SlotOccupancyStatus.Available, persistedSlot.Aggregate.Status);
         Assert.Null(persistedSlot.Aggregate.Material);
         Assert.Equal(9, persistedUnit.Revision);
         Assert.Equal(5, persistedSlot.Revision);
+
+        var timeline = await repository.ListTimelineAsync(
+            new ProductionMaterialTimelineQuery(productionUnitId: unitId));
+        var locations = timeline
+            .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.LocationTransition)
+            .ToArray();
+        var slotTransitions = timeline
+            .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition)
+            .ToArray();
+        var dispositions = timeline
+            .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.DispositionTransition)
+            .ToArray();
+        Assert.Equal(4, locations.Length);
+        Assert.Equal(station, locations[0].DestinationLocation);
+        Assert.Equal(MaterialLocation.InSlot(slot), locations[1].DestinationLocation);
+        Assert.Equal(station, locations[2].DestinationLocation);
+        Assert.Equal(nextStation, locations[3].DestinationLocation);
+        Assert.Equal(
+            [
+                SlotOccupancyStatus.Reserved,
+                SlotOccupancyStatus.Occupied,
+                SlotOccupancyStatus.Running,
+                SlotOccupancyStatus.Occupied,
+                SlotOccupancyStatus.Available
+            ],
+            slotTransitions.Select(entry => entry.CurrentSlotStatus!.Value).ToArray());
+        Assert.Equal(
+            [ProductDisposition.Held, ProductDisposition.InProcess, ProductDisposition.Scrapped],
+            dispositions.Select(entry => entry.CurrentDisposition!.Value).ToArray());
+        Assert.All(timeline, entry => Assert.False(string.IsNullOrWhiteSpace(entry.ActorId)));
     }
 
     [Fact]
     public async Task ReservationRequiresMaterialAtExactStation()
     {
         var repository = new InMemoryProductionMaterialRepository();
-        var service = new ProductionMaterialService(repository);
+        var service = new ProductionMaterialService(
+            repository,
+            new InMemoryProductionRunRepository(repository));
         var unitId = ProductionUnitId.New();
         var slot = new SlotAddress("line-a", "station-b", "slot-01");
         await AssertAccepted(service.RegisterUnitAsync(new RegisterProductionUnitCommand(
@@ -157,7 +192,9 @@ public sealed class ProductionMaterialServiceTests
     public async Task GenealogyServiceRejectsTransitiveCycle()
     {
         var repository = new InMemoryProductionMaterialRepository();
-        var service = new ProductionMaterialService(repository);
+        var service = new ProductionMaterialService(
+            repository,
+            new InMemoryProductionRunRepository(repository));
         var first = ProductionUnitId.New();
         var second = ProductionUnitId.New();
         var third = ProductionUnitId.New();
@@ -179,7 +216,9 @@ public sealed class ProductionMaterialServiceTests
     public async Task RegistrationRequiresLotWithSameProductModel()
     {
         var repository = new InMemoryProductionMaterialRepository();
-        var service = new ProductionMaterialService(repository);
+        var service = new ProductionMaterialService(
+            repository,
+            new InMemoryProductionRunRepository(repository));
         var lotId = new ProductionLotId("lot-model-a");
         await AssertAccepted(service.RegisterLotAsync(new RegisterProductionLotCommand(
             lotId,
@@ -206,7 +245,9 @@ public sealed class ProductionMaterialServiceTests
     public async Task CarrierPositionsAreUniqueAndCapacityIsFencedByCarrierRevision()
     {
         var repository = new InMemoryProductionMaterialRepository();
-        var service = new ProductionMaterialService(repository);
+        var service = new ProductionMaterialService(
+            repository,
+            new InMemoryProductionRunRepository(repository));
         var first = ProductionUnitId.New();
         var second = ProductionUnitId.New();
         var carrierId = new CarrierId("carrier-capacity-one");

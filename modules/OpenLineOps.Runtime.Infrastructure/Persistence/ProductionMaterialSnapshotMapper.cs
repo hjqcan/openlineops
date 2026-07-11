@@ -1,4 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Serialization;
+using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -12,6 +14,7 @@ internal static class ProductionMaterialSnapshotMapper
     private const string CarrierResourceKind = "OpenLineOps.Carrier";
     private const string SlotOccupancyResourceKind = "OpenLineOps.SlotOccupancy";
     private const string GenealogyResourceKind = "OpenLineOps.MaterialGenealogyLink";
+    private const string TimelineResourceKind = "OpenLineOps.ProductionMaterialEvidence";
 
     public static PersistedProductionUnit ToSnapshot(ProductionUnit aggregate)
     {
@@ -26,9 +29,13 @@ internal static class ProductionMaterialSnapshotMapper
             snapshot.LotId?.Value,
             snapshot.RegisteredBy,
             snapshot.RegisteredAtUtc,
-            snapshot.LastTransitionAtUtc,
+            snapshot.LastLocationTransitionAtUtc,
+            snapshot.LastDispositionTransitionAtUtc,
             snapshot.Disposition.ToString(),
             snapshot.DispositionBeforeHold?.ToString(),
+            snapshot.ActiveProductionRunId?.Value,
+            snapshot.LastProductionRunId?.Value,
+            snapshot.LastProductionRunRevision,
             snapshot.DispositionReason,
             ToSnapshot(snapshot.Location));
     }
@@ -52,13 +59,21 @@ internal static class ProductionMaterialSnapshotMapper
                 : new ProductionLotId(Required(snapshot.LotId, "lot id")),
             Required(snapshot.RegisteredBy, "registered by"),
             snapshot.RegisteredAtUtc,
-            snapshot.LastTransitionAtUtc,
-            ParseEnum<ProductionUnitDisposition>(snapshot.Disposition, "disposition"),
+            snapshot.LastLocationTransitionAtUtc,
+            snapshot.LastDispositionTransitionAtUtc,
+            ParseEnum<ProductDisposition>(snapshot.Disposition, "disposition"),
             snapshot.DispositionBeforeHold is null
                 ? null
-                : ParseEnum<ProductionUnitDisposition>(
+                : ParseEnum<ProductDisposition>(
                     snapshot.DispositionBeforeHold,
                     "disposition before hold"),
+            snapshot.ActiveProductionRunId is null
+                ? null
+                : new ProductionRunId(snapshot.ActiveProductionRunId.Value),
+            snapshot.LastProductionRunId is null
+                ? null
+                : new ProductionRunId(snapshot.LastProductionRunId.Value),
+            snapshot.LastProductionRunRevision,
             Optional(snapshot.DispositionReason, "disposition reason"),
             ToAggregate(snapshot.Location)));
     }
@@ -183,6 +198,109 @@ internal static class ProductionMaterialSnapshotMapper
             snapshot.LinkedAtUtc);
     }
 
+    public static PersistedProductionMaterialTimelineEntry ToSnapshot(
+        ProductionMaterialTimelineEntry evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        return new PersistedProductionMaterialTimelineEntry(
+            TimelineResourceKind,
+            evidence.EvidenceId,
+            evidence.Kind.ToString(),
+            evidence.ProductionRunId?.Value,
+            evidence.ProductionUnitId?.Value,
+            evidence.CarrierId?.Value,
+            ToSnapshot(evidence.Material),
+            ToSnapshot(evidence.SourceLocation),
+            ToSnapshot(evidence.DestinationLocation),
+            evidence.Slot?.LineId,
+            evidence.Slot?.StationSystemId,
+            evidence.Slot?.SlotId,
+            evidence.PreviousSlotStatus?.ToString(),
+            evidence.CurrentSlotStatus?.ToString(),
+            evidence.PreviousDisposition?.ToString(),
+            evidence.CurrentDisposition?.ToString(),
+            evidence.Genealogy is null ? null : ToSnapshot(evidence.Genealogy),
+            evidence.Reason,
+            evidence.ActorId,
+            evidence.OccurredAtUtc);
+    }
+
+    public static ProductionMaterialTimelineEntry ToAggregate(
+        PersistedProductionMaterialTimelineEntry snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        RequireResource(snapshot.ResourceKind, TimelineResourceKind);
+        if (snapshot.EvidenceId == Guid.Empty)
+        {
+            throw new InvalidDataException("Persisted Production Material evidence id is empty.");
+        }
+
+        var kind = ParseEnum<ProductionMaterialEvidenceKind>(snapshot.Kind, "evidence kind");
+        ProductionRunId? productionRunId = snapshot.ProductionRunId is null
+            ? null
+            : new ProductionRunId(snapshot.ProductionRunId.Value);
+        var evidence = kind switch
+        {
+            ProductionMaterialEvidenceKind.LocationTransition =>
+                ProductionMaterialTimelineEntry.Location(
+                    snapshot.EvidenceId,
+                    ToAggregate(snapshot.Material)
+                        ?? throw new InvalidDataException("Location evidence has no material."),
+                    productionRunId,
+                    ToAggregate(snapshot.SourceLocation),
+                    ToAggregate(snapshot.DestinationLocation)
+                        ?? throw new InvalidDataException("Location evidence has no destination."),
+                    Required(snapshot.ActorId, "evidence actor"),
+                    snapshot.OccurredAtUtc),
+            ProductionMaterialEvidenceKind.SlotOccupancyTransition =>
+                ProductionMaterialTimelineEntry.SlotOccupancy(
+                    snapshot.EvidenceId,
+                    new SlotAddress(
+                        Required(snapshot.SlotLineId, "evidence Slot line"),
+                        Required(snapshot.SlotStationSystemId, "evidence Slot Station System"),
+                        Required(snapshot.SlotId, "evidence Slot id")),
+                    ToAggregate(snapshot.Material),
+                    productionRunId,
+                    ParseEnum<SlotOccupancyStatus>(
+                        snapshot.PreviousSlotStatus,
+                        "previous Slot status"),
+                    ParseEnum<SlotOccupancyStatus>(
+                        snapshot.CurrentSlotStatus,
+                        "current Slot status"),
+                    Required(snapshot.ActorId, "evidence actor"),
+                    snapshot.OccurredAtUtc),
+            ProductionMaterialEvidenceKind.DispositionTransition =>
+                ProductionMaterialTimelineEntry.Disposition(
+                    snapshot.EvidenceId,
+                    new ProductionUnitId(snapshot.ProductionUnitId
+                        ?? throw new InvalidDataException(
+                            "Disposition evidence has no Production Unit id.")),
+                    productionRunId,
+                    ParseEnum<ProductDisposition>(
+                        snapshot.PreviousDisposition,
+                        "previous disposition"),
+                    ParseEnum<ProductDisposition>(
+                        snapshot.CurrentDisposition,
+                        "current disposition"),
+                    Optional(snapshot.Reason, "evidence reason"),
+                    Required(snapshot.ActorId, "evidence actor"),
+                    snapshot.OccurredAtUtc),
+            ProductionMaterialEvidenceKind.Genealogy =>
+                ProductionMaterialTimelineEntry.FromGenealogy(
+                    ToAggregate(snapshot.Genealogy
+                        ?? throw new InvalidDataException(
+                            "Genealogy evidence has no genealogy document."))),
+            _ => throw new InvalidDataException($"Unsupported Production Material evidence kind {kind}.")
+        };
+        if (ToSnapshot(evidence) != snapshot)
+        {
+            throw new InvalidDataException(
+                "Persisted Production Material evidence contains inconsistent redundant identity or shape.");
+        }
+
+        return evidence;
+    }
+
     private static PersistedMaterialLocation? ToSnapshot(MaterialLocation? location)
     {
         return location is null
@@ -285,9 +403,13 @@ internal sealed record PersistedProductionUnit(
     string? LotId,
     string? RegisteredBy,
     DateTimeOffset RegisteredAtUtc,
-    DateTimeOffset LastTransitionAtUtc,
+    DateTimeOffset LastLocationTransitionAtUtc,
+    DateTimeOffset LastDispositionTransitionAtUtc,
     string? Disposition,
     string? DispositionBeforeHold,
+    Guid? ActiveProductionRunId,
+    Guid? LastProductionRunId,
+    long LastProductionRunRevision,
     string? DispositionReason,
     PersistedMaterialLocation? Location);
 
@@ -338,3 +460,25 @@ internal sealed record PersistedMaterialLocation(
     string? CarrierPositionId);
 
 internal sealed record PersistedMaterialReference(string? Kind, string? Value);
+
+internal sealed record PersistedProductionMaterialTimelineEntry(
+    string? ResourceKind,
+    Guid EvidenceId,
+    string? Kind,
+    Guid? ProductionRunId,
+    Guid? ProductionUnitId,
+    string? CarrierId,
+    PersistedMaterialReference? Material,
+    PersistedMaterialLocation? SourceLocation,
+    PersistedMaterialLocation? DestinationLocation,
+    string? SlotLineId,
+    string? SlotStationSystemId,
+    string? SlotId,
+    string? PreviousSlotStatus,
+    string? CurrentSlotStatus,
+    string? PreviousDisposition,
+    string? CurrentDisposition,
+    PersistedMaterialGenealogyLink? Genealogy,
+    string? Reason,
+    string? ActorId,
+    DateTimeOffset OccurredAtUtc);

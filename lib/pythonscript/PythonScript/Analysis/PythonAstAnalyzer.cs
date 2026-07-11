@@ -95,7 +95,7 @@ namespace PythonScript.Analysis
             });
         }
 
-        public bool IsSingleAssignmentExpression(string source, out string? leftExpression)
+        public static bool IsSingleAssignmentExpression(string source, out string? leftExpression)
         {
             leftExpression = null;
             if (string.IsNullOrWhiteSpace(source))
@@ -193,12 +193,12 @@ namespace PythonScript.Analysis
                 return null;
             }
 
-            IReadOnlyDictionary<string, Type> scope = MergeVariables(localVariables);
+            Dictionary<string, Type> scope = MergeVariables(localVariables);
             var visitor = new PythonExpressionVisitor(typeRegistry, scope, expressionCache);
             return visitor.Resolve(expression);
         }
 
-        private IReadOnlyDictionary<string, Type> MergeVariables(IReadOnlyDictionary<string, Type>? localVariables)
+        private Dictionary<string, Type> MergeVariables(IReadOnlyDictionary<string, Type>? localVariables)
         {
             if (localVariables == null || localVariables.Count == 0)
             {

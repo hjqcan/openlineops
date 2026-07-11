@@ -13,7 +13,8 @@ public sealed record OperationRunDefinition
         ProcessVersionId processVersionId,
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
-        IEnumerable<ResourceRequirement>? resourceRequirements = null)
+        IEnumerable<ResourceRequirement>? resourceRequirements = null,
+        MaterialSlotRequirement? materialSlotRequirement = null)
     {
         OperationId = ProductionRunText.Required(operationId, nameof(operationId));
         StationSystemId = ProductionRunText.Required(stationSystemId, nameof(stationSystemId));
@@ -56,6 +57,7 @@ public sealed record OperationRunDefinition
             .OrderBy(static requirement => requirement.Kind)
             .ThenBy(static requirement => requirement.ResourceId, StringComparer.Ordinal)
             .ToArray();
+        MaterialSlotRequirement = materialSlotRequirement;
     }
 
     public string OperationId { get; }
@@ -73,4 +75,6 @@ public sealed record OperationRunDefinition
     public RecipeSnapshotId RecipeSnapshotId { get; }
 
     public IReadOnlyList<ResourceRequirement> ResourceRequirements { get; }
+
+    public MaterialSlotRequirement? MaterialSlotRequirement { get; }
 }

@@ -1,5 +1,7 @@
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Sessions;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -21,8 +23,10 @@ internal static class RuntimeTestReleaseIdentity
     {
         return new RuntimeSessionTraceMetadata(
             new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
+            new ProductionUnitId(Guid.Parse("11000000-0000-0000-0000-000000000001")),
             "line.main",
             "operation.main",
+            "operation.main@0001",
             1,
             stationSystemId,
             new ProductionUnitIdentity(
@@ -37,6 +41,14 @@ internal static class RuntimeTestReleaseIdentity
             projectId,
             applicationId,
             projectSnapshotId,
-            topologyId);
+            topologyId,
+            ResourceFences(stationSystemId));
     }
+
+    public static IReadOnlyList<ResourceLeaseFenceEvidence> ResourceFences(
+        string stationSystemId = "station.main") =>
+        [new(
+            new ResourceRequirement(ResourceKind.Station, stationSystemId),
+            1,
+            new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero))];
 }

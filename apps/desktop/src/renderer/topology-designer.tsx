@@ -22,9 +22,8 @@ import type {
   AutomationProjectWorkspaceResponse,
   AutomationSystemResponse,
   AutomationTopologyResponse,
+  DriverBindingRouteResponse,
   ProductionLineRuntimeStateResponse,
-  ProductionOperationRunReadModel,
-  ProductionRunReadModel,
   ProjectApplicationResponse,
   SiteLayoutElementResponse,
   SiteLayoutResponse,
@@ -32,12 +31,14 @@ import type {
 } from './contracts';
 import {
   addAutomationSystem,
+  addDriverBinding,
   addSiteLayoutElement,
   addSlotDefinition,
   addSlotGroup,
   createAutomationTopology,
   createSiteLayout,
   deleteAutomationSystem,
+  deleteDriverBinding,
   deleteSlotDefinition,
   deleteSlotGroup,
   getAutomationTopology,
@@ -45,39 +46,32 @@ import {
   linkProjectTopology,
   saveAutomationProjectManifest,
   updateAutomationSystem,
+  updateDriverBinding,
   updateSiteLayoutElementGeometry,
   updateSlotDefinition,
   updateSlotGroup
 } from './api';
+import { buildProductionLineRuntimeView } from './production-line-runtime-view';
+import { useEditorDocument } from './editor-workspace';
+import type { EditorProblem } from './editor-workspace-model';
+import {
+  buildTopologyRuntimeView,
+  describeRuntimeMonitorState,
+  emptyTopologyRuntimeView,
+  runtimeTargetStatusKey,
+  toOperationalState,
+  toTargetOperationalState
+} from './topology-runtime-view';
+import type {
+  OperationalState,
+  TopologyRuntimeStatus,
+  TopologyRuntimeView
+} from './topology-runtime-view';
 
 type WorkspaceMode = 'edit' | 'run';
 type CanvasMode = 'edit' | 'monitor';
 type TopologyDimension = '2d' | '3d';
 type PaletteItemKind = 'Station' | 'System' | 'Group' | 'Slot';
-type OperationalState = 'Idle' | 'Running' | 'Completed' | 'Failed' | 'Offline';
-type RuntimeSlotState = 'Available' | 'Reserved' | 'Occupied' | 'Running' | 'Blocked' | 'Offline';
-
-interface TopologyRuntimeStatus {
-  operationalState: OperationalState;
-  products: string[];
-  queueCount: number;
-  operationIds: string[];
-  slotState?: RuntimeSlotState;
-}
-
-interface TopologySlotRuntimeStatus extends TopologyRuntimeStatus {
-  slotId: string;
-  stationSystemId: string;
-  slotState: RuntimeSlotState;
-  fencingToken: number | null;
-}
-
-interface TopologyRuntimeView {
-  stationStatuses: Map<string, TopologyRuntimeStatus>;
-  targetStatusByKey: Map<string, TopologyRuntimeStatus>;
-  slots: TopologySlotRuntimeStatus[];
-}
-
 interface TopologyCamera {
   yawDegrees: number;
   pitchDegrees: number;
@@ -123,6 +117,14 @@ interface SemanticPropertiesDraft {
   slotEnabled: boolean;
 }
 
+interface DriverBindingDraft {
+  bindingId: string;
+  ownerSystemId: string;
+  capabilityId: string;
+  providerKind: string;
+  providerKey: string;
+}
+
 interface Topology3DRenderElement {
   element: SiteLayoutElementResponse;
   descriptor: ElementDescriptor;
@@ -166,6 +168,14 @@ const slotMaterialKinds = [
   'FixturePosition',
   'TrayPosition',
   'LogicalWorkItem'
+];
+
+const driverProviderKinds = [
+  'Simulator',
+  'DeviceInstance',
+  'PluginCommand',
+  'ExternalSystem',
+  'ProcessCommandProvider'
 ];
 
 const paletteItems: Array<{
@@ -218,6 +228,10 @@ export function TopologyDesigner({
   const [dimension, setDimension] = useState<TopologyDimension>('2d');
   const [camera, setCamera] = useState<TopologyCamera>(defaultTopologyCamera);
   const [deleteConfirmElementId, setDeleteConfirmElementId] = useState<string | null>(null);
+  const [documentDirty, setDocumentDirty] = useState(false);
+  const rootRef = useRef<HTMLElement>(null);
+  const saveStateRef = useRef(saveState);
+  saveStateRef.current = saveState;
 
   const activeApplication = activeWorkspace?.project.applications.find(
     application => application.applicationId === activeApplicationId)
@@ -255,10 +269,10 @@ export function TopologyDesigner({
     const scopedStatuses = [...stationSystemIds]
       .map(stationSystemId => stationStatuses.get(stationSystemId))
       .filter((status): status is TopologyRuntimeStatus => status !== undefined);
-    return describeRuntimeMonitorState(scopedStatuses, runtimeProjection?.activeRunCount ?? 0);
-  }, [effectiveMode, runtimeProjection?.activeRunCount, stationStatuses, topology?.systems]);
+    return describeRuntimeMonitorState(scopedStatuses, runtimeProjection?.productionUnits.length ?? 0);
+  }, [effectiveMode, runtimeProjection?.productionUnits.length, stationStatuses, topology?.systems]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (announce = false) => {
     if (!activeApplication || !apiScope) {
       setTopology(null);
       setLayout(null);
@@ -312,15 +326,27 @@ export function TopologyDesigner({
       return;
     }
 
-    const [topologyResponse, layoutResponse] = await Promise.all([
-      getAutomationTopology(topologyId, apiScope, releaseSnapshot?.snapshotId),
-      getSiteLayout(layoutId, apiScope, releaseSnapshot?.snapshotId)
-    ]);
-    setTopology(topologyResponse.ok && topologyResponse.body ? topologyResponse.body : null);
-    setLayout(layoutResponse.ok && layoutResponse.body ? layoutResponse.body : null);
-    if (releaseSnapshot && (!topologyResponse.ok || !layoutResponse.ok)) {
-      onMessage(
-        `Published topology load failed for ${releaseSnapshot.snapshotId}: topology ${topologyResponse.status}, layout ${layoutResponse.status}.`);
+    if (announce) {
+      setBusy(true);
+    }
+    try {
+      const [topologyResponse, layoutResponse] = await Promise.all([
+        getAutomationTopology(topologyId, apiScope, releaseSnapshot?.snapshotId),
+        getSiteLayout(layoutId, apiScope, releaseSnapshot?.snapshotId)
+      ]);
+      setTopology(topologyResponse.ok && topologyResponse.body ? topologyResponse.body : null);
+      setLayout(layoutResponse.ok && layoutResponse.body ? layoutResponse.body : null);
+      if (releaseSnapshot && (!topologyResponse.ok || !layoutResponse.ok)) {
+        onMessage(
+          `Published topology load failed for ${releaseSnapshot.snapshotId}: topology ${topologyResponse.status}, layout ${layoutResponse.status}.`);
+      } else if (announce) {
+        const revisionLabel = topologyResponse.body?.revision.slice(0, 12) ?? 'unavailable';
+        onMessage(`2D layout refreshed ${layoutId} @ ${revisionLabel}`);
+      }
+    } finally {
+      if (announce) {
+        setBusy(false);
+      }
     }
   }, [activeApplication, activeWorkspace?.project.snapshots, apiScope, effectiveMode, isBackendHealthy, onMessage, projectSnapshotId]);
 
@@ -431,7 +457,7 @@ export function TopologyDesigner({
             requiredCapabilityIds: initialCapabilityIds,
             providedCapabilityIds: initialCapabilityIds,
             metadata: {}
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Add Station ${systemId}`);
         const geometry = clampGeometry({
           x: rootPlacement ? rootPlacement.x - 200 : 48 + ((sequence - 1) % 2) * 480,
@@ -450,7 +476,7 @@ export function TopologyDesigner({
           10,
           { appearance: 'station' });
         const nextLayout = await requireBody(
-          addSiteLayoutElement(layout.layoutId, element, apiScope),
+          addSiteLayoutElement(layout.layoutId, element, apiScope, { revision: layout.revision }),
           `Place Station ${systemId}`);
         setTopology(nextTopology);
         setLayout(nextLayout);
@@ -486,7 +512,7 @@ export function TopologyDesigner({
             requiredCapabilityIds: initialCapabilityIds,
             providedCapabilityIds: initialCapabilityIds,
             metadata: {}
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Add System ${systemId}`);
         const stationOrigin = absoluteElementOrigin(stationElement, layout);
         const geometry = clampGeometry({
@@ -506,7 +532,7 @@ export function TopologyDesigner({
           15,
           { appearance: 'component' });
         const nextLayout = await requireBody(
-          addSiteLayoutElement(layout.layoutId, element, apiScope),
+          addSiteLayoutElement(layout.layoutId, element, apiScope, { revision: layout.revision }),
           `Place System ${systemId}`);
         setTopology(nextTopology);
         setLayout(nextLayout);
@@ -526,7 +552,7 @@ export function TopologyDesigner({
             displayName: `Fixture Group ${sequence}`,
             kind: 'FixtureNest',
             capacity: 8
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Add Slot Group ${slotGroupId}`);
         const stationOrigin = absoluteElementOrigin(stationElement, layout);
         const geometry = clampGeometry({
@@ -546,7 +572,7 @@ export function TopologyDesigner({
           20,
           { appearance: 'fixture-group' });
         const nextLayout = await requireBody(
-          addSiteLayoutElement(layout.layoutId, element, apiScope),
+          addSiteLayoutElement(layout.layoutId, element, apiScope, { revision: layout.revision }),
           `Place Slot Group ${slotGroupId}`);
         setTopology(nextTopology);
         setLayout(nextLayout);
@@ -577,7 +603,7 @@ export function TopologyDesigner({
           displayName: `Slot ${sequence}`,
           materialKind: 'ProductionUnit',
           isEnabled: true
-        }, apiScope),
+        }, apiScope, { revision: topology.revision }),
         `Add Slot ${slotId}`);
       const groupOrigin = absoluteElementOrigin(groupElement, layout);
       const slotGeometry = clampGeometry({
@@ -597,7 +623,7 @@ export function TopologyDesigner({
         30,
         { appearance: 'production-unit-slot' });
       const nextLayout = await requireBody(
-        addSiteLayoutElement(layout.layoutId, element, apiScope),
+        addSiteLayoutElement(layout.layoutId, element, apiScope, { revision: layout.revision }),
         `Place Slot ${slotId}`);
       setTopology(nextTopology);
       setLayout(nextLayout);
@@ -614,6 +640,7 @@ export function TopologyDesigner({
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest
   ) => {
+    setDocumentDirty(true);
     setLayout(current => updateLayoutGeometry(current, elementId, geometry));
   }, []);
 
@@ -633,7 +660,8 @@ export function TopologyDesigner({
         layout.layoutId,
         elementId,
         normalizeGeometry(geometry),
-        apiScope);
+        apiScope,
+        { revision: layout.revision });
       if (!response.ok || !response.body) {
         setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
         setSaveState('error');
@@ -672,7 +700,7 @@ export function TopologyDesigner({
             systemType: requireText(draft.systemType, 'System Type'),
             metadata: topology.systems.find(
               system => system.systemId === element.target.targetId)?.metadata ?? {}
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Save System ${element.target.targetId}`);
       } else if (element.target.kind === 'SlotGroup') {
         if (!Number.isInteger(draft.groupCapacity) || draft.groupCapacity <= 0) {
@@ -683,7 +711,7 @@ export function TopologyDesigner({
             displayName: requireText(draft.displayName, 'Display Name'),
             kind: draft.groupKind,
             capacity: draft.groupCapacity
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Save Slot Group ${element.target.targetId}`);
       } else {
         nextTopology = await requireBody(
@@ -692,13 +720,76 @@ export function TopologyDesigner({
             address: requireText(draft.slotAddress, 'Slot Address'),
             materialKind: draft.slotMaterialKind,
             isEnabled: draft.slotEnabled
-          }, apiScope),
+          }, apiScope, { revision: topology.revision }),
           `Save Slot ${element.target.targetId}`);
       }
 
       setTopology(nextTopology);
       setSaveState('saved');
       onMessage(`Properties saved ${element.target.targetId}`);
+    } catch (error) {
+      setSaveState('error');
+      onMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [apiScope, editable, onMessage, topology]);
+
+  const saveDriverBinding = useCallback(async (
+    originalBindingId: string | null,
+    draft: DriverBindingDraft
+  ) => {
+    if (!editable || !topology || !apiScope) {
+      onMessage('Driver bindings can only be changed in Edit mode.');
+      return;
+    }
+
+    setBusy(true);
+    setSaveState('saving');
+    try {
+      const bindingId = requireText(draft.bindingId, 'Binding ID');
+      if (originalBindingId !== null && originalBindingId !== bindingId) {
+        throw new Error('Binding identity is immutable; create a new binding to change it.');
+      }
+      const request = {
+        ownerSystemId: requireText(draft.ownerSystemId, 'Owner System'),
+        capabilityId: requireText(draft.capabilityId, 'Capability'),
+        providerKind: requireText(draft.providerKind, 'Provider Kind'),
+        providerKey: requireText(draft.providerKey, 'Provider Key')
+      };
+      const nextTopology = originalBindingId === null
+        ? await requireBody(
+          addDriverBinding(topology.topologyId, { bindingId, ...request }, apiScope, { revision: topology.revision }),
+          `Create Driver binding ${bindingId}`)
+        : await requireBody(
+          updateDriverBinding(topology.topologyId, originalBindingId, request, apiScope, { revision: topology.revision }),
+          `Update Driver binding ${originalBindingId}`);
+      setTopology(nextTopology);
+      setSaveState('saved');
+      onMessage(`${originalBindingId === null ? 'Created' : 'Updated'} Driver binding ${bindingId}`);
+    } catch (error) {
+      setSaveState('error');
+      onMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [apiScope, editable, onMessage, topology]);
+
+  const removeDriverBinding = useCallback(async (bindingId: string) => {
+    if (!editable || !topology || !apiScope) {
+      onMessage('Driver bindings can only be deleted in Edit mode.');
+      return;
+    }
+
+    setBusy(true);
+    setSaveState('saving');
+    try {
+      const nextTopology = await requireBody(
+        deleteDriverBinding(topology.topologyId, bindingId, apiScope, { revision: topology.revision }),
+        `Delete Driver binding ${bindingId}`);
+      setTopology(nextTopology);
+      setSaveState('saved');
+      onMessage(`Deleted Driver binding ${bindingId}`);
     } catch (error) {
       setSaveState('error');
       onMessage(String(error));
@@ -725,14 +816,14 @@ export function TopologyDesigner({
     try {
       const deletion = element.target.kind === 'System'
         ? await requireBody(
-          deleteAutomationSystem(topology.topologyId, element.target.targetId, apiScope),
+          deleteAutomationSystem(topology.topologyId, element.target.targetId, apiScope, { revision: topology.revision }),
           `Delete System ${element.target.targetId}`)
         : element.target.kind === 'SlotGroup'
           ? await requireBody(
-            deleteSlotGroup(topology.topologyId, element.target.targetId, apiScope),
+            deleteSlotGroup(topology.topologyId, element.target.targetId, apiScope, { revision: topology.revision }),
             `Delete Slot Group ${element.target.targetId}`)
           : await requireBody(
-            deleteSlotDefinition(topology.topologyId, element.target.targetId, apiScope),
+            deleteSlotDefinition(topology.topologyId, element.target.targetId, apiScope, { revision: topology.revision }),
             `Delete Slot ${element.target.targetId}`);
 
       setTopology(deletion.topology);
@@ -772,8 +863,57 @@ export function TopologyDesigner({
     void addPaletteItem(kind, { x, y });
   }, [addPaletteItem, editable, layout]);
 
+  useEffect(() => {
+    if (saveState === 'saved') {
+      setDocumentDirty(false);
+    }
+  }, [saveState]);
+
+  const savePendingEdits = useCallback(async () => {
+    if (!documentDirty) {
+      return;
+    }
+    const candidates = Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="save-topology-target"], [data-testid="save-driver-binding"], [data-testid="save-layout-geometry"]') ?? []);
+    const saveButton = candidates.find(button => !button.disabled && button.offsetParent !== null);
+    if (!saveButton) {
+      throw new Error('Select the edited topology target before saving it.');
+    }
+    saveButton.click();
+    await waitForTopologySave(saveStateRef);
+  }, [documentDirty]);
+  const topologyProblems = useMemo<EditorProblem[]>(() => saveState === 'error'
+    ? [{
+      id: 'topology-save-error',
+      severity: 'Error',
+      message: 'The most recent topology change was not saved.',
+      targetId: selectedElementId
+    }]
+    : [], [saveState, selectedElementId]);
+  useEditorDocument({
+    dirty: documentDirty,
+    canSave: editable,
+    save: savePendingEdits,
+    revert: async () => {
+      await refresh();
+      setDocumentDirty(false);
+    },
+    focus: targetId => {
+      if (!targetId || !layout) return;
+      const element = layout.elements.find(candidate => (
+        candidate.elementId === targetId || candidate.target.targetId === targetId));
+      if (element) setSelectedElementId(element.elementId);
+    },
+    problems: topologyProblems
+  });
+
   return (
-    <section className="topology-ide" data-testid="topology-workbench">
+    <section
+      ref={rootRef}
+      className="topology-ide"
+      data-testid="topology-workbench"
+      onInputCapture={() => setDocumentDirty(true)}
+    >
       <header className="topology-command-bar">
         <div className="topology-document-identity">
           <Waypoints size={17} />
@@ -829,7 +969,7 @@ export function TopologyDesigner({
             {saveState === 'saving' ? <RefreshCw size={12} /> : <Save size={12} />}
             {saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Save failed' : 'Saved'}
           </span>
-          <button type="button" className="button ghost" onClick={() => void refresh()} disabled={!isBackendHealthy || busy} data-testid="refresh-topology-layout">
+          <button type="button" className="button ghost" onClick={() => void refresh(true)} disabled={!isBackendHealthy || busy} data-testid="refresh-topology-layout">
             <RefreshCw size={14} /> Refresh
           </button>
           <button
@@ -866,7 +1006,7 @@ export function TopologyDesigner({
             ) : null}
           </div>
 
-          <div className="topology-canvas-stage">
+          <div className="topology-canvas-plane">
             {layout && topology ? (
               dimension === '2d' ? (
                 <div
@@ -964,6 +1104,8 @@ export function TopologyDesigner({
           onSelect={setSelectedElementId}
           onCommit={commitGeometry}
           onSaveSemantic={saveSemanticTarget}
+          onSaveDriverBinding={saveDriverBinding}
+          onDeleteDriverBinding={removeDriverBinding}
           onDelete={deleteSemanticTarget}
         />
       </div>
@@ -1785,6 +1927,8 @@ function InspectorPanel({
   onSelect,
   onCommit,
   onSaveSemantic,
+  onSaveDriverBinding,
+  onDeleteDriverBinding,
   onDelete
 }: {
   layout: SiteLayoutResponse | null;
@@ -1802,6 +1946,8 @@ function InspectorPanel({
     previousGeometry: UpdateSiteLayoutElementGeometryRequest
   ): void;
   onSaveSemantic(element: SiteLayoutElementResponse, draft: SemanticPropertiesDraft): void;
+  onSaveDriverBinding(originalBindingId: string | null, draft: DriverBindingDraft): void;
+  onDeleteDriverBinding(bindingId: string): void;
   onDelete(element: SiteLayoutElementResponse): void;
 }): React.ReactElement {
   return (
@@ -1823,6 +1969,15 @@ function InspectorPanel({
         onSaveSemantic={onSaveSemantic}
         onDelete={onDelete}
       />
+      {selectedElement?.target.kind === 'System' && topology ? (
+        <DriverBindingEditor
+          topology={topology}
+          selectedSystemId={selectedElement.target.targetId}
+          editable={editable}
+          onSave={onSaveDriverBinding}
+          onDelete={onDeleteDriverBinding}
+        />
+      ) : null}
       <HierarchyTree
         layout={layout}
         topology={topology}
@@ -1838,6 +1993,204 @@ function InspectorPanel({
         </div>
       </section>
     </aside>
+  );
+}
+
+function DriverBindingEditor({
+  topology,
+  selectedSystemId,
+  editable,
+  onSave,
+  onDelete
+}: {
+  topology: AutomationTopologyResponse;
+  selectedSystemId: string;
+  editable: boolean;
+  onSave(originalBindingId: string | null, draft: DriverBindingDraft): void;
+  onDelete(bindingId: string): void;
+}): React.ReactElement {
+  const ownedBindings = topology.driverBindings
+    .filter(binding => binding.ownerSystemId === selectedSystemId)
+    .sort((left, right) => left.bindingId.localeCompare(right.bindingId));
+  const [selectedBindingId, setSelectedBindingId] = useState<string | null>(null);
+  const [deleteConfirmBindingId, setDeleteConfirmBindingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<DriverBindingDraft>(
+    () => newDriverBindingDraft(selectedSystemId, topology));
+  const selectedBinding = selectedBindingId
+    ? topology.driverBindings.find(binding => binding.bindingId === selectedBindingId) ?? null
+    : null;
+  const ownerSystem = topology.systems.find(system => system.systemId === draft.ownerSystemId) ?? null;
+  const ownerCapabilities = ownerSystem
+    ? [...new Set([
+      ...ownerSystem.requiredCapabilityIds,
+      ...ownerSystem.providedCapabilityIds
+    ])].sort((left, right) => left.localeCompare(right))
+    : [];
+
+  useEffect(() => {
+    const current = selectedBindingId
+      ? topology.driverBindings.find(binding => binding.bindingId === selectedBindingId) ?? null
+      : null;
+    if (current) {
+      setDraft(toDriverBindingDraft(current));
+    } else {
+      setSelectedBindingId(null);
+      setDraft(newDriverBindingDraft(selectedSystemId, topology));
+    }
+    setDeleteConfirmBindingId(null);
+  }, [selectedBindingId, selectedSystemId, topology]);
+
+  return (
+    <section className="topology-driver-editor" data-testid="topology-driver-binding-editor">
+      <header>
+        <div><strong>Driver bindings</strong><span>{ownedBindings.length}</span></div>
+        <button
+          type="button"
+          className="button ghost"
+          disabled={!editable}
+          onClick={() => {
+            setSelectedBindingId(null);
+            setDraft(newDriverBindingDraft(selectedSystemId, topology));
+          }}
+          data-testid="new-driver-binding"
+        >
+          <Plus size={12} /> New
+        </button>
+      </header>
+      {ownedBindings.length > 0 ? (
+        <div className="topology-driver-list">
+          {ownedBindings.map(binding => (
+            <button
+              type="button"
+              key={binding.bindingId}
+              className={selectedBindingId === binding.bindingId ? 'active' : ''}
+              onClick={() => setSelectedBindingId(binding.bindingId)}
+            >
+              <strong>{binding.bindingId}</strong>
+              <span>{binding.capabilityId}</span>
+              <small>{binding.providerKind} / {binding.providerKey}</small>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="topology-driver-empty">No Driver is owned by this System.</p>
+      )}
+      <form
+        className="topology-driver-form"
+        onSubmit={event => {
+          event.preventDefault();
+          onSave(selectedBinding?.bindingId ?? null, draft);
+        }}
+      >
+        <label>
+          <span>Binding ID</span>
+          <input
+            value={draft.bindingId}
+            disabled={!editable || selectedBinding !== null}
+            onChange={event => setDraft(current => ({ ...current, bindingId: event.target.value }))}
+            data-testid="driver-binding-id"
+          />
+        </label>
+        <label>
+          <span>Owner System</span>
+          <select
+            value={draft.ownerSystemId}
+            disabled={!editable}
+            onChange={event => {
+              const ownerSystemId = event.target.value;
+              const owner = topology.systems.find(system => system.systemId === ownerSystemId);
+              const capabilities = owner
+                ? [...new Set([...owner.requiredCapabilityIds, ...owner.providedCapabilityIds])]
+                : [];
+              setDraft(current => ({
+                ...current,
+                ownerSystemId,
+                capabilityId: capabilities.includes(current.capabilityId)
+                  ? current.capabilityId
+                  : capabilities[0] ?? ''
+              }));
+            }}
+            data-testid="driver-binding-owner-system"
+          >
+            {topology.systems.map(system => (
+              <option key={system.systemId} value={system.systemId}>
+                {system.displayName} ({system.systemId})
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Capability</span>
+          <select
+            value={draft.capabilityId}
+            disabled={!editable || ownerCapabilities.length === 0}
+            onChange={event => setDraft(current => ({
+              ...current,
+              capabilityId: event.target.value
+            }))}
+            data-testid="driver-binding-capability"
+          >
+            {ownerCapabilities.length === 0 ? (
+              <option value="">Owner declares no capabilities</option>
+            ) : ownerCapabilities.map(capabilityId => (
+              <option key={capabilityId} value={capabilityId}>{capabilityId}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Provider Kind</span>
+          <select
+            value={draft.providerKind}
+            disabled={!editable}
+            onChange={event => setDraft(current => ({
+              ...current,
+              providerKind: event.target.value
+            }))}
+            data-testid="driver-binding-provider-kind"
+          >
+            {driverProviderKinds.map(kind => <option key={kind} value={kind}>{kind}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Provider Key</span>
+          <input
+            value={draft.providerKey}
+            disabled={!editable}
+            onChange={event => setDraft(current => ({ ...current, providerKey: event.target.value }))}
+            data-testid="driver-binding-provider-key"
+          />
+        </label>
+        <div className="topology-driver-actions">
+          <button
+            type="submit"
+            className="button primary"
+            disabled={!editable || ownerCapabilities.length === 0}
+            data-testid="save-driver-binding"
+          >
+            <Save size={12} /> {selectedBinding ? 'Update' : 'Create'}
+          </button>
+          {selectedBinding ? (
+            <button
+              type="button"
+              className="button danger"
+              disabled={!editable}
+              onClick={() => {
+                if (deleteConfirmBindingId === selectedBinding.bindingId) {
+                  onDelete(selectedBinding.bindingId);
+                  setDeleteConfirmBindingId(null);
+                } else {
+                  setDeleteConfirmBindingId(selectedBinding.bindingId);
+                }
+              }}
+              data-testid="delete-driver-binding"
+            >
+              <Trash2 size={12} />
+              {deleteConfirmBindingId === selectedBinding.bindingId ? 'Confirm delete' : 'Delete'}
+            </button>
+          ) : null}
+        </div>
+      </form>
+    </section>
   );
 }
 
@@ -2405,6 +2758,40 @@ function toSemanticDraft(
   };
 }
 
+function toDriverBindingDraft(binding: DriverBindingRouteResponse): DriverBindingDraft {
+  return {
+    bindingId: binding.bindingId,
+    ownerSystemId: binding.ownerSystemId,
+    capabilityId: binding.capabilityId,
+    providerKind: binding.providerKind,
+    providerKey: binding.providerKey
+  };
+}
+
+function newDriverBindingDraft(
+  ownerSystemId: string,
+  topology: AutomationTopologyResponse
+): DriverBindingDraft {
+  const owner = topology.systems.find(system => system.systemId === ownerSystemId) ?? null;
+  const capabilities = owner
+    ? [...new Set([...owner.requiredCapabilityIds, ...owner.providedCapabilityIds])]
+    : [];
+  const ownerToken = ownerSystemId.replace(/[^a-zA-Z0-9._-]/g, '-');
+  let suffix = topology.driverBindings.length + 1;
+  let bindingId = `binding.${ownerToken}.${suffix}`;
+  while (topology.driverBindings.some(binding => binding.bindingId === bindingId)) {
+    suffix += 1;
+    bindingId = `binding.${ownerToken}.${suffix}`;
+  }
+  return {
+    bindingId,
+    ownerSystemId,
+    capabilityId: capabilities[0] ?? '',
+    providerKind: driverProviderKinds[0],
+    providerKey: `${ownerToken}.simulator`
+  };
+}
+
 function resolveStationElement(
   selected: SiteLayoutElementResponse | null,
   layout: SiteLayoutResponse,
@@ -2455,40 +2842,59 @@ function TopologyLiveOverlay({
   const stationNameById = new Map(topology.systems
     .filter(system => system.kind === 'Station')
     .map(system => [system.systemId, system.displayName]));
+  const productionView = lineState ? buildProductionLineRuntimeView(lineState) : null;
+  const operationByRunId = new Map((lineState?.stations ?? []).flatMap(station =>
+    station.activeOperations.map(operation => [operation.operationRunId, {
+      stationSystemId: station.stationSystemId,
+      operationId: operation.operationId
+    }] as const)));
+  const resources = (lineState?.stations ?? []).flatMap(station =>
+    station.activeOperations.flatMap(operation => operation.resources.map(resource => ({
+      ...resource,
+      stationSystemId: station.stationSystemId,
+      operationRunId: operation.operationRunId
+    }))));
   return (
     <aside className={`topology-live-overlay ${connected ? 'connected' : 'stale'}`} data-testid="topology-live-projection">
       <header>
         <div><CircleDot size={13} /><strong>LIVE WIP</strong></div>
-        <span>{connected ? 'CONNECTED' : 'STALE'} · {lineState?.activeRunCount ?? 0}</span>
+        <span>{connected ? 'CONNECTED' : 'STALE'} · {lineState?.productionUnits.length ?? 0}</span>
       </header>
       <div className="topology-live-scroll">
         <section>
           <h3>ACTIVE PRODUCTS</h3>
-          {(lineState?.activeRuns ?? []).map(run => {
-            const activeOperations = run.operations.filter(operation => operation.executionStatus === 'Running');
-            const locatedOperations = activeOperations.length > 0
-              ? activeOperations
-              : run.operations.filter(operation => operation.executionStatus === 'Pending').slice(0, 1);
+          {(lineState?.productionUnits ?? []).map(unit => {
+            const operations = unit.activeOperationRunIds
+              .map(operationRunId => operationByRunId.get(operationRunId))
+              .filter((operation): operation is NonNullable<typeof operation> => operation !== undefined);
             return (
-              <div className="topology-live-product" key={run.productionRunId}>
-                <i className={`status-${run.executionStatus.toLowerCase()}`} />
+              <div
+                className="topology-live-product"
+                key={unit.productionUnitId}
+                data-testid={`topology-production-unit-${unit.productionUnitId}`}
+              >
+                <i className={`status-${productionUnitTone(unit.disposition, unit.judgement)}`} />
                 <span>
-                  <strong>{run.productionUnitIdentity.value}</strong>
-                  <small>{locatedOperations.map(operation => (
+                  <strong>{unit.identityValue}</strong>
+                  <small>{operations.map(operation => (
                     `${stationNameById.get(operation.stationSystemId) ?? operation.stationSystemId} / ${operation.operationId}`
-                  )).join(' + ') || run.entryOperationId}</small>
+                  )).join(' + ') || formatTopologyMaterialLocation(unit.location, stationNameById)}</small>
                 </span>
-                <em>{run.controlState}</em>
+                <em>{unit.disposition}</em>
               </div>
             );
           })}
-          {(lineState?.activeRuns.length ?? 0) === 0 ? <p>No active products</p> : null}
+          {(lineState?.productionUnits.length ?? 0) === 0 ? <p>No active products</p> : null}
         </section>
 
         <section>
           <h3>STATIONS & QUEUES</h3>
           {[...runtimeView.stationStatuses.entries()].map(([stationSystemId, status]) => (
-            <div className="topology-live-station" key={stationSystemId}>
+            <div
+              className="topology-live-station"
+              key={stationSystemId}
+              data-testid={`topology-station-${stationSystemId}`}
+            >
               <i className={`status-${status.operationalState.toLowerCase()}`} />
               <span><strong>{stationNameById.get(stationSystemId) ?? stationSystemId}</strong><small>{status.products.length} located · {status.queueCount} queued</small></span>
               <em>{status.operationalState}</em>
@@ -2499,301 +2905,96 @@ function TopologyLiveOverlay({
         <section>
           <h3>SLOT OCCUPANCY</h3>
           {runtimeView.slots.map(slot => (
-            <div className="topology-live-slot" key={slot.slotId}>
+            <div
+              className="topology-live-slot"
+              key={`${slot.stationSystemId}:${slot.slotId}`}
+              data-testid={`topology-slot-${slot.stationSystemId}-${slot.slotId}`}
+              data-slot-status={slot.slotState}
+            >
               <i className={`status-${slot.operationalState.toLowerCase()}`} />
-              <span><strong>{slot.slotId}</strong><small>{slot.products.join(', ') || 'empty'}</small></span>
-              <em>{slot.slotState}</em>
+              <span>
+                <strong>{slot.slotId}</strong>
+                <small>{slot.products.join(', ') || 'empty'}</small>
+              </span>
+              <em>{slot.slotState}{slot.fencingToken === null ? '' : ` #${slot.fencingToken}`}</em>
             </div>
           ))}
           {runtimeView.slots.length === 0 ? <p>No Slots in this topology</p> : null}
+        </section>
+
+        <section>
+          <h3>CARRIERS</h3>
+          {(productionView?.carriers ?? []).map(carrier => (
+            <div
+              className="topology-live-carrier"
+              key={carrier.carrierId}
+              data-testid={`topology-carrier-${carrier.carrierId}`}
+            >
+              <Boxes size={12} />
+              <span>
+                <strong>{carrier.carrierId}</strong>
+                <small>{carrier.productionUnits.map(position => (
+                  `${position.carrierPositionId}: ${position.productionUnitLabel}`)).join(', ') || 'empty'}</small>
+              </span>
+              <em>{carrier.productionUnits.length}/{carrier.capacity}</em>
+            </div>
+          ))}
+          {(productionView?.carriers.length ?? 0) === 0 ? <p>No active Carriers</p> : null}
+        </section>
+
+        <section>
+          <h3>RESOURCE LEASES</h3>
+          {resources.map(resource => (
+            <div
+              className="topology-live-resource"
+              key={`${resource.operationRunId}:${resource.kind}:${resource.resourceId}`}
+              data-testid={`topology-resource-${resource.operationRunId}-${resource.kind}-${resource.resourceId}`}
+              data-resource-status={resource.status}
+              data-fencing-token={resource.fencingToken ?? ''}
+            >
+              <LockKeyhole size={12} />
+              <span>
+                <strong>{resource.kind} / {resource.resourceId}</strong>
+                <small>{stationNameById.get(resource.stationSystemId) ?? resource.stationSystemId}</small>
+              </span>
+              <em>{resource.status}{resource.fencingToken === null ? '' : ` #${resource.fencingToken}`}</em>
+            </div>
+          ))}
+          {resources.length === 0 ? <p>No active resource leases</p> : null}
         </section>
       </div>
     </aside>
   );
 }
 
-function runtimeTargetStatusKey(
-  stationSystemId: string,
-  targetKind: string,
-  targetId: string
+function productionUnitTone(
+  disposition: ProductionLineRuntimeStateResponse['productionUnits'][number]['disposition'],
+  judgement: ProductionLineRuntimeStateResponse['productionUnits'][number]['judgement']
 ): string {
-  return JSON.stringify([stationSystemId, targetKind, targetId]);
-}
-
-function toTargetOperationalState(
-  status: TopologyRuntimeStatus | undefined,
-  runtimeConnected: boolean
-): OperationalState {
-  if (!runtimeConnected) {
-    return 'Offline';
+  if (disposition === 'Held' || disposition === 'Scrapped' || judgement === 'Failed') {
+    return 'failed';
   }
-  return status?.operationalState ?? 'Idle';
+  if (disposition === 'Completed' || judgement === 'Passed') {
+    return 'completed';
+  }
+  return 'running';
 }
 
-function describeRuntimeMonitorState(
-  statuses: TopologyRuntimeStatus[],
-  activeRunCount: number
+function formatTopologyMaterialLocation(
+  location: ProductionLineRuntimeStateResponse['productionUnits'][number]['location'],
+  stationNameById: ReadonlyMap<string, string>
 ): string {
-  if (activeRunCount > 0) {
-    const queued = statuses.reduce((total, status) => total + status.queueCount, 0);
-    return `${activeRunCount} active product${activeRunCount === 1 ? '' : 's'} · ${queued} queued`;
+  if (!location) {
+    return 'Location not assigned';
   }
-  return 'Line idle · projection connected';
-}
-
-function toOperationalState(
-  status: TopologyRuntimeStatus | undefined,
-  runtimeConnected: boolean
-): OperationalState {
-  if (!runtimeConnected) {
-    return 'Offline';
+  switch (location.kind) {
+    case 'StationQueue':
+      return `${stationNameById.get(location.stationSystemId ?? '') ?? location.stationSystemId} / queue`;
+    case 'Slot':
+      return `${stationNameById.get(location.stationSystemId ?? '') ?? location.stationSystemId} / ${location.slotId}`;
+    case 'CarrierPosition':
+      return `${location.carrierId} / ${location.carrierPositionId}`;
   }
-  return status?.operationalState ?? 'Idle';
-}
-
-function emptyTopologyRuntimeView(): TopologyRuntimeView {
-  return {
-    stationStatuses: new Map(),
-    targetStatusByKey: new Map(),
-    slots: []
-  };
-}
-
-function buildTopologyRuntimeView(
-  topology: AutomationTopologyResponse | null,
-  lineState: ProductionLineRuntimeStateResponse | null
-): TopologyRuntimeView {
-  if (!topology) {
-    return emptyTopologyRuntimeView();
-  }
-
-  const stationAccumulators = new Map<string, RuntimeAccumulator>();
-  for (const station of topology.systems.filter(system => system.kind === 'Station')) {
-    stationAccumulators.set(station.systemId, createRuntimeAccumulator());
-  }
-  const slots = new Map<string, TopologySlotRuntimeStatus>();
-  for (const slot of topology.slots) {
-    const slotState: RuntimeSlotState = slot.isEnabled ? 'Available' : 'Offline';
-    slots.set(slot.slotId, {
-      slotId: slot.slotId,
-      stationSystemId: findStationAncestor(slot.parentSystemId, topology) ?? slot.parentSystemId,
-      slotState,
-      operationalState: slotOperationalState(slotState),
-      products: [],
-      queueCount: 0,
-      operationIds: [],
-      fencingToken: null
-    });
-  }
-
-  for (const run of lineState?.activeRuns ?? []) {
-    accumulateRun(stationAccumulators, slots, run);
-  }
-
-  const stationStatuses = new Map<string, TopologyRuntimeStatus>();
-  for (const [stationSystemId, accumulator] of stationAccumulators) {
-    stationStatuses.set(stationSystemId, freezeAccumulator(accumulator));
-  }
-
-  const targetStatusByKey = new Map<string, TopologyRuntimeStatus>();
-  for (const slot of slots.values()) {
-    targetStatusByKey.set(
-      runtimeTargetStatusKey(slot.stationSystemId, 'Slot', slot.slotId),
-      slot);
-  }
-  for (const group of topology.slotGroups) {
-    const groupSlots = group.slotIds
-      .map(slotId => slots.get(slotId))
-      .filter((slot): slot is TopologySlotRuntimeStatus => slot !== undefined);
-    const groupState = groupSlots.reduce<OperationalState>(
-      (current, slot) => operationalStatePriority(slot.operationalState) > operationalStatePriority(current)
-        ? slot.operationalState
-        : current,
-      'Idle');
-    targetStatusByKey.set(
-      runtimeTargetStatusKey(
-        findStationAncestor(group.parentSystemId, topology) ?? group.parentSystemId,
-        'SlotGroup',
-        group.slotGroupId),
-      {
-        operationalState: groupState,
-        products: unique(groupSlots.flatMap(slot => slot.products)),
-        queueCount: groupSlots.reduce((total, slot) => total + slot.queueCount, 0),
-        operationIds: unique(groupSlots.flatMap(slot => slot.operationIds))
-      });
-  }
-  for (const system of topology.systems.filter(candidate => candidate.kind === 'System')) {
-    const stationSystemId = findStationAncestor(system.systemId, topology);
-    if (!stationSystemId) {
-      continue;
-    }
-    const stationStatus = stationStatuses.get(stationSystemId);
-    if (stationStatus) {
-      targetStatusByKey.set(
-        runtimeTargetStatusKey(stationSystemId, 'System', system.systemId),
-        stationStatus);
-    }
-  }
-
-  return {
-    stationStatuses,
-    targetStatusByKey,
-    slots: [...slots.values()].sort((left, right) => left.slotId.localeCompare(right.slotId))
-  };
-}
-
-interface RuntimeAccumulator {
-  products: Set<string>;
-  operationIds: Set<string>;
-  queueProducts: Set<string>;
-  runningCount: number;
-  completedCount: number;
-  failedCount: number;
-}
-
-function createRuntimeAccumulator(): RuntimeAccumulator {
-  return {
-    products: new Set(),
-    operationIds: new Set(),
-    queueProducts: new Set(),
-    runningCount: 0,
-    completedCount: 0,
-    failedCount: 0
-  };
-}
-
-function accumulateRun(
-  stations: Map<string, RuntimeAccumulator>,
-  slots: Map<string, TopologySlotRuntimeStatus>,
-  run: ProductionRunReadModel
-): void {
-  const product = run.productionUnitIdentity.value;
-  const runningOperations = run.operations.filter(operation => operation.executionStatus === 'Running');
-  const locatedOperations = runningOperations.length > 0
-    ? runningOperations
-    : run.operations.filter(operation => operation.executionStatus === 'Pending').slice(0, 1);
-  const lastLocatedOperation = locatedOperations.length === 0
-    ? run.operations[run.operations.length - 1]
-    : null;
-  const locatedOperationRunIds = new Set([
-    ...locatedOperations.map(operation => operation.operationRunId),
-    ...(lastLocatedOperation ? [lastLocatedOperation.operationRunId] : [])
-  ]);
-  for (const operation of run.operations) {
-    const station = stations.get(operation.stationSystemId) ?? createRuntimeAccumulator();
-    stations.set(operation.stationSystemId, station);
-    station.operationIds.add(operation.operationId);
-    if (operation.executionStatus === 'Pending') {
-      station.queueProducts.add(product);
-    }
-    if (locatedOperationRunIds.has(operation.operationRunId)) {
-      station.products.add(product);
-      if (operation.executionStatus === 'Running' || run.controlState === 'Held' || run.controlState === 'Paused') {
-        station.runningCount += 1;
-      } else if (operation.executionStatus === 'Completed') {
-        station.completedCount += 1;
-      } else if (operation.executionStatus === 'Failed'
-          || operation.executionStatus === 'TimedOut'
-          || operation.executionStatus === 'Rejected'
-          || operation.incidentCount > 0) {
-        station.failedCount += 1;
-      }
-    }
-
-    for (const resource of operation.resources.filter(candidate => candidate.kind === 'Slot')) {
-      const existing = slots.get(resource.resourceId);
-      const slotState = runtimeSlotState(operation, resource.fencingToken);
-      const candidate: TopologySlotRuntimeStatus = {
-        slotId: resource.resourceId,
-        stationSystemId: existing?.stationSystemId ?? operation.stationSystemId,
-        slotState,
-        operationalState: slotOperationalState(slotState),
-        products: resource.fencingToken === null ? [] : [product],
-        queueCount: operation.executionStatus === 'Pending' && resource.fencingToken !== null ? 1 : 0,
-        operationIds: [operation.operationId],
-        fencingToken: resource.fencingToken
-      };
-      if (!existing || slotStatePriority(candidate.slotState) >= slotStatePriority(existing.slotState)) {
-        slots.set(resource.resourceId, candidate);
-      }
-    }
-  }
-}
-
-function freezeAccumulator(accumulator: RuntimeAccumulator): TopologyRuntimeStatus {
-  const operationalState: OperationalState = accumulator.failedCount > 0
-    ? 'Failed'
-    : accumulator.runningCount > 0
-      ? 'Running'
-      : accumulator.completedCount > 0
-        ? 'Completed'
-        : 'Idle';
-  return {
-    operationalState,
-    products: [...accumulator.products].sort(),
-    queueCount: accumulator.queueProducts.size,
-    operationIds: [...accumulator.operationIds].sort()
-  };
-}
-
-function runtimeSlotState(
-  operation: ProductionOperationRunReadModel,
-  fencingToken: number | null
-): RuntimeSlotState {
-  if (fencingToken === null) {
-    return 'Available';
-  }
-  if (operation.executionStatus === 'Running') {
-    return 'Running';
-  }
-  if (operation.executionStatus === 'Pending') {
-    return 'Reserved';
-  }
-  if (operation.executionStatus === 'Failed'
-      || operation.executionStatus === 'TimedOut'
-      || operation.executionStatus === 'Rejected') {
-    return 'Blocked';
-  }
-  return 'Occupied';
-}
-
-function slotOperationalState(state: RuntimeSlotState): OperationalState {
-  switch (state) {
-    case 'Running':
-    case 'Reserved':
-    case 'Occupied':
-      return 'Running';
-    case 'Blocked':
-      return 'Failed';
-    case 'Offline':
-      return 'Offline';
-    default:
-      return 'Idle';
-  }
-}
-
-function slotStatePriority(state: RuntimeSlotState): number {
-  return { Available: 0, Offline: 1, Reserved: 2, Occupied: 3, Running: 4, Blocked: 5 }[state];
-}
-
-function operationalStatePriority(state: OperationalState): number {
-  return { Idle: 0, Completed: 1, Running: 2, Offline: 3, Failed: 4 }[state];
-}
-
-function findStationAncestor(systemId: string, topology: AutomationTopologyResponse): string | null {
-  const systemById = new Map(topology.systems.map(system => [system.systemId, system]));
-  let current = systemById.get(systemId);
-  while (current) {
-    if (current.kind === 'Station') {
-      return current.systemId;
-    }
-    current = current.parentSystemId ? systemById.get(current.parentSystemId) : undefined;
-  }
-  return null;
-}
-
-function unique(values: string[]): string[] {
-  return [...new Set(values)].sort();
 }
 
 function resolveDropInsertionElement(
@@ -2999,6 +3200,23 @@ function nextSequence(ids: string[], prefix: string): number {
     sequence += 1;
   }
   return sequence;
+}
+
+async function waitForTopologySave(
+  saveStateRef: React.MutableRefObject<'saved' | 'saving' | 'error'>
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  await new Promise(resolve => window.setTimeout(resolve, 50));
+  while (Date.now() < deadline) {
+    if (saveStateRef.current === 'saved') {
+      return;
+    }
+    if (saveStateRef.current === 'error') {
+      throw new Error('Topology save failed. The editor draft was preserved.');
+    }
+    await new Promise(resolve => window.setTimeout(resolve, 40));
+  }
+  throw new Error('Topology save did not complete before the editor timeout.');
 }
 
 async function requireBody<T>(

@@ -10,6 +10,7 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="RabbitMQ.Client" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
@@ -22,7 +23,18 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Application\OpenLineOps.Agent.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Domain\OpenLineOps.Agent.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Infrastructure\OpenLineOps.Agent.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Infrastructure\OpenLineOps.Runtime.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Application\OpenLineOps.Runtime.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Application\OpenLineOps.Devices.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
+    <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

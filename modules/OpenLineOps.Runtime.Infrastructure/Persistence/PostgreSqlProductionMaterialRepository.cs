@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
@@ -125,6 +126,31 @@ public sealed class PostgreSqlProductionMaterialRepository :
             ON olo_material_genealogy_links(parent_unit_id, linked_at_utc, link_id);
         CREATE INDEX IF NOT EXISTS ix_olo_material_genealogy_child
             ON olo_material_genealogy_links(child_unit_id, linked_at_utc, link_id);
+
+        CREATE TABLE IF NOT EXISTS olo_production_material_timeline (
+            evidence_id uuid PRIMARY KEY,
+            kind text NOT NULL,
+            production_run_id uuid NULL,
+            production_unit_id uuid NULL,
+            carrier_id text NULL,
+            genealogy_parent_unit_id uuid NULL,
+            genealogy_child_unit_id uuid NULL,
+            document_json jsonb NOT NULL,
+            occurred_at_utc timestamptz NOT NULL,
+            CONSTRAINT ck_olo_production_material_timeline_kind CHECK (
+                kind IN ('LocationTransition', 'SlotOccupancyTransition',
+                    'DispositionTransition', 'Genealogy'))
+        );
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_unit
+            ON olo_production_material_timeline(production_unit_id, occurred_at_utc, evidence_id);
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_run
+            ON olo_production_material_timeline(production_run_id, occurred_at_utc, evidence_id);
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_carrier
+            ON olo_production_material_timeline(carrier_id, occurred_at_utc, evidence_id);
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_genealogy_parent
+            ON olo_production_material_timeline(genealogy_parent_unit_id, occurred_at_utc, evidence_id);
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_genealogy_child
+            ON olo_production_material_timeline(genealogy_child_unit_id, occurred_at_utc, evidence_id);
         """;
 
     private static readonly JsonSerializerOptions JsonOptions = RuntimePersistenceJson.CreateOptions();
@@ -184,6 +210,18 @@ public sealed class PostgreSqlProductionMaterialRepository :
                 new("linked_by", "text", false),
                 new("document_json", "jsonb", false),
                 new("linked_at_utc", "timestamptz", false)
+            ],
+            ["olo_production_material_timeline"] =
+            [
+                new("evidence_id", "uuid", false),
+                new("kind", "text", false),
+                new("production_run_id", "uuid", true),
+                new("production_unit_id", "uuid", true),
+                new("carrier_id", "text", true),
+                new("genealogy_parent_unit_id", "uuid", true),
+                new("genealogy_child_unit_id", "uuid", true),
+                new("document_json", "jsonb", false),
+                new("occurred_at_utc", "timestamptz", false)
             ]
         };
 
@@ -221,6 +259,7 @@ public sealed class PostgreSqlProductionMaterialRepository :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(productionUnit);
+        ProductionMaterialRegistrationGuard.RequireInitial(productionUnit);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -237,9 +276,8 @@ public sealed class PostgreSqlProductionMaterialRepository :
         command.Parameters.AddWithValue("product_model_id", productionUnit.ProductModelId);
         command.Parameters.AddWithValue("identity_key", productionUnit.IdentityKey);
         command.Parameters.AddWithValue("identity_value", productionUnit.IdentityValue);
-        command.Parameters.AddWithValue(
-            "production_lot_id",
-            (object?)productionUnit.LotId?.Value ?? DBNull.Value);
+        command.Parameters.Add("production_lot_id", NpgsqlDbType.Text).Value =
+            (object?)productionUnit.LotId?.Value ?? DBNull.Value;
         command.Parameters.AddWithValue(
             "document_json",
             Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(productionUnit)));
@@ -267,9 +305,8 @@ public sealed class PostgreSqlProductionMaterialRepository :
             """;
         command.Parameters.AddWithValue("production_lot_id", productionLot.Id.Value);
         command.Parameters.AddWithValue("product_model_id", productionLot.ProductModelId);
-        command.Parameters.AddWithValue(
-            "declared_quantity",
-            (object?)productionLot.DeclaredQuantity ?? DBNull.Value);
+        command.Parameters.Add("declared_quantity", NpgsqlDbType.Integer).Value =
+            (object?)productionLot.DeclaredQuantity ?? DBNull.Value;
         command.Parameters.AddWithValue(
             "document_json",
             Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(productionLot)));
@@ -282,6 +319,7 @@ public sealed class PostgreSqlProductionMaterialRepository :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(carrier);
+        ProductionMaterialRegistrationGuard.RequireInitial(carrier);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -307,6 +345,7 @@ public sealed class PostgreSqlProductionMaterialRepository :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(slot);
+        ProductionMaterialRegistrationGuard.RequireInitial(slot);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -334,7 +373,10 @@ public sealed class PostgreSqlProductionMaterialRepository :
         ArgumentNullException.ThrowIfNull(link);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_material_genealogy_links (
                 link_id, parent_unit_id, child_unit_id, relationship, operation_id,
@@ -354,7 +396,21 @@ public sealed class PostgreSqlProductionMaterialRepository :
             "document_json",
             Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(link)));
         command.Parameters.AddWithValue("linked_at_utc", link.LinkedAtUtc);
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (!added)
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return false;
+        }
+
+        await InsertTimelineAsync(
+                connection,
+                transaction,
+                ProductionMaterialTimelineEntry.FromGenealogy(link),
+                cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async ValueTask<ProductionMaterialPersistenceEntry<ProductionUnit>?>
@@ -470,6 +526,29 @@ public sealed class PostgreSqlProductionMaterialRepository :
         return results;
     }
 
+    public async ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>
+        ListCarriersAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT document_json::text, revision
+            FROM olo_carriers
+            ORDER BY updated_at_utc, carrier_id;
+            """;
+        var results = new List<ProductionMaterialPersistenceEntry<Carrier>>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            results.Add(new ProductionMaterialPersistenceEntry<Carrier>(
+                DeserializeCarrier(reader.GetString(0)),
+                reader.GetInt64(1)));
+        }
+
+        return results;
+    }
+
     public async ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<SlotOccupancy>>>
         ListSlotsAsync(
             string? lineId = null,
@@ -488,10 +567,10 @@ public sealed class PostgreSqlProductionMaterialRepository :
               AND (@station_system_id IS NULL OR station_system_id = @station_system_id)
             ORDER BY line_id, station_system_id, slot_id;
             """;
-        command.Parameters.AddWithValue("line_id", (object?)lineId ?? DBNull.Value);
-        command.Parameters.AddWithValue(
-            "station_system_id",
-            (object?)stationSystemId ?? DBNull.Value);
+        command.Parameters.Add("line_id", NpgsqlDbType.Text).Value =
+            (object?)lineId ?? DBNull.Value;
+        command.Parameters.Add("station_system_id", NpgsqlDbType.Text).Value =
+            (object?)stationSystemId ?? DBNull.Value;
         var results = new List<ProductionMaterialPersistenceEntry<SlotOccupancy>>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -525,6 +604,56 @@ public sealed class PostgreSqlProductionMaterialRepository :
         return results;
     }
 
+    public async ValueTask<IReadOnlyCollection<ProductionMaterialTimelineEntry>> ListTimelineAsync(
+        ProductionMaterialTimelineQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var selectors = new List<string>();
+        if (query.ProductionUnitId is { } productionUnitId)
+        {
+            selectors.Add("(production_unit_id = @production_unit_id OR genealogy_parent_unit_id = @production_unit_id OR genealogy_child_unit_id = @production_unit_id)");
+            command.Parameters.AddWithValue("production_unit_id", productionUnitId.Value);
+        }
+
+        if (query.ProductionRunId is { } productionRunId)
+        {
+            selectors.Add("production_run_id = @production_run_id");
+            command.Parameters.AddWithValue("production_run_id", productionRunId.Value);
+        }
+
+        if (query.CarrierId is { } carrierId)
+        {
+            selectors.Add("carrier_id = @carrier_id");
+            command.Parameters.AddWithValue("carrier_id", carrierId.Value);
+        }
+
+        var throughPredicate = query.ThroughUtc is null
+            ? string.Empty
+            : " AND occurred_at_utc <= @through_utc";
+        if (query.ThroughUtc is { } throughUtc)
+        {
+            command.Parameters.AddWithValue("through_utc", throughUtc);
+        }
+
+        command.CommandText = "SELECT document_json::text FROM olo_production_material_timeline WHERE ("
+            + string.Join(" OR ", selectors)
+            + ")"
+            + throughPredicate
+            + " ORDER BY occurred_at_utc, evidence_id;";
+        var result = new List<ProductionMaterialTimelineEntry>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(DeserializeTimeline(reader.GetString(0)));
+        }
+
+        return result;
+    }
+
     public async ValueTask CommitAsync(
         ProductionMaterialCommit commit,
         CancellationToken cancellationToken = default)
@@ -535,21 +664,40 @@ public sealed class PostgreSqlProductionMaterialRepository :
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var update in commit.ProductionUnits)
+        // All writers acquire row locks in one canonical order. Without this ordering,
+        // two valid hand-off commits that mention the same resources in opposite request
+        // order can deadlock even though their optimistic revisions are independent.
+        foreach (var update in commit.ProductionUnits.OrderBy(
+                     static update => update.Aggregate.Id.Value))
         {
             await UpdateProductionUnitAsync(connection, transaction, update, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        foreach (var update in commit.Carriers)
+        foreach (var update in commit.Carriers.OrderBy(
+                     static update => update.Aggregate.Id.Value,
+                     StringComparer.Ordinal))
         {
             await UpdateCarrierAsync(connection, transaction, update, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        foreach (var update in commit.Slots)
+        foreach (var update in commit.Slots
+                     .OrderBy(static update => update.Aggregate.Address.LineId, StringComparer.Ordinal)
+                     .ThenBy(
+                         static update => update.Aggregate.Address.StationSystemId,
+                         StringComparer.Ordinal)
+                     .ThenBy(
+                         static update => update.Aggregate.Address.SlotId,
+                         StringComparer.Ordinal))
         {
             await UpdateSlotAsync(connection, transaction, update, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        foreach (var evidence in commit.Timeline.OrderBy(static entry => entry.EvidenceId))
+        {
+            await InsertTimelineAsync(connection, transaction, evidence, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -591,6 +739,42 @@ public sealed class PostgreSqlProductionMaterialRepository :
                     cancellationToken)
                 .ConfigureAwait(false);
         }
+    }
+
+    private static async ValueTask InsertTimelineAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionMaterialTimelineEntry evidence,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO olo_production_material_timeline (
+                evidence_id, kind, production_run_id, production_unit_id, carrier_id,
+                genealogy_parent_unit_id, genealogy_child_unit_id, document_json, occurred_at_utc)
+            VALUES (
+                @evidence_id, @kind, @production_run_id, @production_unit_id, @carrier_id,
+                @genealogy_parent_unit_id, @genealogy_child_unit_id, @document_json::jsonb,
+                @occurred_at_utc);
+            """;
+        command.Parameters.AddWithValue("evidence_id", evidence.EvidenceId);
+        command.Parameters.AddWithValue("kind", evidence.Kind.ToString());
+        command.Parameters.Add("production_run_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.ProductionRunId?.Value ?? DBNull.Value;
+        command.Parameters.Add("production_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.ProductionUnitId?.Value ?? DBNull.Value;
+        command.Parameters.Add("carrier_id", NpgsqlDbType.Text).Value =
+            (object?)evidence.CarrierId?.Value ?? DBNull.Value;
+        command.Parameters.Add("genealogy_parent_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.Genealogy?.ParentUnitId.Value ?? DBNull.Value;
+        command.Parameters.Add("genealogy_child_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.Genealogy?.ChildUnitId.Value ?? DBNull.Value;
+        command.Parameters.AddWithValue(
+            "document_json",
+            Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(evidence)));
+        command.Parameters.AddWithValue("occurred_at_utc", evidence.OccurredAtUtc);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async ValueTask UpdateCarrierAsync(
@@ -828,12 +1012,10 @@ public sealed class PostgreSqlProductionMaterialRepository :
     private static void AddSlotState(NpgsqlCommand command, SlotOccupancy slot)
     {
         command.Parameters.AddWithValue("status", slot.Status.ToString());
-        command.Parameters.AddWithValue(
-            "material_kind",
-            (object?)slot.Material?.Kind.ToString() ?? DBNull.Value);
-        command.Parameters.AddWithValue(
-            "material_id",
-            (object?)slot.Material?.Value ?? DBNull.Value);
+        command.Parameters.Add("material_kind", NpgsqlDbType.Text).Value =
+            (object?)slot.Material?.Kind.ToString() ?? DBNull.Value;
+        command.Parameters.Add("material_id", NpgsqlDbType.Text).Value =
+            (object?)slot.Material?.Value ?? DBNull.Value;
         command.Parameters.AddWithValue("updated_at_utc", slot.LastTransitionAtUtc);
     }
 
@@ -863,6 +1045,13 @@ public sealed class PostgreSqlProductionMaterialRepository :
         ProductionMaterialSnapshotMapper.ToAggregate(
             JsonSerializer.Deserialize<PersistedMaterialGenealogyLink>(document, JsonOptions)
             ?? throw new InvalidDataException("Persisted Material genealogy document is empty."));
+
+    private static ProductionMaterialTimelineEntry DeserializeTimeline(string document) =>
+        ProductionMaterialSnapshotMapper.ToAggregate(
+            JsonSerializer.Deserialize<PersistedProductionMaterialTimelineEntry>(
+                document,
+                JsonOptions)
+            ?? throw new InvalidDataException("Persisted Production Material evidence is empty."));
 
     private static void ValidateFilter(string? value, string parameterName)
     {

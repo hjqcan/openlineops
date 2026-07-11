@@ -19,6 +19,31 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
+    public async Task RollbackRemovesVerifiedUncommittedReleaseAndAllowsSameSnapshotRepublish()
+    {
+        var scope = CreateScope("project.rollback", "application.rollback");
+        var store = new FileSystemProjectReleaseArtifactStore();
+        var first = await store.PublishAsync(
+            scope,
+            "snapshot.rollback",
+            PublishedAtUtc,
+            CreateMetadata());
+
+        await store.RollbackPublicationAsync(
+            scope,
+            first.SnapshotId,
+            first.ContentSha256);
+
+        Assert.Null(await store.OpenAsync(scope, first.SnapshotId, first.ContentSha256));
+        var republished = await store.PublishAsync(
+            scope,
+            "snapshot.rollback",
+            PublishedAtUtc,
+            CreateMetadata());
+        Assert.Equal(first.ContentSha256, republished.ContentSha256);
+    }
+
+    [Fact]
     public async Task PublishAndOpenRoundTripCopiesApplicationSourceAndNormalizesNonDigestMetadata()
     {
         var scope = CreateScope("project.release", "application.main");
@@ -85,6 +110,48 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.False(productionLine.TryGetProperty("workstations", out _));
         Assert.False(productionLine.TryGetProperty("stages", out _));
         Assert.DoesNotContain(Path.GetFullPath(scope.ProjectPath), await File.ReadAllTextAsync(descriptor.ManifestPath));
+    }
+
+    [Theory]
+    [InlineData("layout")]
+    [InlineData("block")]
+    [InlineData("binding")]
+    [InlineData("target")]
+    public async Task PublishRejectsDuplicateFrozenIdentityCollections(string collection)
+    {
+        var scope = CreateScope($"project.duplicate-{collection}", "application.main");
+        var metadata = CreateMetadata();
+        metadata = collection switch
+        {
+            "layout" => metadata with { LayoutIds = [.. metadata.LayoutIds, metadata.LayoutIds.First()] },
+            "block" => metadata with
+            {
+                BlockVersionIds = [.. metadata.BlockVersionIds, metadata.BlockVersionIds.First()]
+            },
+            "binding" => metadata with
+            {
+                CapabilityBindings =
+                [
+                    .. metadata.CapabilityBindings,
+                    metadata.CapabilityBindings.First()
+                ]
+            },
+            "target" => metadata with
+            {
+                TargetReferences = [.. metadata.TargetReferences, metadata.TargetReferences.First()]
+            },
+            _ => throw new InvalidOperationException($"Unsupported duplicate collection {collection}.")
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.PublishAsync(
+                scope,
+                $"snapshot.duplicate-{collection}",
+                PublishedAtUtc,
+                metadata)
+            .AsTask());
+
+        Assert.Contains("duplicate frozen identities", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -293,7 +360,9 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                     "capability.main",
                     "binding.main",
                     "PluginCommand",
-                    "plugin.motion")
+                    "plugin.motion",
+                    "station.eol",
+                    "station.eol")
             ],
             PackageDependencies = [dependency]
         };
@@ -555,7 +624,9 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                     "capability.main",
                     "binding.main",
                     "PluginCommand",
-                    "plugin.motion")
+                    "plugin.motion",
+                    "station.eol",
+                    "station.eol")
             ],
             PackageDependencies = [dependency]
         };
@@ -932,7 +1003,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             topologyId,
             ["layout.main"],
             CreateProductionMetadata(topologyId, ["block.main@1"]),
-            [new ProjectReleaseCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main")],
+            [],
+            [new ProjectReleaseCapabilityBinding("capability.main", "binding.main", "Simulator", "simulator.main", "station.eol", "station.eol")],
             [new ProjectReleaseTargetReference("System", "station.eol")],
             ["block.main@1"],
             []);
@@ -942,18 +1014,18 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         return new ProjectReleaseSourceMetadata(
             " topology.main ",
-            ["layout.b", " layout.a ", "layout.b"],
+            ["layout.b", " layout.a "],
             CreateProductionMetadata("topology.main", ["block.inspect@1", "block.move@2"]),
+            [],
             [
-                new ProjectReleaseCapabilityBinding("capability.b", "binding.b", " Simulator ", "simulator.b"),
-                new ProjectReleaseCapabilityBinding(" capability.a ", "binding.a", "Simulator", "simulator.a"),
-                new ProjectReleaseCapabilityBinding("capability.a", "binding.a", "Simulator", "simulator.a")
+                new ProjectReleaseCapabilityBinding("capability.b", "binding.b", " Simulator ", "simulator.b", "station.eol", "station.eol"),
+                new ProjectReleaseCapabilityBinding(" capability.a ", "binding.a", "Simulator", "simulator.a", "station.eol", "station.eol")
             ],
             [
                 new ProjectReleaseTargetReference("System", "station.eol"),
                 new ProjectReleaseTargetReference(" Slot ", "slot.main")
             ],
-            ["block.move@2", " block.inspect@1 ", "block.move@2"],
+            ["block.move@2", " block.inspect@1 "],
             []);
     }
 
@@ -989,10 +1061,17 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                     "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                     "{}",
-                    blockVersionIds)
+                    blockVersionIds,
+                    [new ProjectReleaseOperationResource(
+                        "resource.station",
+                        "Station",
+                        "station.eol",
+                        "Fixed",
+                        [])],
+                    [])
             ],
             Transitions: [],
-            ExternalTestProgramAdapters: []);
+            LineControllerAuthorizations: []);
     }
 
     private static string WriteSourceFile(
@@ -1130,6 +1209,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "binding.main",
             "PluginCommand",
             "plugin.motion",
+            "station.eol",
+            "station.eol",
             "plugin.motion",
             "plugin.motion",
             "1.2.3",

@@ -19,6 +19,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
     {
         var suffix = Guid.NewGuid().ToString("N");
         var productionRunId = Guid.NewGuid();
+        var productionUnitId = Guid.NewGuid();
         var testRoot = Path.Combine(
             Path.GetTempPath(),
             "openlineops-runner-process-e2e",
@@ -56,16 +57,10 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 publishedProjectPath,
                 "--snapshot",
                 "active",
-                "--production-unit",
+                "--production-unit-id",
+                productionUnitId.ToString("D"),
+                "--identity",
                 $"UNIT-{suffix}",
-                "--lot",
-                $"LOT-{suffix}",
-                "--carrier",
-                $"CARRIER-{suffix}",
-                "--fixture",
-                $"FIXTURE-{suffix}",
-                "--device",
-                $"DEVICE-{suffix}",
                 "--actor",
                 "runner-process-e2e",
                 "--run-id",
@@ -93,7 +88,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                     productionRunId,
                     productionRun.GetProperty("productionRunId").GetGuid());
                 Assert.Equal("Completed", productionRun.GetProperty("executionStatus").GetString());
-                Assert.Equal("Passed", productionRun.GetProperty("resultJudgement").GetString());
+                Assert.Equal("NotApplicable", productionRun.GetProperty("resultJudgement").GetString());
                 Assert.Equal(1, productionRun.GetProperty("operationCount").GetInt32());
                 Assert.Equal(1, productionRun.GetProperty("completedOperationCount").GetInt32());
                 Assert.Equal(0, productionRun.GetProperty("incidentCount").GetInt32());
@@ -121,16 +116,10 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 publishedProjectPath,
                 "--snapshot",
                 "active",
-                "--production-unit",
+                "--production-unit-id",
+                productionUnitId.ToString("D"),
+                "--identity",
                 $"UNIT-{suffix}",
-                "--lot",
-                $"LOT-{suffix}",
-                "--carrier",
-                $"CARRIER-{suffix}",
-                "--fixture",
-                $"FIXTURE-{suffix}",
-                "--device",
-                $"DEVICE-{suffix}",
                 "--actor",
                 "runner-process-e2e",
                 "--run-id",
@@ -154,7 +143,9 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 missingReleaseProjectPath,
                 "--snapshot",
                 "active",
-                "--production-unit",
+                "--production-unit-id",
+                productionUnitId.ToString("D"),
+                "--identity",
                 $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
@@ -169,7 +160,9 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 tamperedReleaseProjectPath,
                 "--snapshot",
                 "active",
-                "--production-unit",
+                "--production-unit-id",
+                productionUnitId.ToString("D"),
+                "--identity",
                 $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
@@ -190,7 +183,9 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 draftProjectPath,
                 "--snapshot",
                 "active",
-                "--production-unit",
+                "--production-unit-id",
+                productionUnitId.ToString("D"),
+                "--identity",
                 $"UNIT-{suffix}",
                 "--actor",
                 "runner-process-e2e");
@@ -406,11 +401,20 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                                displayName = "Runner E2E Operation",
                                stationSystemId = "station.main",
                                flowDefinitionId = processDefinitionId,
-                               configurationSnapshotId
+                               configurationSnapshotId,
+                               resources = new[]
+                               {
+                                   new
+                                   {
+                                       bindingId = "resource.station.main",
+                                       kind = "Station",
+                                       topologyTargetId = "station.main",
+                                       resolution = "Fixed"
+                                   }
+                               }
                            }
                        },
-                       transitions = Array.Empty<object>(),
-                       externalTestProgramAdapters = Array.Empty<object>()
+                       transitions = Array.Empty<object>()
                    }))
         {
             await AssertStatusAsync(response, HttpStatusCode.Created);
@@ -537,6 +541,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                            new
                            {
                                deviceBindingId = "binding.primary",
+                               ownerSystemId = "station.main",
                                capabilityId,
                                deviceKey = "runner-simulator"
                            }

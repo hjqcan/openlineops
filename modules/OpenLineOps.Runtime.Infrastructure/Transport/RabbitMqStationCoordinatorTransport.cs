@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Persistence;
@@ -12,15 +10,10 @@ public sealed class RabbitMqStationCoordinatorTransport :
     IStationJobOutboxPublisher,
     IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
-    };
-
     private readonly StationCoordinatorTransportOptions _options;
-    private readonly IStationJobCoordinationStore _store;
     private readonly ConnectionFactory _factory;
+    private readonly IStationCoordinatorConfirmedPublicationTransport? _publicationTransport;
+    private readonly StationResultDeliveryProcessor _resultProcessor;
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _publishGate = new(1, 1);
     private IConnection? _connection;
@@ -29,7 +22,8 @@ public sealed class RabbitMqStationCoordinatorTransport :
 
     public RabbitMqStationCoordinatorTransport(
         StationCoordinatorTransportOptions options,
-        IStationJobCoordinationStore store)
+        IStationJobCoordinationStore store,
+        IStationCoordinatorConfirmedPublicationTransport? publicationTransport = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(store);
@@ -37,7 +31,8 @@ public sealed class RabbitMqStationCoordinatorTransport :
         ValidateName(options.JobExchange, nameof(options.JobExchange));
         ValidateName(options.EventExchange, nameof(options.EventExchange));
         _options = options;
-        _store = store;
+        _publicationTransport = publicationTransport;
+        _resultProcessor = new StationResultDeliveryProcessor(store);
         _factory = new ConnectionFactory
         {
             Uri = options.ResolveBrokerUri(),
@@ -52,7 +47,29 @@ public sealed class RabbitMqStationCoordinatorTransport :
         StationJobRequested request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
+        var publication = StationCoordinatorPublicationFactory.Create(_options, request);
+        await PublishAsync(publication, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask PublishAsync(
+        ResourceLeaseChanged change,
+        CancellationToken cancellationToken = default)
+    {
+        var publication = StationCoordinatorPublicationFactory.Create(_options, change);
+        await PublishAsync(publication, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask PublishAsync(
+        StationCoordinatorPublication publication,
+        CancellationToken cancellationToken)
+    {
+        if (_publicationTransport is not null)
+        {
+            await _publicationTransport.PublishAsync(publication, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         await _publishGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -62,19 +79,27 @@ public sealed class RabbitMqStationCoordinatorTransport :
                 Persistent = true,
                 ContentType = "application/json",
                 ContentEncoding = "utf-8",
-                Type = nameof(StationJobRequested),
-                AppId = _options.CoordinatorId,
-                MessageId = request.MessageId.ToString("D"),
-                CorrelationId = request.JobId.ToString("D")
+                Type = publication.Type,
+                AppId = publication.AppId,
+                MessageId = publication.MessageId.ToString("D"),
+                CorrelationId = publication.CorrelationId.ToString("D")
             };
-            await channel.BasicPublishAsync(
-                    _options.JobExchange,
-                    $"station.{request.StationId}",
-                    mandatory: true,
-                    properties,
-                    JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                await channel.BasicPublishAsync(
+                        publication.Exchange,
+                        publication.RoutingKey,
+                        mandatory: true,
+                        properties,
+                        publication.Body,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                await InvalidatePublisherChannelAsync().ConfigureAwait(false);
+                throw;
+            }
         }
         finally
         {
@@ -82,80 +107,20 @@ public sealed class RabbitMqStationCoordinatorTransport :
         }
     }
 
-    public async Task RunResultInboxAsync(CancellationToken cancellationToken = default)
+    public async Task RunResultInboxAsync(
+        Func<MaterialArrived, CancellationToken, ValueTask> materialArrivalHandler,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(materialArrivalHandler);
         var channel = await GetInboxChannelAsync(cancellationToken).ConfigureAwait(false);
+        var settlement = new RabbitMqSettlement(channel);
         var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += async (_, delivery) =>
-        {
-            try
-            {
-                ValidateDelivery(delivery.BasicProperties);
-                switch (delivery.BasicProperties.Type)
-                {
-                    case nameof(StationJobAccepted):
-                        var accepted = JsonSerializer.Deserialize<StationJobAccepted>(
-                            delivery.Body.Span,
-                            JsonOptions)
-                            ?? throw new InvalidDataException("Station accepted message is null.");
-                        await _store.RecordAcceptedAsync(accepted, cancellationToken)
-                            .ConfigureAwait(false);
-                        break;
-                    case nameof(StationJobProgressed):
-                        var progress = JsonSerializer.Deserialize<StationJobProgressed>(
-                            delivery.Body.Span,
-                            JsonOptions)
-                            ?? throw new InvalidDataException("Station progress message is null.");
-                        await _store.RecordProgressAsync(progress, cancellationToken)
-                            .ConfigureAwait(false);
-                        break;
-                    case nameof(StationJobCompleted):
-                        var completion = JsonSerializer.Deserialize<StationJobCompleted>(
-                            delivery.Body.Span,
-                            JsonOptions)
-                            ?? throw new InvalidDataException("Station completion message is null.");
-                        await _store.RecordCompletionAsync(completion, cancellationToken)
-                            .ConfigureAwait(false);
-                        break;
-                    default:
-                        throw new InvalidDataException(
-                            $"Unsupported Station result message type '{delivery.BasicProperties.Type}'.");
-                }
-                await channel.BasicAckAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is JsonException
-                                               or InvalidDataException
-                                               or ArgumentException)
-            {
-                await channel.BasicRejectAsync(
-                        delivery.DeliveryTag,
-                        requeue: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                await channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-        };
+        consumer.ReceivedAsync += (_, delivery) => _resultProcessor.ProcessAsync(
+                ToDelivery(delivery),
+                settlement,
+                materialArrivalHandler,
+                cancellationToken)
+            .AsTask();
         await channel.BasicConsumeAsync(
                 ResultQueueName(),
                 autoAck: false,
@@ -255,7 +220,8 @@ public sealed class RabbitMqStationCoordinatorTransport :
                  {
                      nameof(StationJobAccepted),
                      nameof(StationJobProgressed),
-                     nameof(StationJobCompleted)
+                     nameof(StationJobCompleted),
+                     nameof(MaterialArrived)
                  })
         {
             await _inboxChannel.QueueBindAsync(
@@ -270,6 +236,15 @@ public sealed class RabbitMqStationCoordinatorTransport :
         await _inboxChannel.BasicQosAsync(0, 16, global: false, cancellationToken)
             .ConfigureAwait(false);
         return _inboxChannel;
+    }
+
+    private async ValueTask InvalidatePublisherChannelAsync()
+    {
+        var channel = Interlocked.Exchange(ref _publisherChannel, null);
+        if (channel is not null)
+        {
+            await channel.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private async ValueTask<IConnection> GetConnectionAsync(CancellationToken cancellationToken)
@@ -304,13 +279,18 @@ public sealed class RabbitMqStationCoordinatorTransport :
     private string ResultQueueName() =>
         $"openlineops.coordinator.{_options.CoordinatorId}.station-results";
 
-    private static void ValidateDelivery(IReadOnlyBasicProperties properties)
-    {
-        if (!string.Equals(properties.ContentType, "application/json", StringComparison.Ordinal))
-        {
-            throw new InvalidDataException("Station result message content type must be application/json.");
-        }
-    }
+    private static StationCoordinatorTransportDelivery ToDelivery(
+        BasicDeliverEventArgs delivery) => new(
+        delivery.DeliveryTag,
+        delivery.BasicProperties.ContentType,
+        delivery.BasicProperties.ContentEncoding,
+        delivery.BasicProperties.Type,
+        delivery.BasicProperties.AppId,
+        delivery.BasicProperties.MessageId,
+        delivery.BasicProperties.CorrelationId,
+        delivery.RoutingKey,
+        delivery.Redelivered,
+        delivery.Body);
 
     private static void ValidateName(string value, string name)
     {
@@ -320,5 +300,25 @@ public sealed class RabbitMqStationCoordinatorTransport :
         {
             throw new InvalidOperationException($"Station transport {name} must be canonical text.");
         }
+    }
+
+    private sealed class RabbitMqSettlement(IChannel channel)
+        : IStationCoordinatorTransportSettlement
+    {
+        public ValueTask AcknowledgeAsync(
+            ulong deliveryTag,
+            CancellationToken cancellationToken = default) => channel.BasicAckAsync(
+                deliveryTag,
+                multiple: false,
+                cancellationToken);
+
+        public ValueTask RejectAsync(
+            ulong deliveryTag,
+            bool requeue,
+            CancellationToken cancellationToken = default) => channel.BasicNackAsync(
+                deliveryTag,
+                multiple: false,
+                requeue,
+                cancellationToken);
     }
 }

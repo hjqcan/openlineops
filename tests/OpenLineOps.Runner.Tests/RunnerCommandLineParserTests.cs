@@ -8,13 +8,14 @@ public sealed class RunnerCommandLineParserTests
     public void ParseDefaultsToActiveSnapshot()
     {
         var result = RunnerCommandLineParser.Parse(
-            ["run", "C:/automation/line-a", "--production-unit", "UNIT-001", "--actor", "operator-a"]);
+            ["run", "C:/automation/line-a", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", "UNIT-001", "--actor", "operator-a"]);
 
         Assert.Equal(RunnerParseStatus.Run, result.Status);
         Assert.NotNull(result.Options);
         Assert.Equal("C:/automation/line-a", result.Options.ProjectTarget);
         Assert.Equal("active", result.Options.Snapshot);
         Assert.NotEqual(Guid.Empty, result.Options.ProductionRunId);
+        Assert.NotEqual(Guid.Empty, result.Options.ProductionUnitId);
         Assert.Equal("UNIT-001", result.Options.ProductionUnitIdentityValue);
         Assert.Equal("operator-a", result.Options.ActorId);
         Assert.Null(result.ErrorMessage);
@@ -24,6 +25,7 @@ public sealed class RunnerCommandLineParserTests
     public void ParseAcceptsProductionRunIdentityAndTraceMetadata()
     {
         var productionRunId = Guid.Parse("00000000-0000-0000-0000-000000000042");
+        var productionUnitId = Guid.Parse("00000000-0000-0000-0000-000000000043");
         var result = RunnerCommandLineParser.Parse(
         [
             "run",
@@ -31,18 +33,10 @@ public sealed class RunnerCommandLineParserTests
             "--snapshot=snapshot.release.42",
             "--run-id",
             productionRunId.ToString("D"),
-            "--production-unit",
+            "--production-unit-id",
+            productionUnitId.ToString("D"),
+            "--identity",
             "UNIT-001",
-            "--lot",
-            "LOT-7",
-            "--carrier",
-            "carrier-7",
-            "--slot",
-            "slot-2",
-            "--fixture",
-            "fixture-left",
-            "--device",
-            "scanner-01",
             "--actor",
             "operator-a"
         ]);
@@ -51,12 +45,8 @@ public sealed class RunnerCommandLineParserTests
         Assert.Equal(RunnerParseStatus.Run, result.Status);
         Assert.Equal("snapshot.release.42", options.Snapshot);
         Assert.Equal(productionRunId, options.ProductionRunId);
+        Assert.Equal(productionUnitId, options.ProductionUnitId);
         Assert.Equal("UNIT-001", options.ProductionUnitIdentityValue);
-        Assert.Equal("LOT-7", options.LotId);
-        Assert.Equal("carrier-7", options.CarrierId);
-        Assert.Equal("slot-2", options.SlotId);
-        Assert.Equal("fixture-left", options.FixtureId);
-        Assert.Equal("scanner-01", options.DeviceId);
         Assert.Equal("operator-a", options.ActorId);
     }
 
@@ -92,20 +82,20 @@ public sealed class RunnerCommandLineParserTests
     public void ParseDoesNotTreatMetadataValueNamedHelpAsHelpCommand()
     {
         var result = RunnerCommandLineParser.Parse(
-            ["run", "project", "--production-unit", "UNIT-001", "--actor", "help"]);
+            ["run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", "UNIT-001", "--actor", "help"]);
 
         Assert.Equal(RunnerParseStatus.Run, result.Status);
         Assert.Equal("help", result.Options?.ActorId);
     }
 
     [Theory]
-    [InlineData("run", "project", "--actor", "operator-a", "Option '--production-unit' is required.")]
-    [InlineData("run", "project", "--production-unit", "UNIT-001", "Option '--actor' is required.")]
+    [InlineData("run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--actor", "operator-a", "Option '--identity' is required.")]
+    [InlineData("run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", "UNIT-001", "Option '--actor' is required.")]
     [InlineData("run", "project", "--serial", "SN-001", "Unknown option '--serial'.")]
-    [InlineData("run", "project", "--production-unit", " UNIT-001", "--actor", "operator-a", "Value for '--production-unit' must not have leading or trailing whitespace.")]
-    [InlineData("run", "project", "--production-unit", "UNIT-001", "--actor", "operator-a", "--run-id", "42", "Value for '--run-id' must be a non-empty GUID in D format.")]
-    [InlineData("run", "project", "--Production-Unit", "UNIT-001", "Unknown option '--Production-Unit'.")]
-    [InlineData("Run", "project", "--production-unit", "UNIT-001", "--actor", "operator-a", "Unknown command 'Run'.")]
+    [InlineData("run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", " UNIT-001", "--actor", "operator-a", "Value for '--identity' must not have leading or trailing whitespace.")]
+    [InlineData("run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", "UNIT-001", "--actor", "operator-a", "--run-id", "42", "Value for '--run-id' must be a non-empty GUID in D format.")]
+    [InlineData("run", "project", "--Production-Unit-Id", "00000000-0000-0000-0000-000000000001", "Unknown option '--Production-Unit-Id'.")]
+    [InlineData("Run", "project", "--production-unit-id", "00000000-0000-0000-0000-000000000001", "--identity", "UNIT-001", "--actor", "operator-a", "Unknown command 'Run'.")]
     public void ParseRejectsMissingOrNonCanonicalProductionRunIdentity(
         params string[] argumentsAndExpectedError)
     {

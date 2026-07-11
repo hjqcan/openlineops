@@ -16,6 +16,7 @@ using OpenLineOps.Production.Infrastructure.Persistence;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.DriverBindings;
 using OpenLineOps.Topology.Domain.Identifiers;
+using OpenLineOps.Topology.Domain.Slots;
 using OpenLineOps.Topology.Domain.Systems;
 using OpenLineOps.Topology.Domain.Topology;
 using OpenLineOps.Topology.Infrastructure.Persistence;
@@ -31,9 +32,9 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public async Task CreateValidatesTopologyPublishedFlowsRouteAndExternalActionResource()
+    public async Task CreateValidatesTopologyPublishedFlowsAndRoute()
     {
-        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var fixture = await CreateFixtureAsync();
 
         var result = await fixture.Service.CreateAsync(
             fixture.Scope.ProjectId,
@@ -49,16 +50,30 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.Equal(
             ["configuration.load", "configuration.test"],
             result.Value.Operations.Select(operation => operation.ConfigurationSnapshotId));
+        Assert.All(result.Value.Operations, operation =>
+        {
+            var station = Assert.Single(operation.Resources);
+            Assert.Equal("Station", station.Kind);
+            Assert.Equal("Fixed", station.Resolution);
+            Assert.Equal(operation.StationSystemId, station.TopologyTargetId);
+        });
         var transition = Assert.Single(result.Value.Transitions);
         Assert.Equal("Sequence", transition.Kind);
         Assert.Equal("operation.test", transition.TargetOperationId);
-        Assert.Equal("Provider", Assert.Single(result.Value.ExternalTestProgramAdapters).LaunchKind);
         Assert.True(File.Exists(Path.Combine(
             fixture.Scope.ApplicationRootPath,
             "production",
             "lines",
             "line.main",
             "line.json")));
+        var restored = await fixture.Service.GetByIdAsync(
+            fixture.Scope.ProjectId,
+            fixture.Scope.ApplicationId,
+            "line.main");
+        Assert.True(restored.IsSuccess, restored.IsFailure ? restored.Error.Message : string.Empty);
+        Assert.Equal(
+            result.Value.Operations.SelectMany(operation => operation.Resources),
+            restored.Value.Operations.SelectMany(operation => operation.Resources));
     }
 
     [Theory]
@@ -70,7 +85,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
     public async Task ServiceRejectsMissingOrNonCanonicalOperationConfigurationSnapshotId(
         string? configurationSnapshotId)
     {
-        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var fixture = await CreateFixtureAsync();
         var request = Request() with
         {
             Operations = Request().Operations
@@ -90,41 +105,9 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateRejectsFlowReferenceToUnknownExternalResource()
-    {
-        var fixture = await CreateFixtureAsync(externalActionMatches: false);
-
-        var result = await fixture.Service.CreateAsync(
-            fixture.Scope.ProjectId,
-            fixture.Scope.ApplicationId,
-            Request());
-
-        Assert.True(result.IsFailure);
-        Assert.Equal("Validation.Production.ExternalTestActionResourceNotFound", result.Error.Code);
-    }
-
-    [Fact]
-    public async Task CreateRejectsExternalActionThatBypassesOperationStationTarget()
-    {
-        var fixture = await CreateFixtureAsync(
-            externalActionMatches: true,
-            externalActionUsesBlockly: false);
-
-        var result = await fixture.Service.CreateAsync(
-            fixture.Scope.ProjectId,
-            fixture.Scope.ApplicationId,
-            Request());
-
-        Assert.True(result.IsFailure);
-        Assert.Equal("Validation.Production.OperationFlowTargetOutsideStation", result.Error.Code);
-    }
-
-    [Fact]
     public async Task CreateRejectsOrdinaryFlowActionTargetingAnotherStation()
     {
-        var fixture = await CreateFixtureAsync(
-            externalActionMatches: true,
-            loadTargetId: "station.other");
+        var fixture = await CreateFixtureAsync(loadTargetId: "station.other");
 
         var result = await fixture.Service.CreateAsync(
             fixture.Scope.ProjectId,
@@ -135,45 +118,46 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.Equal("Validation.Production.OperationFlowTargetOutsideStation", result.Error.Code);
     }
 
-    [Fact]
-    public async Task CreateRejectsDeclaredExternalResourceUnusedByEveryFlow()
+    [Theory]
+    [InlineData("slot.other", "OperationFixedSlotResourceInvalid")]
+    [InlineData("slot.disabled", "OperationFixedSlotResourceInvalid")]
+    public async Task CreateRejectsCrossStationOrDisabledFixedSlot(
+        string slotId,
+        string expectedCode)
     {
-        var fixture = await CreateFixtureAsync(
-            externalActionMatches: true,
-            flowContainsExternalAction: false);
+        var fixture = await CreateFixtureAsync();
+        var request = Request() with
+        {
+            Operations = Request().Operations.Select(operation =>
+                operation.OperationId == "operation.load"
+                    ? operation with
+                    {
+                        Resources =
+                        [
+                            .. operation.Resources,
+                            new OperationResourceBindingRequest(
+                                "resource.slot",
+                                OperationResourceKind.Slot,
+                                slotId,
+                                OperationResourceResolution.Fixed)
+                        ]
+                    }
+                    : operation).ToArray()
+        };
 
         var result = await fixture.Service.CreateAsync(
             fixture.Scope.ProjectId,
             fixture.Scope.ApplicationId,
-            Request());
+            request);
 
         Assert.True(result.IsFailure);
-        Assert.Equal("Validation.Production.ExternalTestActionMissing", result.Error.Code);
-    }
-
-    [Fact]
-    public async Task CreateAcceptsPortableExecutableDeclarationWithoutExecutingIt()
-    {
-        var fixture = await CreateFixtureAsync(
-            externalActionMatches: true,
-            executableAdapter: true);
-
-        var result = await fixture.Service.CreateAsync(
-            fixture.Scope.ProjectId,
-            fixture.Scope.ApplicationId,
-            Request(useExecutable: true));
-
-        Assert.True(result.IsSuccess, result.IsFailure ? result.Error.Message : string.Empty);
-        var adapter = Assert.Single(result.Value.ExternalTestProgramAdapters);
-        Assert.Equal("ApplicationExecutable", adapter.LaunchKind);
-        Assert.Equal("programs/eol/test.exe", adapter.Executable);
-        Assert.Null(adapter.ProviderKey);
+        Assert.Equal($"Validation.Production.{expectedCode}", result.Error.Code);
     }
 
     [Fact]
     public async Task RepositoryRejectsFormerStageResourceShape()
     {
-        var fixture = await CreateFixtureAsync(externalActionMatches: true);
+        var fixture = await CreateFixtureAsync();
         var createResult = await fixture.Service.CreateAsync(
             fixture.Scope.ProjectId,
             fixture.Scope.ApplicationId,
@@ -208,49 +192,27 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         }
     }
 
-    private async Task<ServiceFixture> CreateFixtureAsync(
-        bool externalActionMatches,
-        bool externalActionUsesBlockly = true,
-        bool executableAdapter = false,
-        bool flowContainsExternalAction = true,
-        string loadTargetId = "station.eol")
+    private async Task<ServiceFixture> CreateFixtureAsync(string loadTargetId = "station.eol")
     {
         var scope = new ProjectApplicationWorkspaceScope(
             "project.main",
             "application.main",
             _root,
             "applications/application.main/application.main.oloapp");
-        if (executableAdapter)
-        {
-            var executablePath = Path.Combine(
-                scope.ApplicationRootPath,
-                "programs",
-                "eol",
-                "test.exe");
-            Directory.CreateDirectory(Path.GetDirectoryName(executablePath)!);
-            await File.WriteAllBytesAsync(executablePath, [0x4d, 0x5a]);
-        }
-
         var topologyRepository = new FileSystemProjectAutomationTopologyRepository();
         await topologyRepository.SaveAsync(
             scope,
-            Topology(executableAdapter ? "adapter.test" : "provider.test"));
+            Topology());
         var processRepository = new FileSystemProjectProcessDefinitionRepository();
         await processRepository.SaveAsync(scope, PublishedFlow(
             "flow.load",
             "native.inspect",
             "Inspect",
-            adapterId: null,
-            useBlockly: false,
             directSystemTargetId: loadTargetId));
         await processRepository.SaveAsync(scope, PublishedFlow(
             "flow.test",
             "test.external",
-            "ExecuteTestProgram",
-            flowContainsExternalAction
-                ? externalActionMatches ? "adapter.test" : "wrong.adapter"
-                : null,
-            externalActionUsesBlockly));
+            "ExecuteProgram"));
         var service = new ProjectProductionLineDefinitionService(
             new FixedScopeResolver(scope),
             new FileSystemProjectProductionLineDefinitionRepository(),
@@ -265,7 +227,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         return new ServiceFixture(scope, service);
     }
 
-    internal static SaveProductionLineDefinitionRequest Request(bool useExecutable = false)
+    internal static SaveProductionLineDefinitionRequest Request()
     {
         return new SaveProductionLineDefinitionRequest(
             "line.main",
@@ -279,13 +241,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     "Load",
                     "station.eol",
                     "flow.load",
-                    "configuration.load"),
+                    "configuration.load",
+                    StationResources("load")),
                 new OperationDefinitionRequest(
                     "operation.test",
-                    "External Test",
+                    "External Program",
                     "station.eol",
                     "flow.test",
-                    "configuration.test")
+                    "configuration.test",
+                    StationResources("test"))
             ],
             [new RouteTransitionRequest(
                 "load-test",
@@ -298,26 +262,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                 null,
                 null,
                 null)],
-            [new ExternalTestProgramAdapterRequest(
-                "adapter.test",
-                "External EOL",
-                "test.external",
-                "ExecuteTestProgram",
-                useExecutable ? "programs/eol/test.exe" : null,
-                useExecutable ? null : "provider.test",
-                ["--serial", "{{product.identity}}"],
-                [
-                    new ExternalTestProgramInputMappingRequest("$product.identity", "serial"),
-                    new ExternalTestProgramInputMappingRequest("$product.model", "model")
-                ],
-                [new ExternalTestProgramResultMappingRequest("$.outcome", "test.outcome")],
-                new ExternalTestProgramOutcomeMappingRequest(
-                    "$.outcome",
-                    "Passed",
-                    "Failed",
-                    "Aborted"),
-                30_000)]);
+            []);
     }
+
+    private static OperationResourceBindingRequest[] StationResources(string suffix) =>
+        [new OperationResourceBindingRequest(
+            $"resource.station.{suffix}",
+            OperationResourceKind.Station,
+            "station.eol",
+            OperationResourceResolution.Fixed)];
 
     internal static AutomationTopology Topology(string providerKey = "provider.test")
     {
@@ -327,7 +280,7 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             Now);
         Assert.True(topology.AddCapability(CapabilityContract.Create(
             new CapabilityContractId("test.external"),
-            "ExecuteTestProgram",
+            "ExecuteProgram",
             new Version(1, 0),
             "{}",
             "{}",
@@ -349,9 +302,43 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             metadata: new Dictionary<string, string>())).Succeeded);
         Assert.True(topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.external"),
+            new AutomationSystemId("station.eol"),
             new CapabilityContractId("test.external"),
             DriverProviderKind.ExternalSystem,
             providerKey)).Succeeded);
+        Assert.True(topology.AddSlotGroup(SlotGroup.Create(
+            new SlotGroupId("group.eol"),
+            new AutomationSystemId("station.eol"),
+            "EOL Slots",
+            SlotGroupKind.TesterBank,
+            2)).Succeeded);
+        Assert.True(topology.AddSlot(SlotDefinition.Create(
+            new SlotDefinitionId("slot.enabled"),
+            new SlotGroupId("group.eol"),
+            new AutomationSystemId("station.eol"),
+            "01",
+            "Enabled",
+            isEnabled: true)).Succeeded);
+        Assert.True(topology.AddSlot(SlotDefinition.Create(
+            new SlotDefinitionId("slot.disabled"),
+            new SlotGroupId("group.eol"),
+            new AutomationSystemId("station.eol"),
+            "02",
+            "Disabled",
+            isEnabled: false)).Succeeded);
+        Assert.True(topology.AddSlotGroup(SlotGroup.Create(
+            new SlotGroupId("group.other"),
+            new AutomationSystemId("station.other"),
+            "Other Slots",
+            SlotGroupKind.TesterBank,
+            1)).Succeeded);
+        Assert.True(topology.AddSlot(SlotDefinition.Create(
+            new SlotDefinitionId("slot.other"),
+            new SlotGroupId("group.other"),
+            new AutomationSystemId("station.other"),
+            "01",
+            "Other",
+            isEnabled: true)).Succeeded);
         return topology;
     }
 
@@ -359,8 +346,6 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         string flowId,
         string capabilityId,
         string commandName,
-        string? adapterId,
-        bool useBlockly,
         string directSystemTargetId = "station.eol")
     {
         var flow = ProcessDefinition.Create(
@@ -369,25 +354,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             flowId,
             Now);
         Assert.True(flow.AddNode(ProcessNode.Start(new ProcessNodeId("start"), "Start")).Succeeded);
-        var action = adapterId is null || !useBlockly
-            ? ProcessNode.Command(
+        var action = ProcessNode.Command(
                 new ProcessNodeId("action"),
                 "Action",
                 new ProcessCapabilityId(capabilityId),
-                adapterId is null
-                    ? ProcessActionTargetKind.System
-                    : ProcessActionTargetKind.Capability,
-                adapterId is null ? directSystemTargetId : capabilityId,
+                ProcessActionTargetKind.System,
+                directSystemTargetId,
                 commandName,
                 TimeSpan.FromSeconds(30),
-                adapterId is null
-                    ? "{}"
-                    : $$"""{"externalTestProgramAdapterId":"{{adapterId}}"}""")
-            : ProcessNode.Blockly(
-                new ProcessNodeId("action"),
-                "External Test Action",
-                ExternalTestWorkspace(capabilityId, commandName, adapterId),
-                TimeSpan.FromSeconds(30));
+                "{}");
         Assert.True(flow.AddNode(action).Succeeded);
         Assert.True(flow.AddNode(ProcessNode.End(new ProcessNodeId("end"), "End")).Succeeded);
         Assert.True(flow.AddTransition(ProcessTransition.Create(
@@ -401,32 +376,6 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.True(flow.Publish(Now).Succeeded);
         return flow;
     }
-
-    private static string ExternalTestWorkspace(
-        string capabilityId,
-        string commandName,
-        string adapterId) =>
-        $$"""
-        {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "openlineops_run_external_test",
-                "id": "external-test",
-                "fields": {
-                  "TARGET_KIND": "System",
-                  "TARGET_ID": "station.eol",
-                  "CAPABILITY": "{{capabilityId}}",
-                  "COMMAND": "{{commandName}}",
-                  "ADAPTER_ID": "{{adapterId}}",
-                  "TIMEOUT_MS": 30000
-                }
-              }
-            ]
-          }
-        }
-        """;
 
     private sealed class FixedScopeResolver(ProjectApplicationWorkspaceScope scope)
         : IProjectApplicationWorkspaceScopeResolver

@@ -6,9 +6,7 @@ using OpenLineOps.Production.Api.Models;
 using OpenLineOps.Production.Application.LineDefinitions;
 using OpenLineOps.Production.Domain.Models;
 using OpenLineOps.Runtime.Contracts;
-using ApiAdapterRequest = OpenLineOps.Production.Api.Models.ExternalTestProgramAdapterRequest;
 using ApiSaveRequest = OpenLineOps.Production.Api.Models.SaveProductionLineRequest;
-using AppAdapterRequest = OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramAdapterRequest;
 using AppSaveRequest = OpenLineOps.Production.Application.LineDefinitions.SaveProductionLineDefinitionRequest;
 
 namespace OpenLineOps.Production.Api.Controllers;
@@ -51,7 +49,14 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             .GetByIdAsync(projectId, applicationId, lineDefinitionId, cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var response = ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
+        return Ok(response);
     }
 
     [HttpPost]
@@ -77,6 +82,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
         }
 
         var response = ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
         return Created(
             $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/production-lines/{Uri.EscapeDataString(response.LineDefinitionId)}",
             response);
@@ -91,6 +97,28 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
         ApiSaveRequest request,
         CancellationToken cancellationToken)
     {
+        await using var lease = await EditorDocumentConcurrency.AcquireAsync(
+                $"production-line:{projectId}:{applicationId}:{lineDefinitionId}",
+                cancellationToken)
+            .ConfigureAwait(false);
+        var current = await _service
+            .GetByIdAsync(projectId, applicationId, lineDefinitionId, cancellationToken)
+            .ConfigureAwait(false);
+        if (current.IsFailure)
+        {
+            return ToProblem(current.Error);
+        }
+
+        var currentRevision = ToResponse(current.Value).Revision;
+        var precondition = EditorDocumentConcurrency.Evaluate(
+            Request.Headers[EditorDocumentConcurrency.IfMatchHeaderName].ToString(),
+            Request.Headers[EditorDocumentConcurrency.ConflictResolutionHeaderName].ToString(),
+            currentRevision);
+        if (precondition != EditorDocumentPrecondition.Satisfied)
+        {
+            return this.EditorDocumentPreconditionProblem(precondition, currentRevision);
+        }
+
         var applicationRequest = ToApplicationRequest(request);
         if (applicationRequest.IsFailure)
         {
@@ -105,7 +133,14 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var response = ToResponse(result.Value);
+        Response.SetEditorDocumentRevision(response.Revision);
+        return Ok(response);
     }
 
     private static Result<AppSaveRequest> ToApplicationRequest(ApiSaveRequest request)
@@ -121,11 +156,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             || string.IsNullOrWhiteSpace(request.EntryOperationId)
             || request.Operations is null
             || request.Transitions is null
-            || request.ExternalTestProgramAdapters is null)
+            || request.LineControllerAuthorizations is null)
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestIncomplete",
-                "Line identity, topology, product model, entry operation, operations, transitions and adapters are required."));
+                "Line identity, topology, product model, entry operation, operations and transitions are required."));
         }
 
         if (request.Operations.Any(operation =>
@@ -134,18 +169,38 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 || string.IsNullOrWhiteSpace(operation.DisplayName)
                 || string.IsNullOrWhiteSpace(operation.StationSystemId)
                 || string.IsNullOrWhiteSpace(operation.FlowDefinitionId)
-                || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId))
+                || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId)
+                || operation.Resources is null
+                || operation.Resources.Count == 0
+                || operation.Resources.Any(resource => resource is null
+                    || string.IsNullOrWhiteSpace(resource.BindingId)
+                    || string.IsNullOrWhiteSpace(resource.Kind)
+                    || string.IsNullOrWhiteSpace(resource.TopologyTargetId)
+                    || string.IsNullOrWhiteSpace(resource.Resolution)))
             || request.Transitions.Any(transition =>
                 transition is null
                 || string.IsNullOrWhiteSpace(transition.TransitionId)
                 || string.IsNullOrWhiteSpace(transition.SourceOperationId)
                 || string.IsNullOrWhiteSpace(transition.TargetOperationId)
                 || string.IsNullOrWhiteSpace(transition.Kind))
-            || request.ExternalTestProgramAdapters.Any(AdapterIsIncomplete))
+            || request.LineControllerAuthorizations.Any(authorization =>
+                authorization is null
+                || string.IsNullOrWhiteSpace(authorization.AuthorizationId)
+                || string.IsNullOrWhiteSpace(authorization.OperationId)
+                || string.IsNullOrWhiteSpace(authorization.ActionId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerSystemId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerBindingId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerCapabilityId)
+                || string.IsNullOrWhiteSpace(authorization.ControllerAction)
+                || string.IsNullOrWhiteSpace(authorization.TargetStationSystemId)
+                || string.IsNullOrWhiteSpace(authorization.TargetSystemId)
+                || string.IsNullOrWhiteSpace(authorization.TargetBindingId)
+                || string.IsNullOrWhiteSpace(authorization.TargetCapabilityId)
+                || string.IsNullOrWhiteSpace(authorization.TargetAction)))
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestItemIncomplete",
-                "Every operation, transition and external test adapter must contain its required contract fields."));
+                "Every operation and transition must contain its required contract fields."));
         }
 
         var transitions = new List<OpenLineOps.Production.Application.LineDefinitions.RouteTransitionRequest>();
@@ -200,6 +255,38 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 transition.ExpectedOutputValue));
         }
 
+        var operations = new List<OpenLineOps.Production.Application.LineDefinitions.OperationDefinitionRequest>();
+        foreach (var operation in request.Operations)
+        {
+            var resources = new List<OpenLineOps.Production.Application.LineDefinitions.OperationResourceBindingRequest>();
+            foreach (var resource in operation!.Resources!)
+            {
+                if (!TryParseExact(resource!.Kind!, out OperationResourceKind kind)
+                    || !TryParseExact(
+                        resource.Resolution!,
+                        out OperationResourceResolution resolution))
+                {
+                    return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
+                        "Production.OperationResourceTokenInvalid",
+                        "Operation resource kinds and resolutions must use exact supported tokens."));
+                }
+
+                resources.Add(new OpenLineOps.Production.Application.LineDefinitions.OperationResourceBindingRequest(
+                    resource.BindingId!,
+                    kind,
+                    resource.TopologyTargetId!,
+                    resolution));
+            }
+
+            operations.Add(new OpenLineOps.Production.Application.LineDefinitions.OperationDefinitionRequest(
+                operation.OperationId!,
+                operation.DisplayName!,
+                operation.StationSystemId!,
+                operation.FlowDefinitionId!,
+                operation.ConfigurationSnapshotId!,
+                resources));
+        }
+
         return Result.Success(new AppSaveRequest(
             request.LineDefinitionId,
             request.DisplayName,
@@ -209,36 +296,23 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 request.ProductModel.ModelCode,
                 request.ProductModel.IdentityInputKey),
             request.EntryOperationId,
-            request.Operations.Select(operation =>
-                new OpenLineOps.Production.Application.LineDefinitions.OperationDefinitionRequest(
-                    operation!.OperationId!,
-                    operation.DisplayName!,
-                    operation.StationSystemId!,
-                    operation.FlowDefinitionId!,
-                    operation.ConfigurationSnapshotId!)).ToArray(),
+            operations,
             transitions,
-            request.ExternalTestProgramAdapters.Select(adapter => new AppAdapterRequest(
-                adapter!.AdapterId!,
-                adapter.DisplayName!,
-                adapter.CapabilityId!,
-                adapter.CommandName!,
-                adapter.Executable,
-                adapter.ProviderKey,
-                adapter.ArgumentTemplates!.Select(static argument => argument!).ToArray(),
-                adapter.InputMappings!.Select(mapping =>
-                    new OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramInputMappingRequest(
-                        mapping!.Source!,
-                        mapping.Target!)).ToArray(),
-                adapter.ResultMappings!.Select(mapping =>
-                    new OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramResultMappingRequest(
-                        mapping!.SourcePath!,
-                        mapping.TargetKey!)).ToArray(),
-                new OpenLineOps.Production.Application.LineDefinitions.ExternalTestProgramOutcomeMappingRequest(
-                    adapter.OutcomeMapping!.SourcePath!,
-                    adapter.OutcomeMapping.PassedToken!,
-                    adapter.OutcomeMapping.FailedToken!,
-                    adapter.OutcomeMapping.AbortedToken!),
-                adapter.TimeoutMilliseconds!.Value)).ToArray()));
+            request.LineControllerAuthorizations.Select(authorization =>
+                new OpenLineOps.Production.Application.LineDefinitions.LineControllerAuthorizationRequest(
+                    authorization!.AuthorizationId!,
+                    authorization.OperationId!,
+                    authorization.ActionId!,
+                    authorization.ControllerSystemId!,
+                    authorization.ControllerBindingId!,
+                    authorization.ControllerCapabilityId!,
+                    authorization.ControllerAction!,
+                    authorization.TargetStationSystemId!,
+                    authorization.TargetSystemId!,
+                    authorization.TargetBindingId!,
+                    authorization.TargetCapabilityId!,
+                    authorization.TargetAction!))
+                .ToArray()));
     }
 
     private static bool TryParseExact<T>(string value, out T parsed)
@@ -247,36 +321,6 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
         return Enum.TryParse(value, ignoreCase: false, out parsed)
             && Enum.IsDefined(parsed)
             && string.Equals(value, parsed.ToString(), StringComparison.Ordinal);
-    }
-
-    private static bool AdapterIsIncomplete(ApiAdapterRequest? adapter)
-    {
-        var maximumTimeoutMilliseconds = TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond;
-        return adapter is null
-            || string.IsNullOrWhiteSpace(adapter.AdapterId)
-            || string.IsNullOrWhiteSpace(adapter.DisplayName)
-            || string.IsNullOrWhiteSpace(adapter.CapabilityId)
-            || string.IsNullOrWhiteSpace(adapter.CommandName)
-            || adapter.ArgumentTemplates is null
-            || adapter.InputMappings is null
-            || adapter.ResultMappings is null
-            || adapter.OutcomeMapping is null
-            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.SourcePath)
-            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.PassedToken)
-            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.FailedToken)
-            || string.IsNullOrWhiteSpace(adapter.OutcomeMapping.AbortedToken)
-            || adapter.TimeoutMilliseconds is null
-            || adapter.TimeoutMilliseconds <= 0
-            || adapter.TimeoutMilliseconds > maximumTimeoutMilliseconds
-            || adapter.ArgumentTemplates.Any(static argument => string.IsNullOrWhiteSpace(argument))
-            || adapter.InputMappings.Any(mapping =>
-                mapping is null
-                || string.IsNullOrWhiteSpace(mapping.Source)
-                || string.IsNullOrWhiteSpace(mapping.Target))
-            || adapter.ResultMappings.Any(mapping =>
-                mapping is null
-                || string.IsNullOrWhiteSpace(mapping.SourcePath)
-                || string.IsNullOrWhiteSpace(mapping.TargetKey));
     }
 
     private static ProductionLineResponse ToResponse(ProductionLineDefinitionDetails details)
@@ -295,7 +339,12 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 operation.DisplayName,
                 operation.StationSystemId,
                 operation.FlowDefinitionId,
-                operation.ConfigurationSnapshotId)).ToArray(),
+                operation.ConfigurationSnapshotId,
+                operation.Resources.Select(resource => new OperationResourceBindingResponse(
+                    resource.BindingId,
+                    resource.Kind,
+                    resource.TopologyTargetId,
+                    resource.Resolution)).ToArray())).ToArray(),
             details.Transitions.Select(transition => new RouteTransitionResponse(
                 transition.TransitionId,
                 transition.SourceOperationId,
@@ -307,27 +356,23 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 transition.OutputKey,
                 transition.ExpectedOutputKind,
                 transition.ExpectedOutputValue)).ToArray(),
-            details.ExternalTestProgramAdapters.Select(adapter => new ExternalTestProgramAdapterResponse(
-                adapter.AdapterId,
-                adapter.DisplayName,
-                adapter.CapabilityId,
-                adapter.CommandName,
-                adapter.LaunchKind,
-                adapter.Executable,
-                adapter.ProviderKey,
-                adapter.ArgumentTemplates,
-                adapter.InputMappings.Select(mapping =>
-                    new ExternalTestProgramInputMappingResponse(mapping.Source, mapping.Target)).ToArray(),
-                adapter.ResultMappings.Select(mapping =>
-                    new ExternalTestProgramResultMappingResponse(mapping.SourcePath, mapping.TargetKey)).ToArray(),
-                new ExternalTestProgramOutcomeMappingResponse(
-                    adapter.OutcomeMapping.SourcePath,
-                    adapter.OutcomeMapping.PassedToken,
-                    adapter.OutcomeMapping.FailedToken,
-                    adapter.OutcomeMapping.AbortedToken),
-                adapter.TimeoutMilliseconds)).ToArray(),
+            details.LineControllerAuthorizations.Select(authorization =>
+                new LineControllerAuthorizationResponse(
+                    authorization.AuthorizationId,
+                    authorization.OperationId,
+                    authorization.ActionId,
+                    authorization.ControllerSystemId,
+                    authorization.ControllerBindingId,
+                    authorization.ControllerCapabilityId,
+                    authorization.ControllerAction,
+                    authorization.TargetStationSystemId,
+                    authorization.TargetSystemId,
+                    authorization.TargetBindingId,
+                    authorization.TargetCapabilityId,
+                    authorization.TargetAction)).ToArray(),
             details.CreatedAtUtc,
-            details.UpdatedAtUtc);
+            details.UpdatedAtUtc,
+            EditorDocumentConcurrency.ComputeRevision(details));
     }
 
     private static ProductionLineSummaryResponse ToSummaryResponse(ProductionLineDefinitionSummary summary)

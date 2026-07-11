@@ -12,6 +12,16 @@ const emptyFilters: ProductionOperationsFilters = {
   slotId: ''
 };
 
+interface ScopedOperationsFilters {
+  storageKey: string | null;
+  value: ProductionOperationsFilters;
+}
+
+interface ScopedLineSelection {
+  storageKey: string | null;
+  value: string;
+}
+
 export interface ProductionOperationsProjection {
   activeRuns: ProductionRunReadModel[];
   lineState: ProductionLineRuntimeStateResponse | null;
@@ -39,58 +49,87 @@ export function useProductionOperations({
 }): ProductionOperationsProjection {
   const [activeRuns, setActiveRuns] = useState<ProductionRunReadModel[]>([]);
   const [lineState, setLineState] = useState<ProductionLineRuntimeStateResponse | null>(null);
-  const [filters, setFilters] = useState<ProductionOperationsFilters>(emptyFilters);
-  const [selectedLineId, setSelectedLineId] = useState('');
   const [connected, setConnected] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [lastSynchronizedAtUtc, setLastSynchronizedAtUtc] = useState<string | null>(null);
-  const inFlightRef = useRef(false);
+  const requestSequenceRef = useRef(0);
   const lastErrorRef = useRef('');
-  const selectedLineIdRef = useRef(selectedLineId);
-  selectedLineIdRef.current = selectedLineId;
   const storageKey = useMemo(
     () => projectId && applicationId
       ? `openlineops.operations.filters.${projectId}.${applicationId}`
       : null,
     [applicationId, projectId]);
+  const [filterState, setFilterState] = useState<ScopedOperationsFilters>({
+    storageKey: null,
+    value: emptyFilters
+  });
+  const [lineSelection, setLineSelection] = useState<ScopedLineSelection>({
+    storageKey: null,
+    value: ''
+  });
+  const filters = filterState.storageKey === storageKey ? filterState.value : emptyFilters;
+  const selectedLineId = lineSelection.storageKey === storageKey ? lineSelection.value : '';
+  const selectedLineIdRef = useRef(selectedLineId);
+  selectedLineIdRef.current = selectedLineId;
+  const queryContextKey = [
+    projectId ?? '',
+    applicationId ?? '',
+    filters.productionLineDefinitionId,
+    filters.stationSystemId,
+    filters.slotId,
+    preferredLineId ?? '',
+    isBackendHealthy ? 'healthy' : 'unhealthy'
+  ].join('\u001f');
+  const queryContextKeyRef = useRef(queryContextKey);
+  queryContextKeyRef.current = queryContextKey;
 
   useEffect(() => {
+    requestSequenceRef.current += 1;
     setActiveRuns([]);
     setLineState(null);
     setConnected(false);
+    setRefreshing(false);
     setLastSynchronizedAtUtc(null);
     if (!storageKey) {
-      setFilters(emptyFilters);
-      setSelectedLineId('');
+      setFilterState({ storageKey: null, value: emptyFilters });
+      setLineSelection({ storageKey: null, value: '' });
       return;
     }
 
     const restored = readFilters(storageKey);
     const nextFilters = restored ?? emptyFilters;
-    setFilters(nextFilters);
-    setSelectedLineId(nextFilters.productionLineDefinitionId || preferredLineId || '');
+    setFilterState({ storageKey, value: nextFilters });
+    setLineSelection({
+      storageKey,
+      value: nextFilters.productionLineDefinitionId || preferredLineId || ''
+    });
   }, [preferredLineId, storageKey]);
 
   useEffect(() => {
-    if (storageKey) {
-      window.localStorage.setItem(storageKey, JSON.stringify(filters));
+    if (storageKey && filterState.storageKey === storageKey) {
+      window.localStorage.setItem(storageKey, JSON.stringify(filterState.value));
     }
-  }, [filters, storageKey]);
+  }, [filterState, storageKey]);
 
   const refresh = useCallback(async () => {
-    if (!isBackendHealthy || !projectId || !applicationId || inFlightRef.current) {
+    if (!isBackendHealthy || !projectId || !applicationId) {
       if (!isBackendHealthy) {
         setConnected(false);
+        setRefreshing(false);
       }
       return;
     }
 
-    inFlightRef.current = true;
+    const requestId = ++requestSequenceRef.current;
+    const requestContextKey = queryContextKey;
+    const isCurrentRequest = (): boolean => (
+      requestSequenceRef.current === requestId
+      && queryContextKeyRef.current === requestContextKey);
     setRefreshing(true);
     try {
       const anticipatedLineId = filters.productionLineDefinitionId
-        || selectedLineIdRef.current
         || preferredLineId
+        || selectedLineIdRef.current
         || '';
       const [activeResponse, anticipatedLineResponse] = await Promise.all([
         getActiveProductionRuns(filters),
@@ -116,24 +155,26 @@ export function useProductionOperations({
       if (resolvedLineResponse && (!resolvedLineResponse.ok || !resolvedLineResponse.body)) {
         throw new Error(`Line State ${resolvedLineResponse.status}: ${resolvedLineResponse.text}`);
       }
+      if (resolvedLineResponse?.body
+          && resolvedLineResponse.body.productionLineDefinitionId !== resolvedLineId) {
+        throw new Error(
+          `Line State identity mismatch: requested ${resolvedLineId}, received ${resolvedLineResponse.body.productionLineDefinitionId}`);
+      }
+      if (!isCurrentRequest()) {
+        return;
+      }
 
       const resolvedLineState = resolvedLineResponse?.body ?? null;
-      const scopedLineRuns = resolvedLineState?.activeRuns.filter(run => (
-        run.projectId === projectId && run.applicationId === applicationId)) ?? [];
-      const scopedLineState = resolvedLineState
-        ? {
-          ...resolvedLineState,
-          activeRunCount: scopedLineRuns.length,
-          activeRuns: scopedLineRuns
-        }
-        : null;
       setActiveRuns(scopedRuns);
-      setSelectedLineId(resolvedLineId);
-      setLineState(scopedLineState);
+      setLineSelection({ storageKey, value: resolvedLineId });
+      setLineState(resolvedLineState);
       setConnected(true);
-      setLastSynchronizedAtUtc(scopedLineState?.generatedAtUtc ?? new Date().toISOString());
+      setLastSynchronizedAtUtc(resolvedLineState?.generatedAtUtc ?? new Date().toISOString());
       lastErrorRef.current = '';
     } catch (error) {
+      if (!isCurrentRequest()) {
+        return;
+      }
       const message = String(error);
       setConnected(false);
       if (lastErrorRef.current !== message) {
@@ -141,10 +182,11 @@ export function useProductionOperations({
         onMessage(`Operations projection unavailable: ${message}`);
       }
     } finally {
-      inFlightRef.current = false;
-      setRefreshing(false);
+      if (isCurrentRequest()) {
+        setRefreshing(false);
+      }
     }
-  }, [applicationId, filters, isBackendHealthy, onMessage, preferredLineId, projectId]);
+  }, [applicationId, filters, isBackendHealthy, onMessage, preferredLineId, projectId, queryContextKey, storageKey]);
 
   useEffect(() => {
     void refresh();
@@ -167,23 +209,37 @@ export function useProductionOperations({
   }, [applicationId, isBackendHealthy, projectId, refresh]);
 
   const setFilter = useCallback((filter: keyof ProductionOperationsFilters, value: string) => {
+    requestSequenceRef.current += 1;
     if (filter === 'productionLineDefinitionId') {
-      setSelectedLineId(value);
+      setLineSelection({ storageKey, value });
+      setLineState(null);
+      setConnected(false);
+      setLastSynchronizedAtUtc(null);
     }
-    setFilters(current => {
+    setFilterState(current => {
+      const currentFilters = current.storageKey === storageKey ? current.value : emptyFilters;
       if (filter === 'productionLineDefinitionId') {
         return {
-          productionLineDefinitionId: value,
-          stationSystemId: '',
-          slotId: ''
+          storageKey,
+          value: {
+            productionLineDefinitionId: value,
+            stationSystemId: '',
+            slotId: ''
+          }
         };
       }
       if (filter === 'stationSystemId') {
-        return { ...current, stationSystemId: value, slotId: '' };
+        return {
+          storageKey,
+          value: { ...currentFilters, stationSystemId: value, slotId: '' }
+        };
       }
-      return { ...current, slotId: value };
+      return {
+        storageKey,
+        value: { ...currentFilters, slotId: value }
+      };
     });
-  }, []);
+  }, [storageKey]);
 
   return {
     activeRuns,

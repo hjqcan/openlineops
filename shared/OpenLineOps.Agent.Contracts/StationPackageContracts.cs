@@ -9,11 +9,25 @@ public sealed record StationPackageManifest(
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
+    string StationSystemId,
     string ContentSha256,
     DateTimeOffset CreatedAtUtc,
     IReadOnlyList<StationPackageEntry> Entries)
 {
     public const string RequiredFormat = "openlineops.station-package";
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record StationPackageDeployment(
+    string Schema,
+    string ProjectId,
+    string ApplicationId,
+    string ProjectSnapshotId,
+    string StationSystemId,
+    string PackageContentSha256,
+    DateTimeOffset PublishedAtUtc)
+{
+    public const string RequiredSchema = "openlineops.station-package-deployment";
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -29,5 +43,5 @@ public sealed record StationPackageSignature(
     string KeyId,
     string Signature)
 {
-    public const string RequiredAlgorithm = "RSA-SHA256";
+    public const string RequiredAlgorithm = "RSA-PSS-SHA256";
 }

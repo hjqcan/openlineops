@@ -4,6 +4,7 @@ using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
@@ -15,7 +16,8 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
     [Fact]
     public async Task TerminalSnapshotIsDispatchedExactlyOnce()
     {
-        var repository = new InMemoryProductionRunRepository();
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
         var now = new DateTimeOffset(2026, 7, 11, 5, 0, 0, TimeSpan.Zero);
         var operation = new OperationExecutionPlan(
             "operation.main",
@@ -34,6 +36,7 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
             "snapshot.main",
             "topology.main",
             "line.main",
+            ProductionUnitId.New(),
             new ProductionUnitIdentity("product.board", "serialNumber", "SN-001"),
             null,
             null,
@@ -44,7 +47,8 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
             []);
         Assert.True(await repository.TryAddAsync(
             run,
-            new ProductionRunExecutionPlan(run.Id, [operation])));
+            new ProductionRunExecutionPlan(run.Id, [operation]),
+            await ProductionRunTestMaterials.RegisterAsync(materials, run)));
         Assert.True(run.Start(now).Succeeded);
         var operationRun = Assert.Single(run.Operations);
         var leases = operationRun.ResourceRequirements.Select(resource => new ResourceLease(

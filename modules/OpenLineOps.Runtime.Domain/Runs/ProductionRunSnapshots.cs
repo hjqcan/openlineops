@@ -1,6 +1,7 @@
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 
 namespace OpenLineOps.Runtime.Domain.Runs;
 
@@ -36,6 +37,7 @@ public sealed record ProductionRunSnapshot(
     string ProjectSnapshotId,
     string TopologyId,
     string ProductionLineDefinitionId,
+    ProductionUnitId ProductionUnitId,
     ProductionUnitIdentity ProductionUnitIdentity,
     string? LotId,
     string? CarrierId,
@@ -55,4 +57,5 @@ public sealed record ProductionRunSnapshot(
     IReadOnlyList<RouteTransitionDefinition> RouteTransitions,
     IReadOnlyList<OperationRunSnapshot> Operations,
     IReadOnlyList<RouteDecisionSnapshot> RouteDecisions,
-    IReadOnlyDictionary<string, int> TransitionTraversals);
+    IReadOnlyDictionary<string, int> TransitionTraversals,
+    IReadOnlyList<ProductionRecoveryDecision> RecoveryDecisions);

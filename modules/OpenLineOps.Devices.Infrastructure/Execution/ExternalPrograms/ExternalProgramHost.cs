@@ -1,9 +1,10 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
+using OpenLineOps.ProcessIsolation;
 
 namespace OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 
@@ -17,13 +18,28 @@ public sealed class ExternalProgramHost : IExternalProgramHost
     private readonly ExternalProgramHostOptions _options;
     private readonly string _workspaceRootPath;
     private readonly string _evidenceRootPath;
+    private readonly IsolatedProcessLauncher _processLauncher;
+    private readonly IImmutableContentProtector _contentProtector;
+    private readonly ExternalProgramHostPolicyEnforcer _policyEnforcer;
 
     public ExternalProgramHost(ExternalProgramHostOptions options)
+        : this(options, null, null, null)
+    {
+    }
+
+    internal ExternalProgramHost(
+        ExternalProgramHostOptions options,
+        IsolatedProcessLauncher? processLauncher,
+        IImmutableContentProtector? contentProtector,
+        ExternalProgramHostPolicyEnforcer? policyEnforcer)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _workspaceRootPath = _options.ResolveWorkspaceRootPath();
         _evidenceRootPath = _options.ResolveEvidenceRootPath();
+        _processLauncher = processLauncher ?? new IsolatedProcessLauncher();
+        _contentProtector = contentProtector ?? new ImmutableContentProtector();
+        _policyEnforcer = policyEnforcer ?? new ExternalProgramHostPolicyEnforcer(_options);
     }
 
     public async ValueTask<ExternalProgramExecutionResult> ExecuteAsync(
@@ -37,42 +53,95 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             return ExternalProgramExecutionResult.Rejected(validationError);
         }
 
+        EffectiveExternalProgramPolicy effectivePolicy;
+        ExternalProgramHostIdentity hostIdentity;
+        WindowsAppContainerPolicy? appContainerPolicy;
+        string contentReaderSid;
+        string resourceRootPath;
         string executablePath;
+        ImmutableContentFile[] immutableInventory;
         try
         {
-            executablePath = ResolveFrozenPath(
+            effectivePolicy = EffectiveExternalProgramPolicy.Create(_options, request);
+            hostIdentity = _policyEnforcer.Enforce(request.Policy);
+            appContainerPolicy = _options.RequireAppContainerIsolation
+                ? new WindowsAppContainerPolicy(
+                    _options.AppContainerProfileExternallyOwned
+                        ? _options.AppContainerProfileName!
+                        : CreateInvocationProfileName(_options.AppContainerProfileName!),
+                    request.Policy.NetworkAccessAllowed,
+                    [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName])
+                : null;
+            contentReaderSid = appContainerPolicy is null
+                ? hostIdentity.Sid
+                : WindowsAppContainerIdentity.EnsureCapabilitySid(
+                    WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+            resourceRootPath = ResolveFrozenPath(
                 request.ReleaseApplicationRootPath,
-                request.ExecutableRelativePath,
-                requireFile: true);
-            var verificationError = await VerifyExecutableAsync(
-                    executablePath,
-                    request.ExecutableSizeBytes,
-                    request.ExecutableSha256,
+                request.ResourceRootRelativePath,
+                requireFile: false);
+            if (!Directory.Exists(resourceRootPath))
+            {
+                throw new DirectoryNotFoundException(
+                    $"Frozen external program resource '{request.ResourceRootRelativePath}' does not exist.");
+            }
+
+            immutableInventory = request.Files
+                .Select(file => new ImmutableContentFile(
+                    file.RelativePath,
+                    file.SizeBytes,
+                    file.Sha256))
+                .ToArray();
+            var entryPointRelativeToResource = RelativeEntryPoint(request);
+            var entryPointInventory = request.Files
+                .Where(file => string.Equals(
+                    file.RelativePath,
+                    entryPointRelativeToResource,
+                    PathComparison))
+                .Take(2)
+                .ToArray();
+            if (entryPointInventory.Length != 1
+                || entryPointInventory[0].SizeBytes != request.EntryPointSizeBytes
+                || !string.Equals(
+                    entryPointInventory[0].Sha256,
+                    request.EntryPointSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Frozen external program entry point is absent or differs from the complete resource inventory.");
+            }
+
+            await VerifyFrozenResourceAsync(
+                    resourceRootPath,
+                    immutableInventory,
+                    contentReaderSid,
+                    hostIdentity.Sid,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (verificationError is not null)
-            {
-                return ExternalProgramExecutionResult.Rejected(
-                    $"External program '{request.AdapterId}' frozen executable is invalid: {verificationError}");
-            }
+            executablePath = ResolveFrozenPath(
+                request.ReleaseApplicationRootPath,
+                request.EntryPointRelativePath,
+                requireFile: true);
         }
         catch (OperationCanceledException)
         {
             return ExternalProgramExecutionResult.Canceled(
-                $"External program '{request.AdapterId}' was canceled before launch.",
+                $"External program '{request.ResourceId}' was canceled before launch.",
                 []);
         }
         catch (Exception exception) when (exception is ArgumentException
                                           or InvalidDataException
                                           or IOException
                                           or UnauthorizedAccessException
-                                          or NotSupportedException)
+                                          or NotSupportedException
+                                          or InvalidOperationException
+                                          or Win32Exception)
         {
             return ExternalProgramExecutionResult.Rejected(
-                $"External program '{request.AdapterId}' frozen executable is invalid: {exception.Message}");
+                $"External program '{request.ResourceId}' frozen executable is invalid: {exception.Message}");
         }
 
-        var workspacePath = CreateWorkspace(request);
+        var workspacePath = CreateWorkspace();
         var outputDirectory = Path.Combine(workspacePath, "output");
         var temporaryDirectory = Path.Combine(workspacePath, "temp");
         var standardOutputPath = Path.Combine(workspacePath, "stdout.log");
@@ -90,16 +159,28 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (appContainerPolicy is not null)
+            {
+                var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(
+                    appContainerPolicy.ProfileName);
+                WindowsContentAccessAuthorizer.GrantWorkspaceModify(
+                    workspacePath,
+                    appContainerSid);
+            }
 
             var startInfo = CreateStartInfo(
                 request,
+                effectivePolicy,
+                resourceRootPath,
                 executablePath,
                 workspacePath,
                 outputDirectory,
                 temporaryDirectory,
-                invocationPath);
+                invocationPath,
+                appContainerPolicy);
             result = await ExecuteProcessAsync(
                     request,
+                    effectivePolicy,
                     startInfo,
                     workspacePath,
                     outputDirectory,
@@ -108,245 +189,260 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            var postExecutionVerificationError = await VerifyExecutableAsync(
-                    executablePath,
-                    request.ExecutableSizeBytes,
-                    request.ExecutableSha256,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
-            if (postExecutionVerificationError is not null)
+            try
+            {
+                await VerifyFrozenResourceAsync(
+                        resourceRootPath,
+                        immutableInventory,
+                        contentReaderSid,
+                        hostIdentity.Sid,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException
+                                              or UnauthorizedAccessException
+                                              or InvalidDataException)
             {
                 result = ExternalProgramExecutionResult.Failed(
-                    $"External program '{request.AdapterId}' modified its frozen executable: "
-                    + postExecutionVerificationError,
+                    $"External program '{request.ResourceId}' modified its frozen resource: "
+                    + exception.Message,
                     result.Artifacts);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             result = ExternalProgramExecutionResult.Canceled(
-                $"External program '{request.AdapterId}' was canceled.",
+                $"External program '{request.ResourceId}' was canceled.",
                 []);
         }
         catch (Exception exception) when (exception is IOException
                                           or UnauthorizedAccessException
                                           or InvalidDataException
                                           or NotSupportedException
+                                          or InvalidOperationException
                                           or Win32Exception)
         {
             result = ExternalProgramExecutionResult.Failed(
-                $"External program '{request.AdapterId}' host failed: {exception.Message}",
+                $"External program '{request.ResourceId}' host failed: {exception.Message}",
                 []);
         }
 
-        var cleanupError = TryDeleteWorkspace(workspacePath);
+        var workspaceCleanupError = TryDeleteWorkspace(workspacePath);
+        var profileCleanupError = appContainerPolicy is null
+                                  || _options.AppContainerProfileExternallyOwned
+            ? null
+            : TryDeleteAppContainerProfile(appContainerPolicy.ProfileName);
+        var cleanupError = workspaceCleanupError ?? profileCleanupError;
         return cleanupError is null
             ? result
             : ExternalProgramExecutionResult.Failed(
-                $"External program '{request.AdapterId}' workspace cleanup failed: {cleanupError}",
+                $"External program '{request.ResourceId}' isolation cleanup failed: {cleanupError}",
                 result.Artifacts);
     }
 
     private async ValueTask<ExternalProgramExecutionResult> ExecuteProcessAsync(
         ExternalProgramExecutionRequest request,
-        ProcessStartInfo startInfo,
+        EffectiveExternalProgramPolicy policy,
+        IsolatedProcessStartRequest startRequest,
         string workspacePath,
         string outputDirectory,
         string standardOutputPath,
         string standardErrorPath,
         CancellationToken cancellationToken)
     {
-        using var process = new Process { StartInfo = startInfo };
-        WindowsProcessJob? job = null;
+        using var process = _processLauncher.Launch(startRequest);
+        using var timeoutCancellation = new CancellationTokenSource(policy.ExecutionTimeout);
+        using var outputLimitCancellation = new CancellationTokenSource();
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            timeoutCancellation.Token,
+            outputLimitCancellation.Token);
+        using var monitorStop = new CancellationTokenSource();
+        var standardOutputTask = CaptureStreamAsync(
+            process.StandardOutput,
+            standardOutputPath,
+            policy.MaximumStandardOutputBytes,
+            outputLimitCancellation);
+        var standardErrorTask = CaptureStreamAsync(
+            process.StandardError,
+            standardErrorPath,
+            policy.MaximumStandardErrorBytes,
+            outputLimitCancellation);
+        var outputMonitorTask = MonitorOutputDirectoryAsync(
+            outputDirectory,
+            policy,
+            outputLimitCancellation,
+            monitorStop.Token);
+        string? executionFailure = null;
+        var processExited = false;
         try
         {
-            if (!process.Start())
-            {
-                return ExternalProgramExecutionResult.Failed(
-                    $"External program '{request.AdapterId}' could not be started.",
-                    []);
-            }
-
-            if (OperatingSystem.IsWindows())
-            {
-                try
-                {
-                    job = WindowsProcessJob.Create(_options);
-                    job.Assign(process);
-                }
-                catch when (!_options.RequireWindowsJobObject)
-                {
-                    job?.Dispose();
-                    job = null;
-                }
-                catch
-                {
-                    TryTerminate(process);
-                    throw;
-                }
-            }
-
-            using var timeoutCancellation = new CancellationTokenSource(request.Timeout);
-            using var outputLimitCancellation = new CancellationTokenSource();
-            using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken,
-                timeoutCancellation.Token,
-                outputLimitCancellation.Token);
-
-            var standardOutputTask = CaptureStreamAsync(
-                process.StandardOutput.BaseStream,
-                standardOutputPath,
-                _options.MaximumStandardOutputBytes,
-                outputLimitCancellation);
-            var standardErrorTask = CaptureStreamAsync(
-                process.StandardError.BaseStream,
-                standardErrorPath,
-                _options.MaximumStandardErrorBytes,
-                outputLimitCancellation);
-
+            var inputBytes = Encoding.UTF8.GetBytes(request.InvocationPayload);
             try
             {
                 await process.StandardInput
-                    .WriteAsync(request.InvocationPayload.AsMemory(), executionCancellation.Token)
+                    .WriteAsync(inputBytes, executionCancellation.Token)
                     .ConfigureAwait(false);
-                process.StandardInput.Close();
-                await process.WaitForExitAsync(executionCancellation.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                TryTerminate(process);
-                await WaitForTerminationAsync(process).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is IOException or InvalidOperationException)
-            {
-                TryTerminate(process);
-                await WaitForTerminationAsync(process).ConfigureAwait(false);
-                var failedCaptures = await AwaitCapturesAsync(
-                        standardOutputTask,
-                        standardErrorTask)
+                await process.StandardInput
+                    .FlushAsync(executionCancellation.Token)
                     .ConfigureAwait(false);
-                var failedArtifacts = await PersistEvidenceAsync(
-                        request,
-                        workspacePath,
-                        outputDirectory,
-                        standardOutputPath,
-                        standardErrorPath,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-                return ExternalProgramExecutionResult.Failed(
-                    $"External program '{request.AdapterId}' execution failed: {exception.Message}"
-                    + FormatStandardError(failedCaptures.StandardError.Text),
-                    failedArtifacts);
             }
-
-            job?.Dispose();
-            job = null;
-
-            var captures = await AwaitCapturesAsync(standardOutputTask, standardErrorTask)
-                .ConfigureAwait(false);
-            var artifacts = await PersistEvidenceAsync(
-                    request,
-                    workspacePath,
-                    outputDirectory,
-                    standardOutputPath,
-                    standardErrorPath,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
-
-            if (outputLimitCancellation.IsCancellationRequested)
+            finally
             {
-                return ExternalProgramExecutionResult.Failed(
-                    $"External program '{request.AdapterId}' exceeded the streaming output limit.",
-                    artifacts);
+                process.StandardInput.Dispose();
             }
 
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return ExternalProgramExecutionResult.Canceled(
-                    $"External program '{request.AdapterId}' was canceled."
-                    + FormatStandardError(captures.StandardError.Text),
-                    artifacts);
-            }
+            await process.WaitForExitAsync(executionCancellation.Token).ConfigureAwait(false);
+            processExited = true;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        {
+            executionFailure = exception.Message;
+        }
 
-            if (timeoutCancellation.IsCancellationRequested)
-            {
-                return ExternalProgramExecutionResult.TimedOut(
-                    $"External program '{request.AdapterId}' exceeded its timeout of "
-                    + $"{request.Timeout.TotalMilliseconds.ToString(CultureInfo.InvariantCulture)} ms."
-                    + FormatStandardError(captures.StandardError.Text),
-                    artifacts);
-            }
+        process.TerminateProcessTree();
+        processExited = processExited
+                        || await WaitForTerminationBoundedAsync(process).ConfigureAwait(false);
+        monitorStop.Cancel();
+        var outputQuotaFailure = await outputMonitorTask.ConfigureAwait(false);
+        var captures = await AwaitCapturesBoundedAsync(
+                process,
+                standardOutputTask,
+                standardErrorTask)
+            .ConfigureAwait(false);
+        if (captures is null)
+        {
+            return ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' standard stream shutdown exceeded the host bound.",
+                []);
+        }
 
-            if (process.ExitCode != 0)
-            {
-                return ExternalProgramExecutionResult.Failed(
-                    $"External program '{request.AdapterId}' exited with code "
-                    + $"{process.ExitCode.ToString(CultureInfo.InvariantCulture)}."
-                    + FormatStandardError(captures.StandardError.Text),
-                    artifacts);
-            }
-
-            return ExternalProgramExecutionResult.Completed(
-                captures.StandardOutput.Text,
+        var artifacts = await PersistEvidenceAsync(
+                request,
+                policy,
+                workspacePath,
+                outputDirectory,
+                standardOutputPath,
+                standardErrorPath,
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        if (executionFailure is not null)
+        {
+            return ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' execution failed: {executionFailure}"
+                + FormatStandardError(captures.StandardError.Text),
                 artifacts);
         }
-        finally
+
+        if (outputLimitCancellation.IsCancellationRequested)
         {
-            job?.Dispose();
+            return ExternalProgramExecutionResult.Failed(
+                outputQuotaFailure is null
+                    ? $"External program '{request.ResourceId}' exceeded the streaming output limit."
+                    : $"External program '{request.ResourceId}' output workspace exceeded its quota: "
+                      + outputQuotaFailure,
+                artifacts);
         }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return ExternalProgramExecutionResult.Canceled(
+                $"External program '{request.ResourceId}' was canceled."
+                + FormatStandardError(captures.StandardError.Text),
+                artifacts);
+        }
+
+        if (timeoutCancellation.IsCancellationRequested)
+        {
+            return ExternalProgramExecutionResult.TimedOut(
+                $"External program '{request.ResourceId}' exceeded its timeout of "
+                + $"{policy.ExecutionTimeout.TotalMilliseconds.ToString(CultureInfo.InvariantCulture)} ms."
+                + FormatStandardError(captures.StandardError.Text),
+                artifacts);
+        }
+
+        if (!processExited)
+        {
+            return ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' did not terminate within the bounded shutdown interval.",
+                artifacts);
+        }
+
+        if (process.ExitCode != 0)
+        {
+            return ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' exited with code "
+                + $"{process.ExitCode.ToString(CultureInfo.InvariantCulture)}."
+                + FormatStandardError(captures.StandardError.Text),
+                artifacts);
+        }
+
+        return ExternalProgramExecutionResult.Completed(
+            captures.StandardOutput.Text,
+            artifacts);
     }
 
-    private ProcessStartInfo CreateStartInfo(
+    private static IsolatedProcessStartRequest CreateStartInfo(
         ExternalProgramExecutionRequest request,
+        EffectiveExternalProgramPolicy policy,
+        string resourceRootPath,
         string executablePath,
         string workspacePath,
         string outputDirectory,
         string temporaryDirectory,
-        string invocationPath)
+        string invocationPath,
+        WindowsAppContainerPolicy? appContainerPolicy)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = executablePath,
-            WorkingDirectory = workspacePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
-
+        var arguments = new List<string>(request.Arguments.Count);
         foreach (var argument in request.Arguments)
         {
-            startInfo.ArgumentList.Add(ResolveFrozenArgument(
-                request.ReleaseApplicationRootPath,
+            arguments.Add(ResolveFrozenArgument(
+                resourceRootPath,
+                request.ResourceRootRelativePath,
+                request.Files,
                 argument));
         }
 
-        var inherited = _options.AllowedInheritedEnvironmentVariables
+        var inherited = policy.InheritedEnvironmentVariables
             .Select(name => (Name: name, Value: Environment.GetEnvironmentVariable(name)))
             .Where(item => item.Value is not null)
             .ToArray();
-        startInfo.Environment.Clear();
+        var environment = new Dictionary<string, string>(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
         foreach (var item in inherited)
         {
-            startInfo.Environment[item.Name] = item.Value!;
+            environment[item.Name] = item.Value!;
         }
 
-        startInfo.Environment["TEMP"] = temporaryDirectory;
-        startInfo.Environment["TMP"] = temporaryDirectory;
-        startInfo.Environment["OPENLINEOPS_WORKSPACE"] = workspacePath;
-        startInfo.Environment["OPENLINEOPS_OUTPUT_DIRECTORY"] = outputDirectory;
-        startInfo.Environment["OPENLINEOPS_INVOCATION_FILE"] = invocationPath;
-        startInfo.Environment["OPENLINEOPS_PRODUCTION_RUN_ID"] = request.ProductionRunId.ToString("D");
-        startInfo.Environment["OPENLINEOPS_RUNTIME_COMMAND_ID"] = request.RuntimeCommandId.ToString("D");
-        return startInfo;
+        environment["TEMP"] = temporaryDirectory;
+        environment["TMP"] = temporaryDirectory;
+        environment["OPENLINEOPS_WORKSPACE"] = workspacePath;
+        environment["OPENLINEOPS_OUTPUT_DIRECTORY"] = outputDirectory;
+        environment["OPENLINEOPS_INVOCATION_FILE"] = invocationPath;
+        environment["OPENLINEOPS_PRODUCTION_RUN_ID"] = request.ProductionRunId.ToString("D");
+        environment["OPENLINEOPS_RUNTIME_COMMAND_ID"] = request.RuntimeCommandId.ToString("D");
+        if (appContainerPolicy is not null)
+        {
+            environment["LOCALAPPDATA"] = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+        }
+
+        return new IsolatedProcessStartRequest(
+            executablePath,
+            arguments,
+            workspacePath,
+            environment,
+            policy.ProcessLimits,
+            appContainerPolicy);
     }
 
     private async ValueTask<IReadOnlyCollection<ExternalProgramArtifact>> PersistEvidenceAsync(
         ExternalProgramExecutionRequest request,
+        EffectiveExternalProgramPolicy policy,
         string workspacePath,
         string outputDirectory,
         string standardOutputPath,
@@ -360,10 +456,10 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         };
         foreach (var path in EnumerateOutputFiles(outputDirectory))
         {
-            if (candidates.Count == _options.MaximumArtifactCount)
+            if (candidates.Count == policy.MaximumArtifactCount)
             {
                 throw new InvalidDataException(
-                    $"External program produced more than {_options.MaximumArtifactCount} artifacts.");
+                    $"External program produced more than {policy.MaximumArtifactCount} artifacts.");
             }
 
             candidates.Add((
@@ -371,10 +467,10 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 "output/" + Path.GetRelativePath(outputDirectory, path).Replace('\\', '/')));
         }
 
-        if (candidates.Count > _options.MaximumArtifactCount)
+        if (candidates.Count > policy.MaximumArtifactCount)
         {
             throw new InvalidDataException(
-                $"External program produced {candidates.Count} artifacts; limit is {_options.MaximumArtifactCount}.");
+                $"External program produced {candidates.Count} artifacts; limit is {policy.MaximumArtifactCount}.");
         }
 
         long totalSize = 0;
@@ -383,14 +479,14 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         {
             RejectInvalidEvidencePath(workspacePath, candidate.SourcePath, candidate.RelativePath);
             var file = new FileInfo(candidate.SourcePath);
-            if (file.Length > _options.MaximumArtifactBytes)
+            if (file.Length > policy.MaximumArtifactBytes)
             {
                 throw new InvalidDataException(
                     $"External program artifact '{candidate.RelativePath}' exceeds the per-artifact limit.");
             }
 
             totalSize = checked(totalSize + file.Length);
-            if (totalSize > _options.MaximumTotalArtifactBytes)
+            if (totalSize > policy.MaximumTotalArtifactBytes)
             {
                 throw new InvalidDataException("External program artifacts exceed the total evidence limit.");
             }
@@ -513,14 +609,157 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         return new StoredEvidence(stream.Length, Convert.ToHexString(hash).ToLowerInvariant());
     }
 
-    private static async Task<CapturedStreams> AwaitCapturesAsync(
+    private static async Task<CapturedStreams?> AwaitCapturesBoundedAsync(
+        IIsolatedProcess process,
         Task<CapturedStream> standardOutputTask,
         Task<CapturedStream> standardErrorTask)
     {
-        await Task.WhenAll(standardOutputTask, standardErrorTask).ConfigureAwait(false);
-        return new CapturedStreams(
-            await standardOutputTask.ConfigureAwait(false),
-            await standardErrorTask.ConfigureAwait(false));
+        var combined = Task.WhenAll(standardOutputTask, standardErrorTask);
+        try
+        {
+            await combined.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            return new CapturedStreams(
+                await standardOutputTask.ConfigureAwait(false),
+                await standardErrorTask.ConfigureAwait(false));
+        }
+        catch (TimeoutException)
+        {
+            process.StandardOutput.Dispose();
+            process.StandardError.Dispose();
+            _ = combined.ContinueWith(
+                task => _ = task.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            return null;
+        }
+    }
+
+    private static async Task<bool> WaitForTerminationBoundedAsync(IIsolatedProcess process)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<string?> MonitorOutputDirectoryAsync(
+        string outputDirectory,
+        EffectiveExternalProgramPolicy policy,
+        CancellationTokenSource limitCancellation,
+        CancellationToken stopToken)
+    {
+        while (true)
+        {
+            var violation = InspectOutputDirectorySafely(outputDirectory, policy);
+            if (violation is not null)
+            {
+                limitCancellation.Cancel();
+                return violation;
+            }
+
+            try
+            {
+                await Task.Delay(policy.OutputDirectoryScanInterval, stopToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stopToken.IsCancellationRequested)
+            {
+                return InspectOutputDirectorySafely(outputDirectory, policy);
+            }
+        }
+    }
+
+    private static string? InspectOutputDirectorySafely(
+        string outputDirectory,
+        EffectiveExternalProgramPolicy policy)
+    {
+        try
+        {
+            return InspectOutputDirectory(outputDirectory, policy);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return $"output workspace could not be inspected: {exception.Message}";
+        }
+    }
+
+    private static string? InspectOutputDirectory(
+        string outputDirectory,
+        EffectiveExternalProgramPolicy policy)
+    {
+        var pending = new Stack<(string Path, int Depth)>();
+        pending.Push((outputDirectory, 0));
+        var entries = 0;
+        var fileCount = 0;
+        long totalBytes = 0;
+        while (pending.Count > 0)
+        {
+            var (directory, depth) = pending.Pop();
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            {
+                return "reparse points are forbidden";
+            }
+
+            foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+            {
+                entries++;
+                var childDepth = depth + 1;
+                if (entries > policy.MaximumOutputDirectoryEntries)
+                {
+                    return $"entry count exceeds {policy.MaximumOutputDirectoryEntries}";
+                }
+
+                if (childDepth > policy.MaximumOutputDirectoryDepth)
+                {
+                    return $"directory depth exceeds {policy.MaximumOutputDirectoryDepth}";
+                }
+
+                pending.Push((childDirectory, childDepth));
+            }
+
+            foreach (var file in Directory.EnumerateFiles(directory))
+            {
+                entries++;
+                fileCount++;
+                if (entries > policy.MaximumOutputDirectoryEntries)
+                {
+                    return $"entry count exceeds {policy.MaximumOutputDirectoryEntries}";
+                }
+
+                if (fileCount > policy.MaximumOutputFileCount)
+                {
+                    return $"file count exceeds {policy.MaximumOutputFileCount}";
+                }
+
+                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return "reparse points are forbidden";
+                }
+
+                var length = new FileInfo(file).Length;
+                if (length > policy.MaximumArtifactBytes)
+                {
+                    return $"one artifact exceeds {policy.MaximumArtifactBytes} bytes";
+                }
+
+                totalBytes = length > long.MaxValue - totalBytes
+                    ? long.MaxValue
+                    : totalBytes + length;
+                if (totalBytes > policy.MaximumTotalArtifactBytes)
+                {
+                    return $"total artifact bytes exceed {policy.MaximumTotalArtifactBytes}";
+                }
+            }
+        }
+
+        return null;
     }
 
     private static async Task<CapturedStream> CaptureStreamAsync(
@@ -598,20 +837,89 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         }
     }
 
-    private string CreateWorkspace(ExternalProgramExecutionRequest request)
+    private string CreateWorkspace()
     {
         Directory.CreateDirectory(_workspaceRootPath);
-        var relativePath = request.ProductionRunId.ToString("N")
-                           + "/"
-                           + request.RuntimeCommandId.ToString("N")
-                           + "/"
-                           + Guid.NewGuid().ToString("N");
+        RejectReparsePoints(_workspaceRootPath, _workspaceRootPath);
+        var relativePath = Guid.NewGuid().ToString("N");
         var workspacePath = ResolveContainedPath(_workspaceRootPath, relativePath);
         Directory.CreateDirectory(workspacePath);
+        RejectReparsePoints(_workspaceRootPath, workspacePath);
         return workspacePath;
     }
 
-    private static string ResolveFrozenArgument(string applicationRootPath, string argument)
+    private static string CreateInvocationProfileName(string profileNamespace)
+    {
+        var input = Encoding.UTF8.GetBytes(
+            profileNamespace + "\0" + Guid.NewGuid().ToString("N"));
+        var digest = Convert.ToHexStringLower(SHA256.HashData(input));
+        return "OpenLineOps.External." + digest[..40];
+    }
+
+    private static string? TryDeleteAppContainerProfile(string profileName)
+    {
+        try
+        {
+            WindowsAppContainerIdentity.DeleteProfile(profileName);
+            return null;
+        }
+        catch (Exception exception) when (exception is Win32Exception
+                                          or InvalidOperationException
+                                          or ArgumentException)
+        {
+            return exception.Message;
+        }
+    }
+
+    private async ValueTask VerifyFrozenResourceAsync(
+        string resourceRootPath,
+        IReadOnlyCollection<ImmutableContentFile> inventory,
+        string contentReaderSid,
+        string contentHostReaderSid,
+        CancellationToken cancellationToken)
+    {
+        if (_options.RequireImmutableContentProtection)
+        {
+            await _contentProtector.VerifyAsync(
+                resourceRootPath,
+                inventory,
+                new ImmutableContentProtectionPolicy(contentReaderSid, contentHostReaderSid),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await _contentProtector.VerifyInventoryAsync(
+                resourceRootPath,
+                inventory,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (_options.RequireAppContainerIsolation)
+        {
+            WindowsContentAccessAuthorizer.GrantReadExecute(
+                resourceRootPath,
+                contentReaderSid);
+        }
+    }
+
+    private static string RelativeEntryPoint(ExternalProgramExecutionRequest request)
+    {
+        var prefix = request.ResourceRootRelativePath + "/";
+        if (!request.EntryPointRelativePath.StartsWith(prefix, PathComparison)
+            || request.EntryPointRelativePath.Length == prefix.Length)
+        {
+            throw new InvalidDataException(
+                "External program entry point must be contained by its frozen resource root.");
+        }
+
+        return request.EntryPointRelativePath[prefix.Length..];
+    }
+
+    private static string ResolveFrozenArgument(
+        string resourceRootPath,
+        string resourceRootRelativePath,
+        IReadOnlyCollection<ExternalProgramExecutionFile> inventory,
+        string argument)
     {
         if (string.IsNullOrEmpty(argument)
             || Path.IsPathRooted(argument)
@@ -623,15 +931,18 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             return argument;
         }
 
-        try
-        {
-            var resolved = ResolveFrozenPath(applicationRootPath, argument, requireFile: true);
-            return File.Exists(resolved) ? resolved : argument;
-        }
-        catch (FileNotFoundException)
-        {
-            return argument;
-        }
+        var inventoryRelativeArgument = argument.StartsWith(
+            resourceRootRelativePath + "/",
+            PathComparison)
+            ? argument[(resourceRootRelativePath.Length + 1)..]
+            : argument;
+        var match = inventory.Count(file => string.Equals(
+            file.RelativePath,
+            inventoryRelativeArgument,
+            PathComparison));
+        return match == 1
+            ? ResolveContainedPath(resourceRootPath, inventoryRelativeArgument)
+            : argument;
     }
 
     private static string ResolveFrozenPath(
@@ -716,49 +1027,46 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         }
     }
 
-    private static async ValueTask<string?> VerifyExecutableAsync(
-        string executablePath,
-        long expectedSizeBytes,
-        string expectedSha256,
-        CancellationToken cancellationToken)
-    {
-        var file = new FileInfo(executablePath);
-        if (file.Length != expectedSizeBytes)
-        {
-            return $"size is {file.Length.ToString(CultureInfo.InvariantCulture)} bytes, expected "
-                   + $"{expectedSizeBytes.ToString(CultureInfo.InvariantCulture)} bytes";
-        }
-
-        await using var stream = new FileStream(
-            executablePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            BufferSize,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var hash = Convert.ToHexString(
-                await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false))
-            .ToLowerInvariant();
-        return string.Equals(hash, expectedSha256, StringComparison.Ordinal)
-            ? null
-            : "SHA-256 does not match the immutable release manifest";
-    }
-
     private static string? ValidateRequest(ExternalProgramExecutionRequest request)
     {
-        if (!IsCanonical(request.AdapterId)
+        if (!IsCanonical(request.ResourceId)
             || request.ProductionRunId == Guid.Empty
             || request.RuntimeCommandId == Guid.Empty
             || !IsCanonical(request.ReleaseApplicationRootPath)
-            || !IsCanonical(request.ExecutableRelativePath)
-            || request.ExecutableSizeBytes < 0
-            || !IsLowercaseSha256(request.ExecutableSha256)
+            || !IsCanonical(request.ResourceRootRelativePath)
+            || Path.IsPathRooted(request.ResourceRootRelativePath)
+            || request.ResourceRootRelativePath.Contains('\\')
+            || request.ResourceRootRelativePath.Split('/').Any(segment => segment is "" or "." or "..")
+            || !IsCanonical(request.EntryPointRelativePath)
+            || request.EntryPointSizeBytes < 0
+            || !IsLowercaseSha256(request.EntryPointSha256)
+            || request.Files is null
+            || request.Files.Count == 0
             || request.Arguments is null
-            || request.Arguments.Any(argument => argument is null)
+            || request.Arguments.Any(argument => argument is null || argument.Contains('\0'))
             || request.InvocationPayload is null
-            || request.Timeout <= TimeSpan.Zero)
+            || request.Timeout <= TimeSpan.Zero
+            || request.Policy is null)
         {
             return "External program execution request is invalid.";
+        }
+
+        var paths = new HashSet<string>(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
+        foreach (var file in request.Files)
+        {
+            if (file is null
+                || !IsCanonical(file.RelativePath)
+                || Path.IsPathRooted(file.RelativePath)
+                || file.RelativePath.Contains('\\')
+                || file.RelativePath.Split('/').Any(segment => segment is "" or "." or "..")
+                || file.SizeBytes < 0
+                || !IsLowercaseSha256(file.Sha256)
+                || !paths.Add(file.RelativePath))
+            {
+                return "External program frozen file inventory is invalid.";
+            }
         }
 
         return null;
@@ -803,35 +1111,6 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             ? canonicalError
             : canonicalError[..2048].TrimEnd();
         return $" Standard error: {captured}";
-    }
-
-    private static void TryTerminate(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-                                          or Win32Exception
-                                          or NotSupportedException)
-        {
-            _ = exception;
-        }
-    }
-
-    private static async Task WaitForTerminationAsync(Process process)
-    {
-        try
-        {
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception)
-        {
-            _ = exception;
-        }
     }
 
     private string? TryDeleteWorkspace(string workspacePath)

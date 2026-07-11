@@ -64,7 +64,7 @@ namespace PythonScript
             logger.Log(logEvent);
         }
 
-        private static IDictionary<string, object?> AppendException(IDictionary<string, object?>? properties, Exception? ex)
+        private static Dictionary<string, object?> AppendException(IDictionary<string, object?>? properties, Exception? ex)
         {
             var map = properties != null
                 ? new Dictionary<string, object?>(properties, StringComparer.Ordinal)

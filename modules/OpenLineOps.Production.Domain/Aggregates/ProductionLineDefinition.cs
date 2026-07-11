@@ -8,7 +8,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 {
     private readonly List<OperationDefinition> _operations;
     private readonly List<RouteTransition> _transitions;
-    private readonly List<ExternalTestProgramAdapter> _externalTestProgramAdapters;
+    private readonly List<LineControllerAuthorization> _lineControllerAuthorizations;
 
     private ProductionLineDefinition(
         ProductionLineDefinitionId id,
@@ -18,7 +18,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         OperationDefinitionId entryOperationId,
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
-        IEnumerable<ExternalTestProgramAdapter> externalTestProgramAdapters,
+        IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
@@ -33,10 +33,10 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         _transitions = MaterializeRequired(transitions, nameof(transitions))
             .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
             .ToList();
-        _externalTestProgramAdapters = MaterializeRequired(
-                externalTestProgramAdapters,
-                nameof(externalTestProgramAdapters))
-            .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
+        _lineControllerAuthorizations = MaterializeRequired(
+                lineControllerAuthorizations,
+                nameof(lineControllerAuthorizations))
+            .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
             .ToList();
         EnsureValidComposition();
         if (createdAtUtc.Offset != TimeSpan.Zero || updatedAtUtc.Offset != TimeSpan.Zero)
@@ -65,8 +65,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 
     public IReadOnlyCollection<RouteTransition> Transitions => _transitions.AsReadOnly();
 
-    public IReadOnlyCollection<ExternalTestProgramAdapter> ExternalTestProgramAdapters =>
-        _externalTestProgramAdapters.AsReadOnly();
+    public IReadOnlyCollection<LineControllerAuthorization> LineControllerAuthorizations =>
+        _lineControllerAuthorizations.AsReadOnly();
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -80,7 +80,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         OperationDefinitionId entryOperationId,
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
-        IEnumerable<ExternalTestProgramAdapter> externalTestProgramAdapters,
+        IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
         DateTimeOffset createdAtUtc)
     {
         return Restore(
@@ -91,7 +91,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             entryOperationId,
             operations,
             transitions,
-            externalTestProgramAdapters,
+            lineControllerAuthorizations,
             createdAtUtc,
             createdAtUtc);
     }
@@ -104,13 +104,13 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         OperationDefinitionId entryOperationId,
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
-        IEnumerable<ExternalTestProgramAdapter> externalTestProgramAdapters,
+        IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
     {
         ArgumentNullException.ThrowIfNull(operations);
         ArgumentNullException.ThrowIfNull(transitions);
-        ArgumentNullException.ThrowIfNull(externalTestProgramAdapters);
+        ArgumentNullException.ThrowIfNull(lineControllerAuthorizations);
 
         return new ProductionLineDefinition(
             id,
@@ -120,7 +120,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             entryOperationId,
             operations,
             transitions,
-            externalTestProgramAdapters,
+            lineControllerAuthorizations,
             createdAtUtc,
             updatedAtUtc);
     }
@@ -135,8 +135,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         EnsureUnique(_operations.Select(operation => operation.Id.Value), "operation ids");
         EnsureUnique(_transitions.Select(transition => transition.Id.Value), "transition ids");
         EnsureUnique(
-            _externalTestProgramAdapters.Select(adapter => adapter.Id.Value),
-            "external test program adapter ids");
+            _lineControllerAuthorizations.Select(authorization => authorization.Id.Value),
+            "Line Controller authorization ids");
         if (_operations.All(operation => operation.Id != EntryOperationId))
         {
             throw new ArgumentException(
@@ -144,6 +144,38 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         }
 
         var operationIds = _operations.Select(operation => operation.Id).ToHashSet();
+        if (_lineControllerAuthorizations.Any(authorization =>
+                !operationIds.Contains(authorization.OperationId)))
+        {
+            throw new ArgumentException(
+                "Every Line Controller authorization must reference an existing Operation.");
+        }
+
+        if (_lineControllerAuthorizations
+            .GroupBy(authorization => (authorization.OperationId, authorization.ActionId))
+            .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "An Operation Flow action can have at most one Line Controller authorization.");
+        }
+
+        if (_lineControllerAuthorizations
+            .GroupBy(authorization => (
+                authorization.OperationId,
+                authorization.ControllerSystemId,
+                authorization.ControllerBindingId,
+                authorization.ControllerCapabilityId,
+                authorization.ControllerAction,
+                authorization.TargetStationSystemId,
+                authorization.TargetSystemId,
+                authorization.TargetBindingId,
+                authorization.TargetCapabilityId,
+                authorization.TargetAction))
+            .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "Line Controller authorizations must be semantically unique.");
+        }
         foreach (var transition in _transitions)
         {
             if (!operationIds.Contains(transition.SourceOperationId)

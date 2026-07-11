@@ -18,7 +18,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
     public void CompileProducesStaticActionsExactBlockSourcesTargetsAndDependencyLocks()
     {
         var workspace = """
-            {"blocks":{"languageVersion":0,"blocks":[{"type":"openlineops_move_axis","id":"move-1","x":0,"y":0,"fields":{"TARGET_KIND":"System","TARGET_ID":"system.motion","CAPABILITY":"motion.axis","COMMAND":"MoveAxis","AXIS":"X","POSITION":10,"SPEED":5,"UNIT":"mm"},"next":{"block":{"type":"openlineops_run_external_test","id":"external-1","fields":{"TARGET_KIND":"System","TARGET_ID":"system.tester","CAPABILITY":"production.external-test","COMMAND":"Run","ADAPTER_ID":"adapter.main","TIMEOUT_MS":1234}}}}]}}
+            {"blocks":{"languageVersion":0,"blocks":[{"type":"openlineops_move_axis","id":"move-1","x":0,"y":0,"fields":{"TARGET_KIND":"System","TARGET_ID":"system.motion","CAPABILITY":"motion.axis","COMMAND":"MoveAxis","AXIS":"X","POSITION":10,"SPEED":5,"UNIT":"mm"},"next":{"block":{"type":"openlineops_run_external_program","id":"external-1","fields":{"TARGET_KIND":"System","TARGET_ID":"system.tester","CAPABILITY":"production.external-program","COMMAND":"Run","RESOURCE_ID":"resource.main","TIMEOUT_MS":1234}}}}]}}
             """;
         var definition = CreatePublishedDefinition(workspace);
 
@@ -56,7 +56,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
 
         var external = blocklyNode.Actions[1];
         Assert.Equal("flow:action:2", external.ActionId);
-        Assert.Equal("production.external-test", external.RequiredCapability);
+        Assert.Equal("production.external-program", external.RequiredCapability);
         Assert.Equal("Run", external.CommandName);
         Assert.Equal(FlowIrTargetReferenceKind.System, external.Target.Kind);
         Assert.Equal("system.tester", external.Target.Reference);
@@ -64,13 +64,13 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
         Assert.Equal("external-1", external.Source.ElementId);
         using (var payload = JsonDocument.Parse(external.InputPayload!))
         {
-            Assert.Equal("adapter.main", payload.RootElement
-                .GetProperty("externalTestProgramAdapterId")
+            Assert.Equal("resource.main", payload.RootElement
+                .GetProperty("externalProgramResourceId")
                 .GetString());
         }
 
         Assert.Equal(
-            ["openlineops_move_axis", "openlineops_run_external_test"],
+            ["openlineops_move_axis", "openlineops_run_external_program"],
             document.BlockDependencies.Select(dependency => dependency.BlockType));
 
         var artifact = new FlowIrCanonicalSerializer().Serialize(document);
@@ -86,7 +86,7 @@ public sealed class BlocklyWorkspaceFlowIrCompilerTests
         Assert.Equal("flow:action:1", first.ActionId.Value);
         Assert.Equal("System", first.Target.Kind);
         Assert.Equal("system.motion", first.Target.TargetId);
-        Assert.Equal("production.external-test", second.TargetCapability.Value);
+        Assert.Equal("production.external-program", second.TargetCapability.Value);
         Assert.Equal("flow:action:2", second.ActionId.Value);
         Assert.Equal("System", second.Target.Kind);
         Assert.Equal("system.tester", second.Target.TargetId);

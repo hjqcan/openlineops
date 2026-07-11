@@ -10,14 +10,18 @@ internal sealed record StationAgentHostOptions(
     bool RequireBrokerTls,
     ushort PrefetchCount,
     ushort MaximumConcurrentJobs,
-    string PackageInboxDirectory,
+    string PackageDistributionDirectory,
     string PackageCacheDirectory,
     IReadOnlyDictionary<string, string> TrustedPackagePublicKeys,
     string RuntimeExecutablePath,
     string RuntimeWorkingDirectory,
     string ArtifactDirectory,
+    string ArtifactExchangeDirectory,
     TimeSpan RuntimeTimeout,
     int MaximumRuntimeOutputBytes,
+    IReadOnlyCollection<string> AllowedRestrictedExternalProgramHostAccounts,
+    IReadOnlyCollection<string> AllowedRestrictedExternalProgramHostSids,
+    string ExternalProgramAppContainerProfileNamespace,
     string SafetyExecutablePath,
     string SafetyWorkingDirectory,
     TimeSpan SafetyTimeout)
@@ -39,21 +43,35 @@ internal sealed record StationAgentHostOptions(
         }
 
         var trustedKeys = section
-            .GetSection("TrustedPackagePublicKeys")
+            .GetSection("TrustedPackagePublicKeyFiles")
             .GetChildren()
             .ToDictionary(
                 child => Required(child.Key, "Trusted package key id"),
-                child => Required(child.Value, $"Trusted package public key '{child.Key}'"),
+                child => File.ReadAllText(ResolvePath(Required(
+                    child.Value,
+                    $"Trusted package public key file '{child.Key}'"))),
                 StringComparer.Ordinal);
         if (trustedKeys.Count == 0)
         {
             throw new InvalidDataException(
-                "At least one OpenLineOps:Agent:TrustedPackagePublicKeys entry is required.");
+                "At least one OpenLineOps:Agent:TrustedPackagePublicKeyFiles entry is required.");
         }
 
         var runtimeExecutablePath = ResolvePath(Required(
             section["RuntimeExecutablePath"],
             "OpenLineOps:Agent:RuntimeExecutablePath"));
+        var allowedExternalProgramAccounts = CanonicalCollection(
+            section.GetSection("AllowedRestrictedExternalProgramHostAccounts").Get<string[]>() ?? [],
+            "OpenLineOps:Agent:AllowedRestrictedExternalProgramHostAccounts");
+        var allowedExternalProgramSids = CanonicalCollection(
+            section.GetSection("AllowedRestrictedExternalProgramHostSids").Get<string[]>() ?? [],
+            "OpenLineOps:Agent:AllowedRestrictedExternalProgramHostSids");
+        if (allowedExternalProgramAccounts.Length == 0 && allowedExternalProgramSids.Length == 0)
+        {
+            throw new InvalidDataException(
+                "OpenLineOps Agent requires at least one restricted external program host account or SID.");
+        }
+
         return new StationAgentHostOptions(
             Required(section["AgentId"], "OpenLineOps:Agent:AgentId"),
             Required(section["StationId"], "OpenLineOps:Agent:StationId"),
@@ -62,12 +80,17 @@ internal sealed record StationAgentHostOptions(
             Boolean(section["RequireBrokerTls"], defaultValue: true),
             UShort(section["PrefetchCount"], 8, "OpenLineOps:Agent:PrefetchCount"),
             UShort(section["MaximumConcurrentJobs"], 4, "OpenLineOps:Agent:MaximumConcurrentJobs"),
-            ResolvePath(section["PackageInboxDirectory"], Path.Combine(dataDirectory, "packages")),
+            ResolvePath(Required(
+                section["PackageDistributionDirectory"],
+                "OpenLineOps:Agent:PackageDistributionDirectory")),
             ResolvePath(section["PackageCacheDirectory"], Path.Combine(dataDirectory, "content")),
             trustedKeys,
             runtimeExecutablePath,
             ResolvePath(section["RuntimeWorkingDirectory"], Path.Combine(dataDirectory, "work")),
             ResolvePath(section["ArtifactDirectory"], Path.Combine(dataDirectory, "artifacts")),
+            ResolvePath(Required(
+                section["ArtifactExchangeDirectory"],
+                "OpenLineOps:Agent:ArtifactExchangeDirectory")),
             Duration(
                 section["RuntimeTimeout"],
                 TimeSpan.FromHours(1),
@@ -76,6 +99,11 @@ internal sealed record StationAgentHostOptions(
                 section["MaximumRuntimeOutputBytes"],
                 1024 * 1024,
                 "OpenLineOps:Agent:MaximumRuntimeOutputBytes"),
+            allowedExternalProgramAccounts,
+            allowedExternalProgramSids,
+            Required(
+                section["ExternalProgramAppContainerProfileNamespace"],
+                "OpenLineOps:Agent:ExternalProgramAppContainerProfileNamespace"),
             ResolvePath(section["SafetyExecutablePath"], runtimeExecutablePath),
             ResolvePath(section["SafetyWorkingDirectory"], Path.Combine(dataDirectory, "safety")),
             Duration(
@@ -120,6 +148,25 @@ internal sealed record StationAgentHostOptions(
               && parsed > 0
                 ? parsed
                 : throw new InvalidDataException($"{name} must be a positive integer.");
+
+    private static string[] CanonicalCollection(
+        IReadOnlyCollection<string> values,
+        string name)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value)
+                || char.IsWhiteSpace(value[0])
+                || char.IsWhiteSpace(value[^1])
+                || !result.Add(value))
+            {
+                throw new InvalidDataException($"{name} must contain unique canonical values.");
+            }
+        }
+
+        return result.ToArray();
+    }
 
     private static TimeSpan Duration(string? value, TimeSpan defaultValue, string name) =>
         value is null

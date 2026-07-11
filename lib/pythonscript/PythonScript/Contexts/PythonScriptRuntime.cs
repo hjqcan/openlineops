@@ -14,7 +14,6 @@ namespace PythonScript.Contexts
 
         private string? compiledSource;
         private bool executed;
-        private readonly PythonSyntaxChecker syntaxCheck = new();
 
         public PythonScriptRuntime(string script, IPythonRuntimeSession? session = null, PythonBindingRegistry? registry = null)
             : base(session, registry)
@@ -152,7 +151,7 @@ namespace PythonScript.Contexts
             object? value = ExecuteFunction(FUNCTION_MAIN, args);
             try
             {
-                return Convert.ToInt32(value);
+                return Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
             }
             catch (Exception ex)
             {
@@ -250,7 +249,7 @@ namespace PythonScript.Contexts
                     using var codeObj = PythonEngine.Compile(sourceCode, Script.Source, RunFlagType.File);
                     if (checkOnly)
                     {
-                        result.AddErrors(syntaxCheck.AnalyzeSyntaxErrors(sourceCode));
+                        result.AddErrors(PythonSyntaxChecker.AnalyzeSyntaxErrors(sourceCode));
                         return;
                     }
 
@@ -269,7 +268,7 @@ namespace PythonScript.Contexts
 
             if (!checkOnly && result.HasError == false)
             {
-                result.AddErrors(syntaxCheck.AnalyzeSyntaxErrors(sourceCode));
+                result.AddErrors(PythonSyntaxChecker.AnalyzeSyntaxErrors(sourceCode));
             }
 
             return result;
@@ -324,7 +323,7 @@ namespace PythonScript.Contexts
             }
         }
 
-        private PyObject InvokeFunction(PyObject function, object?[]? args)
+        private static PyObject InvokeFunction(PyObject function, object?[]? args)
         {
             if (args == null || args.Length == 0)
             {
@@ -350,7 +349,7 @@ namespace PythonScript.Contexts
             }
         }
 
-        private PyObject ToPython(object? value)
+        private static PyObject ToPython(object? value)
         {
             if (value is null)
             {
@@ -478,4 +477,3 @@ namespace PythonScript.Contexts
         private const string FUNCTION_MAIN = "Main";
     }
 }
-

@@ -1,7 +1,9 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.ContentProtection;
 
 namespace OpenLineOps.Agent.Infrastructure.Packages;
 
@@ -9,7 +11,9 @@ public sealed record StationPackageTrustOptions(
     string ContentCacheDirectory,
     IReadOnlyDictionary<string, string> TrustedPublicKeys,
     long MaximumExpandedBytes = 4L * 1024 * 1024 * 1024,
-    int MaximumEntryCount = 20_000);
+    int MaximumEntryCount = 20_000,
+    string? ImmutableReaderSid = null,
+    string? ImmutableHostReaderSid = null);
 
 public sealed record InstalledStationPackage(
     string ContentDirectory,
@@ -26,8 +30,12 @@ public sealed class SignedStationPackageInstaller
     private readonly Dictionary<string, string> _trustedPublicKeys;
     private readonly long _maximumExpandedBytes;
     private readonly int _maximumEntryCount;
+    private readonly IImmutableContentProtector _contentProtector;
+    private readonly ImmutableContentProtectionPolicy _contentProtectionPolicy;
 
-    public SignedStationPackageInstaller(StationPackageTrustOptions options)
+    public SignedStationPackageInstaller(
+        StationPackageTrustOptions options,
+        IImmutableContentProtector? contentProtector = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ContentCacheDirectory);
@@ -44,8 +52,34 @@ public sealed class SignedStationPackageInstaller
         _trustedPublicKeys = new Dictionary<string, string>(
             options.TrustedPublicKeys,
             StringComparer.Ordinal);
+        foreach (var (keyId, publicKeyPem) in _trustedPublicKeys)
+        {
+            _ = Required(keyId, nameof(options.TrustedPublicKeys));
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(Required(publicKeyPem, nameof(options.TrustedPublicKeys)));
+            if (rsa.KeySize < 3072)
+            {
+                throw new InvalidDataException(
+                    $"Trusted Station package RSA public key '{keyId}' must be at least 3072 bits.");
+            }
+
+            try
+            {
+                _ = rsa.ExportParameters(includePrivateParameters: true);
+                throw new InvalidDataException(
+                    $"Trusted Station package key '{keyId}' must contain public key material only.");
+            }
+            catch (CryptographicException)
+            {
+            }
+        }
+
         _maximumExpandedBytes = options.MaximumExpandedBytes;
         _maximumEntryCount = options.MaximumEntryCount;
+        _contentProtector = contentProtector ?? new ImmutableContentProtector();
+        _contentProtectionPolicy = new ImmutableContentProtectionPolicy(
+            ResolveImmutableReaderSid(options.ImmutableReaderSid),
+            ResolveImmutableHostReaderSid(options.ImmutableHostReaderSid));
         Directory.CreateDirectory(_cacheDirectory);
     }
 
@@ -88,9 +122,19 @@ public sealed class SignedStationPackageInstaller
         ValidateArchiveIndex(archiveEntries, manifest);
 
         var contentDirectory = Path.Combine(_cacheDirectory, manifest.ContentSha256);
+        var immutableInventory = manifest.Entries
+            .Select(entry => new ImmutableContentFile(
+                entry.Path,
+                entry.Length,
+                entry.Sha256))
+            .ToArray();
         if (Directory.Exists(contentDirectory))
         {
-            await VerifyInstalledContentAsync(contentDirectory, manifest, cancellationToken)
+            await _contentProtector.VerifyAsync(
+                    contentDirectory,
+                    immutableInventory,
+                    _contentProtectionPolicy,
+                    cancellationToken)
                 .ConfigureAwait(false);
             return new InstalledStationPackage(contentDirectory, manifest);
         }
@@ -128,16 +172,41 @@ public sealed class SignedStationPackageInstaller
                 await VerifyFileAsync(outputPath, declared, cancellationToken).ConfigureAwait(false);
             }
 
-            MakeReadOnly(stagingDirectory);
+            var installedByThisCall = false;
             try
             {
                 Directory.Move(stagingDirectory, contentDirectory);
+                installedByThisCall = true;
             }
             catch (IOException) when (Directory.Exists(contentDirectory))
             {
                 ClearReadOnlyAndDelete(stagingDirectory);
-                await VerifyInstalledContentAsync(contentDirectory, manifest, cancellationToken)
+                await _contentProtector.VerifyAsync(
+                        contentDirectory,
+                        immutableInventory,
+                        _contentProtectionPolicy,
+                        cancellationToken)
                     .ConfigureAwait(false);
+            }
+
+            if (installedByThisCall)
+            {
+                try
+                {
+                    await _contentProtector.ProtectAsync(
+                            contentDirectory,
+                            immutableInventory,
+                            _contentProtectionPolicy,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    _contentProtector.DeleteProtectedInstallation(
+                        _cacheDirectory,
+                        contentDirectory);
+                    throw;
+                }
             }
 
             return new InstalledStationPackage(contentDirectory, manifest);
@@ -190,6 +259,7 @@ public sealed class SignedStationPackageInstaller
         _ = Required(manifest.ProjectId, nameof(manifest.ProjectId));
         _ = Required(manifest.ApplicationId, nameof(manifest.ApplicationId));
         _ = Required(manifest.ProjectSnapshotId, nameof(manifest.ProjectSnapshotId));
+        _ = Required(manifest.StationSystemId, nameof(manifest.StationSystemId));
         if (manifest.CreatedAtUtc.Offset != TimeSpan.Zero)
         {
             throw new InvalidDataException("Station package creation timestamp must use UTC offset zero.");
@@ -234,7 +304,15 @@ public sealed class SignedStationPackageInstaller
         }
 
         var manifestHash = RequireSha256(manifest.ContentSha256, nameof(manifest.ContentSha256));
-        if (!string.Equals(StationPackageContentHasher.Compute(manifest.Entries), manifestHash, StringComparison.Ordinal))
+        if (!string.Equals(
+                StationPackageCanonicalization.ComputeContentSha256(
+                    manifest.ProjectId,
+                    manifest.ApplicationId,
+                    manifest.ProjectSnapshotId,
+                    manifest.StationSystemId,
+                    manifest.Entries),
+                manifestHash,
+                StringComparison.Ordinal))
         {
             throw new InvalidDataException("Station package content hash does not match its entry manifest.");
         }
@@ -276,11 +354,17 @@ public sealed class SignedStationPackageInstaller
 
         using var rsa = RSA.Create();
         rsa.ImportFromPem(publicKeyPem);
+        if (rsa.KeySize < 3072)
+        {
+            throw new InvalidDataException(
+                "Trusted Station package RSA public key must be at least 3072 bits.");
+        }
+
         if (!rsa.VerifyData(
                 manifestBytes,
                 signatureBytes,
                 HashAlgorithmName.SHA256,
-                RSASignaturePadding.Pkcs1))
+                RSASignaturePadding.Pss))
         {
             throw new InvalidDataException("Station package signature verification failed.");
         }
@@ -302,35 +386,6 @@ public sealed class SignedStationPackageInstaller
             throw new InvalidDataException(
                 $"Station package archive differs from its manifest. "
                 + $"Unexpected=[{string.Join(',', unexpected)}], Missing=[{string.Join(',', missing)}].");
-        }
-    }
-
-    private static async ValueTask VerifyInstalledContentAsync(
-        string contentDirectory,
-        StationPackageManifest manifest,
-        CancellationToken cancellationToken)
-    {
-        var expectedPaths = manifest.Entries
-            .Select(entry => entry.Path)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var actualPaths = Directory
-            .EnumerateFiles(contentDirectory, "*", SearchOption.AllDirectories)
-            .Select(path => StationPackagePath.FromFile(contentDirectory, path))
-            .ToArray();
-        if (actualPaths.Length != manifest.Entries.Count
-            || actualPaths.Any(path => !expectedPaths.Contains(path)))
-        {
-            throw new InvalidDataException(
-                $"Installed station package cache '{contentDirectory}' contains unexpected content.");
-        }
-
-        foreach (var entry in manifest.Entries)
-        {
-            await VerifyFileAsync(
-                    StationPackagePath.ResolveInside(contentDirectory, entry.Path),
-                    entry,
-                    cancellationToken)
-                .ConfigureAwait(false);
         }
     }
 
@@ -426,21 +481,6 @@ public sealed class SignedStationPackageInstaller
             ? value
             : throw new InvalidDataException($"{parameterName} must be a lowercase SHA-256.");
 
-    private static void MakeReadOnly(string directory)
-    {
-        foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
-        {
-            File.SetAttributes(file, File.GetAttributes(file) | FileAttributes.ReadOnly);
-        }
-
-        foreach (var child in Directory.EnumerateDirectories(directory, "*", SearchOption.AllDirectories))
-        {
-            File.SetAttributes(child, File.GetAttributes(child) | FileAttributes.ReadOnly);
-        }
-
-        File.SetAttributes(directory, File.GetAttributes(directory) | FileAttributes.ReadOnly);
-    }
-
     private static void ClearReadOnlyAndDelete(string directory)
     {
         if (!Directory.Exists(directory))
@@ -458,5 +498,41 @@ public sealed class SignedStationPackageInstaller
 
         File.SetAttributes(directory, File.GetAttributes(directory) & ~FileAttributes.ReadOnly);
         Directory.Delete(directory, recursive: true);
+    }
+
+    private static string ResolveImmutableReaderSid(string? configuredSid)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return configuredSid ?? "unix-reader";
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuredSid))
+        {
+            return configuredSid;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        return identity.User?.Value
+               ?? throw new InvalidOperationException(
+                   "Current Windows identity has no SID for immutable Station package content.");
+    }
+
+    private static string? ResolveImmutableHostReaderSid(string? configuredSid)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return configuredSid;
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuredSid))
+        {
+            return configuredSid;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        return identity.User?.Value
+               ?? throw new InvalidOperationException(
+                   "Current Windows identity has no SID for immutable Station package content.");
     }
 }

@@ -8,7 +8,7 @@ public sealed record ProductionLineDefinitionDetails(
     string EntryOperationId,
     IReadOnlyCollection<OperationDefinitionDetails> Operations,
     IReadOnlyCollection<RouteTransitionDetails> Transitions,
-    IReadOnlyCollection<ExternalTestProgramAdapterDetails> ExternalTestProgramAdapters,
+    IReadOnlyCollection<LineControllerAuthorizationDetails> LineControllerAuthorizations,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
@@ -30,7 +30,28 @@ public sealed record OperationDefinitionDetails(
     string DisplayName,
     string StationSystemId,
     string FlowDefinitionId,
-    string ConfigurationSnapshotId);
+    string ConfigurationSnapshotId,
+    IReadOnlyCollection<OperationResourceBindingDetails> Resources);
+
+public sealed record OperationResourceBindingDetails(
+    string BindingId,
+    string Kind,
+    string TopologyTargetId,
+    string Resolution);
+
+public sealed record LineControllerAuthorizationDetails(
+    string AuthorizationId,
+    string OperationId,
+    string ActionId,
+    string ControllerSystemId,
+    string ControllerBindingId,
+    string ControllerCapabilityId,
+    string ControllerAction,
+    string TargetStationSystemId,
+    string TargetSystemId,
+    string TargetBindingId,
+    string TargetCapabilityId,
+    string TargetAction);
 
 public sealed record RouteTransitionDetails(
     string TransitionId,
@@ -43,27 +64,3 @@ public sealed record RouteTransitionDetails(
     string? OutputKey,
     string? ExpectedOutputKind,
     string? ExpectedOutputValue);
-
-public sealed record ExternalTestProgramAdapterDetails(
-    string AdapterId,
-    string DisplayName,
-    string CapabilityId,
-    string CommandName,
-    string LaunchKind,
-    string? Executable,
-    string? ProviderKey,
-    IReadOnlyCollection<string> ArgumentTemplates,
-    IReadOnlyCollection<ExternalTestProgramInputMappingDetails> InputMappings,
-    IReadOnlyCollection<ExternalTestProgramResultMappingDetails> ResultMappings,
-    ExternalTestProgramOutcomeMappingDetails OutcomeMapping,
-    long TimeoutMilliseconds);
-
-public sealed record ExternalTestProgramInputMappingDetails(string Source, string Target);
-
-public sealed record ExternalTestProgramResultMappingDetails(string SourcePath, string TargetKey);
-
-public sealed record ExternalTestProgramOutcomeMappingDetails(
-    string SourcePath,
-    string PassedToken,
-    string FailedToken,
-    string AbortedToken);

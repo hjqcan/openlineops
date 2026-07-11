@@ -6,6 +6,7 @@ import {
   Code2,
   FileSearch,
   Factory,
+  FileCode2,
   FolderKanban,
   GitBranch,
   Layers3,
@@ -32,29 +33,49 @@ import type {
   RuntimeStationStatus,
   RuntimeTargetStatus,
   RuntimeTimelineEntry,
-  SubmitProjectSnapshotProductionRunRequest,
-  SubmittedProjectSnapshotProductionRunResponse,
+  ProductionRunReadModel,
+  SubmitProductionRunRequest,
   TraceRecordSummary
 } from './contracts';
 import { desktop } from './desktop-bridge';
 import {
   createRuntimeHubConnection,
+  arriveProductionUnit,
   getAlarms,
   getHealth,
   getPlatform,
+  getProjectSnapshotProductionRunContext,
+  getProductionRun,
+  getProductionUnit,
   getStationStatuses,
   getTargetStatuses,
   getTimeline,
   getTraceRecords,
-  submitProjectSnapshotProductionRun
+  registerProductionUnit,
+  submitProductionRun
 } from './api';
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
 import { PluginsWorkbench } from './plugins-workbench';
 import { ProjectsWorkbench } from './projects-workbench';
 import { TraceWorkbench } from './trace-workbench';
-import type { ProductionDesignerProblem } from './production-route-validation';
 import { useProductionOperations } from './use-production-operations';
+import {
+  EditorConflictNotice,
+  EditorDocumentHost,
+  EditorProblemsPanel,
+  EditorTabStrip,
+  SaveAllButton,
+  useDocumentRegistrySnapshot
+} from './editor-workspace';
+import {
+  activateEditorTab,
+  closeEditorTab,
+  DirtyDocumentRegistry,
+  openEditorTab,
+  type EditorTabModel,
+  type EditorTabState
+} from './editor-workspace-model';
 import './styles.css';
 import './production.css';
 import './operations.css';
@@ -75,6 +96,11 @@ const OperationsWorkbench = React.lazy(async () => {
   return { default: module.OperationsWorkbench };
 });
 
+const ExternalProgramWorkbench = React.lazy(async () => {
+  const module = await import('./external-program-workbench');
+  return { default: module.ExternalProgramWorkbench };
+});
+
 const TopologyDesigner = React.lazy(async () => {
   const module = await import('./topology-designer');
   return { default: module.TopologyDesigner };
@@ -85,6 +111,7 @@ const navItems = [
   { id: 'topology', label: '2D Layout', icon: LayoutDashboard },
   { id: 'production', label: 'Line Designer', icon: Factory },
   { id: 'processes', label: 'Flow Designer', icon: Blocks },
+  { id: 'programs', label: 'Program Resources', icon: FileCode2 },
   { id: 'engineering', label: 'Configuration', icon: MonitorCog },
   { id: 'devices', label: 'Devices', icon: PlugZap },
   { id: 'dashboard', label: 'Run and Monitor', icon: Play },
@@ -96,23 +123,23 @@ type NavId = (typeof navItems)[number]['id'];
 type HubState = 'Disconnected' | 'Connecting' | 'Connected' | 'Reconnecting';
 
 interface ProductionRunFormState {
+  productionUnitId: string;
   productionUnitIdentityValue: string;
   actorId: string;
-  lotId: string;
-  carrierId: string;
-  slotId: string;
-  fixtureId: string;
-  deviceId: string;
+}
+
+interface PendingUnsavedGuard {
+  title: string;
+  detail: string;
+  documentIds: ReadonlySet<string> | null;
+  proceed(): void;
+  cancel?(): void;
 }
 
 const emptyProductionRunForm: ProductionRunFormState = {
+  productionUnitId: '',
   productionUnitIdentityValue: '',
-  actorId: '',
-  lotId: '',
-  carrierId: '',
-  slotId: '',
-  fixtureId: '',
-  deviceId: ''
+  actorId: ''
 };
 
 declare global {
@@ -134,8 +161,7 @@ function App(): React.ReactElement {
   const [timeline, setTimeline] = useState<RuntimeTimelineEntry[]>([]);
   const [alarms, setAlarms] = useState<RuntimeAlarm[]>([]);
   const [traceRows, setTraceRows] = useState<TraceRecordSummary[]>([]);
-  const [lastProjectRun, setLastProjectRun] =
-    useState<SubmittedProjectSnapshotProductionRunResponse | null>(null);
+  const [lastProjectRun, setLastProjectRun] = useState<ProductionRunReadModel | null>(null);
   const [activeProductionRunId, setActiveProductionRunId] = useState<string | null>(null);
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [productionRunForm, setProductionRunForm] =
@@ -144,7 +170,10 @@ function App(): React.ReactElement {
   const [activeApplicationId, setActiveApplicationId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('Ready');
-  const [productionProblems, setProductionProblems] = useState<ProductionDesignerProblem[]>([]);
+  const documentRegistry = useMemo(() => new DirtyDocumentRegistry(), []);
+  const [editorTabState, setEditorTabState] = useState<EditorTabState>({ tabs: [], activeId: null });
+  const [pendingUnsavedGuard, setPendingUnsavedGuard] = useState<PendingUnsavedGuard | null>(null);
+  useDocumentRegistrySnapshot(documentRegistry);
 
   const activeApplication = useMemo(
     () => activeWorkspace?.project.applications.find(
@@ -299,7 +328,7 @@ function App(): React.ReactElement {
 
     if (lastProjectRun.projectId === activeWorkspace.project.projectId
         && lastProjectRun.applicationId === activeApplicationSnapshot.applicationId
-        && lastProjectRun.snapshotId === activeApplicationSnapshot.snapshotId
+        && lastProjectRun.projectSnapshotId === activeApplicationSnapshot.snapshotId
         && lastProjectRun.topologyId === activeApplicationSnapshot.topologyId) {
       return;
     }
@@ -310,6 +339,55 @@ function App(): React.ReactElement {
     setTargetStatuses([]);
     setTimeline([]);
   }, [activeApplicationSnapshot, activeWorkspace, lastProjectRun]);
+
+  useEffect(() => {
+    if (!activeProductionRunId || backendStatus?.health !== 'Healthy') {
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+    const synchronizeRun = async (): Promise<void> => {
+      try {
+        const response = await getProductionRun(activeProductionRunId);
+        if (disposed) {
+          return;
+        }
+        if (response.status === 404) {
+          timer = window.setTimeout(() => void synchronizeRun(), 500);
+          return;
+        }
+        if (!response.ok || !response.body) {
+          setMessage(`Production run synchronization failed: ${response.status} ${response.text}`);
+          timer = window.setTimeout(() => void synchronizeRun(), 1500);
+          return;
+        }
+
+        const run = response.body;
+        setLastProjectRun(run);
+        if (run.isTerminal) {
+          setMessage(`Production run ${run.executionStatus}: ${run.productionRunId}`);
+          return;
+        }
+        timer = window.setTimeout(() => void synchronizeRun(), 750);
+      } catch (error) {
+        if (disposed) {
+          return;
+        }
+        setMessage(`Production run synchronization failed: ${String(error)}`);
+        timer = window.setTimeout(() => void synchronizeRun(), 1500);
+      }
+    };
+
+    void synchronizeRun();
+
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [activeProductionRunId, backendStatus?.health]);
 
   useEffect(() => {
     const dialog = runDialogRef.current;
@@ -481,10 +559,31 @@ function App(): React.ReactElement {
     }
   }, []);
 
-  const selectWorkspace = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
+  const runWithUnsavedGuard = useCallback((
+    title: string,
+    detail: string,
+    proceed: () => void,
+    documentIds: ReadonlySet<string> | null = null,
+    cancel?: () => void
+  ) => {
+    if (documentRegistry.dirtyEntries(documentIds ?? undefined).length === 0) {
+      proceed();
+      return;
+    }
+    setPendingUnsavedGuard({ title, detail, documentIds, proceed, cancel });
+  }, [documentRegistry]);
+
+  const applyWorkspaceSelection = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
+    const applicationId = workspace.project.applications[0]?.applicationId ?? null;
     setActiveWorkspace(workspace);
+    setActiveApplicationId(applicationId);
     setWorkspaceMode('edit');
     setActiveNav('projects');
+    setEditorTabState(applicationId
+      ? openEditorTab(
+        { tabs: [], activeId: null },
+        createEditorTab(workspace, applicationId, 'projects'))
+      : { tabs: [], activeId: null });
     setLastProjectRun(null);
     setActiveProductionRunId(null);
     setStations([]);
@@ -492,9 +591,17 @@ function App(): React.ReactElement {
     setTimeline([]);
   }, []);
 
-  const closeWorkspace = useCallback(() => {
+  const selectWorkspace = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
+    runWithUnsavedGuard(
+      'Open another project?',
+      'The current project contains unsaved editor changes.',
+      () => applyWorkspaceSelection(workspace));
+  }, [applyWorkspaceSelection, runWithUnsavedGuard]);
+
+  const applyWorkspaceClose = useCallback(() => {
     setActiveWorkspace(null);
     setActiveApplicationId(null);
+    setEditorTabState({ tabs: [], activeId: null });
     setWorkspaceMode('edit');
     setActiveNav('projects');
     setLastProjectRun(null);
@@ -504,6 +611,13 @@ function App(): React.ReactElement {
     setTimeline([]);
     setMessage('Project closed. Select a project to continue.');
   }, []);
+
+  const closeWorkspace = useCallback(() => {
+    runWithUnsavedGuard(
+      'Close project?',
+      'Unsaved changes must be saved or discarded before the project can close.',
+      applyWorkspaceClose);
+  }, [applyWorkspaceClose, runWithUnsavedGuard]);
 
   const changeWorkspaceMode = useCallback((mode: 'edit' | 'run') => {
     if (mode === 'run' && !activeWorkspace) {
@@ -546,7 +660,10 @@ function App(): React.ReactElement {
       return;
     }
 
-    setProductionRunForm(emptyProductionRunForm);
+    setProductionRunForm({
+      ...emptyProductionRunForm,
+      productionUnitId: crypto.randomUUID()
+    });
     setRunDialogOpen(true);
   }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, hubState]);
 
@@ -579,18 +696,75 @@ function App(): React.ReactElement {
       topologyId: activeApplicationSnapshot.topologyId,
       productionRunId
     };
-    const request = {
+    const request: SubmitProductionRunRequest = {
+      projectId: activeWorkspace.project.projectId,
+      projectSnapshotId: snapshotId,
       productionRunId,
-      productionUnitIdentityValue: productionRunForm.productionUnitIdentityValue,
-      actorId: productionRunForm.actorId,
-      lotId: optionalRunIdentity(productionRunForm.lotId),
-      carrierId: optionalRunIdentity(productionRunForm.carrierId),
-      slotId: optionalRunIdentity(productionRunForm.slotId),
-      fixtureId: optionalRunIdentity(productionRunForm.fixtureId),
-      deviceId: optionalRunIdentity(productionRunForm.deviceId)
+      productionUnitId: productionRunForm.productionUnitId,
+      actorId: productionRunForm.actorId
     };
     setMessage(`Starting published snapshot ${snapshotId}`);
     try {
+      const contextResponse = await getProjectSnapshotProductionRunContext(
+        activeWorkspace.project.projectId,
+        snapshotId);
+      if (!contextResponse.ok || !contextResponse.body) {
+        throw new Error(`Cannot read immutable production context: ${contextResponse.status} ${contextResponse.text}`);
+      }
+
+      const context = contextResponse.body;
+      if (context.projectId !== activeWorkspace.project.projectId
+          || context.applicationId !== activeApplicationSnapshot.applicationId
+          || context.snapshotId !== snapshotId
+          || context.topologyId !== activeApplicationSnapshot.topologyId
+          || context.productionLineDefinitionId !== activeApplicationSnapshot.productionLineDefinitionId
+          || context.productModelId.length === 0
+          || context.productModelIdentityInputKey.length === 0
+          || context.entryOperationId.length === 0
+          || context.entryStationSystemId.length === 0) {
+        throw new Error('Immutable production context identity differs from the selected snapshot.');
+      }
+
+      let unitResponse = await getProductionUnit(productionRunForm.productionUnitId);
+      if (unitResponse.status === 404) {
+        unitResponse = await registerProductionUnit({
+          productionUnitId: productionRunForm.productionUnitId,
+          productModelId: context.productModelId,
+          identityKey: context.productModelIdentityInputKey,
+          identityValue: productionRunForm.productionUnitIdentityValue,
+          lotId: null,
+          actorId: productionRunForm.actorId,
+          occurredAtUtc: new Date().toISOString()
+        });
+      }
+
+      if (!unitResponse.ok || !unitResponse.body) {
+        throw new Error(`Cannot prepare Production Unit: ${unitResponse.status} ${unitResponse.text}`);
+      }
+
+      if (unitResponse.body.productionUnitId !== productionRunForm.productionUnitId
+          || unitResponse.body.productModelId !== context.productModelId
+          || unitResponse.body.identityKey !== context.productModelIdentityInputKey
+          || unitResponse.body.identityValue !== productionRunForm.productionUnitIdentityValue) {
+        throw new Error('Persisted Production Unit identity differs from the immutable production context.');
+      }
+
+      if (!unitResponse.body.location) {
+        unitResponse = await arriveProductionUnit(productionRunForm.productionUnitId, {
+          lineId: context.productionLineDefinitionId,
+          stationSystemId: context.entryStationSystemId,
+          actorId: productionRunForm.actorId,
+          occurredAtUtc: new Date().toISOString()
+        });
+        if (!unitResponse.ok || !unitResponse.body) {
+          throw new Error(`Cannot arrive Production Unit: ${unitResponse.status} ${unitResponse.text}`);
+        }
+      } else if (unitResponse.body.location.kind !== 'StationQueue'
+          || unitResponse.body.location.lineId !== context.productionLineDefinitionId
+          || unitResponse.body.location.stationSystemId !== context.entryStationSystemId) {
+        throw new Error('Production Unit is not queued at the immutable release entry Station.');
+      }
+
       monitoringScopeRef.current = runScope;
       await synchronizeRuntimeProductionRunGroup(
         connection,
@@ -605,15 +779,16 @@ function App(): React.ReactElement {
       setTargetStatuses([]);
       setTimeline([]);
 
-      const response = await submitProjectSnapshotProductionRun(
-        activeWorkspace.project.projectId,
-        snapshotId,
-        request);
+      const response = await submitProductionRun(request);
       if (!response.ok || !response.body) {
         throw new Error(`${response.status} ${response.text}`);
       }
 
-      assertProductionRunResponseIdentity(response.body, runScope, request);
+      assertProductionRunResponseIdentity(
+        response.body,
+        runScope,
+        request,
+        productionRunForm.productionUnitIdentityValue);
 
       setLastProjectRun(response.body);
       setRunDialogOpen(false);
@@ -651,12 +826,18 @@ function App(): React.ReactElement {
     }
   }, [activeApplicationSnapshot, activeWorkspace, backendStatus?.health, hubState, productionRunForm]);
 
-  const selectApplication = useCallback((applicationId: string) => {
+  const applyApplicationSelection = useCallback((applicationId: string) => {
     if (!applicationId) {
       return;
     }
 
     setActiveApplicationId(applicationId);
+    if (activeWorkspace) {
+      setEditorTabState(openEditorTab(
+        { tabs: [], activeId: null },
+        createEditorTab(activeWorkspace, applicationId, 'projects')));
+    }
+    setActiveNav('projects');
     setLastProjectRun(null);
     setActiveProductionRunId(null);
     setStations([]);
@@ -664,10 +845,90 @@ function App(): React.ReactElement {
     setTimeline([]);
     setWorkspaceMode('edit');
     setMessage(`Application selected ${applicationId}`);
+  }, [activeWorkspace]);
+
+  const selectApplication = useCallback((applicationId: string) => {
+    if (!applicationId || applicationId === activeApplication?.applicationId) {
+      return;
+    }
+    runWithUnsavedGuard(
+      'Switch Application?',
+      'Open editors in this Application contain unsaved changes.',
+      () => applyApplicationSelection(applicationId));
+  }, [activeApplication?.applicationId, applyApplicationSelection, runWithUnsavedGuard]);
+
+  const openEditor = useCallback((nav: NavId) => {
+    if (!activeWorkspace || !activeApplication) {
+      setActiveNav('projects');
+      return;
+    }
+    const tab = createEditorTab(activeWorkspace, activeApplication.applicationId, nav);
+    setEditorTabState(current => openEditorTab(current, tab));
+    setActiveNav(nav);
+    setWorkspaceMode(current => nav === 'dashboard'
+      ? 'run'
+      : nav === 'topology'
+        ? current
+        : 'edit');
+  }, [activeApplication, activeWorkspace]);
+
+  const activateEditor = useCallback((tab: EditorTabModel) => {
+    setEditorTabState(current => activateEditorTab(current, tab.id));
+    const nav = tab.kind as NavId;
+    setActiveNav(nav);
+    setWorkspaceMode(current => nav === 'dashboard'
+      ? 'run'
+      : nav === 'topology'
+        ? current
+        : 'edit');
   }, []);
 
-  const visiblePanel = useMemo(() => {
-    if (activeNav === 'topology') {
+  const requestCloseEditor = useCallback((tab: EditorTabModel) => {
+    const applyClose = (): void => {
+      const next = closeEditorTab(editorTabState, tab.id);
+      setEditorTabState(next);
+      const nextTab = next.tabs.find(candidate => candidate.id === next.activeId);
+      setActiveNav((nextTab?.kind as NavId | undefined) ?? 'projects');
+    };
+    runWithUnsavedGuard(
+      `Close ${tab.label}?`,
+      'This editor contains unsaved changes.',
+      applyClose,
+      new Set([tab.id]));
+  }, [editorTabState, runWithUnsavedGuard]);
+
+  const activateEditorById = useCallback((documentId: string) => {
+    const tab = editorTabState.tabs.find(candidate => candidate.id === documentId);
+    if (tab) activateEditor(tab);
+  }, [activateEditor, editorTabState.tabs]);
+
+  useEffect(() => desktop.onCloseRequested(requestId => {
+    runWithUnsavedGuard(
+      'Close OpenLineOps?',
+      'Open editors contain unsaved changes.',
+      () => desktop.respondToCloseRequest(requestId, true),
+      null,
+      () => desktop.respondToCloseRequest(requestId, false));
+  }), [runWithUnsavedGuard]);
+
+  useEffect(() => {
+    if (!activeWorkspace || !activeApplication) {
+      return;
+    }
+    const matchingTab = editorTabState.tabs.find(tab => tab.kind === activeNav);
+    if (!matchingTab) {
+      setEditorTabState(current => openEditorTab(
+        current,
+        createEditorTab(activeWorkspace, activeApplication.applicationId, activeNav)));
+      return;
+    }
+    if (editorTabState.activeId !== matchingTab.id) {
+      setEditorTabState(current => activateEditorTab(current, matchingTab.id));
+    }
+  }, [activeApplication, activeNav, activeWorkspace, editorTabState.activeId, editorTabState.tabs]);
+
+  const renderEditorPanel = useCallback((panelNav: NavId) => {
+    if (panelNav === 'topology') {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="2D layout" />}>
           <TopologyDesigner
@@ -685,7 +946,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'dashboard') {
+    if (panelNav === 'dashboard') {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="line operations" />}>
           <OperationsWorkbench
@@ -697,6 +958,9 @@ function App(): React.ReactElement {
             refreshing={operationsProjection.refreshing}
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             lastSynchronizedAtUtc={operationsProjection.lastSynchronizedAtUtc}
+            projectId={activeWorkspace?.project.projectId ?? null}
+            applicationId={activeApplication?.applicationId ?? null}
+            projectSnapshotId={activeApplicationSnapshot?.snapshotId ?? null}
             onFilterChanged={operationsProjection.setFilter}
             onRefresh={operationsProjection.refresh}
             onOpenTopology={() => {
@@ -710,7 +974,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'processes') {
+    if (panelNav === 'processes') {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="Processes" />}>
           <ProcessWorkbench
@@ -723,7 +987,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'production') {
+    if (panelNav === 'production') {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="Production lines" />}>
           <ProductionWorkbench
@@ -732,13 +996,25 @@ function App(): React.ReactElement {
             isBackendHealthy={backendStatus?.health === 'Healthy'}
             onWorkspaceChanged={setActiveWorkspace}
             onMessage={setMessage}
-            onProblemsChanged={setProductionProblems}
           />
         </React.Suspense>
       );
     }
 
-    if (activeNav === 'projects') {
+    if (panelNav === 'programs') {
+      return (
+        <React.Suspense fallback={<WorkbenchLoading label="program resources" />}>
+          <ExternalProgramWorkbench
+            activeWorkspace={activeWorkspace}
+            activeApplicationId={activeApplication?.applicationId ?? null}
+            isBackendHealthy={backendStatus?.health === 'Healthy'}
+            onMessage={setMessage}
+          />
+        </React.Suspense>
+      );
+    }
+
+    if (panelNav === 'projects') {
       return (
         <ProjectsWorkbench
           activeWorkspace={activeWorkspace}
@@ -752,7 +1028,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'engineering') {
+    if (panelNav === 'engineering') {
       return (
         <EngineeringWorkbench
           activeWorkspace={activeWorkspace}
@@ -763,7 +1039,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'devices') {
+    if (panelNav === 'devices') {
       return (
         <DevicesWorkbench
           isBackendHealthy={backendStatus?.health === 'Healthy'}
@@ -772,7 +1048,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'trace') {
+    if (panelNav === 'trace') {
       return (
         <TraceWorkbench
           isBackendHealthy={backendStatus?.health === 'Healthy'}
@@ -783,7 +1059,7 @@ function App(): React.ReactElement {
       );
     }
 
-    if (activeNav === 'plugins') {
+    if (panelNav === 'plugins') {
       return (
         <PluginsWorkbench
           isBackendHealthy={backendStatus?.health === 'Healthy'}
@@ -792,8 +1068,12 @@ function App(): React.ReactElement {
       );
     }
 
-    return <SecondaryView activeNav={activeNav} traceRows={traceRows} stations={stations} />;
-  }, [activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeNav, activeWorkspace, backendStatus?.health, message, operationsProjection, selectApplication, selectWorkspace, stations, traceRows, workspaceMode]);
+    return <SecondaryView activeNav={panelNav} traceRows={traceRows} stations={stations} />;
+  }, [activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, message, operationsProjection, selectApplication, selectWorkspace, stations, traceRows, workspaceMode]);
+
+  const activeEditorTab = editorTabState.tabs.find(tab => tab.id === editorTabState.activeId) ?? null;
+  const activeEditorDocument = activeEditorTab ? documentRegistry.get(activeEditorTab.id) : null;
+  const editorProblemCount = documentRegistry.problems().length;
 
   return (
     <main
@@ -893,14 +1173,7 @@ function App(): React.ReactElement {
                 type="button"
                 className={activeNav === item.id ? 'nav-item active' : 'nav-item'}
                 key={item.id}
-                onClick={() => {
-                  setActiveNav(item.id);
-                  setWorkspaceMode(current => item.id === 'dashboard'
-                    ? 'run'
-                    : item.id === 'topology'
-                      ? current
-                      : 'edit');
-                }}
+                onClick={() => openEditor(item.id)}
                 title={item.label}
                 disabled={disabled}
                 data-testid={`nav-${item.id}`}
@@ -922,14 +1195,7 @@ function App(): React.ReactElement {
           workspace={activeWorkspace}
           activeApplicationId={activeApplication?.applicationId ?? null}
           activeNav={activeNav}
-          onNavigate={nav => {
-            setActiveNav(nav);
-            setWorkspaceMode(current => nav === 'dashboard'
-              ? 'run'
-              : nav === 'topology'
-                ? current
-                : 'edit');
-          }}
+          onNavigate={openEditor}
           onSelectApplication={selectApplication}
           onClose={closeWorkspace}
         />
@@ -938,26 +1204,37 @@ function App(): React.ReactElement {
       <section className={activeWorkspace ? 'ide-editor-area' : 'ide-editor-area start-center-mode'}>
         {activeWorkspace ? (
           <>
-            <div className="ide-editor-tabs">
-          <div className="ide-editor-tab active">
-            {activeNav === 'processes'
-              ? <Blocks size={14} />
-              : activeNav === 'topology'
-                ? <LayoutDashboard size={14} />
-              : activeNav === 'production'
-                ? <Factory size={14} />
-                : activeNav === 'dashboard'
-                  ? <Play size={14} />
-                  : <FileSearch size={14} />}
-            <span>{activeTitle}</span>
-            {activeWorkspace ? <small>{activeWorkspace.project.projectId}</small> : null}
-          </div>
-            </div>
+            <EditorTabStrip
+              tabs={editorTabState.tabs}
+              activeId={editorTabState.activeId}
+              registry={documentRegistry}
+              iconFor={editorTabIcon}
+              onActivate={activateEditor}
+              onClose={requestCloseEditor}
+            />
 
             <div className="ide-editor-toolbar">
           <div>
             <strong>{activeTitle}</strong>
             <span>{message}</span>
+          </div>
+          <div className="ide-editor-toolbar-actions">
+            <button
+              type="button"
+              className="ide-save-current"
+              disabled={!activeEditorDocument?.dirty || !activeEditorDocument.canSave}
+              onClick={() => {
+                if (activeEditorTab) void documentRegistry.save(activeEditorTab.id);
+              }}
+              data-testid="save-active-editor"
+              title="Save active editor"
+            >
+              Save
+            </button>
+            <SaveAllButton
+              registry={documentRegistry}
+              onResult={success => setMessage(success ? 'All open editors saved.' : 'Save All stopped on a failed editor.')}
+            />
           </div>
           {activeNav === 'dashboard' ? (
             <div className="ide-editor-toolbar-actions">
@@ -966,8 +1243,20 @@ function App(): React.ReactElement {
           ) : null}
             </div>
 
+            <EditorConflictNotice document={activeEditorDocument} />
+
             <div className="ide-editor-surface">
-              {visiblePanel}
+              {editorTabState.tabs.map(tab => (
+                <EditorDocumentHost
+                  key={tab.id}
+                  documentId={tab.id}
+                  title={tab.label}
+                  registry={documentRegistry}
+                  active={tab.id === editorTabState.activeId}
+                >
+                  {renderEditorPanel(tab.kind as NavId)}
+                </EditorDocumentHost>
+              ))}
             </div>
 
             <div className={`ide-bottom-panel ${workspaceMode === 'run' ? 'expanded' : ''}`}>
@@ -976,7 +1265,7 @@ function App(): React.ReactElement {
             <strong>
               {workspaceMode === 'run'
                 ? 'Runtime Output'
-                : `Problems${activeNav === 'production' ? ` (${productionProblems.length})` : ''} · Output · Terminal`}
+                : `Problems (${editorProblemCount}) · Output · Terminal`}
             </strong>
             <span>{message}</span>
           </div>
@@ -987,7 +1276,7 @@ function App(): React.ReactElement {
               <InfoCell
                 label="Production Unit"
                 value={lastProjectRun
-                  ? `${lastProjectRun.productModelId} / ${lastProjectRun.productionUnitIdentityInputKey}=${lastProjectRun.productionUnitIdentityValue}`
+                  ? `${lastProjectRun.productionUnitIdentity.modelId} / ${lastProjectRun.productionUnitIdentity.inputKey}=${lastProjectRun.productionUnitIdentity.value}`
                   : 'waiting'}
               />
               <InfoCell label="Judgement" value={lastProjectRun?.judgement ?? 'Unknown'} />
@@ -1005,11 +1294,13 @@ function App(): React.ReactElement {
               <InfoCell label="Timeline" value={`${timeline.length} events`} />
               <InfoCell label="Alarms" value={`${alarms.filter(alarm => !alarm.isAcknowledged).length} open`} />
             </div>
-          ) : null}
+          ) : (
+            <EditorProblemsPanel registry={documentRegistry} onActivateDocument={activateEditorById} />
+          )}
             </div>
           </>
         ) : (
-          <div className="ide-start-surface">{visiblePanel}</div>
+          <div className="ide-start-surface">{renderEditorPanel('projects')}</div>
         )}
       </section>
 
@@ -1062,6 +1353,19 @@ function App(): React.ReactElement {
             <small>{activeWorkspace?.project.projectId} / {activeApplication?.applicationId}</small>
           </div>
           <label>
+            <span>Production Unit ID</span>
+            <input
+              value={productionRunForm.productionUnitId}
+              onChange={event => setProductionRunForm(current => ({
+                ...current,
+                productionUnitId: event.target.value
+              }))}
+              required
+              autoComplete="off"
+              data-testid="production-run-unit-id"
+            />
+          </label>
+          <label>
             <span>Production Unit identity</span>
             <input
               value={productionRunForm.productionUnitIdentityValue}
@@ -1088,63 +1392,7 @@ function App(): React.ReactElement {
               data-testid="production-run-actor"
             />
           </label>
-          <div className="production-run-optional-grid">
-            <label>
-              <span>Lot (optional)</span>
-              <input
-                value={productionRunForm.lotId}
-                onChange={event => setProductionRunForm(current => ({
-                  ...current,
-                  lotId: event.target.value
-                }))}
-                autoComplete="off"
-                data-testid="production-run-lot"
-              />
-            </label>
-            <label>
-              <span>Carrier (optional)</span>
-              <input
-                value={productionRunForm.carrierId}
-                onChange={event => setProductionRunForm(current => ({ ...current, carrierId: event.target.value }))}
-                autoComplete="off"
-                data-testid="production-run-carrier"
-              />
-            </label>
-            <label>
-              <span>Slot (optional)</span>
-              <input
-                value={productionRunForm.slotId}
-                onChange={event => setProductionRunForm(current => ({ ...current, slotId: event.target.value }))}
-                autoComplete="off"
-                data-testid="production-run-slot"
-              />
-            </label>
-            <label>
-              <span>Fixture (optional)</span>
-              <input
-                value={productionRunForm.fixtureId}
-                onChange={event => setProductionRunForm(current => ({
-                  ...current,
-                  fixtureId: event.target.value
-                }))}
-                autoComplete="off"
-                data-testid="production-run-fixture"
-              />
-            </label>
-            <label>
-              <span>Device (optional)</span>
-              <input
-                value={productionRunForm.deviceId}
-                onChange={event => setProductionRunForm(current => ({
-                  ...current,
-                  deviceId: event.target.value
-                }))}
-                autoComplete="off"
-                data-testid="production-run-device"
-              />
-            </label>
-          </div>
-          <p>Values are passed exactly to the frozen production line. Leading or trailing whitespace is rejected.</p>
+          <p>The Unit is registered and arrived at the entry Station before the immutable run is submitted. Resources come only from the frozen Operation definition.</p>
         </form>
         <footer>
           <button
@@ -1169,8 +1417,94 @@ function App(): React.ReactElement {
         </footer>
       </dialog>
       ) : null}
+      {pendingUnsavedGuard ? (
+        <dialog open className="unsaved-guard-dialog" data-testid="unsaved-changes-dialog">
+          <header>
+            <div>
+              <span>UNSAVED EDITORS</span>
+              <h2>{pendingUnsavedGuard.title}</h2>
+            </div>
+          </header>
+          <div className="unsaved-guard-body">
+            <p>{pendingUnsavedGuard.detail}</p>
+            <ul>
+              {documentRegistry.dirtyEntries(pendingUnsavedGuard.documentIds ?? undefined).map(([id, document]) => (
+                <li key={id}>
+                  <span>{document.title}</span>
+                  <small>{document.saveError ?? 'Unsaved changes'}</small>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <footer>
+            <button
+              type="button"
+              className="button ghost"
+              onClick={() => {
+                pendingUnsavedGuard.cancel?.();
+                setPendingUnsavedGuard(null);
+              }}
+              data-testid="unsaved-cancel"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="button danger"
+              onClick={() => {
+                documentRegistry.discardAll(pendingUnsavedGuard.documentIds ?? undefined);
+                const proceed = pendingUnsavedGuard.proceed;
+                setPendingUnsavedGuard(null);
+                proceed();
+              }}
+              data-testid="unsaved-discard"
+            >
+              Discard Changes
+            </button>
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => void documentRegistry
+                .saveAll(pendingUnsavedGuard.documentIds ?? undefined)
+                .then(success => {
+                  if (!success) {
+                    setMessage('Save failed. The editor remains open with its draft intact.');
+                    return;
+                  }
+                  const proceed = pendingUnsavedGuard.proceed;
+                  setPendingUnsavedGuard(null);
+                  proceed();
+                })}
+              data-testid="unsaved-save"
+            >
+              Save &amp; Continue
+            </button>
+          </footer>
+        </dialog>
+      ) : null}
     </main>
   );
+}
+
+function createEditorTab(
+  workspace: AutomationProjectWorkspaceResponse,
+  applicationId: string,
+  nav: NavId
+): EditorTabModel {
+  const navItem = navItems.find(item => item.id === nav);
+  return {
+    id: `${workspace.project.projectId}\u001f${applicationId}\u001f${nav}`,
+    kind: nav,
+    label: navItem?.label ?? nav,
+    projectId: workspace.project.projectId,
+    applicationId
+  };
+}
+
+function editorTabIcon(kind: string): React.ReactNode {
+  const item = navItems.find(candidate => candidate.id === kind);
+  const Icon = item?.icon ?? FileSearch;
+  return <Icon size={14} />;
 }
 
 function ProjectExplorer({
@@ -1386,9 +1720,10 @@ const secondaryCopy: Record<NavId, string> = {
   dashboard: '',
   projects: 'Automation project workspaces are opened from folder manifests and published through immutable snapshots.',
   topology: 'The same semantic 2D layout is used for engineering and live production monitoring.',
-  production: 'Production lines compose Product Models, Station-bound Operations, typed route graphs and portable program resources.',
+  production: 'Production lines compose Product Models, Station-bound Operations and typed route graphs.',
   engineering: 'Engineering workspaces, recipes, stations and snapshots use Application-scoped backend contracts.',
   processes: 'Process editing remains API-backed so Electron does not own orchestration rules.',
+  programs: 'External programs are Application-owned, hash-frozen resources referenced by ordinary Flow actions.',
   devices: 'Device configuration is read from backend APIs and never from local databases.',
   trace: 'Trace query uses the traceability endpoints and runtime-linked read models.',
   plugins: 'Plugin management uses the canonical manifest and explicit host lifecycle contracts.'
@@ -1461,7 +1796,7 @@ function upsertRuntimeTargetStatus(
 }
 
 function latestProductionRunSessionId(
-  run: SubmittedProjectSnapshotProductionRunResponse | null
+  run: ProductionRunReadModel | null
 ): string | null {
   if (!run) {
     return null;
@@ -1601,6 +1936,10 @@ async function synchronizeRuntimeProductionRunGroup(
 }
 
 function validateProductionRunForm(form: ProductionRunFormState): string | null {
+  if (!isCanonicalUuid(form.productionUnitId)) {
+    return 'Production Unit ID must be a non-empty canonical UUID.';
+  }
+
   if (!isCanonicalRunIdentity(form.productionUnitIdentityValue)) {
     return 'Production Unit identity is required and cannot start or end with whitespace.';
   }
@@ -1609,19 +1948,11 @@ function validateProductionRunForm(form: ProductionRunFormState): string | null 
     return 'Actor is required and cannot start or end with whitespace.';
   }
 
-  for (const [label, value] of [
-    ['Lot', form.lotId],
-    ['Carrier', form.carrierId],
-    ['Slot', form.slotId],
-    ['Fixture', form.fixtureId],
-    ['Device', form.deviceId]
-  ] as const) {
-    if (value.length > 0 && !isCanonicalRunIdentity(value)) {
-      return `${label} cannot start or end with whitespace.`;
-    }
-  }
-
   return null;
+}
+
+function isCanonicalUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value);
 }
 
 function isCanonicalRunIdentity(value: string): boolean {
@@ -1630,26 +1961,22 @@ function isCanonicalRunIdentity(value: string): boolean {
     && !/\s/u.test(value[value.length - 1] ?? '');
 }
 
-function optionalRunIdentity(value: string): string | null {
-  return value.length === 0 ? null : value;
-}
-
 function assertProductionRunResponseIdentity(
-  response: SubmittedProjectSnapshotProductionRunResponse,
+  response: ProductionRunReadModel,
   scope: RuntimeMonitoringScope,
-  request: SubmitProjectSnapshotProductionRunRequest
+  request: SubmitProductionRunRequest,
+  expectedIdentityValue: string
 ): void {
   const terminalExecutionStatuses = new Set(['Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected']);
   if (response.productionRunId !== scope.productionRunId
       || response.projectId !== scope.projectId
       || response.applicationId !== scope.applicationId
-      || response.snapshotId !== scope.projectSnapshotId
+      || response.projectSnapshotId !== scope.projectSnapshotId
       || response.topologyId !== scope.topologyId
       || response.productionLineDefinitionId.length === 0
-      || response.productionUnitIdentityValue !== request.productionUnitIdentityValue
+      || response.productionUnitId !== request.productionUnitId
+      || response.productionUnitIdentity.value !== expectedIdentityValue
       || response.actorId !== request.actorId
-      || response.lotId !== (request.lotId ?? null)
-      || response.carrierId !== (request.carrierId ?? null)
       || response.isTerminal !== terminalExecutionStatuses.has(response.executionStatus)) {
     throw new Error('Production run response identity did not exactly match the submit request.');
   }

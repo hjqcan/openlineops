@@ -78,6 +78,16 @@ public sealed class TraceRecordRepositoryTests
         Assert.Single(operation.Artifacts);
         Assert.Single(operation.Outputs);
         Assert.Equal(2, operation.FencingTokens.Count);
+        Assert.Single(restored.Genealogy);
+        Assert.Single(restored.MaterialLocationTransitions);
+        Assert.Single(restored.SlotOccupancyTransitions);
+        Assert.Single(restored.DispositionTransitions);
+        Assert.Equal(
+            "station-a",
+            Assert.Single(restored.MaterialLocationTransitions).Destination.StationSystemId);
+        Assert.Equal(
+            ProductDisposition.Completed,
+            Assert.Single(restored.DispositionTransitions).CurrentDisposition);
         Assert.Single(restored.AuditEntries);
     }
 

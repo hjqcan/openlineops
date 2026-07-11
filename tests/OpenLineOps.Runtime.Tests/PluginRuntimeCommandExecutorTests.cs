@@ -112,8 +112,10 @@ public sealed class PluginRuntimeCommandExecutorTests
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
             new ProductionRunId(Guid.Parse("10000000-0000-0000-0000-000000000001")),
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
             "line.main",
             "operation.main",
+            "operation.main@0001",
             1,
             "station.main",
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-001"),
@@ -134,7 +136,8 @@ public sealed class PluginRuntimeCommandExecutorTests
             "system.vision",
             "project.main",
             "application.main",
-            "snapshot.release");
+            "snapshot.release",
+            RuntimeTestReleaseIdentity.ResourceFences());
     }
 
     private sealed class CapturingPluginProcessCommandInvoker(
@@ -161,6 +164,8 @@ public sealed class PluginRuntimeCommandExecutorTests
 
         public string? SnapshotId { get; private set; }
 
+        public string? StationSystemId { get; private set; }
+
         public string? TargetKind { get; private set; }
 
         public string? TargetId { get; private set; }
@@ -169,6 +174,7 @@ public sealed class PluginRuntimeCommandExecutorTests
             string projectId,
             string applicationId,
             string snapshotId,
+            string stationSystemId,
             string capabilityId,
             string commandName,
             string? targetKind = null,
@@ -179,6 +185,7 @@ public sealed class PluginRuntimeCommandExecutorTests
             ProjectId = projectId;
             ApplicationId = applicationId;
             SnapshotId = snapshotId;
+            StationSystemId = stationSystemId;
             TargetKind = targetKind;
             TargetId = targetId;
             return ValueTask.FromResult(command);

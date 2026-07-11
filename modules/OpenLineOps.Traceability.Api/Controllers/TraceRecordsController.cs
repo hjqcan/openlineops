@@ -48,6 +48,7 @@ public sealed class TraceRecordsController : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<PagedTraceRecordSummaryResponse>> QueryAsync(
         [FromQuery] Guid? productionRunId,
+        [FromQuery] Guid? productionUnitId,
         [FromQuery] string? productModelId,
         [FromQuery] string? productionUnitIdentityInputKey,
         [FromQuery] string? productionUnitIdentityValue,
@@ -81,6 +82,7 @@ public sealed class TraceRecordsController : ControllerBase
         var result = await _traceRecordService.QueryAsync(
             new TraceRecordQuery(
                 productionRunId,
+                productionUnitId,
                 productModelId,
                 productionUnitIdentityInputKey,
                 productionUnitIdentityValue,
@@ -154,6 +156,7 @@ public sealed class TraceRecordsController : ControllerBase
     {
         return new AppCreateRequest(
             request.ProductionRunId,
+            request.ProductionUnitId,
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
@@ -175,6 +178,10 @@ public sealed class TraceRecordsController : ControllerBase
             request.FailureReason,
             request.Operations?.Select(ToApplicationRequest).ToArray(),
             request.RouteDecisions?.Select(ToApplicationRequest).ToArray(),
+            request.Genealogy?.Select(ToApplicationRequest).ToArray(),
+            request.MaterialLocationTransitions?.Select(ToApplicationRequest).ToArray(),
+            request.SlotOccupancyTransitions?.Select(ToApplicationRequest).ToArray(),
+            request.DispositionTransitions?.Select(ToApplicationRequest).ToArray(),
             request.AuditEntries?.Select(ToApplicationRequest).ToArray());
     }
 
@@ -219,6 +226,61 @@ public sealed class TraceRecordsController : ControllerBase
             request.SourceJudgement,
             request.Traversal,
             request.DecidedAtUtc);
+
+    private static Application.Records.CreateTraceMaterialGenealogyRequest ToApplicationRequest(
+        Models.CreateTraceMaterialGenealogyRequest request) => new(
+        request.LinkId,
+        request.ParentProductionUnitId,
+        request.ChildProductionUnitId,
+        request.Relationship,
+        request.OperationId,
+        request.LinkedBy,
+        request.LinkedAtUtc);
+
+    private static Application.Records.CreateTraceMaterialLocationTransitionRequest
+        ToApplicationRequest(Models.CreateTraceMaterialLocationTransitionRequest request) => new(
+            request.EvidenceId,
+            request.ProductionRunId,
+            request.MaterialKind,
+            request.MaterialId,
+            request.Source is null ? null : ToApplicationRequest(request.Source),
+            request.Destination is null ? null : ToApplicationRequest(request.Destination),
+            request.ActorId,
+            request.OccurredAtUtc);
+
+    private static Application.Records.CreateTraceMaterialLocationRequest ToApplicationRequest(
+        Models.CreateTraceMaterialLocationRequest request) => new(
+        request.Kind,
+        request.LineId,
+        request.StationSystemId,
+        request.SlotId,
+        request.CarrierId,
+        request.CarrierPositionId);
+
+    private static Application.Records.CreateTraceSlotOccupancyTransitionRequest
+        ToApplicationRequest(Models.CreateTraceSlotOccupancyTransitionRequest request) => new(
+            request.EvidenceId,
+            request.ProductionRunId,
+            request.LineId,
+            request.StationSystemId,
+            request.SlotId,
+            request.MaterialKind,
+            request.MaterialId,
+            request.PreviousStatus,
+            request.CurrentStatus,
+            request.ActorId,
+            request.OccurredAtUtc);
+
+    private static Application.Records.CreateTraceDispositionTransitionRequest ToApplicationRequest(
+        Models.CreateTraceDispositionTransitionRequest request) => new(
+        request.EvidenceId,
+        request.ProductionUnitId,
+        request.ProductionRunId,
+        request.PreviousDisposition,
+        request.CurrentDisposition,
+        request.Reason,
+        request.ActorId,
+        request.OccurredAtUtc);
 
     private static Application.Records.CreateTraceOperationOutputRequest ToApplicationRequest(
         Models.CreateTraceOperationOutputRequest request) =>
@@ -290,6 +352,7 @@ public sealed class TraceRecordsController : ControllerBase
         new(
             details.TraceRecordId,
             details.ProductionRunId,
+            details.ProductionUnitId,
             details.ProjectId,
             details.ApplicationId,
             details.ProjectSnapshotId,
@@ -311,12 +374,17 @@ public sealed class TraceRecordsController : ControllerBase
             details.FailureReason,
             details.Operations.Select(ToResponse).ToArray(),
             details.RouteDecisions.Select(ToResponse).ToArray(),
+            details.Genealogy.Select(ToResponse).ToArray(),
+            details.MaterialLocationTransitions.Select(ToResponse).ToArray(),
+            details.SlotOccupancyTransitions.Select(ToResponse).ToArray(),
+            details.DispositionTransitions.Select(ToResponse).ToArray(),
             details.AuditEntries.Select(ToResponse).ToArray());
 
     private static TraceRecordSummaryResponse ToSummaryResponse(TraceRecordSummary summary) =>
         new(
             summary.TraceRecordId,
             summary.ProductionRunId,
+            summary.ProductionUnitId,
             summary.ProjectId,
             summary.ApplicationId,
             summary.ProjectSnapshotId,
@@ -338,7 +406,11 @@ public sealed class TraceRecordsController : ControllerBase
             summary.MeasurementCount,
             summary.ArtifactCount,
             summary.IncidentCount,
-            summary.RouteDecisionCount);
+            summary.RouteDecisionCount,
+            summary.GenealogyCount,
+            summary.MaterialLocationTransitionCount,
+            summary.SlotOccupancyTransitionCount,
+            summary.DispositionTransitionCount);
 
     private static TraceOperationExecutionResponse ToResponse(TraceOperationExecutionDetails operation) =>
         new(
@@ -377,6 +449,61 @@ public sealed class TraceRecordsController : ControllerBase
             decision.SourceJudgement,
             decision.Traversal,
             decision.DecidedAtUtc);
+
+    private static TraceMaterialGenealogyResponse ToResponse(TraceMaterialGenealogyDetails link) =>
+        new(
+            link.LinkId,
+            link.ParentProductionUnitId,
+            link.ChildProductionUnitId,
+            link.Relationship,
+            link.OperationId,
+            link.LinkedBy,
+            link.LinkedAtUtc);
+
+    private static TraceMaterialLocationTransitionResponse ToResponse(
+        TraceMaterialLocationTransitionDetails transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.Source is null ? null : ToResponse(transition.Source),
+        ToResponse(transition.Destination),
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceMaterialLocationResponse ToResponse(TraceMaterialLocationDetails location) =>
+        new(
+            location.Kind,
+            location.LineId,
+            location.StationSystemId,
+            location.SlotId,
+            location.CarrierId,
+            location.CarrierPositionId);
+
+    private static TraceSlotOccupancyTransitionResponse ToResponse(
+        TraceSlotOccupancyTransitionDetails transition) => new(
+        transition.EvidenceId,
+        transition.ProductionRunId,
+        transition.LineId,
+        transition.StationSystemId,
+        transition.SlotId,
+        transition.MaterialKind,
+        transition.MaterialId,
+        transition.PreviousStatus,
+        transition.CurrentStatus,
+        transition.ActorId,
+        transition.OccurredAtUtc);
+
+    private static TraceDispositionTransitionResponse ToResponse(
+        TraceDispositionTransitionDetails transition) => new(
+        transition.EvidenceId,
+        transition.ProductionUnitId,
+        transition.ProductionRunId,
+        transition.PreviousDisposition,
+        transition.CurrentDisposition,
+        transition.Reason,
+        transition.ActorId,
+        transition.OccurredAtUtc);
 
     private static TraceOperationOutputResponse ToResponse(TraceOperationOutputDetails output) =>
         new(output.Key, output.ValueKind, output.CanonicalJson);

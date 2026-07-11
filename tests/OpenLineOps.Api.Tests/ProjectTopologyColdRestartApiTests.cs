@@ -107,7 +107,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 "result = {'application': 'B'}\n",
                 publish: false);
 
-            using var replaceApplicationBProcess = await client.PutAsJsonAsync(
+            using var replaceApplicationBProcess = await client.PutEditorAsync(
+                ProjectProcessPath(projectId, applicationB, processDefinitionId),
                 ProjectProcessPath(projectId, applicationB, processDefinitionId),
                 CreateApplicationProcessRequest(
                     processDefinitionId,
@@ -116,9 +117,10 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     versionId: $"{processDefinitionId}@2.0.0",
                     blocklyWorkspaceJson: ReplacementBlocklyWorkspaceJson));
             Assert.Equal(HttpStatusCode.OK, replaceApplicationBProcess.StatusCode);
-            using var publishApplicationBProcess = await client.PostAsync(
+            using var publishApplicationBProcess = await client.PostEditorAsync<object?>(
+                ProjectProcessPath(projectId, applicationB, processDefinitionId),
                 $"{ProjectProcessPath(projectId, applicationB, processDefinitionId)}/publish",
-                content: null);
+                null);
             Assert.Equal(HttpStatusCode.OK, publishApplicationBProcess.StatusCode);
 
             await RegisterApplicationBlockAsync(
@@ -216,7 +218,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 productionLineDefinitionId,
                 _projectDirectory);
 
-            using var mutateLiveLayout = await client.PutAsJsonAsync(
+            using var mutateLiveLayout = await client.PutEditorAsync(
+                ProjectLayoutPath(projectId, applicationA, layoutId),
                 $"{ProjectLayoutPath(projectId, applicationA, layoutId)}/elements/element.station/geometry",
                 new
                 {
@@ -299,9 +302,13 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 ProjectProcessPath(projectId, applicationB, processDefinitionId));
 
             Assert.Equal("Application A Topology", topologyA.RootElement.GetProperty("displayName").GetString());
-            Assert.Equal("Application A Site", topologyA.RootElement.GetProperty("systems")[0].GetProperty("displayName").GetString());
+            Assert.Equal(
+                "Application A Site",
+                FindTopologySystem(topologyA, "station.main").GetProperty("displayName").GetString());
             Assert.Equal("Application B Topology", topologyB.RootElement.GetProperty("displayName").GetString());
-            Assert.Equal("Application B Site", topologyB.RootElement.GetProperty("systems")[0].GetProperty("displayName").GetString());
+            Assert.Equal(
+                "Application B Site",
+                FindTopologySystem(topologyB, "station.main").GetProperty("displayName").GetString());
             Assert.Equal(125, layoutA.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.Equal(425, layoutB.RootElement.GetProperty("elements")[0].GetProperty("x").GetDouble());
             Assert.Equal(
@@ -466,6 +473,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 projectSnapshotA,
                 applicationA,
                 topologyId,
+                productionLineDefinitionId,
                 processDefinitionId,
                 $"{processDefinitionId}@1.0.0",
                 configurationSnapshotId,
@@ -476,6 +484,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 projectSnapshotB,
                 applicationB,
                 topologyId,
+                productionLineDefinitionId,
                 processDefinitionId,
                 $"{processDefinitionId}@2.0.0",
                 configurationSnapshotId,
@@ -534,22 +543,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             new { topologyId, displayName = topologyName });
         Assert.Equal(HttpStatusCode.Created, createTopology.StatusCode);
 
-        using var addNode = await client.PostAsJsonAsync(
-            $"{topologiesPath}/{topologyId}/systems",
-            new
-            {
-                systemId = "station.main",
-                parentSystemId = (string?)null,
-                kind = "Station",
-                systemType = "test.station",
-                displayName = nodeName,
-                requiredCapabilityIds = Array.Empty<string>(),
-                providedCapabilityIds = Array.Empty<string>(),
-                metadata = new Dictionary<string, string>()
-            });
-        Assert.Equal(HttpStatusCode.OK, addNode.StatusCode);
-
-        using var addCapability = await client.PostAsJsonAsync(
+        using var addCapability = await client.PostEditorAsync(
+            $"{topologiesPath}/{topologyId}",
             $"{topologiesPath}/{topologyId}/capabilities",
             new
             {
@@ -563,11 +558,60 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             });
         Assert.Equal(HttpStatusCode.OK, addCapability.StatusCode);
 
-        using var addDriverBinding = await client.PostAsJsonAsync(
+        using var addPythonCapability = await client.PostEditorAsync(
+            $"{topologiesPath}/{topologyId}",
+            $"{topologiesPath}/{topologyId}/capabilities",
+            new
+            {
+                capabilityId = "process.python-script",
+                commandName = "Execute",
+                version = "1.0.0",
+                inputSchema = """{"type":"object"}""",
+                outputSchema = (string?)null,
+                timeoutSeconds = 10,
+                safetyClass = "Normal"
+            });
+        Assert.Equal(HttpStatusCode.OK, addPythonCapability.StatusCode);
+
+        using var addNode = await client.PostEditorAsync(
+            $"{topologiesPath}/{topologyId}",
+            $"{topologiesPath}/{topologyId}/systems",
+            new
+            {
+                systemId = "station.main",
+                parentSystemId = (string?)null,
+                kind = "Station",
+                systemType = "test.station",
+                displayName = nodeName,
+                requiredCapabilityIds = Array.Empty<string>(),
+                providedCapabilityIds = new[] { capabilityId, "process.python-script" },
+                metadata = new Dictionary<string, string>()
+            });
+        Assert.Equal(HttpStatusCode.OK, addNode.StatusCode);
+
+        using var addFlowHost = await client.PostEditorAsync(
+            $"{topologiesPath}/{topologyId}",
+            $"{topologiesPath}/{topologyId}/systems",
+            new
+            {
+                systemId = "runtime.flow",
+                parentSystemId = (string?)"station.main",
+                kind = "System",
+                systemType = "openlineops.runtime-flow-host",
+                displayName = "Runtime Flow Host",
+                requiredCapabilityIds = Array.Empty<string>(),
+                providedCapabilityIds = Array.Empty<string>(),
+                metadata = new Dictionary<string, string>()
+            });
+        Assert.Equal(HttpStatusCode.OK, addFlowHost.StatusCode);
+
+        using var addDriverBinding = await client.PostEditorAsync(
+            $"{topologiesPath}/{topologyId}",
             $"{topologiesPath}/{topologyId}/driver-bindings",
             new
             {
                 bindingId = "binding.primary",
+                ownerSystemId = "station.main",
                 capabilityId,
                 providerKind = "Simulator",
                 providerKey = $"simulator.{applicationId}"
@@ -587,7 +631,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             });
         Assert.Equal(HttpStatusCode.Created, createLayout.StatusCode);
 
-        using var addElement = await client.PostAsJsonAsync(
+        using var addElement = await client.PostEditorAsync(
+            $"{layoutsPath}/{layoutId}",
             $"{layoutsPath}/{layoutId}/elements",
             new
             {
@@ -631,9 +676,10 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
         if (publish)
         {
-            using var publishProcess = await client.PostAsync(
+            using var publishProcess = await client.PostEditorAsync<object?>(
+                $"{processesPath}/{processDefinitionId}",
                 $"{processesPath}/{processDefinitionId}/publish",
-                content: null);
+                null);
             Assert.Equal(HttpStatusCode.OK, publishProcess.StatusCode);
         }
     }
@@ -739,6 +785,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     new
                     {
                         deviceBindingId = "binding.primary",
+                        ownerSystemId = "station.main",
                         capabilityId,
                         deviceKey
                     }
@@ -789,35 +836,43 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 lineDefinitionId = productionLineDefinitionId,
                 displayName = $"{applicationId} Production Line",
                 topologyId,
-                dutModel = new
+                productModel = new
                 {
-                    dutModelId = "dut.main",
+                    productModelId = "product.main",
                     modelCode = "MODEL-MAIN",
                     identityInputKey = "serialNumber"
                 },
-                workstations = new[]
+                entryOperationId = "operation.main",
+                operations = new[]
                 {
                     new
                     {
-                        workstationId = "workstation.main",
-                        displayName = "Main Workstation",
-                        stationSystemId = "station.main"
-                    }
-                },
-                stages = new[]
-                {
-                    new
-                    {
-                        stageId = "stage.main",
-                        sequence = 1,
-                        displayName = "Main Stage",
-                        workstationId = "workstation.main",
+                        operationId = "operation.main",
+                        displayName = "Main Operation",
+                        stationSystemId = "station.main",
                         flowDefinitionId = processDefinitionId,
                         configurationSnapshotId,
-                        externalTestProgramAdapterId = (string?)null
+                        resources = new[]
+                        {
+                            new
+                            {
+                                bindingId = "operation.main.station",
+                                kind = "Station",
+                                topologyTargetId = "station.main",
+                                resolution = "Fixed"
+                            },
+                            new
+                            {
+                                bindingId = "operation.main.runtime-flow",
+                                kind = "Device",
+                                topologyTargetId = "runtime.flow",
+                                resolution = "Fixed"
+                            }
+                        }
                     }
                 },
-                externalTestProgramAdapters = Array.Empty<object>()
+                transitions = Array.Empty<object>(),
+                lineControllerAuthorizations = Array.Empty<object>()
             });
         var body = await response.Content.ReadAsStringAsync();
 
@@ -883,46 +938,82 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string projectSnapshotId,
         string applicationId,
         string topologyId,
+        string productionLineDefinitionId,
         string processDefinitionId,
         string processVersionId,
         string configurationSnapshotId,
         string recipeVersionId)
     {
         var productionRunId = Guid.NewGuid();
-        using var startResponse = await client.PostAsJsonAsync(
-            $"/api/automation-projects/{projectId}/snapshots/{projectSnapshotId}/production-runs",
+        var productionUnitId = Guid.NewGuid();
+        const string actorId = "scoped-engineering-test";
+        var identityValue = $"UNIT-{applicationId}";
+        using var registerUnitResponse = await client.PostAsJsonAsync(
+            "/api/production-units",
             new
             {
-                productionRunId,
-                dutIdentityValue = $"DUT-{applicationId}",
-                actorId = "scoped-engineering-test"
+                productionUnitId,
+                productModelId = "product.main",
+                identityKey = "serialNumber",
+                identityValue,
+                lotId = (string?)null,
+                actorId,
+                occurredAtUtc = DateTimeOffset.UtcNow
+            });
+        Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
+        using var arriveUnitResponse = await client.PostAsJsonAsync(
+            $"/api/production-units/{productionUnitId:D}/arrivals",
+            new
+            {
+                lineId = productionLineDefinitionId,
+                stationSystemId = "station.main",
+                actorId,
+                occurredAtUtc = DateTimeOffset.UtcNow
+            });
+        Assert.Equal(HttpStatusCode.OK, arriveUnitResponse.StatusCode);
+
+        using var startResponse = await client.PostAsJsonAsync(
+            "/api/production-runs",
+            new
+            {
+                projectId,
+                projectSnapshotId,
+                productionRunId = productionRunId.ToString("D"),
+                productionUnitId = productionUnitId.ToString("D"),
+                actorId
             });
         using var startBody = await ReadJsonAsync(startResponse);
 
-        Assert.Equal(HttpStatusCode.Created, startResponse.StatusCode);
-        Assert.Equal(projectSnapshotId, startBody.RootElement.GetProperty("snapshotId").GetString());
+        Assert.Equal(HttpStatusCode.Accepted, startResponse.StatusCode);
+        Assert.Equal(projectSnapshotId, startBody.RootElement.GetProperty("projectSnapshotId").GetString());
         Assert.Equal(projectId, startBody.RootElement.GetProperty("projectId").GetString());
         Assert.Equal(applicationId, startBody.RootElement.GetProperty("applicationId").GetString());
         Assert.Equal(topologyId, startBody.RootElement.GetProperty("topologyId").GetString());
         Assert.Equal(productionRunId, startBody.RootElement.GetProperty("productionRunId").GetGuid());
-        Assert.Equal("scoped-engineering-test", startBody.RootElement.GetProperty("actorId").GetString());
-        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("batchId").ValueKind);
-        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("fixtureId").ValueKind);
-        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("deviceId").ValueKind);
+        Assert.Equal(actorId, startBody.RootElement.GetProperty("actorId").GetString());
+        Assert.Equal(identityValue, startBody.RootElement
+            .GetProperty("productionUnitIdentity")
+            .GetProperty("value")
+            .GetString());
+        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("lotId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("carrierId").ValueKind);
+        Assert.Equal("Pending", startBody.RootElement.GetProperty("executionStatus").GetString());
+
+        using var completedRun = await WaitForTerminalProductionRunAsync(client, productionRunId);
         Assert.True(
             string.Equals(
                 "Completed",
-                startBody.RootElement.GetProperty("status").GetString(),
+                completedRun.RootElement.GetProperty("executionStatus").GetString(),
                 StringComparison.Ordinal),
-            $"Production Run did not complete: {startBody.RootElement.GetRawText()}");
+            $"Production Run did not complete: {completedRun.RootElement.GetRawText()}");
 
-        var stage = Assert.Single(startBody.RootElement.GetProperty("stages").EnumerateArray());
-        Assert.Equal("Completed", stage.GetProperty("status").GetString());
-        Assert.Equal(processDefinitionId, stage.GetProperty("processDefinitionId").GetString());
-        Assert.Equal(processVersionId, stage.GetProperty("processVersionId").GetString());
-        Assert.Equal(configurationSnapshotId, stage.GetProperty("configurationSnapshotId").GetString());
-        Assert.Equal(recipeVersionId, stage.GetProperty("recipeSnapshotId").GetString());
-        var sessionId = stage.GetProperty("runtimeSessionId").GetGuid();
+        var operation = Assert.Single(completedRun.RootElement.GetProperty("operations").EnumerateArray());
+        Assert.Equal("Completed", operation.GetProperty("executionStatus").GetString());
+        Assert.Equal(processDefinitionId, operation.GetProperty("processDefinitionId").GetString());
+        Assert.Equal(processVersionId, operation.GetProperty("processVersionId").GetString());
+        Assert.Equal(configurationSnapshotId, operation.GetProperty("configurationSnapshotId").GetString());
+        Assert.Equal(recipeVersionId, operation.GetProperty("recipeSnapshotId").GetString());
+        var sessionId = operation.GetProperty("runtimeSessionId").GetGuid();
         using var sessionResponse = await client.GetAsync($"/api/runtime/sessions/{sessionId}");
         using var session = await ReadJsonAsync(sessionResponse);
 
@@ -975,6 +1066,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal($"{applicationName} Station", station.RootElement.GetProperty("displayName").GetString());
         var binding = Assert.Single(station.RootElement.GetProperty("deviceBindings").EnumerateArray());
         Assert.Equal("binding.primary", binding.GetProperty("deviceBindingId").GetString());
+        Assert.Equal("station.main", binding.GetProperty("ownerSystemId").GetString());
         Assert.Equal(capabilityId, binding.GetProperty("capabilityId").GetString());
         Assert.Equal(deviceKey, binding.GetProperty("deviceKey").GetString());
 
@@ -997,6 +1089,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.NotEqual(default, snapshot.GetProperty("publishedAtUtc").GetDateTimeOffset());
         var snapshotBinding = Assert.Single(snapshot.GetProperty("deviceBindings").EnumerateArray());
         Assert.Equal("binding.primary", snapshotBinding.GetProperty("deviceBindingId").GetString());
+        Assert.Equal("station.main", snapshotBinding.GetProperty("ownerSystemId").GetString());
         Assert.Equal(capabilityId, snapshotBinding.GetProperty("capabilityId").GetString());
         Assert.Equal(deviceKey, snapshotBinding.GetProperty("deviceKey").GetString());
     }
@@ -1013,6 +1106,13 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         return Assert.Single(
             process.RootElement.GetProperty("nodes").EnumerateArray(),
             node => node.GetProperty("nodeId").GetString() == nodeId);
+    }
+
+    private static JsonElement FindTopologySystem(JsonDocument topology, string systemId)
+    {
+        return Assert.Single(
+            topology.RootElement.GetProperty("systems").EnumerateArray(),
+            system => system.GetProperty("systemId").GetString() == systemId);
     }
 
     private static void AssertFixtureActionContract(JsonElement block)
@@ -1055,10 +1155,11 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string ContentSha256,
         string AbsoluteManifestPath);
 
-    private sealed class ScriptWorkerWebApplicationFactory : WebApplicationFactory<Program>
+    private sealed class ScriptWorkerWebApplicationFactory : StationPackageWebApplicationFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             var repositoryRoot = FindRepositoryRoot();
             var workerProjectPath = Path.Combine(
                 repositoryRoot,
@@ -1181,6 +1282,28 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     LoopPolicy: null,
                     MaxTraversals: null)
             ]);
+    }
+
+    private static async Task<JsonDocument> WaitForTerminalProductionRunAsync(
+        HttpClient client,
+        Guid productionRunId)
+    {
+        var timeoutAtUtc = DateTimeOffset.UtcNow.AddSeconds(20);
+        while (DateTimeOffset.UtcNow < timeoutAtUtc)
+        {
+            using var response = await client.GetAsync($"/api/production-runs/{productionRunId:D}");
+            var document = await ReadJsonAsync(response);
+            if (response.StatusCode == HttpStatusCode.OK
+                && document.RootElement.GetProperty("isTerminal").GetBoolean())
+            {
+                return document;
+            }
+
+            document.Dispose();
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"Production Run {productionRunId:D} did not reach a terminal state.");
     }
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)

@@ -10,6 +10,8 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 import type {
+  AutomationSystemResponse,
+  AutomationTopologyResponse,
   AutomationProjectWorkspaceResponse,
   EngineeringProjectResponse,
   ProcessDefinitionSummary,
@@ -22,6 +24,7 @@ import {
   createRecipe,
   createStationProfile,
   createWorkspace,
+  getAutomationTopology,
   listEngineeringProjects,
   listProcessDefinitions,
   listRecipes,
@@ -39,6 +42,7 @@ interface EngineeringWorkbenchProps {
 }
 
 interface EngineeringResources {
+  topology: AutomationTopologyResponse | null;
   workspaces: WorkspaceResponse[];
   projects: EngineeringProjectResponse[];
   recipes: RecipeResponse[];
@@ -54,6 +58,7 @@ interface EngineeringDraft {
   stationSystemId: string;
   stationName: string;
   deviceBindingId: string;
+  deviceOwnerSystemId: string;
   capabilityId: string;
   deviceKey: string;
   snapshotId: string;
@@ -62,6 +67,7 @@ interface EngineeringDraft {
 }
 
 const emptyResources: EngineeringResources = {
+  topology: null,
   workspaces: [],
   projects: [],
   recipes: [],
@@ -127,10 +133,28 @@ export function EngineeringWorkbench({
       : null,
     [engineeringIdentity, resources.projects]);
   const configurationSnapshots = configurationProject?.snapshots ?? [];
+  const stationSystems = useMemo(
+    () => resources.topology?.systems.filter(system => system.kind === 'Station') ?? [],
+    [resources.topology]);
+  const deviceOwnerSystems = useMemo(
+    () => resources.topology?.systems.filter(system =>
+      isSystemWithinStation(system, draft.stationSystemId, resources.topology!)) ?? [],
+    [draft.stationSystemId, resources.topology]);
+  const selectedDeviceOwner = deviceOwnerSystems.find(
+    system => system.systemId === draft.deviceOwnerSystemId) ?? null;
+  const ownerCapabilityIds = selectedDeviceOwner
+    ? [...new Set([
+      ...selectedDeviceOwner.requiredCapabilityIds,
+      ...selectedDeviceOwner.providedCapabilityIds
+    ])].sort((left, right) => left.localeCompare(right))
+    : [];
   const canPublishSnapshot = isBackendHealthy
     && !busy
     && engineeringIdentity !== null
-    && selectedProcess !== null;
+    && selectedProcess !== null
+    && resources.topology !== null
+    && selectedDeviceOwner !== null
+    && ownerCapabilityIds.includes(draft.capabilityId);
 
   const loadResources = useCallback(async () => {
     if (!isBackendHealthy || !projectApplicationApiScope || !engineeringIdentity) {
@@ -138,18 +162,23 @@ export function EngineeringWorkbench({
     }
 
     const requestedScopeKey = engineeringScopeKey;
-    const [workspaces, projects, recipes, stations, processDefinitions] = await Promise.all([
+    const topologyPromise = activeApplication?.topologyId
+      ? getAutomationTopology(activeApplication.topologyId, projectApplicationApiScope)
+      : Promise.resolve(null);
+    const [workspaces, projects, recipes, stations, processDefinitions, topologyResponse] = await Promise.all([
       listWorkspaces(projectApplicationApiScope),
       listEngineeringProjects(projectApplicationApiScope),
       listRecipes(projectApplicationApiScope),
       listStationProfiles(projectApplicationApiScope),
-      listProcessDefinitions(projectApplicationApiScope)
+      listProcessDefinitions(projectApplicationApiScope),
+      topologyPromise
     ]);
     if (scopeKeyRef.current !== requestedScopeKey) {
       return;
     }
 
     setResources({
+      topology: topologyResponse?.ok ? topologyResponse.body ?? null : null,
       workspaces,
       projects,
       recipes,
@@ -166,13 +195,39 @@ export function EngineeringWorkbench({
         definition => definition.processDefinitionId === current.processDefinitionId)
         ?? publishedDefinitions[0]
         ?? null;
+      const topology = topologyResponse?.ok ? topologyResponse.body ?? null : null;
+      const stations = topology?.systems.filter(system => system.kind === 'Station') ?? [];
+      const stationSystemId = stations.some(system => system.systemId === current.stationSystemId)
+        ? current.stationSystemId
+        : stations[0]?.systemId ?? current.stationSystemId;
+      const owners = topology?.systems.filter(system =>
+        isSystemWithinStation(system, stationSystemId, topology)) ?? [];
+      const deviceOwnerSystemId = owners.some(system =>
+        system.systemId === current.deviceOwnerSystemId)
+        ? current.deviceOwnerSystemId
+        : owners[0]?.systemId ?? stationSystemId;
+      const owner = owners.find(system => system.systemId === deviceOwnerSystemId);
+      const capabilities = owner
+        ? [...new Set([...owner.requiredCapabilityIds, ...owner.providedCapabilityIds])]
+        : [];
       return {
         ...current,
+        stationSystemId,
+        deviceOwnerSystemId,
+        capabilityId: capabilities.includes(current.capabilityId)
+          ? current.capabilityId
+          : capabilities[0] ?? current.capabilityId,
         processDefinitionId: process?.processDefinitionId ?? '',
         processVersionId: process?.versionId ?? ''
       };
     });
-  }, [engineeringIdentity, engineeringScopeKey, isBackendHealthy, projectApplicationApiScope]);
+  }, [
+    activeApplication?.topologyId,
+    engineeringIdentity,
+    engineeringScopeKey,
+    isBackendHealthy,
+    projectApplicationApiScope
+  ]);
 
   useEffect(() => {
     setResources(emptyResources);
@@ -291,6 +346,7 @@ export function EngineeringWorkbench({
           deviceBindings: [
             {
               deviceBindingId: draft.deviceBindingId,
+              ownerSystemId: draft.deviceOwnerSystemId,
               capabilityId: draft.capabilityId,
               deviceKey: draft.deviceKey
             }
@@ -437,11 +493,39 @@ export function EngineeringWorkbench({
                 value={draft.stationProfileId}
                 onChange={value => setDraft(current => ({ ...current, stationProfileId: value }))}
               />
-              <TextField
-                label="Station System ID"
-                value={draft.stationSystemId}
-                onChange={value => setDraft(current => ({ ...current, stationSystemId: value }))}
-              />
+              <label>
+                <span>Station System</span>
+                <select
+                  value={draft.stationSystemId}
+                  onChange={event => {
+                    const stationSystemId = event.target.value;
+                    const owners = resources.topology?.systems.filter(system =>
+                      isSystemWithinStation(system, stationSystemId, resources.topology!)) ?? [];
+                    const owner = owners[0] ?? null;
+                    const capabilities = owner
+                      ? [...new Set([
+                        ...owner.requiredCapabilityIds,
+                        ...owner.providedCapabilityIds
+                      ])]
+                      : [];
+                    setDraft(current => ({
+                      ...current,
+                      stationSystemId,
+                      deviceOwnerSystemId: owner?.systemId ?? '',
+                      capabilityId: capabilities[0] ?? ''
+                    }));
+                  }}
+                  data-testid="engineering-station-system"
+                >
+                  {stationSystems.length === 0 ? (
+                    <option value="">Create and link a topology Station first</option>
+                  ) : stationSystems.map(system => (
+                    <option key={system.systemId} value={system.systemId}>
+                      {system.displayName} ({system.systemId})
+                    </option>
+                  ))}
+                </select>
+              </label>
               <TextField
                 label="Display Name"
                 value={draft.stationName}
@@ -452,11 +536,56 @@ export function EngineeringWorkbench({
                 value={draft.deviceBindingId}
                 onChange={value => setDraft(current => ({ ...current, deviceBindingId: value }))}
               />
-              <TextField
-                label="Capability"
-                value={draft.capabilityId}
-                onChange={value => setDraft(current => ({ ...current, capabilityId: value }))}
-              />
+              <label>
+                <span>Device Owner System</span>
+                <select
+                  value={draft.deviceOwnerSystemId}
+                  onChange={event => {
+                    const deviceOwnerSystemId = event.target.value;
+                    const owner = deviceOwnerSystems.find(system =>
+                      system.systemId === deviceOwnerSystemId) ?? null;
+                    const capabilities = owner
+                      ? [...new Set([
+                        ...owner.requiredCapabilityIds,
+                        ...owner.providedCapabilityIds
+                      ])]
+                      : [];
+                    setDraft(current => ({
+                      ...current,
+                      deviceOwnerSystemId,
+                      capabilityId: capabilities.includes(current.capabilityId)
+                        ? current.capabilityId
+                        : capabilities[0] ?? ''
+                    }));
+                  }}
+                  data-testid="engineering-device-owner-system"
+                >
+                  {deviceOwnerSystems.length === 0 ? (
+                    <option value="">No System in selected Station</option>
+                  ) : deviceOwnerSystems.map(system => (
+                    <option key={system.systemId} value={system.systemId}>
+                      {system.displayName} ({system.systemId})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Capability</span>
+                <select
+                  value={draft.capabilityId}
+                  onChange={event => setDraft(current => ({
+                    ...current,
+                    capabilityId: event.target.value
+                  }))}
+                  data-testid="engineering-device-capability"
+                >
+                  {ownerCapabilityIds.length === 0 ? (
+                    <option value="">Owner System declares no capabilities</option>
+                  ) : ownerCapabilityIds.map(capabilityId => (
+                    <option key={capabilityId} value={capabilityId}>{capabilityId}</option>
+                  ))}
+                </select>
+              </label>
               <TextField
                 label="Device Key"
                 value={draft.deviceKey}
@@ -679,12 +808,30 @@ function createEngineeringDraft(
     stationSystemId: `${applicationId || 'application'}.station.1`,
     stationName: 'Application Runtime Station',
     deviceBindingId: 'loopback-primary',
+    deviceOwnerSystemId: '',
     capabilityId: 'device.loopback',
     deviceKey: 'loopback-01',
     snapshotId: `${prefix}-snapshot-${seed}`,
     processDefinitionId: process?.processDefinitionId ?? '',
     processVersionId: process?.versionId ?? ''
   };
+}
+
+function isSystemWithinStation(
+  system: AutomationSystemResponse,
+  stationSystemId: string,
+  topology: AutomationTopologyResponse
+): boolean {
+  let current: AutomationSystemResponse | undefined = system;
+  for (let depth = 0; current && depth <= topology.systems.length; depth += 1) {
+    if (current.systemId === stationSystemId) {
+      return true;
+    }
+    current = current.parentSystemId
+      ? topology.systems.find(candidate => candidate.systemId === current?.parentSystemId)
+      : undefined;
+  }
+  return false;
 }
 
 function formatDate(value: string): string {

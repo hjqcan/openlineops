@@ -250,11 +250,46 @@ internal sealed class ApplicationAutomationTopologyEditor
             topologyId,
             topology => topology.AddDriverBinding(DriverBinding.Create(
                 new DriverBindingId(request.BindingId),
+                new AutomationSystemId(request.OwnerSystemId),
                 new CapabilityContractId(request.CapabilityId),
                 providerKind,
                 request.ProviderKey)),
             cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<Result<AutomationTopologyDetails>> UpdateDriverBindingAsync(
+        string topologyId,
+        string bindingId,
+        UpdateDriverBindingRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!TryParseDefinedEnum<DriverProviderKind>(request.ProviderKind, out var providerKind))
+        {
+            return Result.Failure<AutomationTopologyDetails>(ApplicationError.Validation(
+                "Topology.InvalidDriverProviderKind",
+                $"Driver binding {bindingId} has unsupported provider kind {request.ProviderKind}."));
+        }
+
+        return await MutateTopologyAsync(
+            topologyId,
+            topology => topology.UpdateDriverBinding(
+                new DriverBindingId(bindingId),
+                new AutomationSystemId(request.OwnerSystemId),
+                new CapabilityContractId(request.CapabilityId),
+                providerKind,
+                request.ProviderKey),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<Result<AutomationTopologyDetails>> DeleteDriverBindingAsync(
+        string topologyId,
+        string bindingId,
+        CancellationToken cancellationToken = default) =>
+        MutateTopologyAsync(
+            topologyId,
+            topology => topology.RemoveDriverBinding(new DriverBindingId(bindingId)),
+            cancellationToken);
 
     public async Task<Result<AutomationTopologyDetails>> AddSlotGroupAsync(
         string topologyId,

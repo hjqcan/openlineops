@@ -7,15 +7,13 @@ namespace PythonScript.SyntaxStaticCheck
     /// <summary>
     /// 基于 CPython ast 的脚本静态检查。
     /// </summary>
-    public sealed class PythonSyntaxChecker
+    public static class PythonSyntaxChecker
     {
-        public PythonSyntaxChecker()
+        public static IReadOnlyList<PythonSyntaxError> AnalyzeSyntaxErrors(
+            string code,
+            string filename = "<unknown>")
         {
             PythonHost.EnsureInitialized();
-        }
-
-        public IReadOnlyList<PythonSyntaxError> AnalyzeSyntaxErrors(string code, string filename = "<unknown>")
-        {
             var result = new List<PythonSyntaxError>();
             if (string.IsNullOrWhiteSpace(code))
             {

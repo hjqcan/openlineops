@@ -75,7 +75,9 @@ public static class AutomationProjectMapper
             binding.CapabilityId,
             binding.BindingId,
             binding.ProviderKind,
-            binding.ProviderKey);
+            binding.ProviderKey,
+            binding.OwnerSystemId,
+            binding.OwnerStationSystemId);
     }
 
     private static ProjectTargetReferenceDetails ToDetails(ProjectTargetReference target)

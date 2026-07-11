@@ -38,7 +38,11 @@ public sealed record StationRecentTraceResponse(
     int MeasurementCount,
     int FailedMeasurementCount,
     int ArtifactCount,
-    int IncidentCount);
+    int IncidentCount,
+    int GenealogyCount,
+    int MaterialLocationTransitionCount,
+    int SlotOccupancyTransitionCount,
+    int DispositionTransitionCount);
 
 public sealed record EngineeringTraceSearchResponse(
     PagedEngineeringTraceSearchRowsResponse Results,
@@ -80,7 +84,11 @@ public sealed record EngineeringTraceSearchRowResponse(
     int FailedMeasurementCount,
     int ArtifactCount,
     int IncidentCount,
-    int RouteDecisionCount);
+    int RouteDecisionCount,
+    int GenealogyCount,
+    int MaterialLocationTransitionCount,
+    int SlotOccupancyTransitionCount,
+    int DispositionTransitionCount);
 
 public sealed record EngineeringTraceSearchFacetsResponse(
     IReadOnlyCollection<TraceFacetCountResponse> Judgements,

@@ -1,5 +1,6 @@
 using OpenLineOps.Topology.Api.Models;
 using OpenLineOps.Topology.Application.Topologies;
+using OpenLineOps.Api.Abstractions;
 using ApiAddCapabilityRequest = OpenLineOps.Topology.Api.Models.AddCapabilityContractRequest;
 using ApiAddDriverBindingRequest = OpenLineOps.Topology.Api.Models.AddDriverBindingRequest;
 using ApiAddSlotGroupRequest = OpenLineOps.Topology.Api.Models.AddSlotGroupRequest;
@@ -7,6 +8,7 @@ using ApiAddSlotRequest = OpenLineOps.Topology.Api.Models.AddSlotDefinitionReque
 using ApiAddSystemRequest = OpenLineOps.Topology.Api.Models.AddAutomationSystemRequest;
 using ApiCreateTopologyRequest = OpenLineOps.Topology.Api.Models.CreateAutomationTopologyRequest;
 using ApiUpdateSlotGroupRequest = OpenLineOps.Topology.Api.Models.UpdateSlotGroupRequest;
+using ApiUpdateDriverBindingRequest = OpenLineOps.Topology.Api.Models.UpdateDriverBindingRequest;
 using ApiUpdateSlotRequest = OpenLineOps.Topology.Api.Models.UpdateSlotDefinitionRequest;
 using ApiUpdateSystemRequest = OpenLineOps.Topology.Api.Models.UpdateAutomationSystemRequest;
 
@@ -39,6 +41,7 @@ internal static class AutomationTopologyApiContract
                 capability.SafetyClass)).ToArray(),
             topology.DriverBindings.Select(binding => new DriverBindingResponse(
                 binding.BindingId,
+                binding.OwnerSystemId,
                 binding.CapabilityId,
                 binding.ProviderKind,
                 binding.ProviderKey)).ToArray(),
@@ -56,7 +59,8 @@ internal static class AutomationTopologyApiContract
                 slot.Address,
                 slot.DisplayName,
                 slot.MaterialKind,
-                slot.IsEnabled)).ToArray());
+                slot.IsEnabled)).ToArray(),
+            EditorDocumentConcurrency.ComputeRevision(topology));
     }
 
     public static TopologyTargetDeletionResponse ToResponse(TopologyTargetDeletionDetails deletion)
@@ -141,6 +145,22 @@ internal static class AutomationTopologyApiContract
         }
 
         AddRequired(errors, nameof(request.BindingId), request.BindingId);
+        AddRequired(errors, nameof(request.OwnerSystemId), request.OwnerSystemId);
+        AddRequired(errors, nameof(request.CapabilityId), request.CapabilityId);
+        AddRequired(errors, nameof(request.ProviderKind), request.ProviderKind);
+        AddRequired(errors, nameof(request.ProviderKey), request.ProviderKey);
+        return errors;
+    }
+
+    public static Dictionary<string, string[]> Validate(ApiUpdateDriverBindingRequest? request)
+    {
+        var errors = NewErrors(request);
+        if (request is null)
+        {
+            return errors;
+        }
+
+        AddRequired(errors, nameof(request.OwnerSystemId), request.OwnerSystemId);
         AddRequired(errors, nameof(request.CapabilityId), request.CapabilityId);
         AddRequired(errors, nameof(request.ProviderKind), request.ProviderKind);
         AddRequired(errors, nameof(request.ProviderKey), request.ProviderKey);

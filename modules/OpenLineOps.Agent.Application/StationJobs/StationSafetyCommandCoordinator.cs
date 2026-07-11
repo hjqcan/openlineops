@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Application.Abstractions.Time;
 
 namespace OpenLineOps.Agent.Application.StationJobs;
@@ -9,7 +10,8 @@ namespace OpenLineOps.Agent.Application.StationJobs;
 public enum StationSafetyCommandKind
 {
     EmergencyStop = 1,
-    SafeStop = 2
+    SafeStop = 2,
+    JobCancel = 3
 }
 
 public sealed record StationSafetyInboxEntry(
@@ -18,6 +20,7 @@ public sealed record StationSafetyInboxEntry(
     string RequestSha256,
     Guid RequestMessageId,
     Guid AcknowledgementMessageId,
+    Guid? TargetJobId,
     string AgentId,
     string StationId,
     DateTimeOffset ReceivedAtUtc,
@@ -28,6 +31,10 @@ public interface IStationSafetyInboxStore
 {
     ValueTask<StationSafetyInboxEntry?> GetAsync(
         string idempotencyKey,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<StationSafetyInboxEntry?> GetJobCancellationAsync(
+        StationJobId jobId,
         CancellationToken cancellationToken = default);
 
     ValueTask<bool> TryBeginAsync(
@@ -50,6 +57,10 @@ public sealed class StationSafetyCommandCoordinator(
     private const string RecoveryFailureCode = "Agent.SafetyRecoveryRequired";
     private const string RecoveryFailureReason =
         "A prior safety command may have reached the actuator before its acknowledgement was persisted; physical reconciliation is required and the actuator was not replayed.";
+    private const string JobCancellationRecoveryFailureCode =
+        "Agent.JobCancellationRecoveryRequired";
+    private const string JobCancellationRecoveryFailureReason =
+        "A prior job cancellation reached the Agent before its acknowledgement was persisted; the interrupted job was not replayed and physical reconciliation is required if it had begun.";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -70,6 +81,7 @@ public sealed class StationSafetyCommandCoordinator(
                 StationSafetyCommandKind.EmergencyStop,
                 requestSha256,
                 request.MessageId,
+                null,
                 request.AgentId,
                 request.StationId,
                 cancellationToken)
@@ -108,6 +120,7 @@ public sealed class StationSafetyCommandCoordinator(
                 StationSafetyCommandKind.SafeStop,
                 requestSha256,
                 request.MessageId,
+                null,
                 request.AgentId,
                 request.StationId,
                 cancellationToken)
@@ -133,11 +146,56 @@ public sealed class StationSafetyCommandCoordinator(
         return DeserializeSafeStop(completed);
     }
 
+    public async ValueTask<StationJobCancelAcknowledged> HandleJobCancelAsync(
+        StationJobCancelRequested request,
+        Func<StationJobCancelRequested, CancellationToken, ValueTask<StationJobCancelExecutionResult>> handler,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(handler);
+        var requestSha256 = Fingerprint(request with
+        {
+            MessageId = Guid.Empty,
+            RequestedAtUtc = DateTimeOffset.UnixEpoch
+        });
+        var (entry, created) = await GetOrBeginAsync(
+                request.IdempotencyKey,
+                StationSafetyCommandKind.JobCancel,
+                requestSha256,
+                request.MessageId,
+                request.JobId,
+                request.AgentId,
+                request.StationId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!created)
+        {
+            return await ReplayJobCancelAsync(entry, cancellationToken).ConfigureAwait(false);
+        }
+
+        var result = await handler(request, cancellationToken).ConfigureAwait(false);
+        var acknowledgement = new StationJobCancelAcknowledged(
+            entry.AcknowledgementMessageId,
+            entry.RequestMessageId,
+            entry.IdempotencyKey,
+            entry.TargetJobId!.Value,
+            entry.AgentId,
+            entry.StationId,
+            result.Accepted,
+            result.FailureCode,
+            result.FailureReason,
+            UtcNow());
+        var completed = await CompleteAsync(entry, acknowledgement, cancellationToken)
+            .ConfigureAwait(false);
+        return DeserializeJobCancel(completed);
+    }
+
     private async ValueTask<(StationSafetyInboxEntry Entry, bool Created)> GetOrBeginAsync(
         string idempotencyKey,
         StationSafetyCommandKind commandKind,
         string requestSha256,
         Guid requestMessageId,
+        Guid? targetJobId,
         string agentId,
         string stationId,
         CancellationToken cancellationToken)
@@ -145,7 +203,7 @@ public sealed class StationSafetyCommandCoordinator(
         var existing = await store.GetAsync(idempotencyKey, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
-            EnsureSameRequest(existing, commandKind, requestSha256, agentId, stationId);
+            EnsureSameRequest(existing, commandKind, requestSha256, targetJobId, agentId, stationId);
             return (existing, false);
         }
 
@@ -155,6 +213,7 @@ public sealed class StationSafetyCommandCoordinator(
             requestSha256,
             RequiredGuid(requestMessageId, nameof(requestMessageId)),
             Guid.NewGuid(),
+            targetJobId,
             Required(agentId, nameof(agentId)),
             Required(stationId, nameof(stationId)),
             UtcNow(),
@@ -168,7 +227,7 @@ public sealed class StationSafetyCommandCoordinator(
         var raced = await store.GetAsync(idempotencyKey, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException(
                 "Safety command idempotency race did not persist an Inbox entry.");
-        EnsureSameRequest(raced, commandKind, requestSha256, agentId, stationId);
+        EnsureSameRequest(raced, commandKind, requestSha256, targetJobId, agentId, stationId);
         return (raced, false);
     }
 
@@ -220,6 +279,32 @@ public sealed class StationSafetyCommandCoordinator(
         return DeserializeSafeStop(completed);
     }
 
+    private async ValueTask<StationJobCancelAcknowledged> ReplayJobCancelAsync(
+        StationSafetyInboxEntry entry,
+        CancellationToken cancellationToken)
+    {
+        EnsureKind(entry, StationSafetyCommandKind.JobCancel);
+        if (entry.AcknowledgementJson is not null)
+        {
+            return DeserializeJobCancel(entry);
+        }
+
+        var recovery = new StationJobCancelAcknowledged(
+            entry.AcknowledgementMessageId,
+            entry.RequestMessageId,
+            entry.IdempotencyKey,
+            entry.TargetJobId
+            ?? throw new InvalidDataException("Job cancellation Inbox target is not persisted."),
+            entry.AgentId,
+            entry.StationId,
+            false,
+            JobCancellationRecoveryFailureCode,
+            JobCancellationRecoveryFailureReason,
+            UtcNow());
+        var completed = await CompleteAsync(entry, recovery, cancellationToken).ConfigureAwait(false);
+        return DeserializeJobCancel(completed);
+    }
+
     private async ValueTask<StationSafetyInboxEntry> CompleteAsync<TAcknowledgement>(
         StationSafetyInboxEntry entry,
         TAcknowledgement acknowledgement,
@@ -255,15 +340,27 @@ public sealed class StationSafetyCommandCoordinator(
                ?? throw new InvalidDataException("Safe stop acknowledgement is null.");
     }
 
+    private static StationJobCancelAcknowledged DeserializeJobCancel(StationSafetyInboxEntry entry)
+    {
+        EnsureKind(entry, StationSafetyCommandKind.JobCancel);
+        return JsonSerializer.Deserialize<StationJobCancelAcknowledged>(
+                   entry.AcknowledgementJson
+                   ?? throw new InvalidDataException("Job cancellation acknowledgement is not persisted."),
+                   JsonOptions)
+               ?? throw new InvalidDataException("Job cancellation acknowledgement is null.");
+    }
+
     private static void EnsureSameRequest(
         StationSafetyInboxEntry existing,
         StationSafetyCommandKind commandKind,
         string requestSha256,
+        Guid? targetJobId,
         string agentId,
         string stationId)
     {
         if (existing.CommandKind != commandKind
             || !string.Equals(existing.RequestSha256, requestSha256, StringComparison.Ordinal)
+            || existing.TargetJobId != targetJobId
             || !string.Equals(existing.AgentId, agentId, StringComparison.Ordinal)
             || !string.Equals(existing.StationId, stationId, StringComparison.Ordinal))
         {

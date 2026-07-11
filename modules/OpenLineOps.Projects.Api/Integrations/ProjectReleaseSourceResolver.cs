@@ -13,10 +13,12 @@ using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Application.Scripting;
 using OpenLineOps.Production.Application.Persistence;
+using OpenLineOps.Production.Application.LineDefinitions;
 using OpenLineOps.Production.Domain.Aggregates;
 using OpenLineOps.Production.Domain.Identifiers;
 using OpenLineOps.Production.Domain.Models;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Topology.Application.Persistence;
 using OpenLineOps.Topology.Application.Topologies;
@@ -34,6 +36,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     private readonly IProjectEngineeringConfigurationRepository _engineeringRepository;
     private readonly IProjectProcessBlocklyBlockDefinitionRepository _blockRepository;
     private readonly IProjectProductionLineDefinitionRepository _productionRepository;
+    private readonly IExternalProgramResourceRepository _externalProgramRepository;
     private readonly IProcessFlowIrCompiler _flowIrCompiler;
     private readonly IFlowIrCanonicalSerializer _flowIrSerializer;
     private readonly IClock _clock;
@@ -47,6 +50,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         IProjectEngineeringConfigurationRepository engineeringRepository,
         IProjectProcessBlocklyBlockDefinitionRepository blockRepository,
         IProjectProductionLineDefinitionRepository productionRepository,
+        IExternalProgramResourceRepository externalProgramRepository,
         IProcessFlowIrCompiler flowIrCompiler,
         IFlowIrCanonicalSerializer flowIrSerializer,
         IClock clock,
@@ -59,6 +63,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         _engineeringRepository = engineeringRepository;
         _blockRepository = blockRepository;
         _productionRepository = productionRepository;
+        _externalProgramRepository = externalProgramRepository;
         _flowIrCompiler = flowIrCompiler;
         _flowIrSerializer = flowIrSerializer;
         _clock = clock;
@@ -224,13 +229,19 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         var frozenProduction = productionResult.Value.Metadata;
 
         var capabilityBindings = topology.DriverBindings
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
-            .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
             .Select(binding => new ProjectReleaseCapabilityBinding(
                 binding.CapabilityId,
                 binding.BindingId,
                 binding.ProviderKind,
-                binding.ProviderKey))
+                binding.ProviderKey,
+                binding.OwnerSystemId,
+                FindOwningStationSystemId(topology, binding.OwnerSystemId)))
+            .OrderBy(binding => binding.OwnerSystemId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.CapabilityId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
+            .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
+            .ThenBy(binding => binding.OwnerStationSystemId, StringComparer.Ordinal)
             .ToArray();
         if (capabilityBindings.Length == 0)
         {
@@ -255,7 +266,18 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
         var packageDependenciesResult = await ResolvePackageDependenciesAsync(
                 topology,
-                productionResult.Value.FlowDocuments,
+                frozenProduction.Operations.Select(operation => new PackageFlowRouteScope(
+                    operation.StationSystemId,
+                    productionResult.Value.FlowDocuments.Single(flow => string.Equals(
+                        flow.ProcessDefinitionId,
+                        operation.FlowDefinitionId,
+                        StringComparison.Ordinal)),
+                    frozenProduction.LineControllerAuthorizations
+                        .Where(authorization => string.Equals(
+                            authorization.OperationId,
+                            operation.OperationId,
+                            StringComparison.Ordinal))
+                        .ToArray())).ToArray(),
                 cancellationToken)
             .ConfigureAwait(false);
         if (packageDependenciesResult.IsFailure)
@@ -263,10 +285,23 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             return Result.Failure<ProjectReleaseSourceMetadata>(packageDependenciesResult.Error);
         }
 
+        var externalProgramsResult = await ResolveExternalProgramsAsync(
+                scope,
+                topology,
+                frozenProduction,
+                productionResult.Value.FlowDocuments,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (externalProgramsResult.IsFailure)
+        {
+            return Result.Failure<ProjectReleaseSourceMetadata>(externalProgramsResult.Error);
+        }
+
         return Result.Success(new ProjectReleaseSourceMetadata(
             topology.TopologyId,
             layoutIds,
             frozenProduction,
+            externalProgramsResult.Value,
             capabilityBindings,
             targetReferences,
             blockVersionIds,
@@ -289,15 +324,25 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
         foreach (var operation in line.Operations)
         {
-            var station = topology.Systems.SingleOrDefault(system => string.Equals(
-                system.SystemId,
-                operation.StationSystemId,
-                StringComparison.Ordinal));
-            if (station is null || !string.Equals(station.Kind, "Station", StringComparison.Ordinal))
+            var resourceFailure = OperationResourceTopologyValidator.Validate(operation, topology);
+            if (resourceFailure is not null)
             {
                 return ProductionFailure(
-                    "Projects.ReleaseProductionOperationStationInvalid",
-                    $"Production operation {operation.Id} must reference an existing Station system in topology {topology.TopologyId}.");
+                    $"Projects.ReleaseProduction{resourceFailure.Code}",
+                    resourceFailure.Message);
+            }
+
+            foreach (var authorization in line.LineControllerAuthorizations.Where(candidate =>
+                         candidate.OperationId == operation.Id))
+            {
+                var authorizationFailure = OperationResourceTopologyValidator
+                    .ValidateLineControllerAuthorization(operation, authorization, topology);
+                if (authorizationFailure is not null)
+                {
+                    return ProductionFailure(
+                        $"Projects.ReleaseProduction{authorizationFailure.Code}",
+                        authorizationFailure.Message);
+                }
             }
         }
 
@@ -375,6 +420,49 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             }
 
             var resolvedFlow = resolvedFlows[operation.FlowDefinitionId];
+            var operationAuthorizations = line.LineControllerAuthorizations
+                .Where(authorization => authorization.OperationId == operation.Id)
+                .ToArray();
+            foreach (var authorization in operationAuthorizations)
+            {
+                var actionMatches = resolvedFlow.Document.Nodes
+                    .SelectMany(node => node.Actions)
+                    .Where(action => string.Equals(
+                        action.ActionId,
+                        authorization.ActionId,
+                        StringComparison.Ordinal))
+                    .Take(2)
+                    .ToArray();
+                if (actionMatches.Length != 1
+                    || !OperationResourceTopologyValidator.IsLineControllerActionAuthorized(
+                        actionMatches[0],
+                        authorization))
+                {
+                    return ProductionFailure(
+                        "Projects.ReleaseProductionLineControllerActionMismatch",
+                        $"Line Controller authorization {authorization.Id} does not match exactly one frozen DeviceCommand Flow action.");
+                }
+            }
+
+            var unauthorizedAction = resolvedFlow.Document.Nodes
+                .SelectMany(node => node.Actions)
+                .FirstOrDefault(action => !OperationResourceTopologyValidator.IsTargetAuthorized(
+                    action.Target.Kind.ToString(),
+                    action.Target.Reference,
+                    operation,
+                    topology)
+                    && !operationAuthorizations.Any(authorization =>
+                        OperationResourceTopologyValidator.IsLineControllerActionAuthorized(
+                            action,
+                            authorization)));
+            if (unauthorizedAction is not null)
+            {
+                return ProductionFailure(
+                    "Projects.ReleaseProductionOperationActionUnauthorized",
+                    $"Production operation {operation.Id} Flow action {unauthorizedAction.ActionId} target "
+                    + $"{unauthorizedAction.Target.Kind}:{unauthorizedAction.Target.Reference} is not authorized by its frozen Station resource scope or one exact Line Controller authorization.");
+            }
+
             var configurationSnapshot = snapshotMatches[0];
             var configurationValidation = ValidateConfigurationSnapshot(
                 ProcessDefinitionMapper.ToDetails(resolvedFlow.Definition),
@@ -410,91 +498,13 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             var bindingValidation = ValidateRequiredCapabilityBindings(
                 resolvedFlow.Document,
                 operation.FlowDefinitionId,
+                operation,
+                operationAuthorizations,
                 topology,
                 configurationSnapshot);
             if (bindingValidation is not null)
             {
                 return Result.Failure<ResolvedProductionLine>(bindingValidation);
-            }
-        }
-
-        foreach (var adapter in line.ExternalTestProgramAdapters)
-        {
-            if (adapter.InputMappings.Any(mapping =>
-                    !ProjectReleaseExternalTestProgramContract.IsSupportedInputSource(mapping.Source))
-                || adapter.ArgumentTemplates.Any(argument =>
-                    !ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
-                        argument,
-                        adapter.InputMappings.Select(mapping => mapping.Target)))
-                || adapter.ResultMappings.Any(mapping =>
-                    !ProjectReleaseExternalTestProgramContract.IsSupportedResultPath(mapping.SourcePath))
-                || !ProjectReleaseExternalTestProgramContract.IsSupportedOutcomeMapping(
-                    new ProjectReleaseExternalTestProgramOutcomeMapping(
-                        adapter.OutcomeMapping.SourcePath,
-                        adapter.OutcomeMapping.PassedToken,
-                        adapter.OutcomeMapping.FailedToken,
-                        adapter.OutcomeMapping.AbortedToken)))
-            {
-                return ProductionFailure(
-                    "Projects.ReleaseProductionExternalTestContractInvalid",
-                    $"External test adapter {adapter.Id} contains an unsupported input source, argument placeholder, or result path.");
-            }
-
-            var capability = topology.Capabilities.SingleOrDefault(candidate => string.Equals(
-                candidate.CapabilityId,
-                adapter.CapabilityId,
-                StringComparison.Ordinal));
-            var timeoutMilliseconds = checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond);
-            if (capability is null
-                || !string.Equals(capability.CommandName, adapter.CommandName, StringComparison.Ordinal)
-                || checked(capability.TimeoutSeconds * 1000L) != timeoutMilliseconds)
-            {
-                return ProductionFailure(
-                    "Projects.ReleaseProductionExternalTestCapabilityInvalid",
-                    $"External test adapter {adapter.Id} must match one topology capability command and timeout exactly.");
-            }
-
-            var bindings = topology.DriverBindings.Where(binding => string.Equals(
-                    binding.CapabilityId,
-                    adapter.CapabilityId,
-                    StringComparison.Ordinal))
-                .Take(2)
-                .ToArray();
-            if (bindings.Length != 1 || !ExternalTestBindingMatches(adapter, bindings[0]))
-            {
-                return ProductionFailure(
-                    "Projects.ReleaseProductionExternalTestProviderInvalid",
-                    $"External test adapter {adapter.Id} must match exactly one topology Driver binding.");
-            }
-
-            if (adapter.Executable is not null)
-            {
-                var executablePath = ResolveApplicationFile(scope, adapter.Executable);
-                if (!File.Exists(executablePath))
-                {
-                    return ProductionFailure(
-                        "Projects.ReleaseProductionExternalTestExecutableMissing",
-                        $"External test executable '{adapter.Executable}' was not found in the portable Application.");
-                }
-            }
-        }
-
-        foreach (var adapter in line.ExternalTestProgramAdapters)
-        {
-            var matchingActions = line.Operations
-                .SelectMany(operation => resolvedFlows[operation.FlowDefinitionId].Document.Nodes
-                    .SelectMany(node => node.Actions)
-                    .Where(action => ExternalTestActionMatches(
-                        action,
-                        adapter,
-                        operation.StationSystemId)))
-                .Take(2)
-                .ToArray();
-            if (matchingActions.Length != 1)
-            {
-                return ProductionFailure(
-                    "Projects.ReleaseProductionExternalTestActionInvalid",
-                    $"External test adapter {adapter.Id} must be referenced by exactly one matching Production operation Flow action.");
             }
         }
 
@@ -525,6 +535,51 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                         flow.Document.BlockDependencies
                             .Select(dependency => dependency.LockId)
                             .Order(StringComparer.Ordinal)
+                            .ToArray(),
+                        operation.Resources.Select(resource => new ProjectReleaseOperationResource(
+                                resource.Id.Value,
+                                resource.Kind.ToString(),
+                                resource.TopologyTargetId,
+                                resource.Resolution.ToString(),
+                                resource.Resolution == OperationResourceResolution.AvailableSlotInGroup
+                                    ? topology.Slots
+                                        .Where(slot => slot.IsEnabled && string.Equals(
+                                            slot.SlotGroupId,
+                                            resource.TopologyTargetId,
+                                            StringComparison.Ordinal))
+                                        .Select(slot => slot.SlotId)
+                                        .Order(StringComparer.Ordinal)
+                                        .ToArray()
+                                    : []))
+                            .OrderBy(resource => resource.Kind, StringComparer.Ordinal)
+                            .ThenBy(resource => resource.TopologyTargetId, StringComparer.Ordinal)
+                            .ThenBy(resource => resource.BindingId, StringComparer.Ordinal)
+                            .ToArray(),
+                        flow.Document.Nodes
+                            .SelectMany(node => node.Actions.Select((action, index) => new
+                            {
+                                Node = node,
+                                Action = action,
+                                Index = index
+                            }))
+                            .Select(item => new ProjectReleaseAuthorizedAction(
+                                item.Action.ActionId,
+                                item.Node.Kind == FlowIrNodeKind.Blockly && item.Index > 0
+                                    ? $"{item.Node.NodeId}:block-action:{item.Index + 1}"
+                                    : item.Node.NodeId,
+                                item.Action.Kind.ToString(),
+                                item.Action.RequiredCapability,
+                                item.Action.CommandName,
+                                item.Action.Target.Kind.ToString(),
+                                item.Action.Target.Reference,
+                                item.Action.Execution.TimeoutMilliseconds,
+                                line.LineControllerAuthorizations.SingleOrDefault(authorization =>
+                                    authorization.OperationId == operation.Id
+                                    && string.Equals(
+                                        authorization.ActionId,
+                                        item.Action.ActionId,
+                                        StringComparison.Ordinal))?.Id.Value))
+                            .OrderBy(action => action.ActionId, StringComparer.Ordinal)
                             .ToArray());
                 })
                 .ToArray(),
@@ -542,31 +597,21 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                     transition.OutputCondition?.ExpectedValue.Kind.ToString(),
                     transition.OutputCondition?.ExpectedValue.CanonicalValue))
                 .ToArray(),
-            line.ExternalTestProgramAdapters
-                .OrderBy(adapter => adapter.Id.Value, StringComparer.Ordinal)
-                .Select(adapter => new ProjectReleaseExternalTestProgramAdapter(
-                    adapter.Id.Value,
-                    adapter.DisplayName,
-                    adapter.CapabilityId,
-                    adapter.CommandName,
-                    adapter.LaunchKind.ToString(),
-                    adapter.Executable,
-                    adapter.ProviderKey,
-                    adapter.ArgumentTemplates.ToArray(),
-                    adapter.InputMappings.Select(mapping =>
-                        new ProjectReleaseExternalTestProgramInputMapping(
-                            mapping.Source,
-                            mapping.Target)).ToArray(),
-                    adapter.ResultMappings.Select(mapping =>
-                        new ProjectReleaseExternalTestProgramResultMapping(
-                            mapping.SourcePath,
-                            mapping.TargetKey)).ToArray(),
-                    new ProjectReleaseExternalTestProgramOutcomeMapping(
-                        adapter.OutcomeMapping.SourcePath,
-                        adapter.OutcomeMapping.PassedToken,
-                        adapter.OutcomeMapping.FailedToken,
-                        adapter.OutcomeMapping.AbortedToken),
-                    checked(adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond)))
+            line.LineControllerAuthorizations
+                .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
+                .Select(authorization => new ProjectReleaseLineControllerAuthorization(
+                    authorization.Id.Value,
+                    authorization.OperationId.Value,
+                    authorization.ActionId,
+                    authorization.ControllerSystemId,
+                    authorization.ControllerBindingId,
+                    authorization.ControllerCapabilityId,
+                    authorization.ControllerAction,
+                    authorization.TargetStationSystemId,
+                    authorization.TargetSystemId,
+                    authorization.TargetBindingId,
+                    authorization.TargetCapabilityId,
+                    authorization.TargetAction))
                 .ToArray());
 
         return Result.Success(new ResolvedProductionLine(
@@ -577,111 +622,183 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 .ToArray()));
     }
 
+    private async Task<Result<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>> ResolveExternalProgramsAsync(
+        ProjectApplicationWorkspaceScope scope,
+        AutomationTopologyDetails topology,
+        ProjectReleaseProductionLine productionLine,
+        IReadOnlyCollection<FlowIrDocument> flowDocuments,
+        CancellationToken cancellationToken)
+    {
+        var referencedActions = new List<(ProjectReleaseOperation Operation, FlowIrAction Action, string ResourceId)>();
+        foreach (var operation in productionLine.Operations)
+        {
+            var flow = flowDocuments.Single(document => string.Equals(
+                document.ProcessDefinitionId,
+                operation.FlowDefinitionId,
+                StringComparison.Ordinal));
+            foreach (var action in flow.Nodes.SelectMany(node => node.Actions))
+            {
+                var reference = ExternalProgramResourceContract.ReadReference(action.InputPayload);
+                if (reference.IsMalformed)
+                {
+                    return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                        ApplicationError.Conflict(
+                            "Projects.ReleaseExternalProgramReferenceInvalid",
+                            $"Flow action {action.ActionId} contains a malformed externalProgramResourceId."));
+                }
+
+                if (reference.ResourceId is not null)
+                {
+                    referencedActions.Add((operation, action, reference.ResourceId));
+                }
+            }
+        }
+
+        var resources = new List<ProjectReleaseExternalProgramResource>();
+        foreach (var resourceId in referencedActions
+                     .Select(item => item.ResourceId)
+                     .Distinct(StringComparer.Ordinal)
+                     .Order(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var resource = await _externalProgramRepository.GetAsync(scope, resourceId, cancellationToken)
+                .ConfigureAwait(false);
+            if (resource is null)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleaseExternalProgramResourceMissing",
+                        $"Flow references missing Application external program resource {resourceId}."));
+            }
+
+            ExternalProgramResourceValidator.ValidateFrozenResource(resource);
+            var actions = referencedActions.Where(item => item.ResourceId == resourceId).ToArray();
+            foreach (var item in actions)
+            {
+                if (item.Action.Kind != FlowIrActionKind.DeviceCommand
+                    || !string.Equals(
+                        item.Action.RequiredCapability,
+                        resource.CapabilityId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(item.Action.CommandName, resource.CommandName, StringComparison.Ordinal)
+                    || item.Action.Execution.TimeoutMilliseconds != resource.ExecutionLimits.TimeoutMilliseconds
+                    || item.Action.Target.Kind != FlowIrTargetReferenceKind.System
+                    || !string.Equals(
+                        item.Action.Target.Reference,
+                        item.Operation.StationSystemId,
+                        StringComparison.Ordinal))
+                {
+                    return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                        ApplicationError.Conflict(
+                            "Projects.ReleaseExternalProgramActionContractInvalid",
+                            $"Flow action {item.Action.ActionId} does not match external program resource {resourceId} and its Operation Station."));
+                }
+            }
+
+            var capability = topology.Capabilities.SingleOrDefault(candidate => string.Equals(
+                candidate.CapabilityId,
+                resource.CapabilityId,
+                StringComparison.Ordinal));
+            if (capability is null
+                || !string.Equals(capability.CommandName, resource.CommandName, StringComparison.Ordinal)
+                || checked(capability.TimeoutSeconds * 1000L) != resource.ExecutionLimits.TimeoutMilliseconds)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleaseExternalProgramCapabilityInvalid",
+                        $"External program resource {resourceId} must match one topology capability command and timeout."));
+            }
+
+            var invalidStationBinding = actions
+                .Select(item => item.Operation.StationSystemId)
+                .Distinct(StringComparer.Ordinal)
+                .FirstOrDefault(stationSystemId =>
+                {
+                    var bindings = topology.DriverBindings.Where(binding => string.Equals(
+                            binding.CapabilityId,
+                            resource.CapabilityId,
+                            StringComparison.Ordinal)
+                        && IsBindingOwnedByStation(binding, stationSystemId, topology))
+                        .Take(2)
+                        .ToArray();
+                    return bindings.Length != 1
+                        || !ExternalProgramBindingMatches(resource, bindings[0]);
+                });
+            if (invalidStationBinding is not null)
+            {
+                return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                    ApplicationError.Conflict(
+                        "Projects.ReleaseExternalProgramProviderInvalid",
+                        $"External program resource {resourceId} must match exactly one topology Driver binding owned by every referencing Station; {invalidStationBinding} does not."));
+            }
+
+            var resourcePath = $"{ExternalProgramResourceContract.ResourceDirectoryName}/{resource.ResourceId}";
+            resources.Add(new ProjectReleaseExternalProgramResource(
+                resource.ResourceId,
+                resource.DisplayName,
+                resource.CapabilityId,
+                resource.CommandName,
+                resource.LaunchKind.ToString(),
+                resource.EntryPoint,
+                resource.ProviderKind,
+                resource.ProviderKey,
+                resource.ArgumentTemplates,
+                resource.InputMappings.Select(mapping => new ProjectReleaseExternalProgramInputMapping(
+                    mapping.Source,
+                    mapping.Target)).ToArray(),
+                resource.ResultMappings.Select(mapping => new ProjectReleaseExternalProgramResultMapping(
+                    mapping.SourcePath,
+                    mapping.TargetKey,
+                    mapping.ValueKind.ToString())).ToArray(),
+                new ProjectReleaseExternalProgramOutcomeMapping(
+                    resource.OutcomeMapping.SourcePath,
+                    resource.OutcomeMapping.PassedToken,
+                    resource.OutcomeMapping.FailedToken,
+                    resource.OutcomeMapping.AbortedToken),
+                new ProjectReleaseExternalProgramPermissionProfile(
+                    resource.PermissionProfile.ProfileName,
+                    resource.PermissionProfile.NetworkAccessAllowed,
+                    resource.PermissionProfile.AllowedEnvironmentVariables),
+                new ProjectReleaseExternalProgramExecutionLimits(
+                    resource.ExecutionLimits.TimeoutMilliseconds,
+                    resource.ExecutionLimits.MaximumProcessCount,
+                    resource.ExecutionLimits.MaximumWorkingSetBytes,
+                    resource.ExecutionLimits.MaximumCpuTimeMilliseconds,
+                    resource.ExecutionLimits.MaximumStandardOutputBytes,
+                    resource.ExecutionLimits.MaximumStandardErrorBytes,
+                    resource.ExecutionLimits.MaximumArtifactCount,
+                    resource.ExecutionLimits.MaximumArtifactBytes,
+                    resource.ExecutionLimits.MaximumTotalArtifactBytes),
+                resource.Files.Select(file => new ProjectReleaseExternalProgramFile(
+                    $"{resourcePath}/{file.RelativePath}",
+                    file.SizeBytes,
+                    file.Sha256)).ToArray(),
+                resource.ContentSha256,
+                resourcePath));
+        }
+
+        return Result.Success<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(resources);
+    }
+
+    private static bool ExternalProgramBindingMatches(
+        ExternalProgramResource resource,
+        DriverBindingDetails binding)
+    {
+        return resource.LaunchKind switch
+        {
+            ExternalProgramLaunchKind.ApplicationExecutable =>
+                string.Equals(binding.ProviderKind, "ExternalSystem", StringComparison.Ordinal)
+                && string.Equals(binding.ProviderKey, resource.ResourceId, StringComparison.Ordinal),
+            ExternalProgramLaunchKind.Provider =>
+                string.Equals(binding.ProviderKind, resource.ProviderKind, StringComparison.Ordinal)
+                && string.Equals(binding.ProviderKey, resource.ProviderKey, StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
     private static Result<ResolvedProductionLine> ProductionFailure(string code, string message)
     {
         return Result.Failure<ResolvedProductionLine>(ApplicationError.Conflict(code, message));
-    }
-
-    private static bool ExternalTestBindingMatches(
-        ExternalTestProgramAdapter adapter,
-        DriverBindingDetails binding)
-    {
-        if (adapter.ProviderKey is not null)
-        {
-            return binding.ProviderKind is "ExternalSystem" or "ProcessCommandProvider" or "PluginCommand"
-                && string.Equals(binding.ProviderKey, adapter.ProviderKey, StringComparison.Ordinal);
-        }
-
-        return string.Equals(binding.ProviderKind, "ExternalSystem", StringComparison.Ordinal)
-            && string.Equals(binding.ProviderKey, adapter.Id.Value, StringComparison.Ordinal);
-    }
-
-    private static bool ExternalTestActionMatches(
-        FlowIrAction action,
-        ExternalTestProgramAdapter adapter,
-        string stationSystemId)
-    {
-        var expectedTimeoutMilliseconds = checked(
-            adapter.Timeout.Ticks / TimeSpan.TicksPerMillisecond);
-        if (action.Kind != FlowIrActionKind.DeviceCommand
-            || !string.Equals(action.RequiredCapability, adapter.CapabilityId, StringComparison.Ordinal)
-            || !string.Equals(action.CommandName, adapter.CommandName, StringComparison.Ordinal)
-            || action.Execution.TimeoutMilliseconds != expectedTimeoutMilliseconds
-            || action.Target.Kind != FlowIrTargetReferenceKind.System
-            || !string.Equals(action.Target.Reference, stationSystemId, StringComparison.Ordinal)
-            || string.IsNullOrWhiteSpace(action.InputPayload))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var document = System.Text.Json.JsonDocument.Parse(action.InputPayload);
-            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            var adapterProperties = document.RootElement
-                .EnumerateObject()
-                .Where(property => string.Equals(
-                    property.Name,
-                    ExternalTestProgramAdapter.InvocationPayloadAdapterIdProperty,
-                    StringComparison.Ordinal))
-                .Take(2)
-                .ToArray();
-            return adapterProperties.Length == 1
-                && adapterProperties[0].Value.ValueKind == System.Text.Json.JsonValueKind.String
-                && string.Equals(
-                    adapterProperties[0].Value.GetString(),
-                    adapter.Id.Value,
-                    StringComparison.Ordinal);
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static string ResolveApplicationFile(
-        ProjectApplicationWorkspaceScope scope,
-        string relativePath)
-    {
-        var applicationRoot = Path.GetFullPath(scope.ApplicationRootPath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var fullPath = Path.GetFullPath(Path.Combine(
-            applicationRoot,
-            relativePath.Replace('/', Path.DirectorySeparatorChar)));
-        var comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        if (!fullPath.StartsWith(applicationRoot + Path.DirectorySeparatorChar, comparison))
-        {
-            throw new InvalidDataException(
-                $"Application path '{relativePath}' escapes the portable Application.");
-        }
-
-        RejectReparsePoint(applicationRoot);
-        var current = applicationRoot;
-        foreach (var segment in Path.GetRelativePath(applicationRoot, fullPath).Split(
-                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, segment);
-            RejectReparsePoint(current);
-        }
-
-        return fullPath;
-    }
-
-    private static void RejectReparsePoint(string path)
-    {
-        if ((Directory.Exists(path) || File.Exists(path))
-            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException(
-                $"Application resource path '{path}' cannot be a symbolic link or reparse point.");
-        }
     }
 
     private sealed record ResolvedProductionFlow(
@@ -738,6 +855,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     private static ApplicationError? ValidateRequiredCapabilityBindings(
         FlowIrDocument flowIr,
         string processDefinitionId,
+        OperationDefinition operation,
+        IReadOnlyCollection<LineControllerAuthorization> lineControllerAuthorizations,
         AutomationTopologyDetails topology,
         ConfigurationSnapshotDetails configurationSnapshot)
     {
@@ -752,13 +871,16 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         var declaredCapabilities = topology.Capabilities
             .Select(capability => capability.CapabilityId)
             .ToHashSet(StringComparer.Ordinal);
-        var configurationBindings = configurationSnapshot.DeviceBindings
-            .Select(binding => binding.CapabilityId)
-            .ToHashSet(StringComparer.Ordinal);
-
         foreach (var action in requiredActions)
         {
-            var capabilityResult = ResolveActionCapabilityTarget(topology, action);
+            var lineControllerAuthorization = lineControllerAuthorizations.SingleOrDefault(
+                authorization => string.Equals(
+                    authorization.ActionId,
+                    action.ActionId,
+                    StringComparison.Ordinal));
+            var capabilityResult = lineControllerAuthorization is null
+                ? ResolveActionCapabilityTarget(topology, action)
+                : Result.Success(lineControllerAuthorization.ControllerCapabilityId);
             if (capabilityResult.IsFailure)
             {
                 return capabilityResult.Error;
@@ -774,25 +896,108 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
             var topologyBindings = topology.DriverBindings
                 .Where(binding => string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal))
-                .Take(2)
+                .Where(binding => IsBindingOwnedByStation(binding, operation.StationSystemId, topology))
                 .ToArray();
-            if (topologyBindings.Length != 1)
+            var topologyBinding = lineControllerAuthorization is null
+                ? SelectActionDriverBinding(action, operation, topologyBindings)
+                : topologyBindings.SingleOrDefault(binding => string.Equals(
+                    binding.BindingId,
+                    lineControllerAuthorization.ControllerBindingId,
+                    StringComparison.Ordinal));
+            if (topologyBinding is null)
             {
                 return ApplicationError.Conflict(
                     "Projects.ReleaseDriverBindingMissing",
-                    $"Required capability {capabilityId} must have exactly one driver binding in topology {topology.TopologyId}.");
+                    $"Required capability {capabilityId} must resolve to exactly one Driver binding for action {action.ActionId} in topology {topology.TopologyId}.");
             }
 
-            if (IsDevicePluginProvider(topologyBindings[0].ProviderKind)
-                && !configurationBindings.Contains(capabilityId))
+            if (IsDevicePluginProvider(topologyBinding.ProviderKind)
+                && configurationSnapshot.DeviceBindings.Count(binding =>
+                    string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.OwnerSystemId,
+                        topologyBinding.OwnerSystemId,
+                        StringComparison.Ordinal)) != 1)
             {
                 return ApplicationError.Conflict(
                     "Projects.ReleaseDeviceBindingMissing",
-                    $"Required capability {capabilityId} does not have a device binding in configuration snapshot {configurationSnapshot.SnapshotId}.");
+                    $"Required capability {capabilityId} for owner System {topologyBinding.OwnerSystemId} does not have exactly one Device binding in configuration snapshot {configurationSnapshot.SnapshotId}.");
             }
         }
 
         return null;
+    }
+
+    private static DriverBindingDetails? SelectActionDriverBinding(
+        FlowIrAction action,
+        OperationDefinition operation,
+        DriverBindingDetails[] candidates)
+    {
+        IEnumerable<DriverBindingDetails> selected = action.Target.Kind switch
+        {
+            FlowIrTargetReferenceKind.System => candidates.Where(binding => string.Equals(
+                binding.OwnerSystemId,
+                action.Target.Reference,
+                StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.Driver => candidates.Where(binding => string.Equals(
+                binding.BindingId,
+                action.Target.Reference,
+                StringComparison.Ordinal)),
+            FlowIrTargetReferenceKind.Capability when candidates.Length == 1 => candidates,
+            FlowIrTargetReferenceKind.Capability => candidates.Where(binding =>
+                operation.Resources.Any(resource =>
+                    resource.Kind == OperationResourceKind.Device
+                    && resource.Resolution == OperationResourceResolution.Fixed
+                    && (string.Equals(
+                            resource.TopologyTargetId,
+                            binding.BindingId,
+                            StringComparison.Ordinal)
+                        || string.Equals(
+                            resource.TopologyTargetId,
+                            binding.OwnerSystemId,
+                            StringComparison.Ordinal)))),
+            _ => []
+        };
+        var matches = selected.Take(2).ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
+
+    private static bool IsBindingOwnedByStation(
+        DriverBindingDetails binding,
+        string stationSystemId,
+        AutomationTopologyDetails topology)
+    {
+        return string.Equals(
+            FindOwningStationSystemId(topology, binding.OwnerSystemId),
+            stationSystemId,
+            StringComparison.Ordinal);
+    }
+
+    private static string FindOwningStationSystemId(
+        AutomationTopologyDetails topology,
+        string ownerSystemId)
+    {
+        var currentId = ownerSystemId;
+        for (var depth = 0; depth <= topology.Systems.Count; depth++)
+        {
+            var current = topology.Systems.SingleOrDefault(system => string.Equals(
+                system.SystemId,
+                currentId,
+                StringComparison.Ordinal))
+                ?? throw new InvalidDataException(
+                    $"Driver binding owner System {ownerSystemId} is missing from topology {topology.TopologyId}.");
+            if (string.Equals(current.Kind, "Station", StringComparison.Ordinal))
+            {
+                return current.SystemId;
+            }
+
+            currentId = current.ParentSystemId
+                ?? throw new InvalidDataException(
+                    $"Driver binding owner System {ownerSystemId} does not belong to a Station subtree.");
+        }
+
+        throw new InvalidDataException(
+            $"Driver binding owner System {ownerSystemId} has a cyclic topology ancestry.");
     }
 
     private static ProjectReleaseTargetReference[] CreateTargetReferences(
@@ -823,67 +1028,98 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
     internal async Task<Result<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>> ResolvePackageDependenciesAsync(
         AutomationTopologyDetails topology,
+        string stationSystemId,
         FlowIrDocument flowIr,
         CancellationToken cancellationToken)
     {
         return await ResolvePackageDependenciesAsync(
                 topology,
-                [flowIr],
+                [new PackageFlowRouteScope(stationSystemId, flowIr, [])],
                 cancellationToken)
             .ConfigureAwait(false);
     }
 
     private async Task<Result<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>> ResolvePackageDependenciesAsync(
         AutomationTopologyDetails topology,
-        IReadOnlyCollection<FlowIrDocument> flowDocuments,
+        IReadOnlyCollection<PackageFlowRouteScope> stationFlows,
         CancellationToken cancellationToken)
     {
-        var commandsByCapability = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        foreach (var action in flowDocuments
-                     .SelectMany(flow => flow.Nodes)
-                     .SelectMany(node => node.Actions)
-                     .Where(action => action.Kind == FlowIrActionKind.DeviceCommand))
+        var commandsByRoute = new Dictionary<
+            (string StationSystemId, string CapabilityId, string? BindingId),
+            HashSet<string>>();
+        foreach (var stationFlow in stationFlows)
         {
-            var capabilityResult = ResolveActionCapabilityTarget(topology, action);
-            if (capabilityResult.IsFailure)
+            foreach (var action in stationFlow.Flow.Nodes
+                         .SelectMany(node => node.Actions)
+                         .Where(action => action.Kind == FlowIrActionKind.DeviceCommand))
             {
-                return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
-                    capabilityResult.Error);
-            }
+                var lineControllerAuthorization = stationFlow.LineControllerAuthorizations
+                    .SingleOrDefault(authorization => string.Equals(
+                        authorization.ActionId,
+                        action.ActionId,
+                        StringComparison.Ordinal));
+                var capabilityResult = lineControllerAuthorization is null
+                    ? ResolveActionCapabilityTarget(topology, action)
+                    : Result.Success(lineControllerAuthorization.ControllerCapabilityId);
+                if (capabilityResult.IsFailure)
+                {
+                    return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
+                        capabilityResult.Error);
+                }
 
-            if (action.Target.Kind == FlowIrTargetReferenceKind.System
-                && !topology.DriverBindings.Any(binding => string.Equals(
-                    binding.CapabilityId,
+                if (action.Target.Kind == FlowIrTargetReferenceKind.System
+                    && !topology.DriverBindings.Any(binding => string.Equals(
+                            binding.CapabilityId,
+                            capabilityResult.Value,
+                            StringComparison.Ordinal)
+                        && IsBindingOwnedByStation(
+                            binding,
+                            stationFlow.StationSystemId,
+                            topology)))
+                {
+                    // Internal system commands (for example runtime.flow result patching)
+                    // do not resolve through a topology provider package.
+                    continue;
+                }
+
+                var routeKey = (
+                    stationFlow.StationSystemId,
                     capabilityResult.Value,
-                    StringComparison.Ordinal)))
-            {
-                // Internal system commands (for example runtime.flow result patching)
-                // do not resolve through a topology provider package.
-                continue;
-            }
+                    lineControllerAuthorization?.ControllerBindingId);
+                if (!commandsByRoute.TryGetValue(routeKey, out var commands))
+                {
+                    commands = new HashSet<string>(StringComparer.Ordinal);
+                    commandsByRoute.Add(routeKey, commands);
+                }
 
-            if (!commandsByCapability.TryGetValue(capabilityResult.Value, out var commands))
-            {
-                commands = new HashSet<string>(StringComparer.Ordinal);
-                commandsByCapability.Add(capabilityResult.Value, commands);
+                commands.Add(action.CommandName);
             }
-
-            commands.Add(action.CommandName);
         }
 
-        if (commandsByCapability.Count == 0)
+        if (commandsByRoute.Count == 0)
         {
             return Result.Success<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>([]);
         }
 
         var resolvedRoutes = new List<(DriverBindingDetails Binding, string[] CommandNames)>();
-        foreach (var route in commandsByCapability.OrderBy(item => item.Key, StringComparer.Ordinal))
+        foreach (var route in commandsByRoute
+                     .OrderBy(item => item.Key.StationSystemId, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.CapabilityId, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.BindingId, StringComparer.Ordinal))
         {
             var bindings = topology.DriverBindings
                 .Where(binding => string.Equals(
                     binding.CapabilityId,
-                    route.Key,
-                    StringComparison.Ordinal))
+                    route.Key.CapabilityId,
+                    StringComparison.Ordinal)
+                    && (route.Key.BindingId is null || string.Equals(
+                        binding.BindingId,
+                        route.Key.BindingId,
+                        StringComparison.Ordinal))
+                    && IsBindingOwnedByStation(
+                        binding,
+                        route.Key.StationSystemId,
+                        topology))
                 .Take(2)
                 .ToArray();
             if (bindings.Length != 1)
@@ -891,7 +1127,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 return Result.Failure<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(
                     ApplicationError.Conflict(
                         "Projects.ReleaseFlowIrRouteBindingInvalid",
-                        $"Flow IR capability {route.Key} must resolve to exactly one topology driver binding."));
+                        $"Flow IR capability {route.Key.CapabilityId} at Station {route.Key.StationSystemId} must resolve to exactly one topology driver binding."));
             }
 
             if (IsPluginProvider(bindings[0].ProviderKind))
@@ -978,6 +1214,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 binding.BindingId,
                 binding.ProviderKind,
                 binding.ProviderKey,
+                binding.OwnerSystemId,
+                FindOwningStationSystemId(topology, binding.OwnerSystemId),
                 match.Package.Manifest.Id,
                 match.Package.Manifest.Id,
                 match.Package.Manifest.Version,
@@ -1004,6 +1242,11 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
 
         return Result.Success<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>(locks);
     }
+
+    private sealed record PackageFlowRouteScope(
+        string StationSystemId,
+        FlowIrDocument Flow,
+        IReadOnlyCollection<ProjectReleaseLineControllerAuthorization> LineControllerAuthorizations);
 
     internal static Result<string> ResolveActionCapabilityTarget(
         AutomationTopologyDetails topology,

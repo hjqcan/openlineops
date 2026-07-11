@@ -98,6 +98,7 @@ public sealed class TraceReadModelService : ITraceReadModelService
     {
         return new TraceRecordQuery(
             query.ProductionRunId,
+            null,
             query.ProductModelId,
             query.ProductionUnitIdentityInputKey,
             query.ProductionUnitIdentityValue,
@@ -158,7 +159,23 @@ public sealed class TraceReadModelService : ITraceReadModelService
             operations.Sum(operation => operation.Measurements.Count),
             operations.Sum(operation => operation.Measurements.Count(measurement => measurement.Passed == false)),
             operations.Sum(operation => operation.Artifacts.Count),
-            operations.Sum(operation => operation.Incidents.Count));
+            operations.Sum(operation => operation.Incidents.Count),
+            record.Genealogy.Count,
+            record.MaterialLocationTransitions.Count(transition =>
+                string.Equals(
+                    transition.Destination.StationSystemId,
+                    stationSystemId,
+                    StringComparison.Ordinal)
+                || string.Equals(
+                    transition.Source?.StationSystemId,
+                    stationSystemId,
+                    StringComparison.Ordinal)),
+            record.SlotOccupancyTransitions.Count(transition =>
+                string.Equals(
+                    transition.StationSystemId,
+                    stationSystemId,
+                    StringComparison.Ordinal)),
+            record.DispositionTransitions.Count);
     }
 
     private static EngineeringTraceSearchRowReadModel ToEngineeringSearchRow(TraceRecord record)
@@ -191,7 +208,11 @@ public sealed class TraceReadModelService : ITraceReadModelService
             record.Operations.Sum(operation => operation.Measurements.Count(measurement => measurement.Passed == false)),
             record.Operations.Sum(operation => operation.Artifacts.Count),
             record.Operations.Sum(operation => operation.Incidents.Count),
-            record.RouteDecisions.Count);
+            record.RouteDecisions.Count,
+            record.Genealogy.Count,
+            record.MaterialLocationTransitions.Count,
+            record.SlotOccupancyTransitions.Count,
+            record.DispositionTransitions.Count);
     }
 
     private static EngineeringTraceSearchFacetsReadModel CreateFacets(

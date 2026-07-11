@@ -51,8 +51,7 @@ public sealed class PythonScriptDefinitionValidator : IProcessScriptDefinitionVa
 
         try
         {
-            var checker = new PythonSyntaxChecker();
-            var errors = checker
+            var errors = PythonSyntaxChecker
                 .AnalyzeSyntaxErrors(node.ScriptSourceCode, $"{node.Id.Value}.py")
                 .Select(error => new ProcessScriptValidationIssue(
                     NormalizeCode(error.ErrorCode),

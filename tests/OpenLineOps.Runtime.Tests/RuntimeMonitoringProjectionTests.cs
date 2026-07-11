@@ -8,6 +8,7 @@ using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
@@ -432,8 +433,10 @@ public sealed class RuntimeMonitoringProjectionTests
                 nodes),
             new RuntimeSessionTraceMetadata(
                 productionRunId,
+                ProductionUnitId.New(),
                 "line-run-scope",
                 "operation-run-scope",
+                "operation-run-scope@0001",
                 1,
                 stationSystemId,
                 new ProductionUnitIdentity(
@@ -448,7 +451,8 @@ public sealed class RuntimeMonitoringProjectionTests
                 scope.ProjectId,
                 scope.ApplicationId,
                 scope.ProjectSnapshotId,
-                scope.TopologyId));
+                scope.TopologyId,
+                RuntimeTestReleaseIdentity.ResourceFences(stationSystemId)));
     }
 
     private static ExecutableRuntimeNode TargetNode(

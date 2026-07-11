@@ -7,7 +7,8 @@ public enum ResourceKind
     Station = 1,
     Slot = 2,
     Fixture = 3,
-    Device = 4
+    Device = 4,
+    SlotGroup = 5
 }
 
 public sealed record ResourceRequirement
@@ -21,6 +22,17 @@ public sealed record ResourceRequirement
 
         Kind = kind;
         ResourceId = Required(resourceId, nameof(resourceId));
+        if (kind == ResourceKind.Slot)
+        {
+            var segments = ResourceId.Split('/', StringSplitOptions.None);
+            if (segments.Length != 3
+                || segments.Any(static segment => string.IsNullOrWhiteSpace(segment)))
+            {
+                throw new ArgumentException(
+                    "Slot resource id must be the canonical Line/Station/Slot address.",
+                    nameof(resourceId));
+            }
+        }
     }
 
     public ResourceKind Kind { get; }
@@ -86,4 +98,40 @@ public sealed record ResourceLease
     public DateTimeOffset AcquiredAtUtc { get; }
 
     public DateTimeOffset ExpiresAtUtc { get; }
+}
+
+public sealed record ResourceLeaseFenceEvidence
+{
+    public ResourceLeaseFenceEvidence(
+        ResourceRequirement resource,
+        long fencingToken,
+        DateTimeOffset expiresAtUtc)
+    {
+        Resource = resource ?? throw new ArgumentNullException(nameof(resource));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fencingToken);
+        if (expiresAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Resource lease fence expiry must use UTC offset zero.",
+                nameof(expiresAtUtc));
+        }
+
+        FencingToken = fencingToken;
+        ExpiresAtUtc = expiresAtUtc;
+    }
+
+    public ResourceRequirement Resource { get; }
+
+    public long FencingToken { get; }
+
+    public DateTimeOffset ExpiresAtUtc { get; }
+
+    public static ResourceLeaseFenceEvidence FromLease(ResourceLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        return new ResourceLeaseFenceEvidence(
+            lease.Resource,
+            lease.FencingToken,
+            lease.ExpiresAtUtc);
+    }
 }

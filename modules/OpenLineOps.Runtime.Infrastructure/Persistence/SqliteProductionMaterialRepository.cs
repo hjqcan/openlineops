@@ -26,6 +26,7 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(productionUnit);
+        ProductionMaterialRegistrationGuard.RequireInitial(productionUnit);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         var document = JsonSerializer.Serialize(
             ProductionMaterialSnapshotMapper.ToSnapshot(productionUnit),
@@ -105,6 +106,7 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(carrier);
+        ProductionMaterialRegistrationGuard.RequireInitial(carrier);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         var document = JsonSerializer.Serialize(
             ProductionMaterialSnapshotMapper.ToSnapshot(carrier),
@@ -139,6 +141,7 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(slot);
+        ProductionMaterialRegistrationGuard.RequireInitial(slot);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         var document = JsonSerializer.Serialize(
             ProductionMaterialSnapshotMapper.ToSnapshot(slot),
@@ -183,7 +186,9 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
             JsonOptions);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO material_genealogy_links (
                 link_id,
@@ -207,7 +212,21 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         command.Parameters.AddWithValue("$relationship", link.Relationship);
         command.Parameters.AddWithValue("$document_json", document);
         command.Parameters.AddWithValue("$linked_at_utc", FormatTimestamp(link.LinkedAtUtc));
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (!added)
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return false;
+        }
+
+        await InsertTimelineAsync(
+                connection,
+                transaction,
+                ProductionMaterialTimelineEntry.FromGenealogy(link),
+                cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     public async ValueTask<ProductionMaterialPersistenceEntry<ProductionUnit>?>
@@ -334,6 +353,30 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         return units;
     }
 
+    public async ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>
+        ListCarriersAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT document_json, revision
+            FROM carriers
+            ORDER BY updated_at_utc, carrier_id;
+            """;
+        var carriers = new List<ProductionMaterialPersistenceEntry<Carrier>>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            carriers.Add(new ProductionMaterialPersistenceEntry<Carrier>(
+                DeserializeCarrier(reader.GetString(0)),
+                reader.GetInt64(1)));
+        }
+
+        return carriers;
+    }
+
     public async ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<SlotOccupancy>>>
         ListSlotsAsync(
             string? lineId = null,
@@ -396,6 +439,57 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         return links;
     }
 
+    public async ValueTask<IReadOnlyCollection<ProductionMaterialTimelineEntry>> ListTimelineAsync(
+        ProductionMaterialTimelineQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var selectors = new List<string>();
+        if (query.ProductionUnitId is { } productionUnitId)
+        {
+            selectors.Add("(production_unit_id = $production_unit_id OR genealogy_parent_unit_id = $production_unit_id OR genealogy_child_unit_id = $production_unit_id)");
+            command.Parameters.AddWithValue(
+                "$production_unit_id",
+                productionUnitId.Value.ToString("D"));
+        }
+
+        if (query.ProductionRunId is { } productionRunId)
+        {
+            selectors.Add("production_run_id = $production_run_id");
+            command.Parameters.AddWithValue("$production_run_id", productionRunId.Value.ToString("D"));
+        }
+
+        if (query.CarrierId is { } carrierId)
+        {
+            selectors.Add("carrier_id = $carrier_id");
+            command.Parameters.AddWithValue("$carrier_id", carrierId.Value);
+        }
+
+        var through = query.ThroughUtc is null ? string.Empty : " AND occurred_at_utc <= $through_utc";
+        if (query.ThroughUtc is { } throughUtc)
+        {
+            command.Parameters.AddWithValue("$through_utc", FormatTimestamp(throughUtc));
+        }
+
+        command.CommandText = "SELECT document_json FROM production_material_timeline WHERE ("
+            + string.Join(" OR ", selectors)
+            + ")"
+            + through
+            + " ORDER BY occurred_at_utc, evidence_id;";
+        var result = new List<ProductionMaterialTimelineEntry>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(DeserializeTimeline(reader.GetString(0)));
+        }
+
+        return result;
+    }
+
     public async ValueTask CommitAsync(
         ProductionMaterialCommit commit,
         CancellationToken cancellationToken = default)
@@ -404,9 +498,7 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = (SqliteTransaction)await connection
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
 
         foreach (var update in commit.ProductionUnits)
         {
@@ -423,6 +515,12 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         foreach (var update in commit.Slots)
         {
             await UpdateSlotAsync(connection, transaction, update, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        foreach (var evidence in commit.Timeline)
+        {
+            await InsertTimelineAsync(connection, transaction, evidence, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -473,6 +571,61 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
                     cancellationToken)
                 .ConfigureAwait(false);
         }
+    }
+
+    private static async ValueTask InsertTimelineAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionMaterialTimelineEntry evidence,
+        CancellationToken cancellationToken)
+    {
+        var document = JsonSerializer.Serialize(
+            ProductionMaterialSnapshotMapper.ToSnapshot(evidence),
+            JsonOptions);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO production_material_timeline (
+                evidence_id,
+                kind,
+                production_run_id,
+                production_unit_id,
+                carrier_id,
+                genealogy_parent_unit_id,
+                genealogy_child_unit_id,
+                document_json,
+                occurred_at_utc)
+            VALUES (
+                $evidence_id,
+                $kind,
+                $production_run_id,
+                $production_unit_id,
+                $carrier_id,
+                $genealogy_parent_unit_id,
+                $genealogy_child_unit_id,
+                $document_json,
+                $occurred_at_utc);
+            """;
+        command.Parameters.AddWithValue("$evidence_id", evidence.EvidenceId.ToString("D"));
+        command.Parameters.AddWithValue("$kind", evidence.Kind.ToString());
+        command.Parameters.AddWithValue(
+            "$production_run_id",
+            (object?)evidence.ProductionRunId?.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$production_unit_id",
+            (object?)evidence.ProductionUnitId?.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$carrier_id",
+            (object?)evidence.CarrierId?.Value ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$genealogy_parent_unit_id",
+            (object?)evidence.Genealogy?.ParentUnitId.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$genealogy_child_unit_id",
+            (object?)evidence.Genealogy?.ChildUnitId.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue("$document_json", document);
+        command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(evidence.OccurredAtUtc));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async ValueTask UpdateCarrierAsync(
@@ -639,6 +792,29 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
 
                 CREATE INDEX IF NOT EXISTS ix_material_genealogy_child
                     ON material_genealogy_links(child_unit_id, linked_at_utc);
+
+                CREATE TABLE IF NOT EXISTS production_material_timeline (
+                    evidence_id TEXT NOT NULL PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    production_run_id TEXT NULL,
+                    production_unit_id TEXT NULL,
+                    carrier_id TEXT NULL,
+                    genealogy_parent_unit_id TEXT NULL,
+                    genealogy_child_unit_id TEXT NULL,
+                    document_json TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_unit
+                    ON production_material_timeline(production_unit_id, occurred_at_utc, evidence_id);
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_run
+                    ON production_material_timeline(production_run_id, occurred_at_utc, evidence_id);
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_carrier
+                    ON production_material_timeline(carrier_id, occurred_at_utc, evidence_id);
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_genealogy_parent
+                    ON production_material_timeline(genealogy_parent_unit_id, occurred_at_utc, evidence_id);
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_genealogy_child
+                    ON production_material_timeline(genealogy_child_unit_id, occurred_at_utc, evidence_id);
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
@@ -752,6 +928,15 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
     {
         var snapshot = JsonSerializer.Deserialize<PersistedMaterialGenealogyLink>(document, JsonOptions)
             ?? throw new InvalidDataException("Persisted Material genealogy document is empty.");
+        return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
+    }
+
+    private static ProductionMaterialTimelineEntry DeserializeTimeline(string document)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedProductionMaterialTimelineEntry>(
+                document,
+                JsonOptions)
+            ?? throw new InvalidDataException("Persisted Production Material evidence is empty.");
         return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
     }
 

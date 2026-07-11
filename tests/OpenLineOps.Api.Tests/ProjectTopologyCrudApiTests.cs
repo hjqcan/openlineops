@@ -44,7 +44,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
             Assert.Equal(HttpStatusCode.Created, createTopology.StatusCode);
             await AddSystemAsync(client, topologyPath, "Station.Main", null, "Station", "Primary Station");
             await AddSystemAsync(client, topologyPath, "System.Child", "Station.Main", "System", "Disposable Child");
-            using var addGroup = await client.PostAsJsonAsync(
+            using var addGroup = await client.PostEditorAsync(
+                topologyPath,
                 $"{topologyPath}/slot-groups",
                 new
                 {
@@ -76,11 +77,13 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
             await AddElementAsync(client, layoutPath, "slot.one.shape", "SlotShape", "Slot", "Slot.One", "group.region", 10, 42, 28, 26);
             await AddElementAsync(client, layoutPath, "slot.two.shape", "SlotShape", "Slot", "Slot.Two", "group.region", 48, 42, 28, 26);
 
-            using var unknownField = await client.PatchAsJsonAsync(
+            using var unknownField = await client.PatchEditorAsync(
+                topologyPath,
                 $"{topologyPath}/systems/System.Child",
                 new { displayName = "Rejected", unsupported = true });
             Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
-            using var rename = await client.PatchAsJsonAsync(
+            using var rename = await client.PatchEditorAsync(
+                topologyPath,
                 $"{topologyPath}/systems/System.Child",
                 new
                 {
@@ -95,22 +98,29 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
                 system => system.GetProperty("systemId").GetString() == "System.Child");
             Assert.Equal("Vision Controller", renamedSystem.GetProperty("displayName").GetString());
 
-            using var capacityBelowCount = await client.PatchAsJsonAsync(
+            using var capacityBelowCount = await client.PatchEditorAsync(
+                topologyPath,
                 $"{topologyPath}/slot-groups/Group.Main",
                 new { capacity = 1 });
             Assert.Equal(HttpStatusCode.Conflict, capacityBelowCount.StatusCode);
-            using var caseDistinctAddress = await client.PatchAsJsonAsync(
+            using var caseDistinctAddress = await client.PatchEditorAsync(
+                topologyPath,
                 $"{topologyPath}/slots/Slot.Two",
                 new { address = "a1" });
             Assert.Equal(HttpStatusCode.OK, caseDistinctAddress.StatusCode);
-            using var duplicateAddress = await client.PatchAsJsonAsync(
+            using var duplicateAddress = await client.PatchEditorAsync(
+                topologyPath,
                 $"{topologyPath}/slots/Slot.Two",
                 new { address = "A1" });
             Assert.Equal(HttpStatusCode.Conflict, duplicateAddress.StatusCode);
 
-            using var wrongCaseDelete = await client.DeleteAsync($"{topologyPath}/systems/system.child");
+            using var wrongCaseDelete = await client.DeleteEditorAsync(
+                topologyPath,
+                $"{topologyPath}/systems/system.child");
             Assert.Equal(HttpStatusCode.NotFound, wrongCaseDelete.StatusCode);
-            using var deleteChild = await client.DeleteAsync($"{topologyPath}/systems/System.Child");
+            using var deleteChild = await client.DeleteEditorAsync(
+                topologyPath,
+                $"{topologyPath}/systems/System.Child");
             using var deleteChildBody = await ReadJsonAsync(deleteChild);
             Assert.Equal(HttpStatusCode.OK, deleteChild.StatusCode);
             Assert.Equal(1, deleteChildBody.RootElement.GetProperty("updatedLayoutCount").GetInt32());
@@ -120,7 +130,9 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
                 deleteChildBody.RootElement.GetProperty("publicationImpact").GetString(),
                 StringComparison.Ordinal);
 
-            using var deleteGroup = await client.DeleteAsync($"{topologyPath}/slot-groups/Group.Main");
+            using var deleteGroup = await client.DeleteEditorAsync(
+                topologyPath,
+                $"{topologyPath}/slot-groups/Group.Main");
             using var deleteGroupBody = await ReadJsonAsync(deleteGroup);
             Assert.Equal(HttpStatusCode.OK, deleteGroup.StatusCode);
             Assert.Equal(3, deleteGroupBody.RootElement.GetProperty("removedLayoutElementCount").GetInt32());
@@ -163,7 +175,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
         string kind,
         string displayName)
     {
-        using var response = await client.PostAsJsonAsync(
+        using var response = await client.PostEditorAsync(
+            topologyPath,
             $"{topologyPath}/systems",
             new
             {
@@ -186,7 +199,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
         string address,
         string displayName)
     {
-        using var response = await client.PostAsJsonAsync(
+        using var response = await client.PostEditorAsync(
+            topologyPath,
             $"{topologyPath}/slots",
             new
             {
@@ -195,7 +209,7 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
                 parentSystemId = "Station.Main",
                 address,
                 displayName,
-                materialKind = "Dut",
+                materialKind = "ProductionUnit",
                 isEnabled = true
             });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -214,7 +228,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
         double width,
         double height)
     {
-        using var response = await client.PostAsJsonAsync(
+        using var response = await client.PostEditorAsync(
+            layoutPath,
             $"{layoutPath}/elements",
             new
             {

@@ -30,6 +30,13 @@ public sealed record AddCapabilityContractRequest(
 
 public sealed record AddDriverBindingRequest(
     string BindingId,
+    string OwnerSystemId,
+    string CapabilityId,
+    string ProviderKind,
+    string ProviderKey);
+
+public sealed record UpdateDriverBindingRequest(
+    string OwnerSystemId,
     string CapabilityId,
     string ProviderKind,
     string ProviderKey);

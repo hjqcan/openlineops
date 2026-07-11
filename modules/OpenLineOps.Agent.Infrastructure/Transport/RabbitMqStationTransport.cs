@@ -1,6 +1,3 @@
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using RabbitMQ.Client;
@@ -23,21 +20,19 @@ public sealed class RabbitMqStationTransport :
     IStationAgentMessagePublisher,
     IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
-    };
-
     private readonly RabbitMqStationTransportOptions _options;
     private readonly ConnectionFactory _factory;
+    private readonly IStationAgentConfirmedPublicationTransport? _publicationTransport;
+    private readonly StationJobDeliveryProcessor _deliveryProcessor;
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _publishGate = new(1, 1);
     private IConnection? _connection;
     private IChannel? _publisherChannel;
     private IChannel? _receiverChannel;
 
-    public RabbitMqStationTransport(RabbitMqStationTransportOptions options)
+    public RabbitMqStationTransport(
+        RabbitMqStationTransportOptions options,
+        IStationAgentConfirmedPublicationTransport? publicationTransport = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.BrokerUri);
@@ -45,6 +40,13 @@ public sealed class RabbitMqStationTransport :
         _ = Required(options.StationId, nameof(options.StationId));
         _ = Required(options.JobExchange, nameof(options.JobExchange));
         _ = Required(options.EventExchange, nameof(options.EventExchange));
+        if (options.BrokerUri.Scheme is not ("amqp" or "amqps"))
+        {
+            throw new ArgumentException(
+                "Station Agent RabbitMQ BrokerUri must use amqp or amqps.",
+                nameof(options));
+        }
+
         if (options.PrefetchCount == 0
             || options.MaximumConcurrentJobs == 0
             || options.MaximumConcurrentJobs > options.PrefetchCount)
@@ -63,6 +65,8 @@ public sealed class RabbitMqStationTransport :
         }
 
         _options = options;
+        _publicationTransport = publicationTransport;
+        _deliveryProcessor = new StationJobDeliveryProcessor(options);
         _factory = new ConnectionFactory
         {
             Uri = options.BrokerUri,
@@ -78,10 +82,12 @@ public sealed class RabbitMqStationTransport :
         string payloadJson,
         CancellationToken cancellationToken = default)
     {
-        _ = Required(kind, nameof(kind));
-        _ = Required(payloadJson, nameof(payloadJson));
-        using (JsonDocument.Parse(payloadJson))
+        var publication = StationAgentEventPublicationFactory.Create(_options, kind, payloadJson);
+        if (_publicationTransport is not null)
         {
+            await _publicationTransport.PublishAsync(publication, cancellationToken)
+                .ConfigureAwait(false);
+            return;
         }
 
         await _publishGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -93,17 +99,27 @@ public sealed class RabbitMqStationTransport :
                 Persistent = true,
                 ContentType = "application/json",
                 ContentEncoding = "utf-8",
-                Type = kind,
-                AppId = _options.AgentId
+                Type = publication.Type,
+                AppId = publication.AppId,
+                MessageId = publication.MessageId.ToString("D"),
+                CorrelationId = publication.CorrelationId.ToString("D")
             };
-            await channel.BasicPublishAsync(
-                    _options.EventExchange,
-                    $"station.{_options.StationId}.{kind}",
-                    mandatory: true,
-                    properties,
-                    Encoding.UTF8.GetBytes(payloadJson),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                await channel.BasicPublishAsync(
+                        publication.Exchange,
+                        publication.RoutingKey,
+                        mandatory: true,
+                        properties,
+                        publication.Body,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                await InvalidatePublisherChannelAsync().ConfigureAwait(false);
+                throw;
+            }
         }
         finally
         {
@@ -113,64 +129,22 @@ public sealed class RabbitMqStationTransport :
 
     public async Task RunAsync(
         Func<StationJobRequested, CancellationToken, ValueTask> handler,
+        Func<ResourceLeaseChanged, CancellationToken, ValueTask> resourceLeaseHandler,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(handler);
+        ArgumentNullException.ThrowIfNull(resourceLeaseHandler);
         var channel = await GetReceiverChannelAsync(cancellationToken).ConfigureAwait(false);
         var queueName = QueueName();
+        var settlement = new RabbitMqSettlement(channel);
         var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += async (_, delivery) =>
-        {
-            try
-            {
-                if (!string.Equals(
-                        delivery.BasicProperties.ContentType,
-                        "application/json",
-                        StringComparison.Ordinal))
-                {
-                    throw new InvalidDataException("Station job message content type must be application/json.");
-                }
-
-                var request = JsonSerializer.Deserialize<StationJobRequested>(
-                    delivery.Body.Span,
-                    JsonOptions)
-                    ?? throw new InvalidDataException("Station job message is null.");
-                await handler(request, cancellationToken).ConfigureAwait(false);
-                await channel.BasicAckAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is JsonException
-                                               or InvalidDataException
-                                               or ArgumentException)
-            {
-                await channel.BasicRejectAsync(
-                        delivery.DeliveryTag,
-                        requeue: false,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                await channel.BasicNackAsync(
-                        delivery.DeliveryTag,
-                        multiple: false,
-                        requeue: true,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-        };
+        consumer.ReceivedAsync += (_, delivery) => _deliveryProcessor.ProcessAsync(
+                ToDelivery(delivery),
+                handler,
+                resourceLeaseHandler,
+                settlement,
+                cancellationToken)
+            .AsTask();
 
         await channel.BasicConsumeAsync(
                 queueName,
@@ -233,6 +207,15 @@ public sealed class RabbitMqStationTransport :
         return _publisherChannel;
     }
 
+    private async ValueTask InvalidatePublisherChannelAsync()
+    {
+        var channel = Interlocked.Exchange(ref _publisherChannel, null);
+        if (channel is not null)
+        {
+            await channel.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     private async ValueTask<IChannel> GetReceiverChannelAsync(CancellationToken cancellationToken)
     {
         var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -272,6 +255,14 @@ public sealed class RabbitMqStationTransport :
                 queueName,
                 _options.JobExchange,
                 $"station.{_options.StationId}",
+                arguments: null,
+                noWait: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await _receiverChannel.QueueBindAsync(
+                queueName,
+                _options.JobExchange,
+                $"station.{_options.StationId}.resource-lease-changed",
                 arguments: null,
                 noWait: false,
                 cancellationToken)
@@ -316,6 +307,37 @@ public sealed class RabbitMqStationTransport :
     }
 
     private string QueueName() => $"openlineops.station.{_options.StationId}.jobs";
+
+    private static StationTransportDelivery ToDelivery(BasicDeliverEventArgs delivery) => new(
+        delivery.DeliveryTag,
+        delivery.BasicProperties.ContentType,
+        delivery.BasicProperties.ContentEncoding,
+        delivery.BasicProperties.Type,
+        delivery.BasicProperties.AppId,
+        delivery.BasicProperties.MessageId,
+        delivery.BasicProperties.CorrelationId,
+        delivery.RoutingKey,
+        delivery.Redelivered,
+        delivery.Body);
+
+    private sealed class RabbitMqSettlement(IChannel channel) : IStationTransportSettlement
+    {
+        public ValueTask AcknowledgeAsync(
+            ulong deliveryTag,
+            CancellationToken cancellationToken = default) => channel.BasicAckAsync(
+                deliveryTag,
+                multiple: false,
+                cancellationToken);
+
+        public ValueTask RejectAsync(
+            ulong deliveryTag,
+            bool requeue,
+            CancellationToken cancellationToken = default) => channel.BasicNackAsync(
+                deliveryTag,
+                multiple: false,
+                requeue,
+                cancellationToken);
+    }
 
     private static string Required(string value, string parameterName) =>
         string.IsNullOrWhiteSpace(value)

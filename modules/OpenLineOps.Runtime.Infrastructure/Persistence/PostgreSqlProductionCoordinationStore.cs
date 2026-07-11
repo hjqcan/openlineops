@@ -1,11 +1,15 @@
 using System.Globalization;
 using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Occupancy;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
@@ -39,10 +43,12 @@ public sealed class PostgreSqlProductionCoordinationStore :
     public async ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
+        ProductionRunAdmission admission,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentNullException.ThrowIfNull(executionPlan);
+        ArgumentNullException.ThrowIfNull(admission);
         if (run.ExecutionStatus != ExecutionStatus.Pending || executionPlan.RunId != run.Id)
         {
             throw new ArgumentException(
@@ -51,13 +57,28 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await TryReserveProductionUnitAsync(
+                connection,
+                transaction,
+                run,
+                admission,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return false;
+        }
+
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_production_runs (
-                run_id, document_json, execution_plan_json, revision, execution_status,
+                run_id, production_unit_id, document_json, execution_plan_json, revision, execution_status,
                 production_line_definition_id, last_transition_at_utc)
             VALUES (
-                @run_id, @document_json::jsonb, @execution_plan_json::jsonb, 0,
+                @run_id, @production_unit_id, @document_json::jsonb, @execution_plan_json::jsonb, 0,
                 @execution_status, @line_id, @last_transition_at_utc)
             ON CONFLICT (run_id) DO NOTHING;
             """;
@@ -67,7 +88,17 @@ public sealed class PostgreSqlProductionCoordinationStore :
             JsonSerializer.Serialize(
                 ProductionRunExecutionPlanSnapshotMapper.ToSnapshot(executionPlan),
                 JsonOptions));
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (added)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return added;
     }
 
     public async ValueTask<long> SaveAsync(
@@ -101,6 +132,39 @@ public sealed class PostgreSqlProductionCoordinationStore :
             {
                 throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
             }
+        }
+
+        var productionUnitSynchronization = await SynchronizeProductionUnitAsync(
+                connection,
+                transaction,
+                run,
+                nextRevision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await SynchronizeCompletedSlotsAsync(
+                connection,
+                transaction,
+                run,
+                productionUnitSynchronization.Unit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (productionUnitSynchronization.PreviousDisposition
+            != productionUnitSynchronization.Unit.Disposition)
+        {
+            await InsertTimelineAsync(
+                    connection,
+                    transaction,
+                    ProductionMaterialTimelineEntry.Disposition(
+                        Guid.NewGuid(),
+                        productionUnitSynchronization.Unit.Id,
+                        run.Id,
+                        productionUnitSynchronization.PreviousDisposition,
+                        productionUnitSynchronization.Unit.Disposition,
+                        productionUnitSynchronization.Unit.DispositionReason,
+                        run.ActorId,
+                        productionUnitSynchronization.Unit.LastDispositionTransitionAtUtc),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         if (run.IsTerminal)
@@ -248,6 +312,37 @@ public sealed class PostgreSqlProductionCoordinationStore :
         }
     }
 
+    public async ValueTask<IReadOnlyCollection<ResourceLease>> ListAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT resource_kind, resource_id, run_id, operation_run_id,
+                   fencing_token, acquired_at_utc, expires_at_utc
+            FROM olo_resource_leases
+            ORDER BY resource_kind, resource_id;
+            """;
+        var leases = new List<ResourceLease>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            leases.Add(new ResourceLease(
+                new ResourceRequirement(
+                    ParseResourceKind(reader.GetString(0)),
+                    reader.GetString(1)),
+                new ProductionRunId(reader.GetGuid(2)),
+                reader.GetString(3),
+                reader.GetInt64(4),
+                reader.GetFieldValue<DateTimeOffset>(5),
+                reader.GetFieldValue<DateTimeOffset>(6)));
+        }
+
+        return leases;
+    }
+
     public async ValueTask<IReadOnlyCollection<ResourceLease>?> TryAcquireAsync(
         ProductionRunId runId,
         string operationRunId,
@@ -256,6 +351,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
+        ArgumentNullException.ThrowIfNull(resources);
         var requested = resources.Distinct().OrderBy(static resource => resource.CanonicalKey).ToArray();
         if (requested.Length == 0 || requested.Length != resources.Count || duration <= TimeSpan.Zero)
         {
@@ -266,6 +363,17 @@ public sealed class PostgreSqlProductionCoordinationStore :
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
+        await using (var ownerLock = connection.CreateCommand())
+        {
+            ownerLock.Transaction = transaction;
+            ownerLock.CommandText =
+                "SELECT pg_advisory_xact_lock(hashtextextended(@owner_identity, 0));";
+            ownerLock.Parameters.AddWithValue(
+                "owner_identity",
+                $"{runId.Value:D}/{operationRunId}");
+            _ = await ownerLock.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         foreach (var resource in requested)
         {
             // The fencing row is the permanent serialization point for a physical resource.
@@ -317,6 +425,30 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
                 return null;
             }
+        }
+
+        var activeOwned = await ListActiveOwnerLeasesAsync(
+                connection,
+                transaction,
+                runId,
+                operationRunId,
+                acquiredAtUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (activeOwned.Count > 0)
+        {
+            var exactResources = activeOwned
+                .Select(static lease => lease.Resource)
+                .ToHashSet()
+                .SetEquals(requested);
+            if (!exactResources)
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                return null;
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return activeOwned;
         }
 
         var leases = new List<ResourceLease>(requested.Length);
@@ -376,6 +508,128 @@ public sealed class PostgreSqlProductionCoordinationStore :
         return leases;
     }
 
+    private static async ValueTask<IReadOnlyCollection<ResourceLease>> ListActiveOwnerLeasesAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionRunId runId,
+        string operationRunId,
+        DateTimeOffset acquiredAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT resource_kind, resource_id, fencing_token, acquired_at_utc, expires_at_utc
+            FROM olo_resource_leases
+            WHERE run_id = @run_id
+              AND operation_run_id = @operation_run_id
+              AND expires_at_utc > @acquired_at_utc
+            ORDER BY resource_kind, resource_id
+            FOR UPDATE;
+            """;
+        command.Parameters.AddWithValue("run_id", runId.Value);
+        command.Parameters.AddWithValue("operation_run_id", operationRunId);
+        command.Parameters.AddWithValue("acquired_at_utc", acquiredAtUtc);
+        var leases = new List<ResourceLease>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            leases.Add(new ResourceLease(
+                new ResourceRequirement(
+                    ParseResourceKind(reader.GetString(0)),
+                    reader.GetString(1)),
+                runId,
+                operationRunId,
+                reader.GetInt64(2),
+                reader.GetFieldValue<DateTimeOffset>(3),
+                reader.GetFieldValue<DateTimeOffset>(4)));
+        }
+
+        return leases;
+    }
+
+    public async ValueTask<ResourceLeaseFenceValidationResult> ValidateCurrentAsync(
+        ProductionRunId runId,
+        string operationRunId,
+        IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
+        DateTimeOffset validatedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
+        ArgumentNullException.ThrowIfNull(evidence);
+        if (validatedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Resource lease validation time must be UTC.", nameof(validatedAtUtc));
+        }
+
+        var supplied = evidence
+            .OrderBy(static item => item.Resource.CanonicalKey, StringComparer.Ordinal)
+            .ToArray();
+        if (supplied.Length == 0
+            || supplied.Any(static item => item is null)
+            || supplied.Select(static item => item.Resource).Distinct().Count() != supplied.Length)
+        {
+            throw new ArgumentException(
+                "Resource lease validation requires non-empty unique evidence.",
+                nameof(evidence));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var item in supplied)
+        {
+            await using (var fenceCommand = connection.CreateCommand())
+            {
+                fenceCommand.Transaction = transaction;
+                fenceCommand.CommandText = """
+                    SELECT fencing_token
+                    FROM olo_resource_fencing_tokens
+                    WHERE resource_kind = @kind AND resource_id = @resource_id
+                    FOR SHARE;
+                    """;
+                AddResourceParameters(fenceCommand, item.Resource);
+                var currentToken = await fenceCommand.ExecuteScalarAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (currentToken is null
+                    || Convert.ToInt64(currentToken, CultureInfo.InvariantCulture) != item.FencingToken)
+                {
+                    await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                    return ResourceLeaseFenceValidationResult.Reject(
+                        $"Resource lease fence {item.Resource.CanonicalKey}/{item.FencingToken} is stale.");
+                }
+            }
+
+            await using var leaseCommand = connection.CreateCommand();
+            leaseCommand.Transaction = transaction;
+            leaseCommand.CommandText = """
+                SELECT run_id, operation_run_id, fencing_token, expires_at_utc
+                FROM olo_resource_leases
+                WHERE resource_kind = @kind AND resource_id = @resource_id
+                FOR SHARE;
+                """;
+            AddResourceParameters(leaseCommand, item.Resource);
+            await using var reader = await leaseCommand.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var valid = await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+                && reader.GetGuid(0) == runId.Value
+                && string.Equals(reader.GetString(1), operationRunId, StringComparison.Ordinal)
+                && reader.GetInt64(2) == item.FencingToken
+                && reader.GetFieldValue<DateTimeOffset>(3) == item.ExpiresAtUtc
+                && item.ExpiresAtUtc > validatedAtUtc;
+            if (!valid)
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                return ResourceLeaseFenceValidationResult.Reject(
+                    $"Resource lease fence {item.Resource.CanonicalKey}/{item.FencingToken} is missing, expired, or owned by another Operation Run.");
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return ResourceLeaseFenceValidationResult.Accept();
+    }
+
     public ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
@@ -398,35 +652,43 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
     public async ValueTask<bool> TryEnqueueAsync(
         StationJobRequested request,
+        IReadOnlyCollection<ResourceLeaseChanged> resourceLeaseChanges,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(resourceLeaseChanges);
+        var orderedChanges = ValidateDispatch(request, resourceLeaseChanges);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
-        var payload = JsonSerializer.Serialize(request, JsonOptions);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO olo_station_job_outbox (
-                message_id, idempotency_key, payload_json, created_at_utc,
-                attempt_count, last_error, published_at_utc)
-            VALUES (@message_id, @idempotency_key, @payload_json::jsonb, @created_at_utc, 0, NULL, NULL)
-            ON CONFLICT (idempotency_key) DO NOTHING;
-            """;
-        command.Parameters.AddWithValue("message_id", request.MessageId);
-        command.Parameters.AddWithValue("idempotency_key", request.IdempotencyKey);
-        command.Parameters.AddWithValue("payload_json", payload);
-        command.Parameters.AddWithValue("created_at_utc", request.RequestedAtUtc);
-        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
-        if (!added)
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        for (var sequence = 0; sequence < orderedChanges.Length; sequence++)
         {
-            await EnsureSameStationJobAsync(
+            var change = orderedChanges[sequence];
+            _ = await InsertStationDispatchOutboxAsync(
                 connection,
-                request.IdempotencyKey,
-                payload,
+                transaction,
+                change.MessageId,
+                change.IdempotencyKey,
+                nameof(ResourceLeaseChanged),
+                sequence,
+                JsonSerializer.Serialize(change, JsonOptions),
+                request.RequestedAtUtc,
                 cancellationToken).ConfigureAwait(false);
         }
 
-        return added;
+        var jobAdded = await InsertStationDispatchOutboxAsync(
+            connection,
+            transaction,
+            request.MessageId,
+            request.IdempotencyKey,
+            nameof(StationJobRequested),
+            orderedChanges.Length,
+            JsonSerializer.Serialize(request, JsonOptions),
+            request.RequestedAtUtc,
+            cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return jobAdded;
     }
 
     public async ValueTask<StationJobCompleted?> GetCompletionAsync(
@@ -548,10 +810,11 @@ public sealed class PostgreSqlProductionCoordinationStore :
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT message_id, idempotency_key, payload_json::text, attempt_count, created_at_utc
+            SELECT message_id, idempotency_key, kind, sequence, payload_json::text,
+                   attempt_count, created_at_utc
             FROM olo_station_job_outbox
             WHERE published_at_utc IS NULL
-            ORDER BY created_at_utc, message_id
+            ORDER BY created_at_utc, sequence, message_id
             LIMIT @maximum_count;
             """;
         command.Parameters.AddWithValue("maximum_count", maximumCount);
@@ -564,7 +827,9 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.GetInt32(3),
-                reader.GetFieldValue<DateTimeOffset>(4)));
+                reader.GetString(4),
+                reader.GetInt32(5),
+                reader.GetFieldValue<DateTimeOffset>(6)));
         }
 
         return items;
@@ -665,9 +930,10 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
             await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = PostgreSqlProductionMaterialRepository.SchemaSql + """
                 CREATE TABLE IF NOT EXISTS olo_production_runs (
                     run_id uuid PRIMARY KEY,
+                    production_unit_id uuid NOT NULL,
                     document_json jsonb NOT NULL,
                     execution_plan_json jsonb NOT NULL,
                     revision bigint NOT NULL,
@@ -677,6 +943,9 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 );
                 CREATE INDEX IF NOT EXISTS ix_olo_production_runs_active
                     ON olo_production_runs(execution_status, production_line_definition_id, last_transition_at_utc);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_olo_production_runs_active_unit
+                    ON olo_production_runs(production_unit_id)
+                    WHERE execution_status IN ('Pending', 'Running');
 
                 CREATE TABLE IF NOT EXISTS olo_production_terminal_outbox (
                     run_id uuid PRIMARY KEY REFERENCES olo_production_runs(run_id) ON DELETE CASCADE,
@@ -708,6 +977,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 CREATE TABLE IF NOT EXISTS olo_station_job_outbox (
                     message_id uuid PRIMARY KEY,
                     idempotency_key text NOT NULL UNIQUE,
+                    kind text NOT NULL,
+                    sequence integer NOT NULL,
                     payload_json jsonb NOT NULL,
                     created_at_utc timestamptz NOT NULL,
                     attempt_count integer NOT NULL,
@@ -747,11 +1018,11 @@ public sealed class PostgreSqlProductionCoordinationStore :
     {
         var expected = new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
-            ["olo_production_runs"] = ["run_id", "document_json", "execution_plan_json", "revision", "execution_status", "production_line_definition_id", "last_transition_at_utc"],
+            ["olo_production_runs"] = ["run_id", "production_unit_id", "document_json", "execution_plan_json", "revision", "execution_status", "production_line_definition_id", "last_transition_at_utc"],
             ["olo_production_terminal_outbox"] = ["run_id", "document_json", "occurred_at_utc", "attempt_count", "last_error"],
             ["olo_resource_fencing_tokens"] = ["resource_kind", "resource_id", "fencing_token"],
             ["olo_resource_leases"] = ["resource_kind", "resource_id", "run_id", "operation_run_id", "fencing_token", "acquired_at_utc", "expires_at_utc"],
-            ["olo_station_job_outbox"] = ["message_id", "idempotency_key", "payload_json", "created_at_utc", "attempt_count", "last_error", "published_at_utc"],
+            ["olo_station_job_outbox"] = ["message_id", "idempotency_key", "kind", "sequence", "payload_json", "created_at_utc", "attempt_count", "last_error", "published_at_utc"],
             ["olo_station_job_result_inbox"] = ["message_id", "idempotency_key", "payload_json", "received_at_utc"],
             ["olo_station_job_event_inbox"] = ["message_id", "job_id", "idempotency_key", "kind", "payload_json", "occurred_at_utc"]
         };
@@ -789,9 +1060,364 @@ public sealed class PostgreSqlProductionCoordinationStore :
         return connection;
     }
 
+    private static async ValueTask<bool> TryReserveProductionUnitAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionRun run,
+        ProductionRunAdmission admission,
+        CancellationToken cancellationToken)
+    {
+        await using (var existingRun = connection.CreateCommand())
+        {
+            existingRun.Transaction = transaction;
+            existingRun.CommandText = "SELECT 1 FROM olo_production_runs WHERE run_id = @run_id;";
+            existingRun.Parameters.AddWithValue("run_id", run.Id.Value);
+            if (await existingRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null)
+            {
+                return false;
+            }
+        }
+
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT document_json::text, revision
+            FROM olo_production_units
+            WHERE production_unit_id = @production_unit_id
+            FOR UPDATE;
+            """;
+        read.Parameters.AddWithValue("production_unit_id", run.ProductionUnitId.Value);
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        var unit = DeserializeProductionUnit(reader.GetString(0));
+        var unitRevision = reader.GetInt64(1);
+        await reader.DisposeAsync().ConfigureAwait(false);
+        if (unitRevision != admission.ExpectedRevision
+            || unit.ToSnapshot() != admission.ProductionUnit
+            || unit.Id != run.ProductionUnitId)
+        {
+            return false;
+        }
+
+        var result = unit.ReserveProductionRun(run.Id, run.CreatedAtUtc);
+        return result.Succeeded
+            && await UpdateProductionUnitAsync(
+                    connection,
+                    transaction,
+                    unit,
+                    unitRevision,
+                    cancellationToken)
+                .ConfigureAwait(false);
+    }
+
+    private static async ValueTask<ProductionUnitSynchronization> SynchronizeProductionUnitAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionRun run,
+        long runRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT document_json::text, revision
+            FROM olo_production_units
+            WHERE production_unit_id = @production_unit_id
+            FOR UPDATE;
+            """;
+        read.Parameters.AddWithValue("production_unit_id", run.ProductionUnitId.Value);
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                $"Production Unit {run.ProductionUnitId} disappeared during Production Run {run.Id}.");
+        }
+
+        var unit = DeserializeProductionUnit(reader.GetString(0));
+        var unitRevision = reader.GetInt64(1);
+        await reader.DisposeAsync().ConfigureAwait(false);
+        var previousDisposition = unit.Disposition;
+        var result = unit.SynchronizeProductionRun(
+            run.Id,
+            runRevision,
+            run.Disposition,
+            run.IsTerminal,
+            run.FailureReason,
+            run.LastTransitionAtUtc);
+        if (!result.Succeeded
+            || !await UpdateProductionUnitAsync(
+                    connection,
+                    transaction,
+                    unit,
+                    unitRevision,
+                    cancellationToken)
+                .ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                result.Succeeded
+                    ? $"Production Unit {unit.Id} changed during atomic run synchronization."
+                    : result.Message);
+        }
+
+        return new ProductionUnitSynchronization(unit, previousDisposition);
+    }
+
+    private static async ValueTask SynchronizeCompletedSlotsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionRun run,
+        ProductionUnit unit,
+        CancellationToken cancellationToken)
+    {
+        var expectedMaterial = unit.Location is
+        {
+            Kind: MaterialLocationKind.CarrierPosition,
+            CarrierId: { } carrierId
+        }
+            ? MaterialReference.ForCarrier(carrierId)
+            : MaterialReference.ForProductionUnit(unit.Id);
+        foreach (var completedSlot in ProductionRunSlotLifecycle.ResolveCompletedSlots(run))
+        {
+            if (await HasSlotCompletionEvidenceAsync(
+                    connection,
+                    transaction,
+                    run.Id,
+                    completedSlot,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await using var read = connection.CreateCommand();
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT document_json::text, revision
+                FROM olo_slot_occupancies
+                WHERE line_id = @line_id
+                  AND station_system_id = @station_system_id
+                  AND slot_id = @slot_id
+                FOR UPDATE;
+                """;
+            AddSlotIdentity(read, completedSlot.Address);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {completedSlot.Address} disappeared during run synchronization.");
+            }
+
+            var slot = DeserializeSlot(reader.GetString(0));
+            var revision = reader.GetInt64(1);
+            await reader.DisposeAsync().ConfigureAwait(false);
+            if (slot.Material != expectedMaterial)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} is bound to {slot.Material}, not {expectedMaterial}.");
+            }
+
+            if (slot.Status == SlotOccupancyStatus.Occupied)
+            {
+                continue;
+            }
+
+            if (slot.Status != SlotOccupancyStatus.Running)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} must be Running or idempotently Occupied, not {slot.Status}.");
+            }
+
+            var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
+            if (!completed.Succeeded)
+            {
+                throw new InvalidDataException(completed.Message);
+            }
+
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE olo_slot_occupancies
+                SET document_json = @document_json::jsonb,
+                    revision = @next_revision,
+                    status = @status,
+                    updated_at_utc = @updated_at_utc
+                WHERE line_id = @line_id
+                  AND station_system_id = @station_system_id
+                  AND slot_id = @slot_id
+                  AND revision = @expected_revision;
+                """;
+            update.Parameters.AddWithValue(
+                "document_json",
+                JsonSerializer.Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(slot), JsonOptions));
+            update.Parameters.AddWithValue("next_revision", checked(revision + 1));
+            update.Parameters.AddWithValue("status", slot.Status.ToString());
+            update.Parameters.AddWithValue("updated_at_utc", slot.LastTransitionAtUtc);
+            AddSlotIdentity(update, slot.Address);
+            update.Parameters.AddWithValue("expected_revision", revision);
+            if (await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidDataException(
+                    $"Resolved Slot {slot.Address} changed during atomic run synchronization.");
+            }
+
+            await InsertTimelineAsync(
+                    connection,
+                    transaction,
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        slot.Address,
+                        expectedMaterial,
+                        run.Id,
+                        SlotOccupancyStatus.Running,
+                        SlotOccupancyStatus.Occupied,
+                        run.ActorId,
+                        completedSlot.CompletedAtUtc),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask<bool> HasSlotCompletionEvidenceAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionRunId runId,
+        CompletedSlotOperation completedSlot,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT document_json::text
+            FROM olo_production_material_timeline
+            WHERE kind = @kind
+              AND production_run_id = @production_run_id
+              AND occurred_at_utc = @occurred_at_utc;
+            """;
+        command.Parameters.AddWithValue(
+            "kind",
+            ProductionMaterialEvidenceKind.SlotOccupancyTransition.ToString());
+        command.Parameters.AddWithValue("production_run_id", runId.Value);
+        command.Parameters.AddWithValue("occurred_at_utc", completedSlot.CompletedAtUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var snapshot = JsonSerializer.Deserialize<PersistedProductionMaterialTimelineEntry>(
+                reader.GetString(0),
+                JsonOptions)
+                ?? throw new InvalidDataException(
+                    "Persisted Slot completion evidence is empty.");
+            if (ProductionRunSlotLifecycle.IsCompletionEvidence(
+                    ProductionMaterialSnapshotMapper.ToAggregate(snapshot),
+                    runId,
+                    completedSlot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static async ValueTask InsertTimelineAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionMaterialTimelineEntry evidence,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO olo_production_material_timeline (
+                evidence_id, kind, production_run_id, production_unit_id, carrier_id,
+                genealogy_parent_unit_id, genealogy_child_unit_id, document_json, occurred_at_utc)
+            VALUES (
+                @evidence_id, @kind, @production_run_id, @production_unit_id, @carrier_id,
+                @genealogy_parent_unit_id, @genealogy_child_unit_id, @document_json::jsonb,
+                @occurred_at_utc);
+            """;
+        command.Parameters.AddWithValue("evidence_id", evidence.EvidenceId);
+        command.Parameters.AddWithValue("kind", evidence.Kind.ToString());
+        command.Parameters.Add("production_run_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.ProductionRunId?.Value ?? DBNull.Value;
+        command.Parameters.Add("production_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.ProductionUnitId?.Value ?? DBNull.Value;
+        command.Parameters.Add("carrier_id", NpgsqlDbType.Text).Value =
+            (object?)evidence.CarrierId?.Value ?? DBNull.Value;
+        command.Parameters.Add("genealogy_parent_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.Genealogy?.ParentUnitId.Value ?? DBNull.Value;
+        command.Parameters.Add("genealogy_child_unit_id", NpgsqlDbType.Uuid).Value =
+            (object?)evidence.Genealogy?.ChildUnitId.Value ?? DBNull.Value;
+        command.Parameters.AddWithValue(
+            "document_json",
+            JsonSerializer.Serialize(
+                ProductionMaterialSnapshotMapper.ToSnapshot(evidence),
+                JsonOptions));
+        command.Parameters.AddWithValue("occurred_at_utc", evidence.OccurredAtUtc);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<bool> UpdateProductionUnitAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        ProductionUnit unit,
+        long expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE olo_production_units
+            SET document_json = @document_json::jsonb,
+                revision = @next_revision,
+                disposition = @disposition,
+                updated_at_utc = @updated_at_utc
+            WHERE production_unit_id = @production_unit_id
+              AND revision = @expected_revision;
+            """;
+        update.Parameters.AddWithValue(
+            "document_json",
+            JsonSerializer.Serialize(ProductionMaterialSnapshotMapper.ToSnapshot(unit), JsonOptions));
+        update.Parameters.AddWithValue("next_revision", checked(expectedRevision + 1));
+        update.Parameters.AddWithValue("disposition", unit.Disposition.ToString());
+        update.Parameters.AddWithValue("updated_at_utc", unit.LastTransitionAtUtc);
+        update.Parameters.AddWithValue("production_unit_id", unit.Id.Value);
+        update.Parameters.AddWithValue("expected_revision", expectedRevision);
+        return await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
+
+    private static ProductionUnit DeserializeProductionUnit(string documentJson)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedProductionUnit>(documentJson, JsonOptions)
+            ?? throw new InvalidDataException("PostgreSQL Production Unit document is empty.");
+        return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
+    }
+
+    private static SlotOccupancy DeserializeSlot(string documentJson)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedSlotOccupancy>(documentJson, JsonOptions)
+            ?? throw new InvalidDataException("Persisted Slot occupancy document is empty.");
+        return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
+    }
+
+    private static void AddSlotIdentity(NpgsqlCommand command, SlotAddress address)
+    {
+        command.Parameters.AddWithValue("line_id", address.LineId);
+        command.Parameters.AddWithValue("station_system_id", address.StationSystemId);
+        command.Parameters.AddWithValue("slot_id", address.SlotId);
+    }
+
+    private sealed record ProductionUnitSynchronization(
+        ProductionUnit Unit,
+        ProductDisposition PreviousDisposition);
+
     private static void AddRunParameters(NpgsqlCommand command, ProductionRun run)
     {
         command.Parameters.AddWithValue("run_id", run.Id.Value);
+        command.Parameters.AddWithValue("production_unit_id", run.ProductionUnitId.Value);
         command.Parameters.AddWithValue(
             "document_json",
             JsonSerializer.Serialize(ProductionRunSnapshotMapper.ToSnapshot(run), JsonOptions));
@@ -805,6 +1431,14 @@ public sealed class PostgreSqlProductionCoordinationStore :
         command.Parameters.AddWithValue("kind", resource.Kind.ToString());
         command.Parameters.AddWithValue("resource_id", resource.ResourceId);
     }
+
+    private static ResourceKind ParseResourceKind(string value) =>
+        Enum.TryParse<ResourceKind>(value, ignoreCase: false, out var parsed)
+        && Enum.IsDefined(parsed)
+        && string.Equals(parsed.ToString(), value, StringComparison.Ordinal)
+            ? parsed
+            : throw new InvalidDataException(
+                $"Persisted resource kind '{value}' is not a canonical token.");
 
     private async ValueTask ExecuteOwnerLeaseAsync(
         string sql,
@@ -893,18 +1527,105 @@ public sealed class PostgreSqlProductionCoordinationStore :
         }
     }
 
-    private static async ValueTask EnsureSameStationJobAsync(
+    private static async ValueTask<bool> InsertStationDispatchOutboxAsync(
         NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid messageId,
         string idempotencyKey,
+        string kind,
+        int sequence,
         string payload,
-        CancellationToken cancellationToken) =>
-        await EnsureSamePayloadAsync(
-            connection,
-            "olo_station_job_outbox",
-            idempotencyKey,
-            payload,
-            "Station job",
-            cancellationToken).ConfigureAwait(false);
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO olo_station_job_outbox (
+                message_id, idempotency_key, kind, sequence, payload_json, created_at_utc,
+                attempt_count, last_error, published_at_utc)
+            VALUES (
+                @message_id, @idempotency_key, @kind, @sequence, @payload_json::jsonb,
+                @created_at_utc, 0, NULL, NULL)
+            ON CONFLICT (idempotency_key) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("message_id", messageId);
+        command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
+        command.Parameters.AddWithValue("kind", kind);
+        command.Parameters.AddWithValue("sequence", sequence);
+        command.Parameters.AddWithValue("payload_json", payload);
+        command.Parameters.AddWithValue("created_at_utc", createdAtUtc);
+        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (added)
+        {
+            return true;
+        }
+
+        await using var existingCommand = connection.CreateCommand();
+        existingCommand.Transaction = transaction;
+        existingCommand.CommandText = """
+            SELECT message_id, kind, sequence, payload_json::text
+            FROM olo_station_job_outbox
+            WHERE idempotency_key = @idempotency_key;
+            """;
+        existingCommand.Parameters.AddWithValue("idempotency_key", idempotencyKey);
+        await using var reader = await existingCommand.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                "Station dispatch idempotency conflict has no stored payload.");
+        }
+
+        if (reader.GetGuid(0) != messageId
+            || !string.Equals(reader.GetString(1), kind, StringComparison.Ordinal)
+            || reader.GetInt32(2) != sequence)
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch idempotency key '{idempotencyKey}' was reused with different identity.");
+        }
+
+        using var existingJson = JsonDocument.Parse(reader.GetString(3));
+        using var candidateJson = JsonDocument.Parse(payload);
+        if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch idempotency key '{idempotencyKey}' was reused with different evidence.");
+        }
+
+        return false;
+    }
+
+    private static ResourceLeaseChanged[] ValidateDispatch(
+        StationJobRequested request,
+        IReadOnlyCollection<ResourceLeaseChanged> changes)
+    {
+        var expected = request.ResourceFences
+            .OrderBy(static fence => fence.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static fence => fence.ResourceId, StringComparer.Ordinal)
+            .Select(fence => StationDispatchMessageIdentity.CreateLeaseGranted(request, fence))
+            .ToArray();
+        var supplied = changes
+            .OrderBy(static change => change.ResourceKind, StringComparer.Ordinal)
+            .ThenBy(static change => change.ResourceId, StringComparer.Ordinal)
+            .ToArray();
+        if (expected.Length != supplied.Length)
+        {
+            throw new InvalidDataException(
+                "Station dispatch resource lease changes do not match its fences.");
+        }
+
+        for (var index = 0; index < expected.Length; index++)
+        {
+            if (expected[index] != supplied[index])
+            {
+                throw new InvalidDataException(
+                    "Station dispatch resource lease change evidence is not canonical.");
+            }
+        }
+
+        return supplied;
+    }
 
     private static async ValueTask EnsureSameCompletionAsync(
         NpgsqlConnection connection,

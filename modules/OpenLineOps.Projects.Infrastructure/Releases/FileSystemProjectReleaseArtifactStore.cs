@@ -5,11 +5,14 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Projects.Infrastructure.Releases;
 
-public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtifactStore
+public sealed class FileSystemProjectReleaseArtifactStore :
+    IProjectReleaseArtifactStore,
+    IInstalledProjectReleaseReader
 {
     private const int FileBufferSize = 64 * 1024;
     private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
@@ -72,18 +75,20 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 sourceRootPath,
                 sourceApplicationRelativePath);
             var sourceTree = InspectFileTree(sourceApplicationPath);
+            var releaseSourceTree = FilterReleaseSourceTree(sourceTree, normalizedMetadata);
 
             Directory.CreateDirectory(stagedApplicationPath);
             var files = await CopySourceAsync(
                     sourceApplicationPath,
                     stagedApplicationPath,
                     sourceRootPath,
-                    sourceTree,
+                    releaseSourceTree,
                     cancellationToken)
                 .ConfigureAwait(false);
             await VerifySourceUnchangedAsync(
                     sourceApplicationPath,
                     sourceTree,
+                    releaseSourceTree,
                     files,
                     sourceApplicationRelativePath,
                     cancellationToken)
@@ -94,9 +99,9 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            var manifest = new ProjectReleaseArtifactManifest(
-                ProjectReleaseArtifactManifest.CurrentSchema,
-                ProjectReleaseArtifactManifest.CurrentSchemaVersion,
+            var manifest = new ProjectReleaseManifest(
+                ProjectReleaseManifest.RequiredSchema,
+                ProjectReleaseManifest.RequiredSchemaVersion,
                 normalizedSnapshotId,
                 scope.ProjectId,
                 scope.ApplicationId,
@@ -163,6 +168,61 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 releaseRootPath,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    async ValueTask<OpenedProjectReleaseArtifact> IInstalledProjectReleaseReader.OpenAsync(
+        string releaseRootPath,
+        string expectedProjectId,
+        string expectedApplicationId,
+        string expectedSnapshotId,
+        CancellationToken cancellationToken)
+    {
+        var root = Path.GetFullPath(RequireValue(releaseRootPath, nameof(releaseRootPath)));
+        if (!Directory.Exists(root))
+        {
+            throw new DirectoryNotFoundException(
+                $"Installed Project release root '{root}' does not exist.");
+        }
+
+        var projectId = RequireValue(expectedProjectId, nameof(expectedProjectId));
+        var applicationId = RequireValue(expectedApplicationId, nameof(expectedApplicationId));
+        var snapshotId = RequireValue(expectedSnapshotId, nameof(expectedSnapshotId));
+        var manifestPath = ProjectReleaseArtifactPath.GetManifestPath(root);
+        var manifest = await ReadManifestAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        var sourceRoot = ProjectReleaseArtifactPath.GetSourceRootPath(root);
+        var scope = new ProjectApplicationWorkspaceScope(
+            projectId,
+            applicationId,
+            sourceRoot,
+            manifest.ApplicationProjectRelativePath);
+        return await ValidateReleaseAsync(
+                scope,
+                snapshotId,
+                manifest.ContentSha256,
+                root,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async ValueTask RollbackPublicationAsync(
+        ProjectApplicationWorkspaceScope scope,
+        string snapshotId,
+        string expectedContentSha256,
+        CancellationToken cancellationToken = default)
+    {
+        var release = await OpenAsync(
+                scope,
+                snapshotId,
+                expectedContentSha256,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (release is null)
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        Directory.Delete(release.ReleaseRootPath, recursive: true);
     }
 
     private static async ValueTask<ProjectReleaseSourceFile[]> CopySourceAsync(
@@ -295,6 +355,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     private static async ValueTask VerifySourceUnchangedAsync(
         string sourceApplicationPath,
         FileTreeSnapshot initialTree,
+        FileTreeSnapshot releaseTree,
         IReadOnlyCollection<ProjectReleaseSourceFile> copiedFiles,
         string sourceApplicationRelativePath,
         CancellationToken cancellationToken)
@@ -309,7 +370,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         var copiedByPath = copiedFiles.ToDictionary(
             file => file.RelativePath,
             StringComparer.Ordinal);
-        foreach (var relativeFile in currentTree.Files)
+        foreach (var relativeFile in releaseTree.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var sourcePath = ProjectReleaseArtifactPath.ResolveRelativePath(sourceApplicationPath, relativeFile);
@@ -328,6 +389,34 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     $"Project application source file '{relativeFile}' changed while the release was being published.");
             }
         }
+    }
+
+    private static FileTreeSnapshot FilterReleaseSourceTree(
+        FileTreeSnapshot sourceTree,
+        ProjectReleaseSourceMetadata metadata)
+    {
+        var includedResourcePrefixes = metadata.ExternalProgramResources
+            .Select(resource => resource.ResourceRelativePath + "/")
+            .ToArray();
+        var files = sourceTree.Files.Where(path =>
+                !path.StartsWith(
+                    ExternalProgramResourceContract.ResourceDirectoryName + "/",
+                    StringComparison.Ordinal)
+                || includedResourcePrefixes.Any(prefix => path.StartsWith(prefix, StringComparison.Ordinal)))
+            .ToArray();
+        var directories = sourceTree.Directories.Where(path =>
+                !path.StartsWith(
+                    ExternalProgramResourceContract.ResourceDirectoryName + "/",
+                    StringComparison.Ordinal)
+                || string.Equals(
+                    path,
+                    ExternalProgramResourceContract.ResourceDirectoryName,
+                    StringComparison.Ordinal)
+                || includedResourcePrefixes.Any(prefix =>
+                    path.StartsWith(prefix.TrimEnd('/'), StringComparison.Ordinal)
+                    || prefix.StartsWith(path + "/", StringComparison.Ordinal)))
+            .ToArray();
+        return new FileTreeSnapshot(directories, files);
     }
 
     private static async ValueTask<OpenedProjectReleaseArtifact> ValidateReleaseAsync(
@@ -376,7 +465,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             .Select(file => $"source/{file.RelativePath}")
             .Concat(normalizedMetadata.PackageDependencies.SelectMany(dependency =>
                 dependency.Files.Select(file => $"{dependency.PackageRelativePath}/{file.RelativePath}")))
-            .Append(ProjectReleaseArtifactManifest.FileName)
+            .Append(ProjectReleaseManifest.FileName)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
             .ToArray();
@@ -584,6 +673,13 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 $"embedded Production line {metadata.ProductionLine.LineDefinitionId} is missing or duplicated");
         }
 
+        await ValidateEmbeddedExternalProgramsAsync(
+                sourceApplicationPath,
+                metadata.ExternalProgramResources,
+                manifestPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         await ValidateEmbeddedOperationConfigurationsAsync(
                 sourceApplicationPath,
                 applicationId,
@@ -591,6 +687,60 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 manifestPath,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static async ValueTask ValidateEmbeddedExternalProgramsAsync(
+        string sourceApplicationPath,
+        IReadOnlyCollection<ProjectReleaseExternalProgramResource> resources,
+        string manifestPath,
+        CancellationToken cancellationToken)
+    {
+        foreach (var resource in resources)
+        {
+            var resourceDirectory = ProjectReleaseArtifactPath.ResolveRelativePath(
+                sourceApplicationPath,
+                resource.ResourceRelativePath);
+            var descriptorPath = ProjectReleaseArtifactPath.ResolveRelativePath(
+                resourceDirectory,
+                ExternalProgramResourceContract.DescriptorFileName);
+            if (!Directory.Exists(resourceDirectory) || !File.Exists(descriptorPath))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"embedded external program resource {resource.ResourceId} is missing");
+            }
+
+            var actualTree = InspectFileTree(resourceDirectory);
+            var expectedFiles = resource.Files
+                .Select(file => file.RelativePath[(resource.ResourceRelativePath.Length + 1)..])
+                .Append(ExternalProgramResourceContract.DescriptorFileName)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            if (!actualTree.Files.SequenceEqual(expectedFiles, StringComparer.Ordinal))
+            {
+                throw InvalidRelease(
+                    manifestPath,
+                    $"embedded external program resource {resource.ResourceId} file set differs from its frozen inventory");
+            }
+
+            foreach (var file in resource.Files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var path = ProjectReleaseArtifactPath.ResolveRelativePath(
+                    sourceApplicationPath,
+                    file.RelativePath);
+                var info = new FileInfo(path);
+                var hash = await ComputeFileSha256Async(path, cancellationToken).ConfigureAwait(false);
+                if (!info.Exists
+                    || info.Length != file.SizeBytes
+                    || !string.Equals(hash, file.Sha256, StringComparison.Ordinal))
+                {
+                    throw InvalidRelease(
+                        manifestPath,
+                        $"embedded external program resource {resource.ResourceId} file '{file.RelativePath}' failed SHA-256 validation");
+                }
+            }
+        }
     }
 
     private static async ValueTask ValidateEmbeddedOperationConfigurationsAsync(
@@ -905,19 +1055,19 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
     private static void ValidateManifestIdentity(
         ProjectApplicationWorkspaceScope scope,
         string snapshotId,
-        ProjectReleaseArtifactManifest manifest,
+        ProjectReleaseManifest manifest,
         string manifestPath,
         string releaseRootPath)
     {
         if (!string.Equals(
                 manifest.Schema,
-                ProjectReleaseArtifactManifest.CurrentSchema,
+                ProjectReleaseManifest.RequiredSchema,
                 StringComparison.Ordinal))
         {
             throw InvalidRelease(manifestPath, $"schema '{manifest.Schema}' is not supported");
         }
 
-        if (manifest.SchemaVersion != ProjectReleaseArtifactManifest.CurrentSchemaVersion)
+        if (manifest.SchemaVersion != ProjectReleaseManifest.RequiredSchemaVersion)
         {
             throw InvalidRelease(manifestPath, $"schema version {manifest.SchemaVersion} is not supported");
         }
@@ -1046,8 +1196,9 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         var layoutIds = NormalizeIdentifiers(metadata.LayoutIds, nameof(metadata.LayoutIds));
         var blockVersionIds = NormalizeIdentifiers(metadata.BlockVersionIds, nameof(metadata.BlockVersionIds));
         var productionLine = NormalizeProductionLine(metadata.ProductionLine);
+        var externalPrograms = NormalizeExternalPrograms(metadata.ExternalProgramResources);
         var packageDependencies = NormalizePackageDependencies(metadata.PackageDependencies);
-        var capabilityBindings = (metadata.CapabilityBindings
+        var normalizedCapabilityBindings = (metadata.CapabilityBindings
                 ?? throw new ArgumentException("CapabilityBindings collection is required.", nameof(metadata)))
             .Select(binding => binding is null
                 ? throw new ArgumentException("CapabilityBindings cannot contain null.", nameof(metadata))
@@ -1055,24 +1206,71 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     RequireValue(binding.CapabilityId, nameof(binding.CapabilityId)),
                     RequireValue(binding.BindingId, nameof(binding.BindingId)),
                     RequireValue(binding.ProviderKind, nameof(binding.ProviderKind)),
-                    RequireValue(binding.ProviderKey, nameof(binding.ProviderKey))))
-            .Distinct()
-            .OrderBy(binding => binding.CapabilityId, StringComparer.Ordinal)
+                    RequireValue(binding.ProviderKey, nameof(binding.ProviderKey)),
+                    RequireValue(binding.OwnerSystemId, nameof(binding.OwnerSystemId)),
+                    RequireValue(binding.OwnerStationSystemId, nameof(binding.OwnerStationSystemId))))
+            .ToArray();
+        if (normalizedCapabilityBindings.Distinct().Count() != normalizedCapabilityBindings.Length)
+        {
+            throw new ArgumentException(
+                "CapabilityBindings cannot contain duplicate frozen identities.",
+                nameof(metadata));
+        }
+
+        var capabilityBindings = normalizedCapabilityBindings
+            .OrderBy(binding => binding.OwnerSystemId, StringComparer.Ordinal)
+            .ThenBy(binding => binding.CapabilityId, StringComparer.Ordinal)
             .ThenBy(binding => binding.BindingId, StringComparer.Ordinal)
             .ThenBy(binding => binding.ProviderKind, StringComparer.Ordinal)
             .ThenBy(binding => binding.ProviderKey, StringComparer.Ordinal)
+            .ThenBy(binding => binding.OwnerStationSystemId, StringComparer.Ordinal)
             .ToArray();
-        var targetReferences = (metadata.TargetReferences
+        var normalizedTargetReferences = (metadata.TargetReferences
                 ?? throw new ArgumentException("TargetReferences collection is required.", nameof(metadata)))
             .Select(target => target is null
                 ? throw new ArgumentException("TargetReferences cannot contain null.", nameof(metadata))
                 : new ProjectReleaseTargetReference(
                     RequireValue(target.Kind, nameof(target.Kind)),
                     RequireValue(target.TargetId, nameof(target.TargetId))))
-            .Distinct()
+            .ToArray();
+        if (normalizedTargetReferences.Distinct().Count() != normalizedTargetReferences.Length)
+        {
+            throw new ArgumentException(
+                "TargetReferences cannot contain duplicate frozen identities.",
+                nameof(metadata));
+        }
+
+        var targetReferences = normalizedTargetReferences
             .OrderBy(target => target.Kind, StringComparer.Ordinal)
             .ThenBy(target => target.TargetId, StringComparer.Ordinal)
             .ToArray();
+        if (capabilityBindings
+                .GroupBy(
+                    binding => $"{binding.OwnerSystemId}\u001f{binding.CapabilityId}",
+                    StringComparer.Ordinal)
+                .Any(group => group.Count() != 1)
+            || capabilityBindings.Select(binding => binding.BindingId)
+                .Distinct(StringComparer.Ordinal).Count() != capabilityBindings.Length
+            || capabilityBindings.Select(binding => binding.BindingId)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count() != capabilityBindings.Length
+            || capabilityBindings.Any(binding => targetReferences.Count(target =>
+                string.Equals(target.Kind, "System", StringComparison.Ordinal)
+                && string.Equals(
+                    target.TargetId,
+                    binding.OwnerSystemId,
+                    StringComparison.Ordinal)) != 1
+                || targetReferences.Count(target =>
+                    string.Equals(target.Kind, "System", StringComparison.Ordinal)
+                    && string.Equals(
+                        target.TargetId,
+                        binding.OwnerStationSystemId,
+                        StringComparison.Ordinal)) != 1))
+        {
+            throw new ArgumentException(
+                "Capability bindings must have unique Binding ids, be unique per owning System, and reference one frozen System target.",
+                nameof(metadata));
+        }
+
         if (!string.Equals(productionLine.TopologyId, topologyId, StringComparison.Ordinal))
         {
             throw new ArgumentException(
@@ -1091,6 +1289,65 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 nameof(metadata));
         }
 
+        foreach (var authorization in productionLine.LineControllerAuthorizations)
+        {
+            var operation = productionLine.Operations.Single(candidate => string.Equals(
+                candidate.OperationId,
+                authorization.OperationId,
+                StringComparison.Ordinal));
+            if (string.Equals(
+                    operation.StationSystemId,
+                    authorization.TargetStationSystemId,
+                    StringComparison.Ordinal)
+                || capabilityBindings.Count(binding =>
+                    string.Equals(
+                        binding.BindingId,
+                        authorization.ControllerBindingId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.OwnerSystemId,
+                        authorization.ControllerSystemId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.OwnerStationSystemId,
+                        operation.StationSystemId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.CapabilityId,
+                        authorization.ControllerCapabilityId,
+                        StringComparison.Ordinal)) != 1
+                || capabilityBindings.Count(binding =>
+                    string.Equals(
+                        binding.BindingId,
+                        authorization.TargetBindingId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.OwnerSystemId,
+                        authorization.TargetSystemId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.OwnerStationSystemId,
+                        authorization.TargetStationSystemId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        binding.CapabilityId,
+                        authorization.TargetCapabilityId,
+                        StringComparison.Ordinal)) != 1
+                || targetReferences.Count(target => string.Equals(
+                        target.Kind,
+                        "Driver",
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        target.TargetId,
+                        authorization.TargetBindingId,
+                        StringComparison.Ordinal)) != 1)
+            {
+                throw new ArgumentException(
+                    $"Line Controller authorization {authorization.AuthorizationId} does not match exact frozen controller and remote target binding identities.",
+                    nameof(metadata));
+            }
+        }
+
         var productionBlockVersionIds = productionLine.Operations
             .SelectMany(operation => operation.BlockVersionIds)
             .Distinct(StringComparer.Ordinal)
@@ -1106,7 +1363,12 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 string.Equals(dependency.CapabilityId, binding.CapabilityId, StringComparison.Ordinal)
                 && string.Equals(dependency.BindingId, binding.BindingId, StringComparison.Ordinal)
                 && string.Equals(dependency.ProviderKind, binding.ProviderKind, StringComparison.Ordinal)
-                && string.Equals(dependency.ProviderKey, binding.ProviderKey, StringComparison.Ordinal)) != 1))
+                && string.Equals(dependency.ProviderKey, binding.ProviderKey, StringComparison.Ordinal)
+                && string.Equals(dependency.OwnerSystemId, binding.OwnerSystemId, StringComparison.Ordinal)
+                && string.Equals(
+                    dependency.OwnerStationSystemId,
+                    binding.OwnerStationSystemId,
+                    StringComparison.Ordinal)) != 1))
         {
             throw new ArgumentException(
                 "Every package dependency lock must match exactly one capability binding.",
@@ -1117,6 +1379,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             topologyId,
             layoutIds,
             productionLine,
+            externalPrograms,
             capabilityBindings,
             targetReferences,
             blockVersionIds,
@@ -1160,6 +1423,13 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     operation.FlowIrSha256,
                     operation.FlowIrCanonicalJson,
                     $"Production operation {operation.OperationId} Flow IR");
+                var resources = NormalizeOperationResources(
+                    operation.Resources,
+                    operation.StationSystemId,
+                    operation.OperationId);
+                var authorizedActions = NormalizeAuthorizedActions(
+                    operation.AuthorizedActions,
+                    operation.OperationId);
                 return new ProjectReleaseOperation(
                     RequireProductionValue(operation.OperationId, nameof(operation.OperationId)),
                     RequireProductionValue(operation.DisplayName, nameof(operation.DisplayName)),
@@ -1180,7 +1450,9 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     flowIr.CanonicalJson,
                     NormalizeIdentifiers(
                         operation.BlockVersionIds,
-                        nameof(operation.BlockVersionIds)));
+                        nameof(operation.BlockVersionIds)),
+                    resources,
+                    authorizedActions);
             })
             .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
             .ToArray();
@@ -1218,16 +1490,9 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             "Production Route Transition ids");
         ValidateRouteGraph(entryOperationId, operations, transitions);
 
-        var adapters = (line.ExternalTestProgramAdapters
-                ?? throw new ArgumentException(
-                    "ProductionLine.ExternalTestProgramAdapters is required.",
-                    nameof(line)))
-            .Select(adapter => NormalizeProductionAdapter(adapter, line.LineDefinitionId))
-            .OrderBy(adapter => adapter.AdapterId, StringComparer.Ordinal)
-            .ToArray();
-        EnsureProductionIdentifiersAreUnique(
-            adapters.Select(adapter => adapter.AdapterId),
-            "Production external test adapter ids");
+        var lineControllerAuthorizations = NormalizeLineControllerAuthorizations(
+            line.LineControllerAuthorizations,
+            operations);
 
         return new ProjectReleaseProductionLine(
             RequireProductionValue(line.LineDefinitionId, nameof(line.LineDefinitionId)),
@@ -1237,8 +1502,298 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             entryOperationId,
             operations,
             transitions,
-            adapters);
+            lineControllerAuthorizations);
     }
+
+    private static ProjectReleaseOperationResource[] NormalizeOperationResources(
+        IReadOnlyCollection<ProjectReleaseOperationResource>? resources,
+        string stationSystemId,
+        string operationId)
+    {
+        var normalized = (resources
+                ?? throw new ArgumentException(
+                    $"Production operation {operationId} resources are required.",
+                    nameof(resources)))
+            .Select(resource =>
+            {
+                if (resource is null)
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operationId} resources cannot contain null.",
+                        nameof(resources));
+                }
+
+                var kind = RequireExactToken(
+                    resource.Kind,
+                    ["Station", "Fixture", "Device", "SlotGroup", "Slot"],
+                    "Operation resource kind");
+                var resolution = RequireExactToken(
+                    resource.Resolution,
+                    ["Fixed", "CurrentMaterialSlot", "AvailableSlotInGroup"],
+                    "Operation resource resolution");
+                if (!string.Equals(kind, "Slot", StringComparison.Ordinal)
+                    && !string.Equals(resolution, "Fixed", StringComparison.Ordinal))
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operationId} resource kind {kind} only supports Fixed resolution.",
+                        nameof(resources));
+                }
+
+                return new ProjectReleaseOperationResource(
+                    RequireProductionValue(resource.BindingId, nameof(resource.BindingId)),
+                    kind,
+                    RequireProductionValue(
+                        resource.TopologyTargetId,
+                        nameof(resource.TopologyTargetId)),
+                    resolution,
+                    NormalizeIdentifiers(
+                        resource.EligibleSlotIds,
+                        nameof(resource.EligibleSlotIds)));
+            })
+            .OrderBy(resource => resource.Kind, StringComparer.Ordinal)
+            .ThenBy(resource => resource.TopologyTargetId, StringComparer.Ordinal)
+            .ThenBy(resource => resource.Resolution, StringComparer.Ordinal)
+            .ThenBy(resource => resource.BindingId, StringComparer.Ordinal)
+            .ToArray();
+        if (normalized.Length == 0)
+        {
+            throw new ArgumentException(
+                $"Production operation {operationId} requires resources.",
+                nameof(resources));
+        }
+
+        EnsureProductionIdentifiersAreUnique(
+            normalized.Select(resource => resource.BindingId),
+            $"Production operation {operationId} resource BindingIds");
+        if (normalized.GroupBy(resource => (
+                    resource.Kind,
+                    resource.TopologyTargetId,
+                    resource.Resolution))
+                .Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                $"Production operation {operationId} resource bindings must be semantically unique.",
+                nameof(resources));
+        }
+
+        if (normalized.Any(resource =>
+                string.Equals(
+                    resource.Resolution,
+                    "AvailableSlotInGroup",
+                    StringComparison.Ordinal) != (resource.EligibleSlotIds.Count > 0)))
+        {
+            throw new ArgumentException(
+                $"Production operation {operationId} AvailableSlotInGroup resources must freeze eligible Slots; other resources cannot declare them.",
+                nameof(resources));
+        }
+
+        var stationResources = normalized.Where(resource => string.Equals(
+            resource.Kind,
+            "Station",
+            StringComparison.Ordinal)).ToArray();
+        if (stationResources.Length != 1
+            || !string.Equals(stationResources[0].Resolution, "Fixed", StringComparison.Ordinal)
+            || !string.Equals(
+                stationResources[0].TopologyTargetId,
+                stationSystemId,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Production operation {operationId} must freeze exactly one Fixed Station resource equal to {stationSystemId}.",
+                nameof(resources));
+        }
+
+        return normalized;
+    }
+
+    private static ProjectReleaseAuthorizedAction[] NormalizeAuthorizedActions(
+        IReadOnlyCollection<ProjectReleaseAuthorizedAction>? actions,
+        string operationId)
+    {
+        var normalized = (actions
+                ?? throw new ArgumentException(
+                    $"Production operation {operationId} authorized actions are required.",
+                    nameof(actions)))
+            .Select(action =>
+            {
+                if (action is null)
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operationId} authorized actions cannot contain null.",
+                        nameof(actions));
+                }
+
+                return new ProjectReleaseAuthorizedAction(
+                    RequireProductionValue(action.ActionId, nameof(action.ActionId)),
+                    RequireProductionValue(action.NodeId, nameof(action.NodeId)),
+                    RequireExactToken(
+                        action.Kind,
+                        ["DeviceCommand", "PythonScript"],
+                        "authorized action kind"),
+                    RequireProductionValue(
+                        action.RequiredCapability,
+                        nameof(action.RequiredCapability)),
+                    RequireProductionValue(action.CommandName, nameof(action.CommandName)),
+                    RequireExactToken(
+                        action.TargetKind,
+                        ["System", "SlotGroup", "Slot", "ProductionUnit", "Capability", "Driver"],
+                        "authorized action target kind"),
+                    RequireProductionValue(action.TargetId, nameof(action.TargetId)),
+                    action.TimeoutMilliseconds > 0
+                        ? action.TimeoutMilliseconds
+                        : throw new ArgumentException(
+                            "Authorized action timeout must be positive.",
+                            nameof(actions)),
+                    action.LineControllerAuthorizationId is null
+                        ? null
+                        : RequireProductionValue(
+                            action.LineControllerAuthorizationId,
+                            nameof(action.LineControllerAuthorizationId)));
+            })
+            .OrderBy(action => action.ActionId, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            normalized.Select(action => action.ActionId),
+            $"Production operation {operationId} authorized action ids");
+        return normalized;
+    }
+
+    private static ProjectReleaseLineControllerAuthorization[] NormalizeLineControllerAuthorizations(
+        IReadOnlyCollection<ProjectReleaseLineControllerAuthorization>? authorizations,
+        IReadOnlyCollection<ProjectReleaseOperation> operations)
+    {
+        var normalized = (authorizations
+                ?? throw new ArgumentException(
+                    "ProductionLine.LineControllerAuthorizations is required.",
+                    nameof(authorizations)))
+            .Select(authorization => authorization is null
+                ? throw new ArgumentException(
+                    "ProductionLine.LineControllerAuthorizations cannot contain null.",
+                    nameof(authorizations))
+                : new ProjectReleaseLineControllerAuthorization(
+                    RequireProductionValue(
+                        authorization.AuthorizationId,
+                        nameof(authorization.AuthorizationId)),
+                    RequireProductionValue(
+                        authorization.OperationId,
+                        nameof(authorization.OperationId)),
+                    RequireProductionValue(authorization.ActionId, nameof(authorization.ActionId)),
+                    RequireProductionValue(
+                        authorization.ControllerSystemId,
+                        nameof(authorization.ControllerSystemId)),
+                    RequireProductionValue(
+                        authorization.ControllerBindingId,
+                        nameof(authorization.ControllerBindingId)),
+                    RequireProductionValue(
+                        authorization.ControllerCapabilityId,
+                        nameof(authorization.ControllerCapabilityId)),
+                    RequireProductionValue(
+                        authorization.ControllerAction,
+                        nameof(authorization.ControllerAction)),
+                    RequireProductionValue(
+                        authorization.TargetStationSystemId,
+                        nameof(authorization.TargetStationSystemId)),
+                    RequireProductionValue(
+                        authorization.TargetSystemId,
+                        nameof(authorization.TargetSystemId)),
+                    RequireProductionValue(
+                        authorization.TargetBindingId,
+                        nameof(authorization.TargetBindingId)),
+                    RequireProductionValue(
+                        authorization.TargetCapabilityId,
+                        nameof(authorization.TargetCapabilityId)),
+                    RequireProductionValue(
+                        authorization.TargetAction,
+                        nameof(authorization.TargetAction))))
+            .OrderBy(authorization => authorization.AuthorizationId, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            normalized.Select(authorization => authorization.AuthorizationId),
+            "Line Controller authorization ids");
+        if (normalized.GroupBy(authorization => (
+                authorization.OperationId,
+                authorization.ActionId)).Any(group => group.Count() != 1))
+        {
+            throw new ArgumentException(
+                "Each frozen Operation action can have at most one Line Controller authorization.",
+                nameof(authorizations));
+        }
+
+        foreach (var authorization in normalized)
+        {
+            var operationMatches = operations.Where(operation => string.Equals(
+                    operation.OperationId,
+                    authorization.OperationId,
+                    StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (operationMatches.Length != 1)
+            {
+                throw new ArgumentException(
+                    $"Line Controller authorization {authorization.AuthorizationId} references an absent Operation.",
+                    nameof(authorizations));
+            }
+
+            var operation = operationMatches[0];
+            var actionMatches = operation.AuthorizedActions.Where(action =>
+                    string.Equals(action.ActionId, authorization.ActionId, StringComparison.Ordinal)
+                    && string.Equals(
+                        action.LineControllerAuthorizationId,
+                        authorization.AuthorizationId,
+                        StringComparison.Ordinal)
+                    && string.Equals(action.Kind, "DeviceCommand", StringComparison.Ordinal)
+                    && string.Equals(
+                        action.RequiredCapability,
+                        authorization.ControllerCapabilityId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        action.CommandName,
+                        authorization.ControllerAction,
+                        StringComparison.Ordinal)
+                    && string.Equals(action.TargetKind, "Driver", StringComparison.Ordinal)
+                    && string.Equals(
+                        action.TargetId,
+                        authorization.TargetBindingId,
+                        StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (actionMatches.Length != 1
+                || !operation.Resources.Any(resource =>
+                    string.Equals(resource.Kind, "Device", StringComparison.Ordinal)
+                    && string.Equals(resource.Resolution, "Fixed", StringComparison.Ordinal)
+                    && string.Equals(
+                        resource.TopologyTargetId,
+                        authorization.ControllerBindingId,
+                        StringComparison.Ordinal)))
+            {
+                throw new ArgumentException(
+                    $"Line Controller authorization {authorization.AuthorizationId} does not match one exact frozen Flow action and controller resource.",
+                    nameof(authorizations));
+            }
+        }
+
+        if (operations.SelectMany(operation => operation.AuthorizedActions)
+            .Any(action => action.LineControllerAuthorizationId is not null
+                && normalized.Count(authorization => string.Equals(
+                    authorization.AuthorizationId,
+                    action.LineControllerAuthorizationId,
+                    StringComparison.Ordinal)) != 1))
+        {
+            throw new ArgumentException(
+                "Every authorized action Line Controller reference must resolve exactly once.",
+                nameof(authorizations));
+        }
+
+        return normalized;
+    }
+
+    private static string RequireExactToken(
+        string value,
+        IReadOnlyCollection<string> supported,
+        string description) =>
+        supported.Contains(value, StringComparer.Ordinal)
+            ? value
+            : throw new ArgumentException($"Unsupported {description} '{value}'.", nameof(value));
 
     private static ProjectReleaseRouteTransition NormalizeRouteTransition(
         ProjectReleaseRouteTransition? transition,
@@ -1763,142 +2318,170 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         return normalized;
     }
 
-    private static ProjectReleaseExternalTestProgramAdapter NormalizeProductionAdapter(
-        ProjectReleaseExternalTestProgramAdapter? adapter,
-        string lineDefinitionId)
+    private static ProjectReleaseExternalProgramResource[] NormalizeExternalPrograms(
+        IReadOnlyCollection<ProjectReleaseExternalProgramResource>? resources)
     {
-        if (adapter is null)
+        if (resources is null)
         {
-            throw new ArgumentException(
-                $"Production line {lineDefinitionId} external test adapters cannot contain null.",
-                nameof(adapter));
+            throw new ArgumentException("ExternalProgramResources collection is required.", nameof(resources));
         }
 
-        var executable = adapter.Executable is null
-            ? null
-            : NormalizeProductionExecutable(adapter.Executable);
-        var providerKey = adapter.ProviderKey is null
-            ? null
-            : RequireProductionValue(adapter.ProviderKey, nameof(adapter.ProviderKey));
-        var expectedLaunchKind = executable is null ? "Provider" : "ApplicationExecutable";
-        if ((executable is null) == (providerKey is null)
-            || !string.Equals(adapter.LaunchKind, expectedLaunchKind, StringComparison.Ordinal))
+        var normalized = resources.Select(resource =>
         {
-            throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} must have one canonical launch route.",
-                nameof(adapter));
-        }
+            if (resource is null)
+            {
+                throw new ArgumentException("ExternalProgramResources cannot contain null.", nameof(resources));
+            }
 
-        if (adapter.TimeoutMilliseconds <= 0)
-        {
-            throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} timeout must be positive.",
-                nameof(adapter));
-        }
+            var resourceId = ExternalProgramResourceContract.PortableId(
+                resource.ResourceId,
+                nameof(resource.ResourceId));
+            var relativePath = ExternalProgramResourceContract.CanonicalRelativePath(
+                resource.ResourceRelativePath,
+                nameof(resource.ResourceRelativePath));
+            var expectedPath = $"{ExternalProgramResourceContract.ResourceDirectoryName}/{resourceId}";
+            if (!string.Equals(relativePath, expectedPath, StringComparison.Ordinal)
+                || !Enum.TryParse<ExternalProgramLaunchKind>(
+                    resource.LaunchKind,
+                    ignoreCase: false,
+                    out var launchKind)
+                || !Enum.IsDefined(launchKind)
+                || !string.Equals(resource.LaunchKind, launchKind.ToString(), StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"External program resource {resourceId} identity or launch kind is invalid.",
+                    nameof(resources));
+            }
 
-        var arguments = (adapter.ArgumentTemplates
-                ?? throw new ArgumentException("Adapter ArgumentTemplates is required.", nameof(adapter)))
-            .Select(argument => RequireProductionValue(argument, nameof(adapter.ArgumentTemplates)))
-            .ToArray();
-        var inputMappings = (adapter.InputMappings
-                ?? throw new ArgumentException("Adapter InputMappings is required.", nameof(adapter)))
-            .Select(mapping => mapping is null
-                ? throw new ArgumentException("Adapter InputMappings cannot contain null.", nameof(adapter))
-                : new ProjectReleaseExternalTestProgramInputMapping(
-                    RequireProductionValue(mapping.Source, nameof(mapping.Source)),
-                    RequireProductionValue(mapping.Target, nameof(mapping.Target))))
-            .OrderBy(mapping => mapping.Target, StringComparer.Ordinal)
-            .ThenBy(mapping => mapping.Source, StringComparer.Ordinal)
-            .ToArray();
-        var resultMappings = (adapter.ResultMappings
-                ?? throw new ArgumentException("Adapter ResultMappings is required.", nameof(adapter)))
-            .Select(mapping => mapping is null
-                ? throw new ArgumentException("Adapter ResultMappings cannot contain null.", nameof(adapter))
-                : new ProjectReleaseExternalTestProgramResultMapping(
-                    RequireProductionValue(mapping.SourcePath, nameof(mapping.SourcePath)),
-                    RequireProductionValue(mapping.TargetKey, nameof(mapping.TargetKey))))
-            .OrderBy(mapping => mapping.TargetKey, StringComparer.Ordinal)
-            .ThenBy(mapping => mapping.SourcePath, StringComparer.Ordinal)
-            .ToArray();
-        var rawOutcomeMapping = adapter.OutcomeMapping
-            ?? throw new ArgumentException("Adapter OutcomeMapping is required.", nameof(adapter));
-        var outcomeMapping = new ProjectReleaseExternalTestProgramOutcomeMapping(
-            RequireProductionValue(rawOutcomeMapping.SourcePath, nameof(rawOutcomeMapping.SourcePath)),
-            RequireProductionValue(rawOutcomeMapping.PassedToken, nameof(rawOutcomeMapping.PassedToken)),
-            RequireProductionValue(rawOutcomeMapping.FailedToken, nameof(rawOutcomeMapping.FailedToken)),
-            RequireProductionValue(rawOutcomeMapping.AbortedToken, nameof(rawOutcomeMapping.AbortedToken)));
-        if (inputMappings.Length == 0 || resultMappings.Length == 0)
-        {
-            throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} mappings are required.",
-                nameof(adapter));
-        }
+            var files = (resource.Files
+                    ?? throw new ArgumentException("External program Files is required.", nameof(resources)))
+                .Select(file =>
+                {
+                    if (file is null)
+                    {
+                        throw new ArgumentException("External program Files cannot contain null.", nameof(resources));
+                    }
+
+                    var path = ExternalProgramResourceContract.CanonicalRelativePath(
+                        file.RelativePath,
+                        nameof(file.RelativePath),
+                        ExternalProgramResourceContract.ResourceDirectoryName);
+                    if (!path.StartsWith(relativePath + "/files/", StringComparison.Ordinal)
+                        || file.SizeBytes < 0
+                        || !ExternalProgramResourceContract.IsSha256(file.Sha256))
+                    {
+                        throw new ArgumentException(
+                            $"External program resource {resourceId} file inventory is invalid.",
+                            nameof(resources));
+                    }
+
+                    return new ProjectReleaseExternalProgramFile(path, file.SizeBytes, file.Sha256);
+                })
+                .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+                .ToArray();
+            EnsureProductionIdentifiersAreUnique(
+                files.Select(file => file.RelativePath),
+                $"External program resource {resourceId} file paths");
+
+            var inputMappings = resource.InputMappings.Select(mapping =>
+                    new ExternalProgramInputMapping(mapping.Source, mapping.Target))
+                .ToArray();
+            var resultMappings = resource.ResultMappings.Select(mapping =>
+                    new ExternalProgramResultMapping(
+                        mapping.SourcePath,
+                        mapping.TargetKey,
+                        ParseExact<ProductionContextValueKind>(mapping.ValueKind, "external program result kind")))
+                .ToArray();
+            var localResource = new ExternalProgramResource(
+                resourceId,
+                resource.DisplayName,
+                resource.CapabilityId,
+                resource.CommandName,
+                launchKind,
+                resource.EntryPoint,
+                resource.ResourceProviderKind,
+                resource.ProviderKey,
+                resource.ArgumentTemplates,
+                inputMappings,
+                resultMappings,
+                new ExternalProgramOutcomeMapping(
+                    resource.OutcomeMapping.SourcePath,
+                    resource.OutcomeMapping.PassedToken,
+                    resource.OutcomeMapping.FailedToken,
+                    resource.OutcomeMapping.AbortedToken),
+                new ExternalProgramPermissionProfile(
+                    resource.PermissionProfile.ProfileName,
+                    resource.PermissionProfile.NetworkAccessAllowed,
+                    resource.PermissionProfile.AllowedEnvironmentVariables),
+                new ExternalProgramExecutionLimits(
+                    resource.ExecutionLimits.TimeoutMilliseconds,
+                    resource.ExecutionLimits.MaximumProcessCount,
+                    resource.ExecutionLimits.MaximumWorkingSetBytes,
+                    resource.ExecutionLimits.MaximumCpuTimeMilliseconds,
+                    resource.ExecutionLimits.MaximumStandardOutputBytes,
+                    resource.ExecutionLimits.MaximumStandardErrorBytes,
+                    resource.ExecutionLimits.MaximumArtifactCount,
+                    resource.ExecutionLimits.MaximumArtifactBytes,
+                    resource.ExecutionLimits.MaximumTotalArtifactBytes),
+                files.Select(file => new ExternalProgramResourceFile(
+                    file.RelativePath[(relativePath.Length + 1)..],
+                    file.SizeBytes,
+                    file.Sha256)).ToArray(),
+                resource.ContentSha256,
+                DateTimeOffset.UnixEpoch);
+            ExternalProgramResourceValidator.ValidateFrozenResource(localResource);
+
+            return new ProjectReleaseExternalProgramResource(
+                resourceId,
+                localResource.DisplayName,
+                localResource.CapabilityId,
+                localResource.CommandName,
+                launchKind.ToString(),
+                localResource.EntryPoint,
+                localResource.ProviderKind,
+                localResource.ProviderKey,
+                localResource.ArgumentTemplates.ToArray(),
+                localResource.InputMappings.Select(mapping => new ProjectReleaseExternalProgramInputMapping(
+                    mapping.Source,
+                    mapping.Target)).ToArray(),
+                localResource.ResultMappings.Select(mapping => new ProjectReleaseExternalProgramResultMapping(
+                    mapping.SourcePath,
+                    mapping.TargetKey,
+                    mapping.ValueKind.ToString())).ToArray(),
+                new ProjectReleaseExternalProgramOutcomeMapping(
+                    localResource.OutcomeMapping.SourcePath,
+                    localResource.OutcomeMapping.PassedToken,
+                    localResource.OutcomeMapping.FailedToken,
+                    localResource.OutcomeMapping.AbortedToken),
+                resource.PermissionProfile with
+                {
+                    AllowedEnvironmentVariables = resource.PermissionProfile.AllowedEnvironmentVariables
+                        .Order(StringComparer.Ordinal)
+                        .ToArray()
+                },
+                resource.ExecutionLimits,
+                files,
+                localResource.ContentSha256,
+                relativePath);
+        }).OrderBy(resource => resource.ResourceId, StringComparer.Ordinal).ToArray();
 
         EnsureProductionIdentifiersAreUnique(
-            inputMappings.Select(mapping => mapping.Target),
-            $"Production adapter {adapter.AdapterId} input targets");
-        EnsureProductionIdentifiersAreUnique(
-            resultMappings.Select(mapping => mapping.TargetKey),
-            $"Production adapter {adapter.AdapterId} result targets");
-        if (inputMappings.All(mapping => !string.Equals(
-                mapping.Source,
-                "$product.identity",
-                StringComparison.Ordinal))
-            || inputMappings.All(mapping => !string.Equals(
-                mapping.Source,
-                "$product.model",
-                StringComparison.Ordinal)))
-        {
-            throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} input mappings must include Product identity and Product model.",
-                nameof(adapter));
-        }
-
-        if (inputMappings.Any(mapping =>
-                !ProjectReleaseExternalTestProgramContract.IsSupportedInputSource(mapping.Source))
-            || arguments.Any(argument =>
-                !ProjectReleaseExternalTestProgramContract.IsSupportedArgumentTemplate(
-                    argument,
-                    inputMappings.Select(mapping => mapping.Target)))
-            || resultMappings.Any(mapping =>
-                !ProjectReleaseExternalTestProgramContract.IsSupportedResultPath(mapping.SourcePath))
-            || !ProjectReleaseExternalTestProgramContract.IsSupportedOutcomeMapping(outcomeMapping))
-        {
-            throw new ArgumentException(
-                $"Production external test adapter {adapter.AdapterId} contains an unsupported input source, argument placeholder, or result path.",
-                nameof(adapter));
-        }
-
-        return new ProjectReleaseExternalTestProgramAdapter(
-            RequireProductionValue(adapter.AdapterId, nameof(adapter.AdapterId)),
-            RequireProductionValue(adapter.DisplayName, nameof(adapter.DisplayName)),
-            RequireProductionValue(adapter.CapabilityId, nameof(adapter.CapabilityId)),
-            RequireProductionValue(adapter.CommandName, nameof(adapter.CommandName)),
-            expectedLaunchKind,
-            executable,
-            providerKey,
-            arguments,
-            inputMappings,
-            resultMappings,
-            outcomeMapping,
-            adapter.TimeoutMilliseconds);
+            normalized.Select(resource => resource.ResourceId),
+            "External program resource ids");
+        return normalized;
     }
 
-    private static string NormalizeProductionExecutable(string value)
+    private static T ParseExact<T>(string value, string description)
+        where T : struct, Enum
     {
-        var executable = RequireProductionValue(value, nameof(value));
-        if (Path.IsPathRooted(executable)
-            || executable.Contains('\\')
-            || executable.Split('/').Length < 2
-            || !string.Equals(executable.Split('/')[0], "programs", StringComparison.Ordinal)
-            || executable.Split('/').Any(segment => segment is "" or "." or ".."))
+        if (!Enum.TryParse<T>(value, ignoreCase: false, out var parsed)
+            || !Enum.IsDefined(parsed)
+            || !string.Equals(value, parsed.ToString(), StringComparison.Ordinal))
         {
-            throw new ArgumentException(
-                "Production external test executable must be a canonical programs/ Application-relative path.",
-                nameof(value));
+            throw new ArgumentException($"Unsupported {description} '{value}'.", nameof(value));
         }
 
-        return executable;
+        return parsed;
     }
 
     private static (string SchemaVersion, string Sha256, string CanonicalJson) NormalizeFrozenFlowIr(
@@ -2086,6 +2669,8 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 RequireValue(dependency.BindingId, nameof(dependency.BindingId)),
                 RequireValue(dependency.ProviderKind, nameof(dependency.ProviderKind)),
                 RequireValue(dependency.ProviderKey, nameof(dependency.ProviderKey)),
+                RequireValue(dependency.OwnerSystemId, nameof(dependency.OwnerSystemId)),
+                RequireValue(dependency.OwnerStationSystemId, nameof(dependency.OwnerStationSystemId)),
                 RequireValue(dependency.PackageId, nameof(dependency.PackageId)),
                 RequireValue(dependency.PluginId, nameof(dependency.PluginId)),
                 RequireValue(dependency.PackageVersion, nameof(dependency.PackageVersion)),
@@ -2104,12 +2689,13 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                     ? null
                     : Path.GetFullPath(dependency.SourcePackagePath));
         })
-        .OrderBy(dependency => dependency.CapabilityId, StringComparer.Ordinal)
+        .OrderBy(dependency => dependency.OwnerSystemId, StringComparer.Ordinal)
+        .ThenBy(dependency => dependency.CapabilityId, StringComparer.Ordinal)
         .ThenBy(dependency => dependency.BindingId, StringComparer.Ordinal)
         .ToArray();
 
         if (normalized
-            .GroupBy(dependency => $"{dependency.CapabilityId}\u001f{dependency.BindingId}", StringComparer.Ordinal)
+            .GroupBy(dependency => $"{dependency.OwnerStationSystemId}\u001f{dependency.OwnerSystemId}\u001f{dependency.CapabilityId}\u001f{dependency.BindingId}", StringComparer.Ordinal)
             .Any(group => group.Count() != 1))
         {
             throw new ArgumentException(
@@ -2182,9 +2768,17 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
             throw new ArgumentException($"{fieldName} collection is required.", fieldName);
         }
 
-        return values
+        var normalized = values
             .Select(value => RequireValue(value, fieldName))
-            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (normalized.Distinct(StringComparer.Ordinal).Count() != normalized.Length)
+        {
+            throw new ArgumentException(
+                $"{fieldName} cannot contain duplicate frozen identities.",
+                fieldName);
+        }
+
+        return normalized
             .Order(StringComparer.Ordinal)
             .ToArray();
     }
@@ -2248,7 +2842,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
 
     private static async ValueTask WriteManifestAsync(
         string releaseRootPath,
-        ProjectReleaseArtifactManifest manifest,
+        ProjectReleaseManifest manifest,
         CancellationToken cancellationToken)
     {
         var manifestPath = ProjectReleaseArtifactPath.GetManifestPath(releaseRootPath);
@@ -2265,7 +2859,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async ValueTask<ProjectReleaseArtifactManifest> ReadManifestAsync(
+    private static async ValueTask<ProjectReleaseManifest> ReadManifestAsync(
         string manifestPath,
         CancellationToken cancellationToken)
     {
@@ -2284,7 +2878,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
                 FileBufferSize,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             return await JsonSerializer
-                .DeserializeAsync<ProjectReleaseArtifactManifest>(stream, ManifestJsonOptions, cancellationToken)
+                .DeserializeAsync<ProjectReleaseManifest>(stream, ManifestJsonOptions, cancellationToken)
                 .ConfigureAwait(false)
                 ?? throw InvalidRelease(manifestPath, "is empty");
         }
@@ -2294,7 +2888,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
         }
     }
 
-    private static string ComputeContentSha256(ProjectReleaseArtifactManifest manifest)
+    private static string ComputeContentSha256(ProjectReleaseManifest manifest)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(
             manifest with { ContentSha256 = string.Empty },
@@ -2345,7 +2939,7 @@ public sealed class FileSystemProjectReleaseArtifactStore : IProjectReleaseArtif
 
     private static ProjectReleaseArtifactDescriptor ToDescriptor(
         string releaseRootPath,
-        ProjectReleaseArtifactManifest manifest)
+        ProjectReleaseManifest manifest)
     {
         return new ProjectReleaseArtifactDescriptor(
             manifest.SnapshotId,

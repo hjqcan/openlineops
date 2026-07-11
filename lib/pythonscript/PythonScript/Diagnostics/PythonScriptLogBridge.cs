@@ -166,7 +166,7 @@ namespace PythonScript.Diagnostics
             return result;
         }
 
-        private static Exception? ConvertException(object? candidate, IDictionary<string, object?> properties)
+        private static Exception? ConvertException(object? candidate, Dictionary<string, object?> properties)
         {
             if (candidate == null)
             {
@@ -195,7 +195,7 @@ namespace PythonScript.Diagnostics
 
                 try
                 {
-                    string? text = pyObject.ToString();
+                    string? text = pyObject.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     if (string.IsNullOrEmpty(text))
                     {
                         text = pyObject.Repr();
@@ -247,4 +247,3 @@ namespace PythonScript.Diagnostics
         }
     }
 }
-

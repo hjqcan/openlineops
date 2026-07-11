@@ -22,6 +22,8 @@ public sealed class StationCoordinatorTransportOptions
 
     public string SafetyEventExchange { get; set; } = "openlineops.station.safety-events";
 
+    public string? DeploymentCatalogDirectory { get; set; }
+
     public List<StationDeploymentOptions> Deployments { get; set; } = [];
 
     public Uri ResolveBrokerUri()
@@ -49,15 +51,12 @@ public sealed class StationDeploymentOptions
 
     public string ApplicationId { get; set; } = string.Empty;
 
-    public string ProjectSnapshotId { get; set; } = string.Empty;
-
     public string StationSystemId { get; set; } = string.Empty;
 
     public string AgentId { get; set; } = string.Empty;
 
     public string StationId { get; set; } = string.Empty;
 
-    public string PackageContentSha256 { get; set; } = string.Empty;
 }
 
 public static class StationCoordinatorTransportProviders

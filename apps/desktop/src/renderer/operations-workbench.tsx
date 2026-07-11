@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -21,11 +21,23 @@ import {
 import type {
   OperatorProductionRunCommand,
   ProductionLineRuntimeStateResponse,
+  ProductionContextValueRequest,
   ProductionOperationsFilters,
   ProductionOperationRunReadModel,
-  ProductionRunReadModel
+  ProductionRunReadModel,
+  StationEmergencyStopResponse
 } from './contracts';
-import { commandProductionRun } from './api';
+import {
+  commandProductionRun,
+  getProjectSnapshotProductionRunContext,
+  getStationSafetyEvents,
+  requestStationEmergencyStop
+} from './api';
+import {
+  buildProductionLineRuntimeView,
+  type ProductionLineCarrierView,
+  type ProductionLineStationView
+} from './production-line-runtime-view';
 
 interface OperationsWorkbenchProps {
   activeRuns: ProductionRunReadModel[];
@@ -36,6 +48,9 @@ interface OperationsWorkbenchProps {
   refreshing: boolean;
   isBackendHealthy: boolean;
   lastSynchronizedAtUtc: string | null;
+  projectId: string | null;
+  applicationId: string | null;
+  projectSnapshotId: string | null;
   onFilterChanged(filter: keyof ProductionOperationsFilters, value: string): void;
   onRefresh(): Promise<void>;
   onOpenTopology(): void;
@@ -51,31 +66,19 @@ interface CommandDefinition {
   tone: 'normal' | 'warning' | 'danger';
 }
 
-interface StationOverview {
-  stationSystemId: string;
-  runningProducts: string[];
-  queuedProducts: string[];
-  heldProducts: string[];
-  failedProducts: string[];
-  slots: SlotOverview[];
-}
-
-interface SlotOverview {
-  slotId: string;
-  state: 'Available' | 'Reserved' | 'Occupied' | 'Running' | 'Blocked';
-  productIdentity: string | null;
-  fencingToken: number | null;
-}
-
 const commandDefinitions: CommandDefinition[] = [
   { command: 'Pause', label: 'Pause', description: 'Pause after the current safe boundary.', icon: Pause, tone: 'normal' },
   { command: 'Continue', label: 'Continue', description: 'Resume a paused production run.', icon: Play, tone: 'normal' },
-  { command: 'Stop', label: 'Stop', description: 'Stop normal execution with a recorded reason.', icon: Square, tone: 'warning' },
+  { command: 'Stop', label: 'Stop', description: 'Finish the current Operation, then stop at its safe boundary.', icon: Square, tone: 'warning' },
+  { command: 'Cancel', label: 'Cancel', description: 'Immediately terminate the active Operation and its vendor process tree.', icon: AlertTriangle, tone: 'danger' },
   { command: 'Hold', label: 'Hold', description: 'Hold this product for operator disposition.', icon: Hand, tone: 'warning' },
   { command: 'Release', label: 'Release', description: 'Release a held product back to its route.', icon: LockOpen, tone: 'normal' },
   { command: 'Rework', label: 'Rework', description: 'Return to one explicit earlier Operation.', icon: RotateCcw, tone: 'warning' },
   { command: 'Scrap', label: 'Scrap', description: 'Terminally scrap this product and preserve evidence.', icon: Trash2, tone: 'danger' },
-  { command: 'SafeStop', label: 'Safe Stop', description: 'Request the Agent safety stop path.', icon: ShieldAlert, tone: 'danger' }
+  { command: 'SafeStop', label: 'Safe Stop', description: 'Request the Agent safety stop path.', icon: ShieldAlert, tone: 'danger' },
+  { command: 'Reconcile', label: 'Reconcile', description: 'Record observed completion without replaying hardware.', icon: CircleDot, tone: 'warning' },
+  { command: 'Retry', label: 'Retry', description: 'Release recovery hold and retry one Operation.', icon: RotateCcw, tone: 'warning' },
+  { command: 'Abort', label: 'Abort', description: 'Abort this run from Recovery Required with evidence.', icon: AlertTriangle, tone: 'danger' }
 ];
 
 export function OperationsWorkbench({
@@ -87,6 +90,9 @@ export function OperationsWorkbench({
   refreshing,
   isBackendHealthy,
   lastSynchronizedAtUtc,
+  projectId,
+  applicationId,
+  projectSnapshotId,
   onFilterChanged,
   onRefresh,
   onOpenTopology,
@@ -98,28 +104,71 @@ export function OperationsWorkbench({
   const [actorId, setActorId] = useState('desktop-operator');
   const [reason, setReason] = useState('');
   const [operationId, setOperationId] = useState('');
+  const [recoveryOperationRunId, setRecoveryOperationRunId] = useState('');
+  const [recoveryJudgement, setRecoveryJudgement] = useState<'Passed' | 'Failed' | 'NotApplicable'>('Passed');
+  const [recoveryOutputsJson, setRecoveryOutputsJson] = useState('{}');
+  const [evidenceReference, setEvidenceReference] = useState('');
   const [commandBusy, setCommandBusy] = useState(false);
+  const [safetyEvents, setSafetyEvents] = useState<StationEmergencyStopResponse[]>([]);
+  const [safetyError, setSafetyError] = useState('');
+  const [safetyBusy, setSafetyBusy] = useState(false);
+  const [deployedStationSystemIds, setDeployedStationSystemIds] = useState<string[]>([]);
+  const [deploymentStationError, setDeploymentStationError] = useState('');
+  const [pendingEmergencyStationSystemId, setPendingEmergencyStationSystemId] = useState('');
+  const [emergencyReason, setEmergencyReason] = useState('');
+  const [emergencyConfirmation, setEmergencyConfirmation] = useState('');
   const visibleRuns = activeRuns;
-  const lineRuns = lineState?.activeRuns ?? [];
+  const visibleRunIds = useMemo(
+    () => new Set(visibleRuns.map(run => run.productionRunId)),
+    [visibleRuns]);
+  const lineRuns = useMemo(
+    () => (lineState?.activeRuns ?? []).filter(run => visibleRunIds.has(run.productionRunId)),
+    [lineState, visibleRunIds]);
+  const runtimeView = useMemo(
+    () => lineState ? buildProductionLineRuntimeView(lineState) : null,
+    [lineState]);
   const runById = useMemo(
     () => new Map([...lineRuns, ...visibleRuns].map(run => [run.productionRunId, run])),
     [lineRuns, visibleRuns]);
   const selectedRun = runById.get(selectedRunId) ?? null;
-  const stationOverviews = useMemo(() => buildStationOverviews(lineRuns), [lineRuns]);
+  const stationOverviews = useMemo(() => {
+    const runtimeStations = new Map(
+      (runtimeView?.stations ?? []).map(station => [station.stationSystemId, station]));
+    return uniqueSorted([
+      ...deployedStationSystemIds,
+      ...runtimeStations.keys()
+    ])
+      .map(stationSystemId => runtimeStations.get(stationSystemId)
+        ?? idleStationView(stationSystemId))
+      .filter(station => (
+        (!filters.stationSystemId || station.stationSystemId === filters.stationSystemId)
+        && (!filters.slotId || station.slots.some(slot => slot.slotId === filters.slotId))));
+  }, [deployedStationSystemIds, filters.slotId, filters.stationSystemId, runtimeView]);
   const lineIds = useMemo(
-    () => uniqueSorted([...lineRuns, ...visibleRuns].map(run => run.productionLineDefinitionId)),
-    [lineRuns, visibleRuns]);
+    () => uniqueSorted([
+      selectedLineId,
+      lineState?.productionLineDefinitionId ?? '',
+      ...lineRuns.map(run => run.productionLineDefinitionId),
+      ...visibleRuns.map(run => run.productionLineDefinitionId)
+    ]),
+    [lineRuns, lineState?.productionLineDefinitionId, selectedLineId, visibleRuns]);
   const stationIds = useMemo(
-    () => uniqueSorted(lineRuns.flatMap(run => run.operations.map(operation => operation.stationSystemId))),
-    [lineRuns]);
+    () => uniqueSorted([
+      ...deployedStationSystemIds,
+      ...(lineState?.stations.map(station => station.stationSystemId) ?? [])
+    ]),
+    [deployedStationSystemIds, lineState]);
   const slotIds = useMemo(
-    () => uniqueSorted(lineRuns.flatMap(run => run.operations.flatMap(operation => operation.resources
-      .filter(resource => resource.kind === 'Slot')
-      .map(resource => resource.resourceId)))),
-    [lineRuns]);
+    () => uniqueSorted((lineState?.slots ?? [])
+      .filter(slot => !filters.stationSystemId || slot.stationSystemId === filters.stationSystemId)
+      .map(slot => slot.slotId)),
+    [filters.stationSystemId, lineState]);
   const pendingDefinition = pendingCommand
     ? commandDefinitions.find(definition => definition.command === pendingCommand) ?? null
     : null;
+  const visibleCommandDefinitions = selectedRun?.controlState === 'RecoveryRequired'
+    ? commandDefinitions.filter(definition => ['Reconcile', 'Retry', 'Abort', 'Scrap'].includes(definition.command))
+    : commandDefinitions.filter(definition => !['Reconcile', 'Retry', 'Abort'].includes(definition.command));
 
   useEffect(() => {
     setSelectedRunId(current => {
@@ -144,7 +193,84 @@ export function OperationsWorkbench({
     setOperationId(current => selectedRun.operations.some(operation => operation.operationId === current)
       ? current
       : currentOperation(selectedRun)?.operationId ?? selectedRun.entryOperationId);
+    const running = selectedRun.operations.find(operation => operation.executionStatus === 'Running');
+    setRecoveryOperationRunId(current => selectedRun.operations.some(operation => (
+      operation.operationRunId === current && operation.executionStatus === 'Running'))
+      ? current
+      : running?.operationRunId ?? '');
   }, [selectedRun]);
+
+  useEffect(() => {
+    let canceled = false;
+    setDeployedStationSystemIds([]);
+    setDeploymentStationError('');
+    if (!isBackendHealthy || !projectId || !applicationId || !projectSnapshotId) {
+      return () => {
+        canceled = true;
+      };
+    }
+
+    void (async () => {
+      try {
+        const response = await getProjectSnapshotProductionRunContext(
+          projectId,
+          projectSnapshotId);
+        if (!response.ok || !response.body) {
+          throw new Error(`${response.status} ${response.text}`);
+        }
+        const context = response.body;
+        if (context.projectId !== projectId
+            || context.applicationId !== applicationId
+            || context.snapshotId !== projectSnapshotId) {
+          throw new Error('Frozen Station deployment context identity does not match the active workspace.');
+        }
+        const stationSystemIds = uniqueSorted(context.stationSystemIds);
+        if (stationSystemIds.length === 0
+            || stationSystemIds.some(stationSystemId => !isCanonical(stationSystemId))
+            || stationSystemIds.length !== context.stationSystemIds.length
+            || stationSystemIds.some((stationSystemId, index) => (
+              stationSystemId !== context.stationSystemIds[index]))) {
+          throw new Error('Frozen Station deployment context is not canonical, unique, and sorted.');
+        }
+        if (!canceled) {
+          setDeployedStationSystemIds(stationSystemIds);
+        }
+      } catch (error) {
+        if (!canceled) {
+          setDeploymentStationError(String(error));
+        }
+      }
+    })();
+
+    return () => {
+      canceled = true;
+    };
+  }, [applicationId, isBackendHealthy, projectId, projectSnapshotId]);
+
+  const refreshSafetyEvents = useCallback(async (): Promise<void> => {
+    if (!isBackendHealthy || !projectId || !applicationId) {
+      setSafetyEvents([]);
+      return;
+    }
+    try {
+      const response = await getStationSafetyEvents({
+        projectId,
+        applicationId,
+        projectSnapshotId: projectSnapshotId ?? undefined
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`${response.status} ${response.text}`);
+      }
+      setSafetyEvents(response.body.events);
+      setSafetyError('');
+    } catch (error) {
+      setSafetyError(String(error));
+    }
+  }, [applicationId, isBackendHealthy, projectId, projectSnapshotId]);
+
+  useEffect(() => {
+    void refreshSafetyEvents();
+  }, [lineState?.generatedAtUtc, refreshSafetyEvents]);
 
   const submitCommand = async (): Promise<void> => {
     if (!selectedRun || !pendingCommand || !pendingDefinition) {
@@ -162,13 +288,48 @@ export function OperationsWorkbench({
       onMessage('Rework requires one explicit Operation ID.');
       return;
     }
+    const recovery = requiresRecoveryDecision(pendingCommand, selectedRun);
+    if (recovery && !isCanonical(evidenceReference)) {
+      onMessage(`${pendingDefinition.label} requires an immutable evidence reference.`);
+      return;
+    }
+    if (pendingCommand === 'Reconcile' && !selectedRun.operations.some(operation => (
+      operation.operationRunId === recoveryOperationRunId
+      && operation.executionStatus === 'Running'))) {
+      onMessage('Reconcile requires the exact running Operation Run ID.');
+      return;
+    }
+    if (pendingCommand === 'Retry' && !isCanonical(operationId)) {
+      onMessage('Retry requires one explicit Operation ID.');
+      return;
+    }
+
+    let observedOutputs: Record<string, ProductionContextValueRequest> = {};
+    if (pendingCommand === 'Reconcile') {
+      try {
+        observedOutputs = parseTypedOutputs(recoveryOutputsJson);
+      } catch (error) {
+        onMessage(`Observed outputs are invalid: ${String(error)}`);
+        return;
+      }
+    }
+    const recoveryDecision = recovery ? {
+      decisionId: crypto.randomUUID(),
+      evidenceReference,
+      decidedAtUtc: new Date().toISOString(),
+      operationRunId: pendingCommand === 'Reconcile' ? recoveryOperationRunId : null,
+      operationId: pendingCommand === 'Retry' ? operationId : null,
+      observedJudgement: pendingCommand === 'Reconcile' ? recoveryJudgement : null,
+      observedOutputs: pendingCommand === 'Reconcile' ? observedOutputs : {}
+    } : null;
 
     setCommandBusy(true);
     try {
       const response = await commandProductionRun(selectedRun.productionRunId, pendingCommand, {
         actorId,
         reason: reason || null,
-        operationId: pendingCommand === 'Rework' ? operationId : null
+        operationId: pendingCommand === 'Rework' ? operationId : null,
+        recoveryDecision
       });
       if (!response.ok || !response.body) {
         onMessage(`${pendingDefinition.label} rejected: ${response.status} ${response.text}`);
@@ -177,11 +338,73 @@ export function OperationsWorkbench({
       onMessage(`${pendingDefinition.label} accepted for ${response.body.productionUnitIdentity.value}`);
       setPendingCommand(null);
       setReason('');
+      setEvidenceReference('');
+      setRecoveryOutputsJson('{}');
       await onRefresh();
     } catch (error) {
       onMessage(`${pendingDefinition.label} failed: ${String(error)}`);
     } finally {
       setCommandBusy(false);
+    }
+  };
+
+  const issueEmergencyStop = async (
+    existing: StationEmergencyStopResponse | null = null
+  ): Promise<void> => {
+    const stationSystemId = existing?.stationSystemId ?? pendingEmergencyStationSystemId;
+    if (!isCanonical(stationSystemId)
+        || !projectId
+        || !applicationId
+        || !projectSnapshotId) {
+      onMessage('Emergency Stop requires one explicit Station and frozen Project snapshot.');
+      return;
+    }
+    if (!existing) {
+      if (!isCanonical(actorId) || !isCanonical(emergencyReason)) {
+        onMessage('Emergency Stop requires a canonical Actor ID and operator reason.');
+        return;
+      }
+      if (emergencyConfirmation !== stationSystemId) {
+        onMessage(`Type the exact Station System ID '${stationSystemId}' to confirm Emergency Stop.`);
+        return;
+      }
+    }
+
+    setSafetyBusy(true);
+    try {
+      const request = existing ? {
+        messageId: existing.messageId,
+        idempotencyKey: existing.idempotencyKey,
+        projectId: existing.projectId,
+        applicationId: existing.applicationId,
+        projectSnapshotId: existing.projectSnapshotId,
+        actorId: existing.actorId,
+        reason: existing.reason,
+        requestedAtUtc: existing.requestedAtUtc
+      } : {
+        messageId: crypto.randomUUID(),
+        idempotencyKey: crypto.randomUUID(),
+        projectId,
+        applicationId,
+        projectSnapshotId,
+        actorId,
+        reason: emergencyReason,
+        requestedAtUtc: new Date().toISOString()
+      };
+      const response = await requestStationEmergencyStop(stationSystemId, request);
+      if (!response.ok || !response.body) {
+        onMessage(`Emergency Stop rejected: ${response.status} ${response.text}`);
+        return;
+      }
+      onMessage(`Emergency Stop ${response.body.status} for ${stationSystemId}.`);
+      setPendingEmergencyStationSystemId('');
+      setEmergencyReason('');
+      setEmergencyConfirmation('');
+      await refreshSafetyEvents();
+    } catch (error) {
+      onMessage(`Emergency Stop failed: ${String(error)}`);
+    } finally {
+      setSafetyBusy(false);
     }
   };
 
@@ -257,6 +480,32 @@ export function OperationsWorkbench({
         </button>
       </section>
 
+      {pendingEmergencyStationSystemId ? (
+        <section className="operations-emergency-confirmation" role="alertdialog" aria-modal="true" data-testid="emergency-stop-confirmation">
+          <div>
+            <ShieldAlert size={24} />
+            <span>
+              <strong>EMERGENCY STOP · {pendingEmergencyStationSystemId}</strong>
+              <small>This uses the independent Station safety channel. It is not Safe Stop and does not wait for a Production Run boundary.</small>
+            </span>
+          </div>
+          <label>
+            <span>Operator reason</span>
+            <input value={emergencyReason} onChange={event => setEmergencyReason(event.target.value)} autoFocus data-testid="emergency-stop-reason" />
+          </label>
+          <label>
+            <span>Type the exact Station System ID to confirm</span>
+            <input value={emergencyConfirmation} onChange={event => setEmergencyConfirmation(event.target.value)} data-testid="emergency-stop-confirmation-text" />
+          </label>
+          <div>
+            <button type="button" className="button ghost" onClick={() => setPendingEmergencyStationSystemId('')} disabled={safetyBusy} data-testid="cancel-emergency-stop">Cancel</button>
+            <button type="button" className="button danger" onClick={() => void issueEmergencyStop()} disabled={safetyBusy || emergencyConfirmation !== pendingEmergencyStationSystemId} data-testid="confirm-emergency-stop">
+              <ShieldAlert size={14} /> {safetyBusy ? 'Sending…' : 'Trigger Emergency Stop'}
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <div className="operations-layout">
         <aside className="operations-run-browser">
           <header><span>ACTIVE RUNS</span><small>{visibleRuns.length}</small></header>
@@ -283,22 +532,77 @@ export function OperationsWorkbench({
           <header>
             <div>
               <Factory size={16} />
-              <span><strong>Line State</strong><small>{lineState?.activeRunCount ?? 0} active products from one projection</small></span>
+              <span>
+                <strong>Line State</strong>
+                <small>{lineState?.productionUnits.length ?? 0} WIP materials · {lineState?.activeRunCount ?? 0} active runs</small>
+              </span>
             </div>
             <span data-testid="line-state-generated-at">{lineState ? formatTimestamp(lineState.generatedAtUtc) : 'not synchronized'}</span>
           </header>
+          {deploymentStationError ? (
+            <p className="operations-safety-error" data-testid="station-deployment-context-error">
+              Frozen Station deployment context unavailable: {deploymentStationError}
+            </p>
+          ) : null}
           <div className="operations-station-grid">
             {stationOverviews.map(station => (
-              <StationCard key={station.stationSystemId} station={station} />
+              <StationCard
+                key={station.stationSystemId}
+                station={station}
+                onEmergencyStop={() => {
+                  setPendingEmergencyStationSystemId(station.stationSystemId);
+                  setEmergencyReason('');
+                  setEmergencyConfirmation('');
+                }}
+              />
             ))}
             {stationOverviews.length === 0 ? (
               <div className="operations-line-empty">
                 <Factory size={30} />
-                <strong>The selected line has no active WIP</strong>
-                <span>Studio reconnects by querying Active Runs and the persisted Line State projection.</span>
+                <strong>The selected line has no persisted Station state</strong>
+                <span>Queue, Slot occupancy and leases are restored from the Coordinator projection.</span>
               </div>
             ) : null}
           </div>
+          {runtimeView && runtimeView.carriers.length > 0 ? (
+            <section className="operations-carrier-board" data-testid="line-carriers">
+              <header><Boxes size={14} /><strong>CARRIERS</strong><small>{runtimeView.carriers.length}</small></header>
+              <div>
+                {runtimeView.carriers.map(carrier => (
+                  <CarrierCard key={carrier.carrierId} carrier={carrier} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+          <section className="operations-safety-board" data-testid="station-safety-events">
+            <header>
+              <span><ShieldAlert size={14} /><strong>STATION SAFETY EVIDENCE</strong></span>
+              <small>{safetyEvents.length} persisted · independent channel</small>
+            </header>
+            {safetyError ? <p className="operations-safety-error">Safety evidence unavailable: {safetyError}</p> : null}
+            <div>
+              {safetyEvents.slice(0, 8).map(event => (
+                <article key={event.idempotencyKey} className={`status-${event.status.toLowerCase()}`} data-testid={`emergency-stop-event-${event.idempotencyKey}`}>
+                  <i />
+                  <span>
+                    <strong>{event.stationSystemId}</strong>
+                    <small>{event.actorId} · {formatTimestamp(event.requestedAtUtc)}</small>
+                    <em>{event.reason}</em>
+                  </span>
+                  <span>
+                    <b>{event.status}</b>
+                    <small>{event.failureCode ?? event.lastDispatchFailure ?? `${event.dispatchAttemptCount} dispatch attempt(s)`}</small>
+                    {event.status === 'Pending' ? (
+                      <button type="button" className="button danger" onClick={() => void issueEmergencyStop(event)} disabled={safetyBusy} data-testid={`retry-emergency-stop-${event.idempotencyKey}`}>
+                        Retry same message
+                      </button>
+                    ) : null}
+                  </span>
+                </article>
+              ))}
+              {safetyEvents.length === 0 && !safetyError ? <p>No Emergency Stop evidence for this frozen Application snapshot.</p> : null}
+            </div>
+          </section>
         </main>
 
         <aside className="operations-run-detail">
@@ -308,7 +612,7 @@ export function OperationsWorkbench({
               <section className="operations-command-section">
                 <header><span>OPERATOR COMMANDS</span><small>{selectedRun.controlState}</small></header>
                 <div className="operations-command-grid">
-                  {commandDefinitions.map(definition => {
+                  {visibleCommandDefinitions.map(definition => {
                     const Icon = definition.icon;
                     return (
                       <button
@@ -319,6 +623,8 @@ export function OperationsWorkbench({
                         onClick={() => {
                           setPendingCommand(definition.command);
                           setReason('');
+                          setEvidenceReference('');
+                          setRecoveryOutputsJson('{}');
                         }}
                         data-testid={`production-command-${definition.command}`}
                       >
@@ -342,6 +648,52 @@ export function OperationsWorkbench({
                           {selectedRun.operations.map(operation => (
                             <option key={operation.operationRunId} value={operation.operationId}>
                               {operation.operationId} · attempt {operation.attempt}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {requiresRecoveryDecision(pendingDefinition.command, selectedRun) ? (
+                      <label>
+                        <span>Evidence reference</span>
+                        <input value={evidenceReference} onChange={event => setEvidenceReference(event.target.value)} data-testid="recovery-evidence-reference" />
+                      </label>
+                    ) : null}
+                    {pendingDefinition.command === 'Reconcile' ? (
+                      <>
+                        <label>
+                          <span>Running Operation Run</span>
+                          <select value={recoveryOperationRunId} onChange={event => setRecoveryOperationRunId(event.target.value)} data-testid="recovery-operation-run">
+                            {selectedRun.operations
+                              .filter(operation => operation.executionStatus === 'Running')
+                              .map(operation => (
+                                <option key={operation.operationRunId} value={operation.operationRunId}>
+                                  {operation.operationRunId} · {operation.operationId}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Observed judgement</span>
+                          <select value={recoveryJudgement} onChange={event => setRecoveryJudgement(event.target.value as typeof recoveryJudgement)} data-testid="recovery-observed-judgement">
+                            <option value="Passed">Passed</option>
+                            <option value="Failed">Failed</option>
+                            <option value="NotApplicable">NotApplicable</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>Typed observed outputs (JSON)</span>
+                          <textarea value={recoveryOutputsJson} onChange={event => setRecoveryOutputsJson(event.target.value)} rows={5} spellCheck={false} data-testid="recovery-observed-outputs" />
+                        </label>
+                      </>
+                    ) : null}
+                    {pendingDefinition.command === 'Retry' ? (
+                      <label>
+                        <span>Retry Operation</span>
+                        <select value={operationId} onChange={event => setOperationId(event.target.value)} data-testid="recovery-operation-id">
+                          {uniqueOperations(selectedRun).map(operation => (
+                            <option key={operation.operationId} value={operation.operationId}>
+                              {operation.operationId}
                             </option>
                           ))}
                         </select>
@@ -392,42 +744,139 @@ const RunListItem = memo(function RunListItem({
   );
 });
 
-const StationCard = memo(function StationCard({ station }: { station: StationOverview }): React.ReactElement {
-  const state = station.failedProducts.length > 0
-    ? 'failed'
-    : station.runningProducts.length > 0
-      ? 'running'
-      : station.heldProducts.length > 0
-        ? 'held'
-        : 'queued';
+const StationCard = memo(function StationCard({
+  station,
+  onEmergencyStop
+}: {
+  station: ProductionLineStationView;
+  onEmergencyStop(): void;
+}): React.ReactElement {
+  const tone = stationTone(station.status);
   return (
-    <article className={`operations-station-card status-${state}`}>
+    <article
+      className={`operations-station-card status-${tone}`}
+      data-testid={`line-station-${station.stationSystemId}`}
+      data-station-status={station.status}
+    >
       <header>
         <span><Factory size={14} /><strong>{station.stationSystemId}</strong></span>
-        <small>{station.runningProducts.length} running · {station.queuedProducts.length} queued</small>
+        <span className="operations-station-safety-actions">
+          <small>{station.status} · {station.activeOperations.length} active · {station.queue.length} queued</small>
+          <button type="button" onClick={onEmergencyStop} title={`Emergency Stop ${station.stationSystemId}`} data-testid={`emergency-stop-${station.stationSystemId}`}>
+            <ShieldAlert size={12} /> E-STOP
+          </button>
+        </span>
       </header>
       <div className="operations-product-lanes">
-        <ProductLane label="RUNNING" products={station.runningProducts} />
-        <ProductLane label="QUEUE" products={station.queuedProducts} />
-        {station.heldProducts.length > 0 ? <ProductLane label="HELD" products={station.heldProducts} /> : null}
-        {station.failedProducts.length > 0 ? <ProductLane label="INCIDENT" products={station.failedProducts} /> : null}
+        <ProductLane
+          label="ACTIVE OPERATIONS"
+          products={station.activeOperations.map(operation => (
+            `${operation.productionUnitLabel} / ${operation.operationId}`))}
+          testId={`line-station-active-${station.stationSystemId}`}
+        />
+        <ProductLane
+          label="STATION QUEUE"
+          products={station.queue.map(material => `${material.label} [${material.kind}]`)}
+          testId={`line-station-queue-${station.stationSystemId}`}
+        />
+        <ProductLane
+          label="LOCATED WIP"
+          products={station.productionUnits.map(unit => (
+            `${unit.identityValue} / ${unit.disposition}`))}
+          testId={`line-station-wip-${station.stationSystemId}`}
+        />
       </div>
       <div className="operations-slot-strip">
         {station.slots.map(slot => (
-          <div key={slot.slotId} className={`status-${slot.state.toLowerCase()}`} title={`${slot.slotId} · ${slot.state}`}>
+          <div
+            key={slot.slotId}
+            className={`status-${slot.status.toLowerCase()}`}
+            title={`${slot.slotId} · ${slot.status}`}
+            data-testid={`line-slot-${station.stationSystemId}-${slot.slotId}`}
+            data-slot-status={slot.status}
+          >
             <i />
-            <span><strong>{slot.slotId}</strong><small>{slot.state}{slot.productIdentity ? ` · ${slot.productIdentity}` : ''}</small></span>
+            <span>
+              <strong>{slot.slotId}</strong>
+              <small>{slot.status}{slot.materialLabel ? ` · ${slot.materialLabel}` : ''}</small>
+            </span>
           </div>
         ))}
-        {station.slots.length === 0 ? <span className="operations-no-slots">No leased Slot resources</span> : null}
+        {station.slots.length === 0 ? <span className="operations-no-slots">No persisted Slots</span> : null}
+      </div>
+      {station.resources.length > 0 ? (
+        <div className="operations-resource-strip" data-testid={`line-station-resources-${station.stationSystemId}`}>
+          {station.resources.map(resource => (
+            <div
+              key={`${resource.operationRunId}:${resource.kind}:${resource.resourceId}`}
+              className={`status-${resourceTone(resource.status)}`}
+              data-testid={`line-resource-${resource.operationRunId}-${resource.kind}-${resource.resourceId}`}
+              data-resource-status={resource.status}
+              data-fencing-token={resource.fencingToken ?? ''}
+            >
+              <span>{resource.kind}</span>
+              <strong>{resource.resourceId}</strong>
+              <small>
+                {resource.status}
+                {resource.fencingToken === null ? '' : ` · fence ${resource.fencingToken}`}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {station.carriers.length > 0 ? (
+        <div className="operations-station-carriers">
+          {station.carriers.map(carrier => (
+            <span key={carrier.carrierId}>
+              <Boxes size={12} /> {carrier.carrierId} · {carrier.productionUnits.length}/{carrier.capacity}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </article>
+  );
+});
+
+const CarrierCard = memo(function CarrierCard({
+  carrier
+}: {
+  carrier: ProductionLineCarrierView;
+}): React.ReactElement {
+  return (
+    <article data-testid={`line-carrier-${carrier.carrierId}`}>
+      <header>
+        <span><Boxes size={13} /><strong>{carrier.carrierId}</strong></span>
+        <small>{carrier.carrierTypeId} · {carrier.productionUnits.length}/{carrier.capacity}</small>
+      </header>
+      <p>{formatMaterialLocation(carrier.location)}</p>
+      <div>
+        {carrier.productionUnits.map(position => (
+          <span
+            key={position.carrierPositionId}
+            data-testid={`line-carrier-position-${carrier.carrierId}-${position.carrierPositionId}`}
+          >
+            <b>{position.carrierPositionId}</b>
+            <strong>{position.productionUnitLabel}</strong>
+            <small>{position.disposition} · {position.judgement}</small>
+          </span>
+        ))}
+        {carrier.productionUnits.length === 0 ? <small>Carrier is empty</small> : null}
       </div>
     </article>
   );
 });
 
-function ProductLane({ label, products }: { label: string; products: string[] }): React.ReactElement {
+function ProductLane({
+  label,
+  products,
+  testId
+}: {
+  label: string;
+  products: string[];
+  testId: string;
+}): React.ReactElement {
   return (
-    <div>
+    <div data-testid={testId}>
       <span>{label}</span>
       <div>{products.length > 0
         ? products.map(product => <b key={product}>{product}</b>)
@@ -462,82 +911,23 @@ function RunDetail({ run }: { run: ProductionRunReadModel }): React.ReactElement
           </div>
         ))}
       </div>
+      {run.recoveryDecisions.length > 0 ? (
+        <div className="operations-recovery-evidence" data-testid="production-recovery-decisions">
+          <strong>RECOVERY DECISIONS</strong>
+          {run.recoveryDecisions.map(decision => (
+            <span key={decision.decisionId}>
+              <b>{decision.kind}</b>
+              <small>{decision.actorId} · {decision.evidenceReference}</small>
+              <em>{decision.reason}</em>
+            </span>
+          ))}
+        </div>
+      ) : null}
       {run.failureReason ? (
         <div className="operations-failure"><AlertTriangle size={13} /><span>{run.failureCode} · {run.failureReason}</span></div>
       ) : null}
     </section>
   );
-}
-
-function buildStationOverviews(runs: ProductionRunReadModel[]): StationOverview[] {
-  const stations = new Map<string, {
-    running: Set<string>;
-    queued: Set<string>;
-    held: Set<string>;
-    failed: Set<string>;
-    slots: Map<string, SlotOverview>;
-  }>();
-  for (const run of runs) {
-    const product = run.productionUnitIdentity.value;
-    for (const operation of run.operations) {
-      const station = stations.get(operation.stationSystemId) ?? {
-        running: new Set<string>(),
-        queued: new Set<string>(),
-        held: new Set<string>(),
-        failed: new Set<string>(),
-        slots: new Map<string, SlotOverview>()
-      };
-      stations.set(operation.stationSystemId, station);
-      if (run.controlState === 'Held') {
-        station.held.add(product);
-      } else if (operation.executionStatus === 'Running') {
-        station.running.add(product);
-      } else if (operation.executionStatus === 'Pending') {
-        station.queued.add(product);
-      } else if (['Failed', 'TimedOut', 'Rejected'].includes(operation.executionStatus)) {
-        station.failed.add(product);
-      }
-
-      for (const resource of operation.resources.filter(candidate => candidate.kind === 'Slot')) {
-        const slot = toSlotOverview(resource.resourceId, resource.fencingToken, operation, product);
-        const existing = station.slots.get(slot.slotId);
-        if (!existing || slotPriority(slot.state) > slotPriority(existing.state)) {
-          station.slots.set(slot.slotId, slot);
-        }
-      }
-    }
-  }
-  return [...stations.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([stationSystemId, station]) => ({
-      stationSystemId,
-      runningProducts: [...station.running].sort(),
-      queuedProducts: [...station.queued].sort(),
-      heldProducts: [...station.held].sort(),
-      failedProducts: [...station.failed].sort(),
-      slots: [...station.slots.values()].sort((left, right) => left.slotId.localeCompare(right.slotId))
-    }));
-}
-
-function toSlotOverview(
-  slotId: string,
-  fencingToken: number | null,
-  operation: ProductionOperationRunReadModel,
-  productIdentity: string
-): SlotOverview {
-  if (fencingToken === null) {
-    return { slotId, state: 'Available', productIdentity: null, fencingToken };
-  }
-  if (operation.executionStatus === 'Running') {
-    return { slotId, state: 'Running', productIdentity, fencingToken };
-  }
-  if (operation.executionStatus === 'Pending') {
-    return { slotId, state: 'Reserved', productIdentity, fencingToken };
-  }
-  if (['Failed', 'TimedOut', 'Rejected'].includes(operation.executionStatus)) {
-    return { slotId, state: 'Blocked', productIdentity, fencingToken };
-  }
-  return { slotId, state: 'Occupied', productIdentity, fencingToken };
 }
 
 function currentOperation(run: ProductionRunReadModel): ProductionOperationRunReadModel | null {
@@ -551,23 +941,95 @@ function canIssue(command: OperatorProductionRunCommand, run: ProductionRunReadM
   if (run.isTerminal) {
     return false;
   }
+  if (run.controlState === 'RecoveryRequired') {
+    switch (command) {
+      case 'Reconcile': return run.operations.some(operation => operation.executionStatus === 'Running');
+      case 'Retry': return run.operations.length > 0;
+      case 'Abort':
+      case 'Scrap': return true;
+      default: return false;
+    }
+  }
   switch (command) {
     case 'Pause': return run.controlState === 'Active';
     case 'Continue': return run.controlState === 'Paused';
+    case 'Stop': return run.controlState !== 'StopRequested';
     case 'Hold': return run.controlState === 'Active' || run.controlState === 'Paused';
     case 'Release': return run.controlState === 'Held';
     case 'Rework': return run.operations.length > 0 && run.controlState !== 'SafeStopped';
     case 'SafeStop': return run.controlState !== 'SafeStopped';
+    case 'Reconcile':
+    case 'Retry':
+    case 'Abort': return false;
     default: return true;
   }
 }
 
 function requiresReason(command: OperatorProductionRunCommand): boolean {
-  return command === 'Stop' || command === 'Hold' || command === 'Scrap' || command === 'SafeStop';
+  return command === 'Stop'
+    || command === 'Cancel'
+    || command === 'Hold'
+    || command === 'Scrap'
+    || command === 'SafeStop'
+    || command === 'Reconcile'
+    || command === 'Retry'
+    || command === 'Abort';
+}
+
+function requiresRecoveryDecision(
+  command: OperatorProductionRunCommand,
+  run: ProductionRunReadModel
+): boolean {
+  return command === 'Reconcile'
+    || command === 'Retry'
+    || command === 'Abort'
+    || (command === 'Scrap' && run.controlState === 'RecoveryRequired');
+}
+
+function uniqueOperations(run: ProductionRunReadModel): ProductionOperationRunReadModel[] {
+  const operations = new Map<string, ProductionOperationRunReadModel>();
+  run.operations.forEach(operation => {
+    if (!operations.has(operation.operationId)) {
+      operations.set(operation.operationId, operation);
+    }
+  });
+  return [...operations.values()];
+}
+
+function parseTypedOutputs(value: string): Record<string, ProductionContextValueRequest> {
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('expected an object keyed by output name');
+  }
+  const allowedKinds = new Set<ProductionContextValueRequest['kind']>([
+    'Text',
+    'Boolean',
+    'WholeNumber',
+    'FixedPoint',
+    'DateTimeUtc'
+  ]);
+  const outputs: Record<string, ProductionContextValueRequest> = {};
+  Object.entries(parsed).forEach(([key, raw]) => {
+    if (!isCanonical(key) || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`output '${key}' must be a canonical typed object`);
+    }
+    const candidate = raw as { kind?: unknown; canonicalValue?: unknown };
+    if (typeof candidate.kind !== 'string'
+        || !allowedKinds.has(candidate.kind as ProductionContextValueRequest['kind'])
+        || typeof candidate.canonicalValue !== 'string'
+        || !isCanonical(candidate.canonicalValue)) {
+      throw new Error(`output '${key}' has an invalid kind or canonicalValue`);
+    }
+    outputs[key] = {
+      kind: candidate.kind as ProductionContextValueRequest['kind'],
+      canonicalValue: candidate.canonicalValue
+    };
+  });
+  return outputs;
 }
 
 function statusTone(executionStatus: string, controlState: string): string {
-  if (controlState === 'Held' || controlState === 'Paused') {
+  if (controlState === 'Held' || controlState === 'Paused' || controlState === 'StopRequested') {
     return 'held';
   }
   if (['Failed', 'TimedOut', 'Rejected'].includes(executionStatus)) {
@@ -582,8 +1044,48 @@ function statusTone(executionStatus: string, controlState: string): string {
   return 'queued';
 }
 
-function slotPriority(state: SlotOverview['state']): number {
-  return { Available: 0, Reserved: 1, Occupied: 2, Running: 3, Blocked: 4 }[state];
+function idleStationView(stationSystemId: string): ProductionLineStationView {
+  return {
+    stationSystemId,
+    status: 'Idle',
+    queue: [],
+    activeOperations: [],
+    productionUnits: [],
+    slots: [],
+    carriers: [],
+    resources: []
+  };
+}
+
+function stationTone(status: ProductionLineStationView['status']): string {
+  switch (status) {
+    case 'Running': return 'running';
+    case 'Queued':
+    case 'WaitingForResources': return 'queued';
+    case 'Blocked': return 'failed';
+    case 'Offline': return 'offline';
+    default: return 'completed';
+  }
+}
+
+function resourceTone(status: ProductionLineStationView['resources'][number]['status']): string {
+  switch (status) {
+    case 'Leased': return 'running';
+    case 'Waiting': return 'queued';
+    case 'RecoveryHeld': return 'held';
+    default: return 'failed';
+  }
+}
+
+function formatMaterialLocation(location: ProductionLineCarrierView['location']): string {
+  if (!location) {
+    return 'Location is not assigned';
+  }
+  switch (location.kind) {
+    case 'StationQueue': return `${location.stationSystemId} / queue`;
+    case 'Slot': return `${location.stationSystemId} / ${location.slotId}`;
+    case 'CarrierPosition': return `${location.carrierId} / ${location.carrierPositionId}`;
+  }
 }
 
 function uniqueSorted(values: string[]): string[] {

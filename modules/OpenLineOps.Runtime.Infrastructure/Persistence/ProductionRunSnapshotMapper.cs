@@ -3,6 +3,7 @@ using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Domain.ProductionUnits;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -24,6 +25,7 @@ internal static class ProductionRunSnapshotMapper
             snapshot.ProjectSnapshotId,
             snapshot.TopologyId,
             snapshot.ProductionLineDefinitionId,
+            snapshot.ProductionUnitId.Value,
             snapshot.ProductionUnitIdentity.ModelId,
             snapshot.ProductionUnitIdentity.InputKey,
             snapshot.ProductionUnitIdentity.Value,
@@ -52,7 +54,8 @@ internal static class ProductionRunSnapshotMapper
                 decision.Traversal,
                 decision.DecidedAtUtc)).ToArray(),
             snapshot.TransitionTraversals.Select(pair =>
-                new PersistedTransitionTraversal(pair.Key, pair.Value)).ToArray());
+                new PersistedTransitionTraversal(pair.Key, pair.Value)).ToArray(),
+            snapshot.RecoveryDecisions.Select(ToSnapshot).ToArray());
     }
 
     public static ProductionRun ToAggregate(PersistedProductionRun snapshot)
@@ -62,6 +65,11 @@ internal static class ProductionRunSnapshotMapper
         if (snapshot.RunId == Guid.Empty)
         {
             throw new InvalidDataException("Persisted Production Run does not declare a run id.");
+        }
+
+        if (snapshot.ProductionUnitId == Guid.Empty)
+        {
+            throw new InvalidDataException("Persisted Production Run does not declare a Production Unit id.");
         }
 
         var definitions = Required(snapshot.OperationDefinitions, "operation definitions")
@@ -91,6 +99,10 @@ internal static class ProductionRunSnapshotMapper
             throw new InvalidDataException("Persisted transition traversal ids must be unique.");
         }
 
+        var recoveryDecisions = Required(snapshot.RecoveryDecisions, "recovery decisions")
+            .Select(ToAggregate)
+            .ToArray();
+
         return ProductionRun.Restore(new ProductionRunSnapshot(
             new ProductionRunId(snapshot.RunId),
             Text(snapshot.ProjectId, "project id"),
@@ -98,6 +110,7 @@ internal static class ProductionRunSnapshotMapper
             Text(snapshot.ProjectSnapshotId, "project snapshot id"),
             Text(snapshot.TopologyId, "topology id"),
             Text(snapshot.ProductionLineDefinitionId, "production line definition id"),
+            new ProductionUnitId(snapshot.ProductionUnitId),
             new ProductionUnitIdentity(
                 Text(snapshot.ProductModelId, "product model id"),
                 Text(snapshot.IdentityInputKey, "product identity input key"),
@@ -120,7 +133,8 @@ internal static class ProductionRunSnapshotMapper
             transitions,
             operations,
             decisions,
-            traversalCounts));
+            traversalCounts,
+            recoveryDecisions));
     }
 
     private static PersistedOperationDefinition ToSnapshot(OperationRunDefinition definition) => new(
@@ -132,7 +146,8 @@ internal static class ProductionRunSnapshotMapper
         definition.ConfigurationSnapshotId.Value,
         definition.RecipeSnapshotId.Value,
         definition.ResourceRequirements.Select(requirement =>
-            new PersistedResourceRequirement(requirement.Kind.ToString(), requirement.ResourceId)).ToArray());
+            new PersistedResourceRequirement(requirement.Kind.ToString(), requirement.ResourceId)).ToArray(),
+        ToSnapshot(definition.MaterialSlotRequirement));
 
     private static OperationRunDefinition ToAggregate(PersistedOperationDefinition definition) => new(
         Text(definition.OperationId, "operation id"),
@@ -144,7 +159,24 @@ internal static class ProductionRunSnapshotMapper
             definition.ConfigurationSnapshotId,
             "configuration snapshot id")),
         new RecipeSnapshotId(Text(definition.RecipeSnapshotId, "recipe snapshot id")),
-        Required(definition.Resources, "operation resources").Select(ToAggregate));
+        Required(definition.Resources, "operation resources").Select(ToAggregate),
+        ToAggregate(definition.MaterialSlotRequirement));
+
+    private static PersistedMaterialSlotRequirement? ToSnapshot(
+        MaterialSlotRequirement? requirement) => requirement is null
+        ? null
+        : new PersistedMaterialSlotRequirement(
+            requirement.Resolution.ToString(),
+            requirement.TopologyTargetId,
+            requirement.EligibleSlotIds.ToArray());
+
+    private static MaterialSlotRequirement? ToAggregate(
+        PersistedMaterialSlotRequirement? requirement) => requirement is null
+        ? null
+        : new MaterialSlotRequirement(
+            Enum<MaterialSlotResolution>(requirement.Resolution, "material Slot resolution"),
+            Text(requirement.TopologyTargetId, "material Slot topology target id"),
+            Required(requirement.EligibleSlotIds, "eligible material Slot ids"));
 
     private static ResourceRequirement ToAggregate(PersistedResourceRequirement resource) => new(
         Enum<ResourceKind>(resource.Kind, "resource kind"),
@@ -206,6 +238,58 @@ internal static class ProductionRunSnapshotMapper
             pair.Key.Kind.ToString(),
             pair.Key.ResourceId,
             pair.Value)).ToArray());
+
+    private static PersistedRecoveryDecision ToSnapshot(ProductionRecoveryDecision decision) => new(
+        decision.DecisionId,
+        decision.Kind.ToString(),
+        decision.ActorId,
+        decision.Reason,
+        decision.EvidenceReference,
+        decision.DecidedAtUtc,
+        decision.OperationRunId,
+        decision.OperationId,
+        decision.ObservedJudgement?.ToString(),
+        decision.ObservedOutputs
+            .OrderBy(output => output.Key, StringComparer.Ordinal)
+            .Select(output => new PersistedProductionContextValue(
+                output.Key,
+                output.Value.Kind.ToString(),
+                output.Value.CanonicalValue))
+            .ToArray());
+
+    private static ProductionRecoveryDecision ToAggregate(PersistedRecoveryDecision decision)
+    {
+        if (decision.DecisionId == Guid.Empty)
+        {
+            throw new InvalidDataException("Persisted Recovery Decision does not declare an id.");
+        }
+
+        var outputItems = Required(decision.ObservedOutputs, "Recovery Decision observed outputs");
+        var outputs = outputItems.ToDictionary(
+            item => Text(item.Key, "Recovery Decision output key"),
+            item => new ProductionContextValue(
+                Enum<ProductionContextValueKind>(item.Kind, "Recovery Decision output kind"),
+                Text(item.Value, "Recovery Decision output value")),
+            StringComparer.Ordinal);
+        if (outputs.Count != outputItems.Length)
+        {
+            throw new InvalidDataException("Persisted Recovery Decision output keys must be unique.");
+        }
+
+        return new ProductionRecoveryDecision(
+            decision.DecisionId,
+            Enum<ProductionRecoveryDecisionKind>(decision.Kind, "Recovery Decision kind"),
+            Text(decision.ActorId, "Recovery Decision actor"),
+            Text(decision.Reason, "Recovery Decision reason"),
+            Text(decision.EvidenceReference, "Recovery Decision evidence reference"),
+            decision.DecidedAtUtc,
+            Optional(decision.OperationRunId, "Recovery Decision Operation Run id"),
+            Optional(decision.OperationId, "Recovery Decision Operation id"),
+            decision.ObservedJudgement is null
+                ? null
+                : Enum<ResultJudgement>(decision.ObservedJudgement, "Recovery Decision judgement"),
+            outputs);
+    }
 
     private static OperationRunSnapshot ToAggregate(
         PersistedOperationRun operation,
@@ -322,6 +406,7 @@ internal sealed record PersistedProductionRun(
     string? ProjectSnapshotId,
     string? TopologyId,
     string? ProductionLineDefinitionId,
+    Guid ProductionUnitId,
     string? ProductModelId,
     string? IdentityInputKey,
     string? IdentityValue,
@@ -343,7 +428,8 @@ internal sealed record PersistedProductionRun(
     PersistedRouteTransition[]? RouteTransitions,
     PersistedOperationRun[]? Operations,
     PersistedRouteDecision[]? RouteDecisions,
-    PersistedTransitionTraversal[]? TransitionTraversals);
+    PersistedTransitionTraversal[]? TransitionTraversals,
+    PersistedRecoveryDecision[]? RecoveryDecisions);
 
 internal sealed record PersistedOperationDefinition(
     string? OperationId,
@@ -353,9 +439,15 @@ internal sealed record PersistedOperationDefinition(
     string? ProcessVersionId,
     string? ConfigurationSnapshotId,
     string? RecipeSnapshotId,
-    PersistedResourceRequirement[]? Resources);
+    PersistedResourceRequirement[]? Resources,
+    PersistedMaterialSlotRequirement? MaterialSlotRequirement);
 
 internal sealed record PersistedResourceRequirement(string? Kind, string? ResourceId);
+
+internal sealed record PersistedMaterialSlotRequirement(
+    string? Resolution,
+    string? TopologyTargetId,
+    string[]? EligibleSlotIds);
 
 internal sealed record PersistedRouteTransition(
     string? TransitionId,
@@ -402,3 +494,15 @@ internal sealed record PersistedRouteDecision(
     DateTimeOffset DecidedAtUtc);
 
 internal sealed record PersistedTransitionTraversal(string? TransitionId, int Count);
+
+internal sealed record PersistedRecoveryDecision(
+    Guid DecisionId,
+    string? Kind,
+    string? ActorId,
+    string? Reason,
+    string? EvidenceReference,
+    DateTimeOffset DecidedAtUtc,
+    string? OperationRunId,
+    string? OperationId,
+    string? ObservedJudgement,
+    PersistedProductionContextValue[]? ObservedOutputs);

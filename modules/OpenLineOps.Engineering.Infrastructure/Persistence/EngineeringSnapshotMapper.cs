@@ -121,6 +121,7 @@ internal static class EngineeringSnapshotMapper
     {
         return new PersistedDeviceBinding(
             binding.Id.Value,
+            binding.OwnerSystemId,
             binding.CapabilityId.Value,
             binding.DeviceKey);
     }
@@ -129,6 +130,7 @@ internal static class EngineeringSnapshotMapper
     {
         return new PersistedDeviceBindingSnapshot(
             binding.DeviceBindingId.Value,
+            binding.OwnerSystemId,
             binding.CapabilityId.Value,
             binding.DeviceKey);
     }
@@ -158,6 +160,7 @@ internal static class EngineeringSnapshotMapper
     {
         return DeviceBinding.Create(
             new DeviceBindingId(binding.DeviceBindingId),
+            binding.OwnerSystemId,
             new DeviceCapabilityId(binding.CapabilityId),
             binding.DeviceKey);
     }
@@ -166,6 +169,7 @@ internal static class EngineeringSnapshotMapper
     {
         return new DeviceBindingSnapshot(
             new DeviceBindingId(binding.DeviceBindingId),
+            binding.OwnerSystemId,
             new DeviceCapabilityId(binding.CapabilityId),
             binding.DeviceKey);
     }
@@ -229,10 +233,12 @@ internal sealed record PersistedStationProfile(
 
 internal sealed record PersistedDeviceBinding(
     string DeviceBindingId,
+    string OwnerSystemId,
     string CapabilityId,
     string DeviceKey);
 
 internal sealed record PersistedDeviceBindingSnapshot(
     string DeviceBindingId,
+    string OwnerSystemId,
     string CapabilityId,
     string DeviceKey);

@@ -36,8 +36,8 @@ namespace PythonScript
                 return code;
             }
 
-            if ((code.StartsWith("\"") && code.EndsWith("\"") && code.Count(c => c == '"') >= 2) ||
-                (code.StartsWith("'") && code.EndsWith("'") && code.Count(c => c == '\'') >= 2))
+            if ((code.StartsWith('"') && code.EndsWith('"') && code.Count(c => c == '"') >= 2) ||
+                (code.StartsWith('\'') && code.EndsWith('\'') && code.Count(c => c == '\'') >= 2))
             {
                 string content = code.Substring(1, code.Length - 2);
                 return $"'''{content}'''";

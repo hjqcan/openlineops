@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using Microsoft.CSharp.RuntimeBinder;
 using Python.Runtime;
@@ -160,20 +161,20 @@ namespace PythonScript.Utils
                         }
                     }
 
-                    string? repr = pyObject.ToString();
+                    string? repr = pyObject.ToString(CultureInfo.InvariantCulture);
                     if (!string.IsNullOrEmpty(repr))
                     {
                         return repr;
                     }
 
                     using var typeObj = pyObject.GetPythonType();
-                    string? typeName = typeObj?.ToString();
+                    string? typeName = typeObj?.ToString(CultureInfo.InvariantCulture);
                     return string.IsNullOrEmpty(typeName) ? "PythonObject" : typeName;
                 }
             }
             catch (PythonException)
             {
-                return pyObject.ToString()!;
+                return pyObject.ToString(CultureInfo.InvariantCulture)!;
             }
         }
     }

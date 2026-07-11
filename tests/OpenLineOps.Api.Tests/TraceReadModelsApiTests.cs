@@ -51,7 +51,9 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
             $"/api/traceability/read-models/station-dashboard?stationSystemId={stationSystemId}&recentLimit=3");
         using var body = await ReadJsonAsync(response);
 
-        Assert.Equal(HttpStatusCode.Created, passed.StatusCode);
+        Assert.True(
+            passed.StatusCode == HttpStatusCode.Created,
+            $"Passed trace returned {(int)passed.StatusCode}: {await passed.Content.ReadAsStringAsync()}");
         Assert.Equal(HttpStatusCode.Created, nonconforming.StatusCode);
         Assert.Equal(HttpStatusCode.Created, systemFailure.StatusCode);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -80,13 +82,13 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
     public async Task EngineeringSearchReturnsProductionRunRowsAndOperationFacets()
     {
         var suffix = Guid.NewGuid().ToString("N");
-        var batchId = $"batch-engineering-{suffix}";
+        var lotId = $"lot-engineering-{suffix}";
         using var first = await _client.PostAsJsonAsync(
             "/api/traceability/records",
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-ENG-P-{suffix}",
-                batchId,
+                lotId,
                 BaseTimeUtc.AddMinutes(1),
                 stationSystemId: "station-system-engineering-a",
                 processVersionId: "process-api-read-model@1.0.0"));
@@ -95,14 +97,14 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-ENG-F-{suffix}",
-                batchId,
+                lotId,
                 BaseTimeUtc.AddMinutes(2),
                 judgement: "Failed",
                 stationSystemId: "station-system-engineering-b",
                 processVersionId: "process-api-read-model@1.0.0"));
 
         using var response = await _client.GetAsync(
-            $"/api/traceability/read-models/engineering-search?batchId={batchId}"
+            $"/api/traceability/read-models/engineering-search?lotId={lotId}"
             + "&processVersionId=process-api-read-model@1.0.0&pageSize=10");
         using var body = await ReadJsonAsync(response);
         var results = body.RootElement.GetProperty("results");

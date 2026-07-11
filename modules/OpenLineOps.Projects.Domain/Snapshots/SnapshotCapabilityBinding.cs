@@ -1,6 +1,12 @@
 namespace OpenLineOps.Projects.Domain.Snapshots;
 
-public sealed record SnapshotCapabilityBinding(string CapabilityId, string BindingId, string ProviderKind, string ProviderKey)
+public sealed record SnapshotCapabilityBinding(
+    string CapabilityId,
+    string BindingId,
+    string ProviderKind,
+    string ProviderKey,
+    string OwnerSystemId,
+    string OwnerStationSystemId)
 {
     public string CapabilityId { get; } = string.IsNullOrWhiteSpace(CapabilityId)
         ? throw new ArgumentException("Capability id cannot be empty.", nameof(CapabilityId))
@@ -17,4 +23,12 @@ public sealed record SnapshotCapabilityBinding(string CapabilityId, string Bindi
     public string ProviderKey { get; } = string.IsNullOrWhiteSpace(ProviderKey)
         ? throw new ArgumentException("Provider key cannot be empty.", nameof(ProviderKey))
         : ProviderKey.Trim();
+
+    public string OwnerSystemId { get; } = string.IsNullOrWhiteSpace(OwnerSystemId)
+        ? throw new ArgumentException("Owner system id cannot be empty.", nameof(OwnerSystemId))
+        : OwnerSystemId.Trim();
+
+    public string OwnerStationSystemId { get; } = string.IsNullOrWhiteSpace(OwnerStationSystemId)
+        ? throw new ArgumentException("Owner Station system id cannot be empty.", nameof(OwnerStationSystemId))
+        : OwnerStationSystemId.Trim();
 }

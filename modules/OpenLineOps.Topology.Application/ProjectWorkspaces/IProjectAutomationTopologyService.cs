@@ -59,6 +59,21 @@ public interface IProjectAutomationTopologyService
         AddDriverBindingRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<Result<AutomationTopologyDetails>> UpdateDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        UpdateDriverBindingRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<AutomationTopologyDetails>> DeleteDriverBindingAsync(
+        string projectId,
+        string applicationId,
+        string topologyId,
+        string bindingId,
+        CancellationToken cancellationToken = default);
+
     Task<Result<AutomationTopologyDetails>> AddSlotGroupAsync(
         string projectId,
         string applicationId,
