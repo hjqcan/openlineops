@@ -1,4 +1,5 @@
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Contracts;
@@ -21,7 +22,6 @@ public sealed class ProductionRunRecoveryService(
         var recoveryRequired = 0;
         foreach (var entry in entries)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var run = entry.Run;
             if (run.ExecutionStatus == ExecutionStatus.Pending)
             {
@@ -29,39 +29,53 @@ public sealed class ProductionRunRecoveryService(
                 continue;
             }
 
-            if (run.ControlState == ProductionRunControlState.RecoveryRequired)
+            var interrupted = run.Operations
+                .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+                .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+                .ToArray();
+            if (interrupted.Length == 0)
             {
-                recoveryRequired++;
-                continue;
-            }
+                if (run.ControlState == ProductionRunControlState.RecoveryRequired)
+                {
+                    recoveryRequired++;
+                    continue;
+                }
 
-            var interrupted = run.Operations.SingleOrDefault(operation =>
-                operation.ExecutionStatus == ExecutionStatus.Running);
-            if (interrupted is null)
-            {
                 // No hardware action was in flight. The coordinator may dispatch a pending operation.
                 resumable++;
                 continue;
             }
 
-            var transition = run.MarkRecoveryRequired(
-                $"Operation Run {interrupted.OperationRunId} was interrupted by host termination; "
-                + "device commands were not replayed.",
-                clock.UtcNow);
-            if (!transition.Succeeded)
+            IDomainEvent[] events = [];
+            if (run.ControlState != ProductionRunControlState.RecoveryRequired)
             {
-                throw new InvalidOperationException(
-                    $"Could not protect interrupted Production Run {run.Id}: {transition.Message}");
+                var operationRunIds = string.Join(
+                    ", ",
+                    interrupted.Select(static operation => operation.OperationRunId));
+                var transition = run.MarkRecoveryRequired(
+                    $"Operation Runs {operationRunIds} were interrupted by host termination; "
+                    + "device commands were not replayed.",
+                    clock.UtcNow);
+                if (!transition.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        $"Could not protect interrupted Production Run {run.Id}: {transition.Message}");
+                }
+
+                events = run.DomainEvents.ToArray();
+                await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
+                    .ConfigureAwait(false);
             }
 
-            var events = run.DomainEvents.ToArray();
-            await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
-                .ConfigureAwait(false);
-            await resourceLeases.HoldForRecoveryAsync(
-                    run.Id,
-                    interrupted.OperationRunId,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
+            foreach (var operation in interrupted)
+            {
+                await resourceLeases.HoldForRecoveryAsync(
+                        run.Id,
+                        operation.OperationRunId,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
             if (events.Length > 0)
             {
                 await domainEventPublisher.PublishAsync(events, CancellationToken.None)
@@ -72,6 +86,7 @@ public sealed class ProductionRunRecoveryService(
             recoveryRequired++;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return new ProductionRunRecoveryResult(pending, resumable, recoveryRequired);
     }
 }

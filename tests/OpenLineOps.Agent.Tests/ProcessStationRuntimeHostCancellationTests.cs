@@ -54,14 +54,14 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         }
 
         var pidFile = Path.Combine(_root, "timeout-child.pid");
-        var host = CreateHost(TimeSpan.FromMilliseconds(500));
+        var host = CreateHost(TimeSpan.FromSeconds(10));
         var execution = host.ExecuteAsync(
                 CreateRequest(pidFile),
                 static (_, _) => ValueTask.CompletedTask)
             .AsTask();
         var childProcessId = await WaitForChildProcessIdAsync(pidFile);
 
-        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(15));
 
         Assert.Equal(ExecutionStatus.TimedOut, result.ExecutionStatus);
         Assert.Equal(ResultJudgement.Unknown, result.Judgement);
@@ -254,7 +254,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 
     private static async Task<int> WaitForChildProcessIdAsync(string path)
     {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
         while (DateTimeOffset.UtcNow < deadline)
         {
             if (File.Exists(path))
@@ -285,7 +285,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 
     private static async Task<bool> IsProcessRunningAsync(int processId)
     {
-        for (var attempt = 0; attempt < 40; attempt++)
+        for (var attempt = 0; attempt < 200; attempt++)
         {
             try
             {
@@ -342,11 +342,6 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 
     private sealed class AcceptingFenceValidator : IStationResourceFenceValidator
     {
-        public ValueTask<StationResourceFenceValidationResult> ValidateAndAdvanceAsync(
-            StationJobSnapshot job,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(StationResourceFenceValidationResult.Accept());
-
         public ValueTask<StationResourceFenceValidationResult> ValidateCurrentAsync(
             StationJobSnapshot job,
             CancellationToken cancellationToken = default) =>

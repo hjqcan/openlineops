@@ -198,6 +198,54 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
     }
 
     [Fact]
+    public async Task CancellationDuringRuntimeSessionFreezesExactCanceledCommandEvidence()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        const string reason = "Operator canceled the active vendor program.";
+        var canceledAtUtc = BaseTimeUtc.AddSeconds(4);
+        Assert.True(session.CancelCommand(
+            command.Id,
+            canceledAtUtc,
+            reason).Succeeded);
+        Assert.True(session.CancelStep(command.StepId, canceledAtUtc).Succeeded);
+        Assert.True(session.Cancel(canceledAtUtc, reason).Succeeded);
+        await runtimeRepository.SaveAsync(session);
+        Assert.True(run.CancelOperation(
+            operation.OperationRunId,
+            "Runtime.OperationCanceled",
+            reason,
+            completedStepCount: 0,
+            commandCount: 1,
+            incidentCount: 0,
+            canceledAtUtc: canceledAtUtc).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Canceled, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, trace.Judgement);
+        Assert.Equal(ProductDisposition.Held, trace.Disposition);
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(ExecutionStatus.Canceled, storedOperation.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, storedOperation.Judgement);
+        Assert.Equal("Runtime.OperationCanceled", storedOperation.FailureCode);
+        Assert.Equal(TraceRuntimeSessionStatus.Canceled, storedOperation.RuntimeSessionStatus);
+        Assert.Equal(0, storedOperation.CompletedStepCount);
+        Assert.Equal(1, storedOperation.CommandCount);
+        Assert.Equal(0, storedOperation.IncidentCount);
+        var storedCommand = Assert.Single(storedOperation.Commands);
+        Assert.Equal(TraceCommandStatus.Canceled, storedCommand.Status);
+        Assert.Equal(ResultJudgement.Unknown, storedCommand.ResultJudgement);
+    }
+
+    [Fact]
     public async Task ReconciledInterruptedOperationFreezesOperatorEvidenceWithoutRuntimeReplay()
     {
         var runtimeRepository = new InMemoryRuntimeSessionRepository();
@@ -268,13 +316,17 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             1,
             0,
             BaseTimeUtc.AddSeconds(7)).Succeeded);
-        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
+        var request = await PrimeStationResultInboxAsync(
+            stationJobs,
+            run,
+            operation,
+            sessionId);
         await stationJobs.RecordCompletionAsync(new StationJobCompleted(
             Guid.NewGuid(),
-            StationJobIdentity.CreateJobId(idempotencyKey),
-            idempotencyKey,
-            "agent.functional-test",
-            operation.StationId.Value,
+            request.JobId,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
             sessionId.Value,
             ExecutionStatus.Completed,
             ResultJudgement.Passed,
@@ -365,18 +417,23 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             0,
             0,
             BaseTimeUtc.AddSeconds(7)).Succeeded);
-        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
-        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+        var request = await PrimeStationResultInboxAsync(
+            stationJobs,
+            run,
+            operation,
+            sessionId);
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await stationJobs.RecordCompletionAsync(new StationJobCompleted(
             Guid.NewGuid(),
             Guid.NewGuid(),
-            idempotencyKey,
-            "agent.functional-test",
-            operation.StationId.Value,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
             sessionId.Value,
             ExecutionStatus.Completed,
             ResultJudgement.Passed,
             TypedOutputs(),
-            1,
+            0,
             0,
             0,
             [],
@@ -385,11 +442,8 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             [],
             null,
             null,
-            BaseTimeUtc.AddSeconds(7)));
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await subscriber.HandleAsync(run.ToSnapshot()));
-        Assert.Contains("Station job id", exception.Message, StringComparison.Ordinal);
+            BaseTimeUtc.AddSeconds(7))));
+        Assert.Contains("unknown job", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
     }
 
@@ -414,13 +468,18 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             0,
             0,
             BaseTimeUtc.AddSeconds(7)).Succeeded);
-        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
-        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+        var request = await PrimeStationResultInboxAsync(
+            stationJobs,
+            run,
+            operation,
+            sessionId);
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await stationJobs.RecordCompletionAsync(new StationJobCompleted(
             Guid.NewGuid(),
-            StationJobIdentity.CreateJobId(idempotencyKey),
-            idempotencyKey,
-            "agent.functional-test",
-            operation.StationId.Value,
+            request.JobId,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
             sessionId.Value,
             ExecutionStatus.Completed,
             ResultJudgement.Passed,
@@ -434,11 +493,8 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             [],
             null,
             null,
-            BaseTimeUtc.AddSeconds(7)));
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await subscriber.HandleAsync(run.ToSnapshot()));
-        Assert.Contains("completed step count", exception.Message, StringComparison.OrdinalIgnoreCase);
+            BaseTimeUtc.AddSeconds(7))));
+        Assert.Contains("counts", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Null(await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
     }
 
@@ -494,11 +550,13 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             "engineer-a",
             BaseTimeUtc.AddSeconds(-1)))).Succeeded);
         Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForProductionUnit(run.ProductionUnitId),
             station,
             "scanner-a",
             BaseTimeUtc))).Succeeded);
         Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForCarrier(carrierId),
             station,
             "scanner-a",
@@ -566,6 +624,65 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             : $"{{\"test.outcome\":{{\"kind\":\"Text\",\"value\":\"{outcome}\"}}}}";
         using var document = JsonDocument.Parse(json);
         return document.RootElement.Clone();
+    }
+
+    private static async ValueTask<StationJobRequested> PrimeStationResultInboxAsync(
+        InMemoryStationJobCoordinationStore stationJobs,
+        ProductionRun run,
+        OperationRun operation,
+        RuntimeSessionId sessionId)
+    {
+        using var inputs = JsonDocument.Parse("{}");
+        var idempotencyKey = $"{run.Id.Value:D}/{operation.OperationRunId}";
+        var request = new StationJobRequested(
+            Guid.NewGuid(),
+            StationJobIdentity.CreateJobId(idempotencyKey),
+            idempotencyKey,
+            "agent.functional-test",
+            operation.StationId.Value,
+            operation.StationSystemId,
+            run.Id.Value,
+            run.ProductionUnitId.Value,
+            sessionId.Value,
+            operation.OperationRunId,
+            operation.Attempt,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            run.LotId,
+            run.CarrierId,
+            run.ProjectId,
+            run.ApplicationId,
+            run.ProjectSnapshotId,
+            run.ProductionLineDefinitionId,
+            run.TopologyId,
+            run.ActorId,
+            new string('a', 64),
+            operation.OperationId,
+            operation.ProcessDefinitionId.Value,
+            operation.ProcessVersionId.Value,
+            operation.ConfigurationSnapshotId.Value,
+            operation.RecipeSnapshotId.Value,
+            operation.ResourceRequirements.Select(resource => new StationResourceFence(
+                    resource.Kind.ToString(),
+                    resource.ResourceId,
+                    operation.FencingTokens[resource],
+                    BaseTimeUtc.AddMinutes(5)))
+                .ToArray(),
+            inputs.RootElement.Clone(),
+            BaseTimeUtc.AddSeconds(1));
+        var leaseChanges = request.ResourceFences
+            .Select(fence => StationDispatchMessageIdentity.CreateLeaseGranted(request, fence))
+            .ToArray();
+        Assert.True(await stationJobs.TryEnqueueAsync(request, leaseChanges));
+        await stationJobs.RecordAcceptedAsync(new StationJobAccepted(
+            Guid.NewGuid(),
+            request.JobId,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
+            BaseTimeUtc.AddSeconds(1)));
+        return request;
     }
 
     private static ProductionRunTraceDomainEventSubscriber CreateSubscriber(

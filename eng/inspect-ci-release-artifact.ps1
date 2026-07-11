@@ -5,7 +5,7 @@ param(
 
     [switch] $RequirePublishable,
 
-    [switch] $RequireSignedDesktop
+    [switch] $RequireSignedWindowsArtifacts
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +15,7 @@ Add-Type -AssemblyName System.Xml.Linq
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $Failures = New-Object System.Collections.Generic.List[string]
-$ExpectedArtifactKinds = @("api", "desktop", "plugin-host", "sample-plugin", "script-worker", "source")
+$ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -424,7 +424,7 @@ function Test-PublicationEvidenceDocument {
         "third-party license metadata",
         "release candidate inspection",
         "release candidate inspection behavior",
-        "desktop signing readiness",
+        "Windows package signing readiness",
         "publication metadata finalization behavior",
         "publication readiness with pending external allowed",
         "strict publication readiness",
@@ -521,8 +521,8 @@ function Invoke-ReleaseCandidateInspection {
         $inspectionWorkRoot
     )
 
-    if ($RequireSignedDesktop -or $RequirePublishable) {
-        $arguments += "-RequireSignedDesktop"
+    if ($RequireSignedWindowsArtifacts -or $RequirePublishable) {
+        $arguments += "-RequireSignedWindowsArtifacts"
     }
 
     $previousErrorActionPreference = $ErrorActionPreference
@@ -603,7 +603,7 @@ function Write-InspectionReport {
         bundleRoot = $ResolvedBundleRoot
         workRoot = $ResolvedWorkRoot
         requirePublishable = [bool] $RequirePublishable
-        requireSignedDesktop = [bool] $RequireSignedDesktop
+        requireSignedWindowsArtifacts = [bool] $RequireSignedWindowsArtifacts
         release = [ordered]@{
             version = $releaseVersion
             artifactCount = $artifactCount

@@ -77,7 +77,7 @@ public static class ReleaseManifestCommand
           OpenLineOps.ReleaseManifest --verify-json <document.json> [--verify-json <document.json>]...
 
         Canonical artifact directories and kind values:
-          source, api, plugin-host, script-worker, sample-plugin, desktop
+          source, api, agent, runner, plugin-host, script-worker, sample-plugin, desktop
 
         Example:
           dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind api --require-kind desktop

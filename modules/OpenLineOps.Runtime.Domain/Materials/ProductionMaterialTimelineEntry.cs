@@ -19,6 +19,8 @@ public sealed record ProductionMaterialTimelineEntry
         Guid evidenceId,
         ProductionMaterialEvidenceKind kind,
         ProductionRunId? productionRunId,
+        string? operationRunId,
+        long? slotFencingToken,
         ProductionUnitId? productionUnitId,
         CarrierId? carrierId,
         MaterialReference? material,
@@ -42,6 +44,10 @@ public sealed record ProductionMaterialTimelineEntry
         EvidenceId = evidenceId;
         Kind = Enum.IsDefined(kind) ? kind : throw new ArgumentOutOfRangeException(nameof(kind));
         ProductionRunId = productionRunId;
+        OperationRunId = ProductionMaterialGuard.OptionalCanonical(
+            operationRunId,
+            nameof(operationRunId));
+        SlotFencingToken = slotFencingToken;
         ProductionUnitId = productionUnitId;
         CarrierId = carrierId;
         Material = material;
@@ -64,6 +70,10 @@ public sealed record ProductionMaterialTimelineEntry
     public ProductionMaterialEvidenceKind Kind { get; }
 
     public ProductionRunId? ProductionRunId { get; }
+
+    public string? OperationRunId { get; }
+
+    public long? SlotFencingToken { get; }
 
     public ProductionUnitId? ProductionUnitId { get; }
 
@@ -108,6 +118,8 @@ public sealed record ProductionMaterialTimelineEntry
             evidenceId,
             ProductionMaterialEvidenceKind.LocationTransition,
             productionRunId,
+            null,
+            null,
             material.Kind == MaterialKind.ProductionUnit
                 ? material.RequireProductionUnitId()
                 : null,
@@ -131,6 +143,8 @@ public sealed record ProductionMaterialTimelineEntry
         SlotAddress slot,
         MaterialReference? material,
         ProductionRunId? productionRunId,
+        string? operationRunId,
+        long? slotFencingToken,
         SlotOccupancyStatus previousStatus,
         SlotOccupancyStatus currentStatus,
         string actorId,
@@ -141,6 +155,8 @@ public sealed record ProductionMaterialTimelineEntry
             evidenceId,
             ProductionMaterialEvidenceKind.SlotOccupancyTransition,
             productionRunId,
+            operationRunId,
+            slotFencingToken,
             material?.Kind == MaterialKind.ProductionUnit
                 ? material.RequireProductionUnitId()
                 : null,
@@ -173,6 +189,8 @@ public sealed record ProductionMaterialTimelineEntry
             evidenceId,
             ProductionMaterialEvidenceKind.DispositionTransition,
             productionRunId,
+            null,
+            null,
             productionUnitId,
             null,
             MaterialReference.ForProductionUnit(productionUnitId),
@@ -207,6 +225,8 @@ public sealed record ProductionMaterialTimelineEntry
             null,
             null,
             null,
+            null,
+            null,
             link,
             null,
             link.LinkedBy,
@@ -215,6 +235,22 @@ public sealed record ProductionMaterialTimelineEntry
 
     private void ValidateShape()
     {
+        var hasOperationRunId = OperationRunId is not null;
+        var hasSlotFencingToken = SlotFencingToken is not null;
+        if (hasOperationRunId != hasSlotFencingToken)
+        {
+            throw new ArgumentException(
+                "Slot completion evidence must contain both Operation Run id and Slot fencing token.");
+        }
+
+        if (SlotFencingToken is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(SlotFencingToken),
+                "Slot completion evidence fencing token must be positive.");
+        }
+
+        var hasExactSlotCompletionIdentity = hasOperationRunId && hasSlotFencingToken;
         var valid = Kind switch
         {
             ProductionMaterialEvidenceKind.LocationTransition =>
@@ -226,7 +262,8 @@ public sealed record ProductionMaterialTimelineEntry
                 && PreviousDisposition is null
                 && CurrentDisposition is null
                 && Genealogy is null
-                && Reason is null,
+                && Reason is null
+                && !hasExactSlotCompletionIdentity,
             ProductionMaterialEvidenceKind.SlotOccupancyTransition =>
                 Slot is not null
                 && PreviousSlotStatus is not null
@@ -243,7 +280,11 @@ public sealed record ProductionMaterialTimelineEntry
                 && PreviousDisposition is null
                 && CurrentDisposition is null
                 && Genealogy is null
-                && Reason is null,
+                && Reason is null
+                && hasExactSlotCompletionIdentity == (
+                    ProductionRunId is not null
+                    && PreviousSlotStatus == SlotOccupancyStatus.Running
+                    && CurrentSlotStatus == SlotOccupancyStatus.Occupied),
             ProductionMaterialEvidenceKind.DispositionTransition =>
                 ProductionUnitId is not null
                 && Material?.Kind == MaterialKind.ProductionUnit
@@ -255,7 +296,8 @@ public sealed record ProductionMaterialTimelineEntry
                 && Slot is null
                 && PreviousSlotStatus is null
                 && CurrentSlotStatus is null
-                && Genealogy is null,
+                && Genealogy is null
+                && !hasExactSlotCompletionIdentity,
             ProductionMaterialEvidenceKind.Genealogy =>
                 Genealogy is not null
                 && Genealogy.Id.Value == EvidenceId
@@ -270,7 +312,8 @@ public sealed record ProductionMaterialTimelineEntry
                 && CurrentSlotStatus is null
                 && PreviousDisposition is null
                 && CurrentDisposition is null
-                && Reason is null,
+                && Reason is null
+                && !hasExactSlotCompletionIdentity,
             _ => false
         };
         if (!valid)

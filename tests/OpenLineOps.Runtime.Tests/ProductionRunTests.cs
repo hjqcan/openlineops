@@ -225,6 +225,112 @@ public sealed class ProductionRunTests
         Assert.Single(run.RecoveryDecisions);
     }
 
+    [Fact]
+    public void CancelOperationRequiresRunningOperationChronologicalUtcAndNonnegativeMetrics()
+    {
+        var run = CreateRun([Operation("test")], []);
+        var pending = run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Operator canceled.",
+            0,
+            0,
+            0,
+            Now.AddSeconds(1));
+        Assert.False(pending.Succeeded);
+        Assert.Equal("Runtime.OperationCancelRejected", pending.Code);
+        StartOperation(run, "test@0001", Now.AddSeconds(2));
+
+        var invalidMetrics = run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Operator canceled.",
+            0,
+            -1,
+            0,
+            Now.AddSeconds(3));
+        Assert.False(invalidMetrics.Succeeded);
+        Assert.Equal("Runtime.OperationCancelMetricsInvalid", invalidMetrics.Code);
+        var invalidTimestamp = run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Operator canceled.",
+            0,
+            1,
+            0,
+            Now.AddSeconds(1));
+        Assert.False(invalidTimestamp.Succeeded);
+        Assert.Equal("Runtime.OperationCancelTimestampInvalid", invalidTimestamp.Code);
+        Assert.Throws<ArgumentException>(() => run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Operator canceled.",
+            0,
+            1,
+            0,
+            Now.AddSeconds(3).ToOffset(TimeSpan.FromHours(8))));
+
+        var canceled = run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Operator canceled.",
+            0,
+            1,
+            0,
+            Now.AddSeconds(3));
+
+        Assert.True(canceled.Succeeded);
+        Assert.Equal(ExecutionStatus.Canceled, run.ExecutionStatus);
+        Assert.Equal("Runtime.ProductionRunCanceled", run.FailureCode);
+        var operation = Assert.Single(run.Operations);
+        Assert.Equal(ExecutionStatus.Canceled, operation.ExecutionStatus);
+        Assert.Equal("Runtime.OperationCanceled", operation.FailureCode);
+        Assert.Equal(1, operation.CommandCount);
+    }
+
+    [Fact]
+    public void ParallelRunningOperationsPreserveEachCanceledExecutionMetricsBeforeRunTerminates()
+    {
+        var run = CreateRun(
+            [Operation("entry"), Operation("left"), Operation("right")],
+            [
+                Transition("fork-left", "entry", "left", RuntimeRouteTransitionKind.ParallelFork, group: "work"),
+                Transition("fork-right", "entry", "right", RuntimeRouteTransitionKind.ParallelFork, group: "work")
+            ]);
+        StartAndComplete(run, "entry@0001", ResultJudgement.NotApplicable, Now.AddSeconds(1));
+        StartOperation(run, "left@0001", Now.AddSeconds(3));
+        StartOperation(run, "right@0001", Now.AddSeconds(3));
+
+        Assert.True(run.CancelOperation(
+            "left@0001",
+            "Runtime.LeftCanceled",
+            "Operator canceled both branches.",
+            0,
+            2,
+            0,
+            Now.AddSeconds(4)).Succeeded);
+        Assert.Equal(ExecutionStatus.Running, run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.StopRequested, run.ControlState);
+        Assert.True(run.CancelOperation(
+            "right@0001",
+            "Runtime.RightCanceled",
+            "Operator canceled both branches.",
+            1,
+            3,
+            1,
+            Now.AddSeconds(5)).Succeeded);
+
+        Assert.Equal(ExecutionStatus.Canceled, run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, run.Judgement);
+        Assert.Equal("Runtime.ProductionRunCanceled", run.FailureCode);
+        var left = run.Operations.Single(operation => operation.OperationRunId == "left@0001");
+        var right = run.Operations.Single(operation => operation.OperationRunId == "right@0001");
+        Assert.Equal((0, 2, 0), (left.CompletedStepCount, left.CommandCount, left.IncidentCount));
+        Assert.Equal((1, 3, 1), (right.CompletedStepCount, right.CommandCount, right.IncidentCount));
+        Assert.Equal("Runtime.LeftCanceled", left.FailureCode);
+        Assert.Equal("Runtime.RightCanceled", right.FailureCode);
+    }
+
     private static ProductionRun CreateRun(
         IReadOnlyCollection<OperationRunDefinition> operations,
         IReadOnlyCollection<RouteTransitionDefinition> transitions)

@@ -217,7 +217,7 @@ $stageCommand = @(
     $resolvedArtifactsRoot,
     "-WorkRoot",
     $resolvedWorkRoot,
-    "-SignDesktopPackage",
+    "-SignWindowsPackages",
     "-CodeSigningTimestampUrl",
     $CodeSigningTimestampUrl
 )
@@ -264,7 +264,7 @@ $commands += ,@(
     $inspectScript,
     "-ArtifactsRoot",
     $resolvedArtifactsRoot,
-    "-RequireSignedDesktop"
+    "-RequireSignedWindowsArtifacts"
 )
 $commands += ,@(
     "powershell",

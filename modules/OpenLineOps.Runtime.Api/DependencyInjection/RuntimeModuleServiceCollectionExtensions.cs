@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Api.HostedServices;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Execution;
@@ -21,7 +22,6 @@ using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Time;
 using OpenLineOps.Runtime.Infrastructure.Transport;
-using OpenLineOps.Runtime.Api.HostedServices;
 
 namespace OpenLineOps.Runtime.Api.DependencyInjection;
 
@@ -131,6 +131,8 @@ public static class RuntimeModuleServiceCollectionExtensions
         }
 
         services.AddScoped<ProductionMaterialService>();
+        services.TryAddScoped<IProductionMaterialArrivalAuthorizer,
+            RejectingProductionMaterialArrivalAuthorizer>();
         services.AddScoped<ProductionMaterialArrivalIngress>();
         services.TryAddSingleton<IStationEmergencyStopOperatorAuthorizer,
             ExplicitStationEmergencyStopOperatorAuthorizer>();
@@ -142,6 +144,10 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddScoped<IProductionLineRuntimeStateReader, ProductionLineRuntimeStateReader>();
 
         services.TryAddSingleton<IStationDeploymentResolver, FileSystemStationDeploymentResolver>();
+        services.AddScoped<StationDispatchPublicationAuthorizer>();
+        services.AddScoped<IProductionRunRecoveryService, ProductionRunRecoveryService>();
+        services.AddScoped<StationJobRecoveryRequiredIngress>();
+        services.AddHostedService<ProductionRunStartupRecoveryHostedService>();
         var transportProvider = StationCoordinatorTransportProviders.Parse(transportOptions.Provider);
         switch (transportProvider)
         {
@@ -242,8 +248,6 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddScoped<IProductionRunRunner, ProductionRunRunner>();
         services.AddScoped<IProductionRunCoordinator, ProductionRunCoordinator>();
         services.AddScoped<IRuntimeSessionRecoveryService, RuntimeSessionRecoveryService>();
-        services.AddScoped<IProductionRunRecoveryService, ProductionRunRecoveryService>();
-        services.AddHostedService<ProductionRunStartupRecoveryHostedService>();
         services.AddHostedService<ProductionRunCoordinatorHostedService>();
 
         return services;

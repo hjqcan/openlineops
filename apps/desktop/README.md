@@ -7,6 +7,7 @@ Electron IDE shell for authoring and operating portable OpenLineOps automation p
 ```powershell
 npm install
 npm run typecheck
+npm run test:production-route-validation
 npm run build
 npm run package:win
 npm run smoke:e2e

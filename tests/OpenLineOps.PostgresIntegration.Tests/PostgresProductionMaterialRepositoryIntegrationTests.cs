@@ -1,5 +1,6 @@
-using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -43,6 +44,7 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
         var occupiedSlot = SlotOccupancy.Register(occupiedAddress, BaseTimeUtc);
         var availableSlot = SlotOccupancy.Register(availableAddress, BaseTimeUtc);
         var material = MaterialReference.ForProductionUnit(child.Id);
+        var completionRunId = ProductionRunId.New();
         var stationQueue = MaterialLocation.AtStation(
             occupiedAddress.LineId,
             occupiedAddress.StationSystemId);
@@ -74,6 +76,8 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
             Assert.True(carrierEntry.Aggregate.Arrive(stationQueue, BaseTimeUtc.AddSeconds(1)).Succeeded);
             Assert.True(slotEntry.Aggregate.Reserve(material, BaseTimeUtc.AddSeconds(2)).Succeeded);
             Assert.True(slotEntry.Aggregate.Load(material, BaseTimeUtc.AddSeconds(3)).Succeeded);
+            Assert.True(slotEntry.Aggregate.Start(material, BaseTimeUtc.AddSeconds(4)).Succeeded);
+            Assert.True(slotEntry.Aggregate.Complete(material, BaseTimeUtc.AddSeconds(5)).Succeeded);
             await repository.CommitAsync(new ProductionMaterialCommit(
                 productionUnits:
                 [new ProductionUnitUpdate(childEntry.Aggregate, childEntry.Revision)],
@@ -89,12 +93,24 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
                         stationQueue, "integration-test", BaseTimeUtc.AddSeconds(1)),
                     ProductionMaterialTimelineEntry.SlotOccupancy(
                         Guid.NewGuid(), occupiedAddress, material, null,
+                        null, null,
                         SlotOccupancyStatus.Available, SlotOccupancyStatus.Reserved,
                         "integration-test", BaseTimeUtc.AddSeconds(2)),
                     ProductionMaterialTimelineEntry.SlotOccupancy(
                         Guid.NewGuid(), occupiedAddress, material, null,
+                        null, null,
                         SlotOccupancyStatus.Reserved, SlotOccupancyStatus.Occupied,
-                        "integration-test", BaseTimeUtc.AddSeconds(3))
+                        "integration-test", BaseTimeUtc.AddSeconds(3)),
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(), occupiedAddress, material, null,
+                        null, null,
+                        SlotOccupancyStatus.Occupied, SlotOccupancyStatus.Running,
+                        "integration-test", BaseTimeUtc.AddSeconds(4)),
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(), occupiedAddress, material, completionRunId,
+                        "operation.test@0001", 73,
+                        SlotOccupancyStatus.Running, SlotOccupancyStatus.Occupied,
+                        "coordinator.main", BaseTimeUtc.AddSeconds(5))
                 ]));
             Assert.True(await repository.TryAddAsync(genealogy));
         }
@@ -119,6 +135,10 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
         var restoredLink = Assert.Single(
             await restarted.ListGenealogyLinksAsync(),
             link => link.Id == genealogy.Id);
+        var completionEvidence = Assert.Single(await restarted.ListTimelineAsync(
+            new ProductionMaterialTimelineQuery(
+                productionUnitId: child.Id,
+                productionRunId: completionRunId)));
 
         Assert.Equal(12, restoredLot.Aggregate.DeclaredQuantity);
         Assert.Equal(lot.Id, restoredChild.Aggregate.LotId);
@@ -128,6 +148,8 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
         Assert.Equal(SlotOccupancyStatus.Occupied, restoredSlot.Aggregate.Status);
         Assert.Equal(material, restoredSlot.Aggregate.Material);
         Assert.Equal(genealogy, restoredLink);
+        Assert.Equal("operation.test@0001", completionEvidence.OperationRunId);
+        Assert.Equal(73, completionEvidence.SlotFencingToken);
         Assert.Equal(2, lineSlots.Count);
         Assert.Equal(2, stationSlots.Count);
         Assert.All(
@@ -170,6 +192,7 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
             [
                 ProductionMaterialTimelineEntry.SlotOccupancy(
                     Guid.NewGuid(), address, null, null,
+                    null, null,
                     SlotOccupancyStatus.Available, SlotOccupancyStatus.Blocked,
                     "integration-test", BaseTimeUtc.AddSeconds(1))
             ]));
@@ -196,6 +219,7 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
                         "quality review", "integration-test", BaseTimeUtc.AddSeconds(2)),
                     ProductionMaterialTimelineEntry.SlotOccupancy(
                         Guid.NewGuid(), address, null, null,
+                        null, null,
                         SlotOccupancyStatus.Available, SlotOccupancyStatus.Blocked,
                         "integration-test", BaseTimeUtc.AddSeconds(2))
                 ])));

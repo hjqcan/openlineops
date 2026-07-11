@@ -38,9 +38,11 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
 
     public async ValueTask<bool> TryEnqueueAsync(
         MaterialArrived message,
+        DateTimeOffset receivedAtUtc,
         CancellationToken cancellationToken = default)
     {
         StationMessageContract.Validate(message);
+        ValidateUtc(receivedAtUtc, nameof(receivedAtUtc));
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         var payload = JsonSerializer.Serialize(message, JsonOptions);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -48,10 +50,11 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
         command.CommandText = """
             INSERT INTO station_material_arrival_outbox (
                 message_id, idempotency_key, payload_json, created_at_utc,
-                attempt_count, last_error, published_at_utc)
+                attempt_count, last_error, next_attempt_at_utc,
+                published_at_utc, quarantined_at_utc)
             VALUES (
                 $message_id, $idempotency_key, $payload_json, $created_at_utc,
-                0, NULL, NULL)
+                0, NULL, $created_at_utc, NULL, NULL)
             ON CONFLICT DO NOTHING;
             """;
         command.Parameters.AddWithValue("$message_id", message.MessageId.ToString("D"));
@@ -59,7 +62,7 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
         command.Parameters.AddWithValue("$payload_json", payload);
         command.Parameters.AddWithValue(
             "$created_at_utc",
-            message.ArrivedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+            receivedAtUtc.ToString("O", CultureInfo.InvariantCulture));
         var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
         if (!added)
         {
@@ -72,17 +75,20 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
 
     public async ValueTask<IReadOnlyCollection<StationMaterialArrivalOutboxItem>> ListPendingAsync(
         int maximumCount,
+        DateTimeOffset nowUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        ValidateUtc(nowUtc, nameof(nowUtc));
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT message_id, idempotency_key, payload_json, created_at_utc, attempt_count
+            SELECT sequence, message_id, idempotency_key, payload_json, created_at_utc,
+                   attempt_count, next_attempt_at_utc
             FROM station_material_arrival_outbox
-            WHERE published_at_utc IS NULL
-            ORDER BY created_at_utc, message_id
+            WHERE published_at_utc IS NULL AND quarantined_at_utc IS NULL
+            ORDER BY sequence
             LIMIT $maximum_count;
             """;
         command.Parameters.AddWithValue("$maximum_count", maximumCount);
@@ -90,12 +96,20 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            var nextAttemptAtUtc = ParseUtc(reader.GetString(6));
+            if (nextAttemptAtUtc > nowUtc)
+            {
+                break;
+            }
+
             result.Add(new StationMaterialArrivalOutboxItem(
-                Guid.Parse(reader.GetString(0)),
-                reader.GetString(1),
+                reader.GetInt64(0),
+                Guid.Parse(reader.GetString(1)),
                 reader.GetString(2),
-                ParseUtc(reader.GetString(3)),
-                reader.GetInt32(4)));
+                reader.GetString(3),
+                ParseUtc(reader.GetString(4)),
+                reader.GetInt32(5),
+                nextAttemptAtUtc));
         }
 
         return result;
@@ -123,13 +137,32 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
     public ValueTask RecordPublishFailureAsync(
         Guid messageId,
         string failure,
+        DateTimeOffset nextAttemptAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(failure);
-        return ExecuteRequiredAsync(
-            "UPDATE station_material_arrival_outbox SET attempt_count = attempt_count + 1, last_error = $value WHERE message_id = $message_id;",
+        ValidateUtc(nextAttemptAtUtc, nameof(nextAttemptAtUtc));
+        return RecordFailureAsync(
             messageId,
-            failure.Length <= 4096 ? failure : failure[..4096],
+            failure,
+            nextAttemptAtUtc,
+            quarantine: false,
+            cancellationToken);
+    }
+
+    public ValueTask QuarantineAsync(
+        Guid messageId,
+        string failure,
+        DateTimeOffset quarantinedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure);
+        ValidateUtc(quarantinedAtUtc, nameof(quarantinedAtUtc));
+        return RecordFailureAsync(
+            messageId,
+            failure,
+            quarantinedAtUtc,
+            quarantine: true,
             cancellationToken);
     }
 
@@ -156,13 +189,16 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = FULL;
                 CREATE TABLE IF NOT EXISTS station_material_arrival_outbox (
-                    message_id TEXT PRIMARY KEY,
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL UNIQUE,
                     idempotency_key TEXT NOT NULL UNIQUE,
                     payload_json TEXT NOT NULL,
                     created_at_utc TEXT NOT NULL,
                     attempt_count INTEGER NOT NULL,
                     last_error TEXT NULL,
-                    published_at_utc TEXT NULL
+                    next_attempt_at_utc TEXT NOT NULL,
+                    published_at_utc TEXT NULL,
+                    quarantined_at_utc TEXT NULL
                 );
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -190,6 +226,49 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
         {
             throw new InvalidOperationException(
                 $"Material arrival outbox message {messageId:D} does not exist.");
+        }
+    }
+
+    private async ValueTask RecordFailureAsync(
+        Guid messageId,
+        string failure,
+        DateTimeOffset occurredAtUtc,
+        bool quarantine,
+        CancellationToken cancellationToken)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = quarantine
+            ? """
+                UPDATE station_material_arrival_outbox
+                SET attempt_count = attempt_count + 1,
+                    last_error = $failure,
+                    quarantined_at_utc = $occurred_at_utc
+                WHERE message_id = $message_id
+                  AND published_at_utc IS NULL
+                  AND quarantined_at_utc IS NULL;
+                """
+            : """
+                UPDATE station_material_arrival_outbox
+                SET attempt_count = attempt_count + 1,
+                    last_error = $failure,
+                    next_attempt_at_utc = $occurred_at_utc
+                WHERE message_id = $message_id
+                  AND published_at_utc IS NULL
+                  AND quarantined_at_utc IS NULL;
+                """;
+        command.Parameters.AddWithValue("$message_id", messageId.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$failure",
+            failure.Length <= 4096 ? failure : failure[..4096]);
+        command.Parameters.AddWithValue(
+            "$occurred_at_utc",
+            occurredAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Material arrival outbox message {messageId:D} is not pending.");
         }
     }
 
@@ -238,4 +317,14 @@ public sealed class SqliteStationMaterialArrivalOutboxStore :
         "O",
         CultureInfo.InvariantCulture,
         DateTimeStyles.None);
+
+    private static void ValidateUtc(DateTimeOffset value, string parameterName)
+    {
+        if (value == default || value.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station material arrival outbox timestamp must be non-default UTC.",
+                parameterName);
+        }
+    }
 }

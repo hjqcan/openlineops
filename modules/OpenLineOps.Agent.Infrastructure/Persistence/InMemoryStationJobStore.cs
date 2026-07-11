@@ -135,8 +135,14 @@ public sealed class InMemoryStationJobStore : IStationJobStore
         lock (_gate)
         {
             var result = _outbox.Values
-                .Where(message => message.AcknowledgedAtUtc is null
-                    && (message.NextAttemptAtUtc is null || message.NextAttemptAtUtc <= nowUtc))
+                .Where(message => message.AcknowledgedAtUtc is null)
+                .GroupBy(message => message.JobId)
+                .Select(group => group
+                    .OrderBy(message => message.Sequence)
+                    .ThenBy(message => message.MessageId)
+                    .First())
+                .Where(message => message.NextAttemptAtUtc is null
+                    || message.NextAttemptAtUtc <= nowUtc)
                 .OrderBy(message => message.CreatedAtUtc)
                 .ThenBy(message => message.JobId.Value)
                 .ThenBy(message => message.Sequence)

@@ -6,8 +6,8 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
-using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
 
@@ -33,6 +33,12 @@ public sealed class ProductionRunCoordinator(
             return Result.Failure<ProductionRunSnapshot>(validation);
         }
 
+        var existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is not null)
+        {
+            return ResolveExistingSubmission(existing.Run, request);
+        }
 
         var unitEntry = await materials.GetProductionUnitAsync(
                 request.ProductionUnitId,
@@ -63,6 +69,13 @@ public sealed class ProductionRunCoordinator(
 
         if (unit.ActiveProductionRunId is not null)
         {
+            existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
+                .ConfigureAwait(false);
+            if (existing is not null)
+            {
+                return ResolveExistingSubmission(existing.Run, request);
+            }
+
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
                 "Runtime.ProductionUnitAlreadyActive",
                 $"Production Unit {unit.Id} is already reserved for Production Run "
@@ -71,6 +84,13 @@ public sealed class ProductionRunCoordinator(
 
         if (unit.Disposition != ProductDisposition.InProcess)
         {
+            existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
+                .ConfigureAwait(false);
+            if (existing is not null)
+            {
+                return ResolveExistingSubmission(existing.Run, request);
+            }
+
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
                 "Runtime.ProductionUnitRunReservationRejected",
                 $"Production Unit {unit.Id} cannot enter a run from {unit.Disposition}."));
@@ -139,15 +159,11 @@ public sealed class ProductionRunCoordinator(
                 cancellationToken)
             .ConfigureAwait(false))
         {
-            var existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
+            existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
                 .ConfigureAwait(false);
             if (existing is not null)
             {
-                return HasSameIdentity(existing.Run, request)
-                    ? Result.Success(existing.Run.ToSnapshot())
-                    : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                        "Runtime.ProductionRunIdentityMismatch",
-                        $"Production Run id {request.RunId} already belongs to another immutable identity."));
+                return ResolveExistingSubmission(existing.Run, request);
             }
 
             var currentUnit = await materials.GetProductionUnitAsync(
@@ -502,6 +518,7 @@ public sealed class ProductionRunCoordinator(
         string.Equals(run.ProjectId, request.ProjectId, StringComparison.Ordinal)
         && string.Equals(run.ApplicationId, request.ApplicationId, StringComparison.Ordinal)
         && string.Equals(run.ProjectSnapshotId, request.ProjectSnapshotId, StringComparison.Ordinal)
+        && string.Equals(run.TopologyId, request.TopologyId, StringComparison.Ordinal)
         && string.Equals(run.ProductionLineDefinitionId, request.ProductionLineDefinitionId, StringComparison.Ordinal)
         && run.ProductionUnitId == request.ProductionUnitId
         && string.Equals(
@@ -514,4 +531,13 @@ public sealed class ProductionRunCoordinator(
             StringComparison.Ordinal)
         && string.Equals(run.ActorId, request.ActorId, StringComparison.Ordinal)
         && string.Equals(run.EntryOperationId, request.EntryOperationId, StringComparison.Ordinal);
+
+    private static Result<ProductionRunSnapshot> ResolveExistingSubmission(
+        ProductionRun run,
+        SubmitProductionRunRequest request) =>
+        HasSameIdentity(run, request)
+            ? Result.Success(run.ToSnapshot())
+            : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runtime.ProductionRunIdentityMismatch",
+                $"Production Run id {request.RunId} already belongs to another immutable identity."));
 }

@@ -1,5 +1,5 @@
-using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -45,6 +45,7 @@ public sealed class ProductionMaterialServiceTests
             "engineer-a",
             BaseTimeUtc)));
         await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             material,
             station,
             "scanner-a",
@@ -169,6 +170,7 @@ public sealed class ProductionMaterialServiceTests
             "engineer-a",
             BaseTimeUtc)));
         await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForProductionUnit(unitId),
             MaterialLocation.AtStation("line-a", "station-a"),
             "scanner-a",
@@ -261,11 +263,13 @@ public sealed class ProductionMaterialServiceTests
             "operator-a",
             BaseTimeUtc)));
         await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForProductionUnit(first),
             station,
             "scanner-a",
             BaseTimeUtc.AddSeconds(1))));
         await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForProductionUnit(second),
             station,
             "scanner-a",

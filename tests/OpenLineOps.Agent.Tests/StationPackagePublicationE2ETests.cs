@@ -69,6 +69,34 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
             release.SnapshotId,
             "station.test"));
         Assert.Equal(testPackage.PackageContentSha256, route.PackageContentSha256);
+        Assert.Equal("line.portable", route.ProductionLineDefinitionId);
+
+        var localRoute = await new FileSystemStationDeploymentResolver(
+            new StationCoordinatorTransportOptions
+            {
+                Provider = StationCoordinatorTransportProviders.Disabled,
+                DeploymentCatalogDirectory = catalog
+            }).ResolveAsync(new(
+                release.ProjectId,
+                release.ApplicationId,
+                release.SnapshotId,
+                "station.test"));
+        Assert.Equal(StationMaterialArrivalProducers.CoordinatorApi, localRoute.AgentId);
+        Assert.Equal("station.test", localRoute.StationId);
+        Assert.Equal(testPackage.PackageContentSha256, localRoute.PackageContentSha256);
+        Assert.Equal("line.portable", localRoute.ProductionLineDefinitionId);
+        var unmappedAgentResolver = new FileSystemStationDeploymentResolver(
+            new StationCoordinatorTransportOptions
+            {
+                Provider = StationCoordinatorTransportProviders.RabbitMq,
+                DeploymentCatalogDirectory = catalog
+            });
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await unmappedAgentResolver.ResolveAsync(new(
+                release.ProjectId,
+                release.ApplicationId,
+                release.SnapshotId,
+                "station.test")));
 
         var nextRelease = CreateRelease("project.line", "snapshot.next", "portable-content");
         var nextPublished = await publisher.PublishAsync(new ProjectReleaseStationPackageRequest(

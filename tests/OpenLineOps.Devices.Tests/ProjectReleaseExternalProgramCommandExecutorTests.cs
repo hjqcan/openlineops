@@ -1,6 +1,6 @@
-using System.Text.Json;
-using System.Security.Cryptography;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Domain.Identifiers;
@@ -521,15 +521,35 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
 
     public void Dispose()
     {
-        if (Directory.Exists(_applicationRoot))
+        DeleteDirectoryBounded(_applicationRoot);
+        DeleteDirectoryBounded(_hostRoot);
+    }
+
+    private static void DeleteDirectoryBounded(string path)
+    {
+        Exception? lastFailure = null;
+        for (var attempt = 0; attempt < 50; attempt++)
         {
-            Directory.Delete(_applicationRoot, recursive: true);
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                lastFailure = exception;
+                Thread.Sleep(TimeSpan.FromMilliseconds(100));
+            }
         }
 
-        if (Directory.Exists(_hostRoot))
-        {
-            Directory.Delete(_hostRoot, recursive: true);
-        }
+        throw new IOException(
+            $"External program test directory remained locked after bounded process shutdown: {path}",
+            lastFailure);
     }
 
     private ExternalProgramHost CreateHost(int maximumStandardOutputBytes = 4 * 1024 * 1024)

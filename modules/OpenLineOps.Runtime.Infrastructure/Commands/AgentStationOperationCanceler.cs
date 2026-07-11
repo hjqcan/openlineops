@@ -20,6 +20,15 @@ public sealed class AgentStationOperationCanceler(
                     request.Operation.Definition.StationSystemId),
                 cancellationToken)
             .ConfigureAwait(false);
+        if (!string.Equals(
+                route.ProductionLineDefinitionId,
+                request.Run.ProductionLineDefinitionId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Station deployment does not match the canceled Production Run's exact frozen Production Line.");
+        }
+
         var message = new StationJobCancelRequested(
             Guid.NewGuid(),
             StationJobIdentity.CreateCancellationIdempotencyKey(request.JobIdempotencyKey),

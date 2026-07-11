@@ -273,6 +273,43 @@ public sealed class OperationRun
         FailureReason = ProductionRunText.Required(reason, nameof(reason));
     }
 
+    internal RuntimeOperationResult CancelAfterExecution(
+        string code,
+        string reason,
+        int completedStepCount,
+        int commandCount,
+        int incidentCount,
+        DateTimeOffset canceledAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Running)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.OperationCancelRejected",
+                $"Operation Run {OperationRunId} cannot capture execution cancellation from {ExecutionStatus}.");
+        }
+
+        if (completedStepCount < 0 || commandCount < 0 || incidentCount < 0)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.OperationCancelMetricsInvalid",
+                $"Operation Run {OperationRunId} cancellation metrics cannot be negative.");
+        }
+
+        if (StartedAtUtc is null || canceledAtUtc < StartedAtUtc.Value)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.OperationCancelTimestampInvalid",
+                $"Operation Run {OperationRunId} cancellation cannot precede its start timestamp.");
+        }
+
+        var failureCode = ProductionRunText.Required(code, nameof(code));
+        _ = ProductionRunText.Required(reason, nameof(reason));
+        SetMetrics(completedStepCount, commandCount, incidentCount);
+        Cancel(reason, canceledAtUtc);
+        FailureCode = failureCode;
+        return RuntimeOperationResult.Accepted();
+    }
+
     internal OperationRunSnapshot ToSnapshot() => new(
         Definition,
         OperationRunId,

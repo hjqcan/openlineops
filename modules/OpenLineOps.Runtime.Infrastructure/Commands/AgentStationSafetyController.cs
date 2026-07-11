@@ -27,6 +27,16 @@ public sealed class AgentStationSafetyController(
                     request.Run.ProjectSnapshotId,
                     station.Key),
                 cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(
+                    route.ProductionLineDefinitionId,
+                    request.Run.ProductionLineDefinitionId,
+                    StringComparison.Ordinal))
+            {
+                return StationSafetyResult.Failure(
+                    "Runtime.SafeStopDeploymentMismatch",
+                    "Station deployment does not match the Production Run's exact frozen Production Line.");
+            }
+
             var operationRunId = station
                 .OrderByDescending(static operation => operation.Attempt)
                 .Select(static operation => operation.OperationRunId)
@@ -49,6 +59,14 @@ public sealed class AgentStationSafetyController(
                 || !string.Equals(
                     acknowledgement.IdempotencyKey,
                     idempotencyKey,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    acknowledgement.AgentId,
+                    route.AgentId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    acknowledgement.StationId,
+                    route.StationId,
                     StringComparison.Ordinal))
             {
                 return StationSafetyResult.Failure(

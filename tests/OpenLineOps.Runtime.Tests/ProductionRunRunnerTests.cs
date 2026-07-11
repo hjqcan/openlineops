@@ -48,6 +48,52 @@ public sealed class ProductionRunRunnerTests
     }
 
     [Fact]
+    public async Task CompletedRunSubmissionRetryReturnsExistingRunWithoutReAdmissionOrRedispatch()
+    {
+        var fixture = new Fixture(new StationOperationDispatchResult(
+            ExecutionStatus.Completed,
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
+            0,
+            Now.AddSeconds(2)));
+        var request = CreateRequest();
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
+        var completed = await fixture.Runner.ExecuteAsync(request.RunId);
+        Assert.True(completed.IsSuccess);
+        var completedRevision = (await fixture.Repository.GetByIdAsync(request.RunId))!.Revision;
+
+        var retry = await fixture.Coordinator.SubmitAsync(request);
+        var retryExecution = await fixture.Runner.ExecuteAsync(request.RunId);
+
+        Assert.True(retry.IsSuccess);
+        Assert.Equal(ExecutionStatus.Completed, retry.Value.ExecutionStatus);
+        Assert.True(retryExecution.IsSuccess);
+        Assert.Equal(ExecutionStatus.Completed, retryExecution.Value.Run.ExecutionStatus);
+        Assert.Equal(completedRevision, (await fixture.Repository.GetByIdAsync(request.RunId))!.Revision);
+        Assert.Single(fixture.Dispatcher.Requests);
+
+        var mismatchedTopology = new SubmitProductionRunRequest(
+            request.RunId,
+            request.ProjectId,
+            request.ApplicationId,
+            request.ProjectSnapshotId,
+            "topology.other",
+            request.ProductionLineDefinitionId,
+            request.ProductionUnitId,
+            request.FrozenProductModelId,
+            request.FrozenIdentityInputKey,
+            request.ActorId,
+            request.EntryOperationId,
+            request.Operations,
+            request.RouteTransitions);
+        var rejected = await fixture.Coordinator.SubmitAsync(mismatchedTopology);
+        Assert.True(rejected.IsFailure);
+        Assert.Equal("Conflict.Runtime.ProductionRunIdentityMismatch", rejected.Error.Code);
+    }
+
+    [Fact]
     public async Task VendorProductFailureDoesNotBecomeSystemExecutionFailure()
     {
         var fixture = new Fixture(new StationOperationDispatchResult(
@@ -267,6 +313,12 @@ public sealed class ProductionRunRunnerTests
         Assert.Equal(ResultJudgement.Aborted, result.Value.Run.Judgement);
         Assert.Equal(ProductDisposition.Held, result.Value.Run.Disposition);
         Assert.Equal("Runtime.ProductionRunCanceled", result.Value.Run.FailureCode);
+        var canceledOperation = Assert.Single(result.Value.Run.Operations);
+        Assert.Equal(ExecutionStatus.Canceled, canceledOperation.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, canceledOperation.Judgement);
+        Assert.Equal(0, canceledOperation.CompletedStepCount);
+        Assert.Equal(1, canceledOperation.CommandCount);
+        Assert.Equal(0, canceledOperation.IncidentCount);
     }
 
     [Fact]
@@ -396,6 +448,7 @@ public sealed class ProductionRunRunnerTests
             materials,
             new InMemoryProductionRunRepository(materials));
         Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             MaterialReference.ForProductionUnit(unit.Id),
             MaterialLocation.AtStation(
                 request.ProductionLineDefinitionId,
@@ -636,6 +689,7 @@ public sealed class ProductionRunRunnerTests
             Assert.True(await _materials.TryAddAsync(unit));
             var materialService = new ProductionMaterialService(_materials, _repository);
             Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
                 MaterialReference.ForProductionUnit(unit.Id),
                 MaterialLocation.AtStation(
                     request.ProductionLineDefinitionId,
@@ -755,7 +809,7 @@ public sealed class ProductionRunRunnerTests
                     ResultJudgement.Aborted,
                     null,
                     0,
-                    0,
+                    1,
                     0,
                     Now.AddSeconds(1),
                     "Runtime.OperationCanceled",

@@ -40,6 +40,10 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Verify solution project coverage
+        shell: powershell
+        run: ./eng/verify-solution-project-coverage.ps1
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -88,8 +92,8 @@ jobs:
       - name: Build PythonScript component
         run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
-      - name: Test .NET
-        run: dotnet test OpenLineOps.sln --no-build -v minimal
+      - name: Test .NET with isolated Windows process hosts
+        run: dotnet test OpenLineOps.sln --no-build -v minimal -m:1
 
       - name: Check .NET package vulnerabilities
         run: dotnet list OpenLineOps.sln package --vulnerable --include-transitive
@@ -124,16 +128,26 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:editor-workspace
 
+      - name: Test production route validation
+        working-directory: apps/desktop
+        run: npm run test:production-route-validation
+
       - name: Build desktop
         working-directory: apps/desktop
         run: npm run build
+
+      - name: Restore self-contained Windows production hosts
+        run: |
+          dotnet restore src/OpenLineOps.Agent/OpenLineOps.Agent.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.Runner/OpenLineOps.Runner.csproj --runtime win-x64
 
       - name: Stage release artifacts
         shell: powershell
         run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
 
       - name: Verify staged release manifest
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 
       - name: Inspect release candidate
         shell: powershell
@@ -143,9 +157,9 @@ jobs:
         shell: powershell
         run: ./eng/verify-release-candidate-inspection.ps1
 
-      - name: Verify desktop signing readiness
+      - name: Verify Windows package signing readiness
         shell: powershell
-        run: ./eng/verify-desktop-signing-readiness.ps1
+        run: ./eng/verify-windows-signing-readiness.ps1
 
       - name: Verify publication metadata finalization
         shell: powershell

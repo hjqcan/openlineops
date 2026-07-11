@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Packages;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.Projects.Infrastructure.Releases;
@@ -25,6 +26,7 @@ public sealed class SignedStationPackageTests : IDisposable
             "project-a",
             "application-line",
             "snapshot-001",
+            "line.main",
             "station.eol",
             "factory-signing",
             rsa.ExportRSAPrivateKeyPem(),
@@ -41,6 +43,20 @@ public sealed class SignedStationPackageTests : IDisposable
         Assert.Equal(installed.ContentDirectory, installedAgain.ContentDirectory);
         Assert.Equal("application-line", installed.Manifest.ApplicationId);
         Assert.True(File.Exists(Path.Combine(installed.ContentDirectory, "flows", "main.json")));
+        var deploymentProvider = new SignedStationMaterialArrivalDeploymentProvider(
+            new SignedStationMaterialArrivalDeploymentOptions(
+                "agent.line-a",
+                "station.line-a",
+                packagePath,
+                built.Manifest.ContentSha256),
+            installer);
+        var deployment = await deploymentProvider.GetCurrentAsync();
+        Assert.Equal("project-a", deployment.ProjectId);
+        Assert.Equal("application-line", deployment.ApplicationId);
+        Assert.Equal("snapshot-001", deployment.ProjectSnapshotId);
+        Assert.Equal("line.main", deployment.ProductionLineDefinitionId);
+        Assert.Equal("station.eol", deployment.StationSystemId);
+        Assert.Equal(built.Manifest.ContentSha256, deployment.PackageContentSha256);
         Assert.All(
             Directory.EnumerateFiles(installed.ContentDirectory, "*", SearchOption.AllDirectories),
             path => Assert.True(File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly)));
@@ -59,6 +75,7 @@ public sealed class SignedStationPackageTests : IDisposable
             "project-a",
             "application-line",
             "snapshot-001",
+            "line.main",
             "station.eol",
             "factory-signing",
             rsa.ExportRSAPrivateKeyPem(),
@@ -93,6 +110,7 @@ public sealed class SignedStationPackageTests : IDisposable
             "project-a",
             "application-line",
             "snapshot-001",
+            "line.main",
             "station.eol",
             "factory-signing",
             signer.ExportRSAPrivateKeyPem(),
@@ -119,6 +137,7 @@ public sealed class SignedStationPackageTests : IDisposable
                 "project-a",
                 "application-line",
                 "snapshot-001",
+                "line.main",
                 "station.eol",
                 "factory-signing",
                 weak.ExportRSAPrivateKeyPem(),
@@ -141,6 +160,7 @@ public sealed class SignedStationPackageTests : IDisposable
             "project-a",
             "application-line",
             "snapshot-001",
+            "line.main",
             "station.eol",
             "factory-signing",
             signer.ExportRSAPrivateKeyPem(),
@@ -169,6 +189,7 @@ public sealed class SignedStationPackageTests : IDisposable
                 "project-a",
                 "application-line",
                 "snapshot-001",
+                "line.main",
                 "station.eol",
                 "factory-signing",
                 signer.ExportRSAPrivateKeyPem(),
@@ -195,6 +216,7 @@ public sealed class SignedStationPackageTests : IDisposable
             "project-a",
             "application-line",
             "snapshot-001",
+            "line.main",
             "station.eol",
             "factory-signing",
             signer.ExportRSAPrivateKeyPem(),

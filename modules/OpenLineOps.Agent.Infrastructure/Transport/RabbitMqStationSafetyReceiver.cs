@@ -233,7 +233,7 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         await DeclarePriorityQueueAsync(
                 channel,
                 EmergencyQueueName(),
-                $"station.{_options.StationId}.emergency-stop",
+                $"station.{_options.AgentId}.{_options.StationId}.emergency-stop",
                 cancellationToken)
             .ConfigureAwait(false);
         await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
@@ -248,13 +248,13 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         await DeclarePriorityQueueAsync(
                 channel,
                 SafeStopQueueName(),
-                $"station.{_options.StationId}.safe-stop",
+                $"station.{_options.AgentId}.{_options.StationId}.safe-stop",
                 cancellationToken)
             .ConfigureAwait(false);
         await DeclarePriorityQueueAsync(
                 channel,
                 JobCancelQueueName(),
-                $"station.{_options.StationId}.job-cancel",
+                $"station.{_options.AgentId}.{_options.StationId}.job-cancel",
                 cancellationToken)
             .ConfigureAwait(false);
         await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
@@ -349,13 +349,13 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         delivery.Body);
 
     private string EmergencyQueueName() =>
-        $"openlineops.station.{_options.StationId}.emergency-stop";
+        $"openlineops.station.{_options.AgentId}.{_options.StationId}.emergency-stop";
 
     private string SafeStopQueueName() =>
-        $"openlineops.station.{_options.StationId}.safe-stop";
+        $"openlineops.station.{_options.AgentId}.{_options.StationId}.safe-stop";
 
     private string JobCancelQueueName() =>
-        $"openlineops.station.{_options.StationId}.job-cancel";
+        $"openlineops.station.{_options.AgentId}.{_options.StationId}.job-cancel";
 
     private static async ValueTask DisposeChannelAsync(IChannel? channel)
     {

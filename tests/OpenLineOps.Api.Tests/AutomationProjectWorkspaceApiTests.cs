@@ -1,10 +1,17 @@
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
-using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Projects.Api.Integrations;
+using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Api.Tests;
 
@@ -424,7 +431,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
             using var contextResponse = await _client.GetAsync(contextPath);
             using var contextBody = await ReadJsonAsync(contextResponse);
             Assert.Equal(HttpStatusCode.OK, contextResponse.StatusCode);
-            Assert.Equal(10, contextBody.RootElement.EnumerateObject().Count());
+            Assert.Equal(12, contextBody.RootElement.EnumerateObject().Count());
             Assert.False(contextBody.RootElement.TryGetProperty("releaseContentSha256", out _));
             Assert.False(contextBody.RootElement.TryGetProperty("releaseManifestPath", out _));
             Assert.Equal(projectId, contextBody.RootElement.GetProperty("projectId").GetString());
@@ -440,11 +447,66 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 .GetString();
             var frozenEntryStationSystemId = contextBody.RootElement
                 .GetProperty("entryStationSystemId")
-                .GetString();
+                .GetString()
+                ?? throw new InvalidDataException("Entry Station System ID is null.");
+            var frozenEntryStationId = contextBody.RootElement
+                .GetProperty("entryStationId")
+                .GetString()
+                ?? throw new InvalidDataException("Entry physical Station ID is null.");
+            var frozenEntryStationPackageContentSha256 = contextBody.RootElement
+                .GetProperty("entryStationPackageContentSha256")
+                .GetString()
+                ?? throw new InvalidDataException("Entry Station package SHA-256 is null.");
             Assert.Equal($"product-scoped-{suffix}", frozenProductModelId);
             Assert.Equal("serialNumber", frozenIdentityInputKey);
             Assert.Equal("operation.main", contextBody.RootElement.GetProperty("entryOperationId").GetString());
             Assert.Equal("station.main", frozenEntryStationSystemId);
+            Assert.Equal("station.main", frozenEntryStationId);
+            Assert.Matches(
+                "^[0-9a-f]{64}$",
+                frozenEntryStationPackageContentSha256);
+            await using (var authorizationScope = _factory.Services.CreateAsyncScope())
+            {
+                var agentAuthorizer = new ProjectReleaseProductionMaterialArrivalAuthorizer(
+                    authorizationScope.ServiceProvider.GetRequiredService<IAutomationProjectService>(),
+                    authorizationScope.ServiceProvider.GetRequiredService<IProjectReleaseSnapshotReader>(),
+                    new FixedStationDeploymentResolver(new StationDeploymentRoute(
+                        "agent.main",
+                        "station.physical.main",
+                        frozenEntryStationPackageContentSha256,
+                        productionLineDefinitionId)));
+                var agentArrival = new MaterialArrived(
+                    Guid.NewGuid(),
+                    $"material-arrival/{Guid.NewGuid():D}",
+                    "agent.main",
+                    "station.physical.main",
+                    projectId,
+                    applicationId,
+                    snapshotId,
+                    frozenEntryStationPackageContentSha256,
+                    StationMaterialKinds.ProductionUnit,
+                    Guid.NewGuid().ToString("D"),
+                    productionLineDefinitionId,
+                    frozenEntryStationSystemId,
+                    StationMaterialArrivalSources.Plc,
+                    "plc.reader.main",
+                    DateTimeOffset.UtcNow);
+                await agentAuthorizer.AuthorizeAsync(
+                    agentArrival,
+                    ProductionMaterialArrivalOrigin.StationAgent);
+                await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                    await agentAuthorizer.AuthorizeAsync(
+                        agentArrival with { ProducerId = "agent.spoof" },
+                        ProductionMaterialArrivalOrigin.StationAgent));
+                await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                    await agentAuthorizer.AuthorizeAsync(
+                        agentArrival with { StationId = "station.physical.spoof" },
+                        ProductionMaterialArrivalOrigin.StationAgent));
+                await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                    await agentAuthorizer.AuthorizeAsync(
+                        agentArrival,
+                        ProductionMaterialArrivalOrigin.CoordinatorApi));
+            }
             Assert.Equal(
                 ["station.main"],
                 contextBody.RootElement.GetProperty("stationSystemIds")
@@ -476,7 +538,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                     contextAfterDraftDeletionBody.RootElement.GetProperty("entryStationSystemId").GetString());
             }
 
-            using (var restartedFactory = new StationPackageWebApplicationFactory())
+            using (var restartedFactory = new StationPackageWebApplicationFactory(
+                       _factory.RootDirectory))
             using (var restartedClient = restartedFactory.CreateClient(
                        new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }))
             {
@@ -506,6 +569,38 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                         .Select(station => station.GetString()
                             ?? throw new InvalidDataException("Frozen Station System ID is null."))
                         .ToArray());
+                var restartedCarrierId = $"carrier-restarted-{suffix}";
+                var restartedOccurredAtUtc = DateTimeOffset.UtcNow;
+                using var restartedCarrierRegisterResponse = await restartedClient.PostAsJsonAsync(
+                    "/api/production-carriers",
+                    new
+                    {
+                        carrierId = restartedCarrierId,
+                        carrierTypeId = "carrier-type.cold-restart",
+                        capacity = 4,
+                        actorId = "api-test",
+                        occurredAtUtc = restartedOccurredAtUtc
+                    });
+                Assert.Equal(HttpStatusCode.Created, restartedCarrierRegisterResponse.StatusCode);
+                using var restartedCarrierArrivalResponse = await restartedClient.PostAsJsonAsync(
+                    $"/api/production-carriers/{restartedCarrierId}/arrivals",
+                    new FrozenDeploymentMaterialArrival(
+                        projectId,
+                        applicationId,
+                        snapshotId,
+                        restartedContextBody.RootElement
+                            .GetProperty("entryStationPackageContentSha256")
+                            .GetString()
+                        ?? throw new InvalidDataException(
+                            "Restarted entry Station package SHA-256 is null."),
+                        restartedContextBody.RootElement.GetProperty("entryStationId").GetString()
+                        ?? throw new InvalidDataException(
+                            "Restarted entry physical Station ID is null."),
+                        productionLineDefinitionId,
+                        frozenEntryStationSystemId,
+                        "api-test",
+                        restartedOccurredAtUtc.AddMilliseconds(1)));
+                Assert.Equal(HttpStatusCode.OK, restartedCarrierArrivalResponse.StatusCode);
             }
 
             var productionRunId = Guid.NewGuid();
@@ -524,16 +619,55 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                     occurredAtUtc = DateTimeOffset.UtcNow
                 });
             Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
+            var arrivalOccurredAtUtc = DateTimeOffset.UtcNow;
+            var validArrival = new FrozenDeploymentMaterialArrival(
+                projectId,
+                applicationId,
+                snapshotId,
+                frozenEntryStationPackageContentSha256,
+                frozenEntryStationId,
+                productionLineDefinitionId,
+                frozenEntryStationSystemId,
+                actorId,
+                arrivalOccurredAtUtc);
+            foreach (var spoofedArrival in new[]
+                     {
+                         validArrival with { ProjectId = $"{projectId}.spoof" },
+                         validArrival with { ApplicationId = $"{applicationId}.spoof" },
+                         validArrival with { ProjectSnapshotId = $"{snapshotId}.spoof" },
+                         validArrival with { PackageContentSha256 = new string('b', 64) },
+                         validArrival with { StationId = $"{validArrival.StationId}.spoof" },
+                         validArrival with { LineId = $"{productionLineDefinitionId}.spoof" },
+                         validArrival with { StationSystemId = $"{validArrival.StationSystemId}.spoof" }
+                     })
+            {
+                using var spoofedResponse = await _client.PostAsJsonAsync(
+                    $"/api/production-units/{productionUnitId:D}/arrivals",
+                    spoofedArrival);
+                Assert.Equal(HttpStatusCode.BadRequest, spoofedResponse.StatusCode);
+            }
+
             using var arriveUnitResponse = await _client.PostAsJsonAsync(
                 $"/api/production-units/{productionUnitId:D}/arrivals",
+                validArrival);
+            Assert.Equal(HttpStatusCode.OK, arriveUnitResponse.StatusCode);
+
+            var carrierId = $"carrier-{suffix}";
+            using var registerCarrierResponse = await _client.PostAsJsonAsync(
+                "/api/production-carriers",
                 new
                 {
-                    lineId = productionLineDefinitionId,
-                    stationSystemId = frozenEntryStationSystemId,
+                    carrierId,
+                    carrierTypeId = "carrier-type.board-tray",
+                    capacity = 8,
                     actorId,
-                    occurredAtUtc = DateTimeOffset.UtcNow
+                    occurredAtUtc = arrivalOccurredAtUtc.AddMilliseconds(-1)
                 });
-            Assert.Equal(HttpStatusCode.OK, arriveUnitResponse.StatusCode);
+            Assert.Equal(HttpStatusCode.Created, registerCarrierResponse.StatusCode);
+            using var arriveCarrierResponse = await _client.PostAsJsonAsync(
+                $"/api/production-carriers/{carrierId}/arrivals",
+                validArrival with { OccurredAtUtc = arrivalOccurredAtUtc.AddMilliseconds(1) });
+            Assert.Equal(HttpStatusCode.OK, arriveCarrierResponse.StatusCode);
 
             using var startResponse = await _client.PostAsJsonAsync(
                 "/api/production-runs",
@@ -876,14 +1010,14 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                            lineDefinitionId = productionLineDefinitionId,
                            displayName = "Repeated Flow Line",
                            topologyId,
-                            productModel = new
-                            {
-                                productModelId = $"product-scoped-{suffix}",
-                                modelCode = $"MODEL-{suffix}",
-                                identityInputKey = "serialNumber"
-                            },
-                            entryOperationId = "operation.first",
-                            operations = new[]
+                           productModel = new
+                           {
+                               productModelId = $"product-scoped-{suffix}",
+                               modelCode = $"MODEL-{suffix}",
+                               identityInputKey = "serialNumber"
+                           },
+                           entryOperationId = "operation.first",
+                           operations = new[]
                             {
                                 new
                                 {
@@ -904,7 +1038,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                     resources = StationResources("second")
                                 }
                             },
-                            transitions = new[]
+                           transitions = new[]
                             {
                                 new
                                 {
@@ -914,7 +1048,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                     kind = "Sequence"
                                 }
                             },
-                            lineControllerAuthorizations = Array.Empty<object>()
+                           lineControllerAuthorizations = Array.Empty<object>()
                        }))
             {
                 Assert.Equal(HttpStatusCode.OK, replaceLineResponse.StatusCode);
@@ -1621,5 +1755,28 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
     {
         var stream = await response.Content.ReadAsStreamAsync();
         return await JsonDocument.ParseAsync(stream);
+    }
+
+    private sealed record FrozenDeploymentMaterialArrival(
+        string ProjectId,
+        string ApplicationId,
+        string ProjectSnapshotId,
+        string PackageContentSha256,
+        string StationId,
+        string LineId,
+        string StationSystemId,
+        string ActorId,
+        DateTimeOffset OccurredAtUtc);
+
+    private sealed class FixedStationDeploymentResolver(StationDeploymentRoute route) :
+        IStationDeploymentResolver
+    {
+        public ValueTask<StationDeploymentRoute> ResolveAsync(
+            StationDeploymentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(route);
+        }
     }
 }

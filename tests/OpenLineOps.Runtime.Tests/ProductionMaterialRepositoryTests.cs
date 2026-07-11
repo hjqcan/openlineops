@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
-using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -99,6 +99,8 @@ public sealed class ProductionMaterialRepositoryTests
                         address,
                         material,
                         null,
+                        null,
+                        null,
                         SlotOccupancyStatus.Available,
                         SlotOccupancyStatus.Reserved,
                         "operator-a",
@@ -181,11 +183,13 @@ public sealed class ProductionMaterialRepositoryTests
                 "engineer-a",
                 BaseTimeUtc))).Succeeded);
             Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
                 child,
                 station,
                 "scanner-a",
                 BaseTimeUtc.AddSeconds(1)))).Succeeded);
             Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
                 carrier,
                 station,
                 "scanner-a",
@@ -405,6 +409,8 @@ public sealed class ProductionMaterialRepositoryTests
                     address,
                     null,
                     null,
+                    null,
+                    null,
                     SlotOccupancyStatus.Available,
                     SlotOccupancyStatus.Blocked,
                     "operator-a",
@@ -431,6 +437,8 @@ public sealed class ProductionMaterialRepositoryTests
                     ProductionMaterialTimelineEntry.SlotOccupancy(
                         Guid.NewGuid(),
                         address,
+                        null,
+                        null,
                         null,
                         null,
                         SlotOccupancyStatus.Available,

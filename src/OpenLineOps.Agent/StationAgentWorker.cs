@@ -7,6 +7,7 @@ namespace OpenLineOps.Agent;
 
 public sealed class StationAgentWorker(
     StationJobCoordinator coordinator,
+    StationResourceLeaseChangeCoordinator resourceLeaseChanges,
     IStationJobReceiver receiver,
     IStationSafetyReceiver safetyReceiver,
     IStationSafetyActuator safetyActuator,
@@ -153,7 +154,11 @@ public sealed class StationAgentWorker(
         {
             try
             {
-                await receiver.RunAsync(HandleJobAsync, stoppingToken).ConfigureAwait(false);
+                await receiver.RunAsync(
+                        HandleJobAsync,
+                        resourceLeaseChanges.HandleAsync,
+                        stoppingToken)
+                    .ConfigureAwait(false);
                 retryDelay = TimeSpan.FromSeconds(1);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

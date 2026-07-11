@@ -10,6 +10,8 @@ namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
 {
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 11, 0, 0, TimeSpan.Zero);
     private readonly string _directory = Path.Combine(
@@ -30,18 +32,17 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         var signal = new StationMaterialArrivalSignal(
             Guid.NewGuid(),
             "material-arrival/plc/unit-001/scan-001",
-            Guid.NewGuid(),
-            "line.main",
-            "station-system.main",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
             StationMaterialArrivalSources.Plc,
             "plc.reader.main",
             Now);
         using (var store = new SqliteStationMaterialArrivalOutboxStore(connectionString))
         {
             var reporter = new StationMaterialArrivalReporter(
-                "agent.main",
-                "station.main",
-                store);
+                new FixedMaterialArrivalDeploymentProvider(),
+                store,
+                new FixedClock(Now.AddSeconds(1)));
             Assert.True(await reporter.ReportAsync(signal));
             Assert.False(await reporter.ReportAsync(signal));
         }
@@ -51,20 +52,157 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         {
             var dispatcher = new StationMaterialArrivalOutboxDispatcher(restarted, publisher);
             Assert.Equal(1, await dispatcher.DispatchPendingAsync(10, Now.AddSeconds(1)));
-            Assert.Empty(await restarted.ListPendingAsync(10));
+            Assert.Empty(await restarted.ListPendingAsync(10, Now.AddSeconds(1)));
         }
 
         Assert.Equal(StationAgentMessageKinds.MaterialArrived, publisher.Kind);
-        var message = JsonSerializer.Deserialize<MaterialArrived>(publisher.Payload!);
+        var message = JsonSerializer.Deserialize<MaterialArrived>(
+            publisher.Payload!,
+            JsonOptions);
         Assert.NotNull(message);
         Assert.Equal(signal.MessageId, message.MessageId);
+        Assert.Equal("project.main", message.ProjectId);
+        Assert.Equal("application.main", message.ApplicationId);
+        Assert.Equal("snapshot.main", message.ProjectSnapshotId);
+        Assert.Equal("line.main", message.LineId);
+        Assert.Equal("station-system.main", message.StationSystemId);
+        Assert.Equal(new string('a', 64), message.PackageContentSha256);
         var publication = StationAgentEventPublicationFactory.Create(
             Options(),
             publisher.Kind!,
             publisher.Payload!);
         Assert.Equal(signal.MessageId, publication.MessageId);
-        Assert.Equal(signal.ProductionUnitId, publication.CorrelationId);
+        Assert.Equal(signal.MessageId, publication.CorrelationId);
         Assert.Equal("station.station.main.MaterialArrived", publication.RoutingKey);
+    }
+
+    [Fact]
+    public void MaterialSignalCannotSelectAnyDeploymentIdentity()
+    {
+        Assert.Equal(
+            [
+                nameof(StationMaterialArrivalSignal.MessageId),
+                nameof(StationMaterialArrivalSignal.IdempotencyKey),
+                nameof(StationMaterialArrivalSignal.MaterialKind),
+                nameof(StationMaterialArrivalSignal.MaterialId),
+                nameof(StationMaterialArrivalSignal.Source),
+                nameof(StationMaterialArrivalSignal.ActorId),
+                nameof(StationMaterialArrivalSignal.ArrivedAtUtc)
+            ],
+            typeof(StationMaterialArrivalSignal)
+                .GetProperties()
+                .Select(static property => property.Name)
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task MaterialOutboxUsesDurableBackoffAndGlobalHeadOfLineOrdering()
+    {
+        Directory.CreateDirectory(_directory);
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(_directory, "agent-hol.sqlite"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared
+        }.ToString();
+        var first = Signal("unit-hol-001", Now);
+        var second = Signal("unit-hol-002", Now.AddMinutes(-10));
+        using (var store = new SqliteStationMaterialArrivalOutboxStore(connectionString))
+        {
+            var reporter = new StationMaterialArrivalReporter(
+                new FixedMaterialArrivalDeploymentProvider(),
+                store,
+                new FixedClock(Now.AddSeconds(1)));
+            Assert.True(await reporter.ReportAsync(first));
+            Assert.True(await reporter.ReportAsync(second));
+            var failing = new OrderedPublisher(failuresRemaining: 1);
+            var dispatcher = new StationMaterialArrivalOutboxDispatcher(store, failing);
+            Assert.Equal(0, await dispatcher.DispatchPendingAsync(10, Now.AddSeconds(1)));
+            Assert.Equal([first.MessageId], failing.AttemptedMessageIds);
+            Assert.Empty(await store.ListPendingAsync(10, Now.AddSeconds(1)));
+        }
+
+        using (var restarted = new SqliteStationMaterialArrivalOutboxStore(connectionString))
+        {
+            var publisher = new OrderedPublisher();
+            var dispatcher = new StationMaterialArrivalOutboxDispatcher(restarted, publisher);
+            Assert.Equal(0, await dispatcher.DispatchPendingAsync(
+                10,
+                Now.AddSeconds(1).AddMilliseconds(249)));
+            Assert.Empty(publisher.AttemptedMessageIds);
+            Assert.Equal(2, await dispatcher.DispatchPendingAsync(
+                10,
+                Now.AddSeconds(1).AddMilliseconds(250)));
+            Assert.Equal([first.MessageId, second.MessageId], publisher.AttemptedMessageIds);
+        }
+    }
+
+    [Fact]
+    public async Task PoisonedMaterialHeadIsQuarantinedOnceBeforeNextMessagePublishes()
+    {
+        Directory.CreateDirectory(_directory);
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(_directory, "agent-poison.sqlite"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared
+        }.ToString();
+        var first = Signal("unit-poison-001", Now);
+        var second = Signal("unit-poison-002", Now.AddMilliseconds(1));
+        using var store = new SqliteStationMaterialArrivalOutboxStore(connectionString);
+        var reporter = new StationMaterialArrivalReporter(
+            new FixedMaterialArrivalDeploymentProvider(),
+            store,
+            new FixedClock(Now.AddSeconds(1)));
+        Assert.True(await reporter.ReportAsync(first));
+        Assert.True(await reporter.ReportAsync(second));
+        await using (var connection = new SqliteConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var poison = connection.CreateCommand();
+            poison.CommandText = """
+                UPDATE station_material_arrival_outbox
+                SET payload_json = '{}'
+                WHERE message_id = $message_id;
+                """;
+            poison.Parameters.AddWithValue("$message_id", first.MessageId.ToString("D"));
+            Assert.Equal(1, await poison.ExecuteNonQueryAsync());
+        }
+
+        var publisher = new OrderedPublisher();
+        var dispatcher = new StationMaterialArrivalOutboxDispatcher(store, publisher);
+        Assert.Equal(1, await dispatcher.DispatchPendingAsync(10, Now.AddSeconds(1)));
+        Assert.Equal([second.MessageId], publisher.AttemptedMessageIds);
+        Assert.Empty(await store.ListPendingAsync(10, Now.AddSeconds(2)));
+        await using var verification = new SqliteConnection(connectionString);
+        await verification.OpenAsync();
+        await using var query = verification.CreateCommand();
+        query.CommandText = """
+            SELECT attempt_count, quarantined_at_utc
+            FROM station_material_arrival_outbox
+            WHERE message_id = $message_id;
+            """;
+        query.Parameters.AddWithValue("$message_id", first.MessageId.ToString("D"));
+        await using var reader = await query.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.False(reader.IsDBNull(1));
+    }
+
+    [Fact]
+    public async Task MaterialReporterRejectsTimestampBeyondFutureClockSkewBeforeEnqueue()
+    {
+        var store = new InMemoryStationMaterialArrivalOutboxStore();
+        var reporter = new StationMaterialArrivalReporter(
+            new FixedMaterialArrivalDeploymentProvider(),
+            store,
+            new FixedClock(Now));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await reporter.ReportAsync(Signal(
+                "unit-future-001",
+                Now.AddMinutes(5).AddMilliseconds(1))));
+        Assert.Empty(await store.ListPendingAsync(10, Now));
     }
 
     [Fact]
@@ -163,6 +301,17 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         Now,
         Now.AddMinutes(5));
 
+    private static StationMaterialArrivalSignal Signal(
+        string materialIdentity,
+        DateTimeOffset arrivedAtUtc) => new(
+        Guid.NewGuid(),
+        $"material-arrival/plc/{materialIdentity}/{Guid.NewGuid():D}",
+        StationMaterialKinds.ProductionUnit,
+        Guid.NewGuid().ToString("D"),
+        StationMaterialArrivalSources.Plc,
+        "plc.reader.main",
+        arrivedAtUtc);
+
     private static StationTransportDelivery Delivery(
         ResourceLeaseChanged change,
         ulong deliveryTag,
@@ -174,9 +323,9 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         "coordinator.main",
         change.MessageId.ToString("D"),
         change.JobId.ToString("D"),
-        $"station.{change.StationId}.resource-lease-changed",
+        $"station.{change.AgentId}.{change.StationId}.resource-lease-changed",
         redelivered,
-        JsonSerializer.SerializeToUtf8Bytes(change));
+        JsonSerializer.SerializeToUtf8Bytes(change, JsonOptions));
 
     private static ValueTask IgnoreJobAsync(
         StationJobRequested _,
@@ -199,6 +348,33 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             Kind = kind;
             Payload = payloadJson;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class OrderedPublisher(int failuresRemaining = 0) :
+        IStationAgentMessagePublisher
+    {
+        private int _failuresRemaining = failuresRemaining;
+
+        public List<Guid> AttemptedMessageIds { get; } = [];
+
+        public ValueTask PublishAsync(
+            string kind,
+            string payloadJson,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Equal(StationAgentMessageKinds.MaterialArrived, kind);
+            var message = JsonSerializer.Deserialize<MaterialArrived>(payloadJson, JsonOptions)
+                ?? throw new InvalidDataException("Material arrival payload is null.");
+            AttemptedMessageIds.Add(message.MessageId);
+            if (_failuresRemaining > 0)
+            {
+                _failuresRemaining--;
+                return ValueTask.FromException(new IOException("Broker is offline."));
+            }
+
             return ValueTask.CompletedTask;
         }
     }
@@ -237,5 +413,24 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
     private sealed class FixedClock(DateTimeOffset nowUtc) : IClock
     {
         public DateTimeOffset UtcNow => nowUtc;
+    }
+
+    private sealed class FixedMaterialArrivalDeploymentProvider :
+        IStationMaterialArrivalDeploymentProvider
+    {
+        public ValueTask<VerifiedStationMaterialArrivalDeployment> GetCurrentAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(new VerifiedStationMaterialArrivalDeployment(
+                "agent.main",
+                "station.main",
+                "project.main",
+                "application.main",
+                "snapshot.main",
+                "line.main",
+                "station-system.main",
+                new string('a', 64)));
+        }
     }
 }

@@ -186,6 +186,7 @@ public sealed class ProductionRunRepositoryTests
         Assert.True(await materials.TryAddAsync(slot));
         var materialService = new ProductionMaterialService(materials, repository);
         Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
             material,
             station,
             "scanner.main",
@@ -263,6 +264,8 @@ public sealed class ProductionRunRepositoryTests
         Assert.Equal(SlotOccupancyStatus.Running, slotCompletion.PreviousSlotStatus);
         Assert.Equal(SlotOccupancyStatus.Occupied, slotCompletion.CurrentSlotStatus);
         Assert.Equal(run.Id, slotCompletion.ProductionRunId);
+        Assert.Equal(operation.OperationRunId, slotCompletion.OperationRunId);
+        Assert.Equal(2, slotCompletion.SlotFencingToken);
 
         var unloaded = await materialService.UnloadSlotAsync(new UnloadSlotCommand(
             slotAddress,
@@ -274,10 +277,135 @@ public sealed class ProductionRunRepositoryTests
         Assert.Equal(
             SlotOccupancyStatus.Available,
             (await materials.GetSlotAsync(slotAddress))!.Aggregate.Status);
+    }
+
+    [Fact]
+    public async Task InMemorySameRunSlotAndCompletionTimePersistsEachReworkOperationEvidence()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var repository = new InMemoryProductionRunRepository(materials);
+
+        await AssertSameTimestampReworkEvidenceAsync(materials, repository);
+    }
+
+    [Fact]
+    public async Task SqliteSameRunSlotAndCompletionTimePersistsEachReworkOperationEvidence()
+    {
+        await using var database = new TemporaryDatabase();
+        using var repository = new SqliteProductionRunRepository(database.ConnectionString);
+        using var materials = new SqliteProductionMaterialRepository(database.ConnectionString);
+
+        await AssertSameTimestampReworkEvidenceAsync(materials, repository);
+    }
+
+    [Fact]
+    public async Task SqliteRunCrossesStationsAfterHistoricalSlotWasUnloaded()
+    {
+        await using var database = new TemporaryDatabase();
+        using var repository = new SqliteProductionRunRepository(database.ConnectionString);
+        using var materials = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var unitId = ProductionUnitId.New();
+        var slot1 = new SlotAddress("line.main", "station.one", "slot.one");
+        var slot2 = new SlotAddress("line.main", "station.two", "slot.two");
+        var material = MaterialReference.ForProductionUnit(unitId);
+        var station1 = MaterialLocation.AtStation(slot1.LineId, slot1.StationSystemId);
+        var station2 = MaterialLocation.AtStation(slot2.LineId, slot2.StationSystemId);
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            unitId,
+            "product.board",
+            "serialNumber",
+            "SN-CROSS-STATION-001",
+            null,
+            "operator.main",
+            Now.AddMinutes(-1))));
+        Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(slot1, Now.AddMinutes(-1))));
+        Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(slot2, Now.AddMinutes(-1))));
+        var materialService = new ProductionMaterialService(materials, repository);
+        await PrepareRunningSlotAsync(
+            materialService,
+            slot1,
+            material,
+            station1,
+            Now.AddSeconds(-10));
+
+        var operation1 = OperationPlan("operation.one", slot1);
+        var operation2 = OperationPlan("operation.two", slot2);
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            "topology.main",
+            "line.main",
+            unitId,
+            new ProductionUnitIdentity(
+                "product.board",
+                "serialNumber",
+                "SN-CROSS-STATION-001"),
+            null,
+            null,
+            "operator.main",
+            operation1.Definition.OperationId,
+            Now,
+            [operation1.Definition, operation2.Definition],
+            [new RouteTransitionDefinition(
+                "route.one-to-two",
+                operation1.Definition.OperationId,
+                operation2.Definition.OperationId,
+                RuntimeRouteTransitionKind.Sequence)]);
+        var plan = new ProductionRunExecutionPlan(run.Id, [operation1, operation2]);
+        var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(unitId));
+        Assert.True(await repository.TryAddAsync(
+            run,
+            plan,
+            new ProductionRunAdmission(unitEntry.Aggregate.ToSnapshot(), unitEntry.Revision)));
+        Assert.True(run.Start(Now).Succeeded);
+        StartOperation(run, "operation.one@0001", 1, Now.AddSeconds(1));
+        Assert.Equal(1, await repository.SaveAsync(run, 0));
+        Assert.True(run.CompleteOperation(
+            "operation.one@0001",
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
+            0,
+            Now.AddSeconds(2)).Succeeded);
+        Assert.Equal(2, await repository.SaveAsync(run, 1));
+        Assert.Equal(
+            SlotOccupancyStatus.Occupied,
+            (await materials.GetSlotAsync(slot1))!.Aggregate.Status);
+
+        Assert.True((await materialService.UnloadSlotAsync(new UnloadSlotCommand(
+            slot1,
+            material,
+            station1,
+            "operator.main",
+            Now.AddSeconds(3)))).Succeeded);
+        Assert.True((await materialService.TransferAsync(new TransferMaterialCommand(
+            material,
+            station1,
+            station2,
+            "conveyor.main",
+            Now.AddSeconds(4)))).Succeeded);
+        await PrepareRunningSlotAsync(
+            materialService,
+            slot2,
+            material,
+            station2,
+            Now.AddSeconds(5),
+            arrive: false);
+
+        // Saving the unchanged Pending second operation must not replay Slot 1 completion.
         Assert.Equal(3, await repository.SaveAsync(run, 2));
+        StartOperation(run, "operation.two@0001", 20, Now.AddSeconds(8));
+        Assert.Equal(4, await repository.SaveAsync(run, 3));
+        Assert.Equal(
+            SlotOccupancyStatus.Running,
+            (await materials.GetSlotAsync(slot2))!.Aggregate.Status);
         Assert.Equal(
             SlotOccupancyStatus.Available,
-            (await materials.GetSlotAsync(slotAddress))!.Aggregate.Status);
+            (await materials.GetSlotAsync(slot1))!.Aggregate.Status);
     }
 
     [Fact]
@@ -388,6 +516,211 @@ public sealed class ProductionRunRepositoryTests
             [operation.Definition],
             []);
         return (run, new ProductionRunExecutionPlan(runId, [operation]));
+    }
+
+    private static async Task AssertSameTimestampReworkEvidenceAsync(
+        IProductionMaterialRepository materials,
+        IProductionRunRepository repository)
+    {
+        var unitId = ProductionUnitId.New();
+        var slot = new SlotAddress("line.main", "station.rework", "slot.rework");
+        var material = MaterialReference.ForProductionUnit(unitId);
+        var station = MaterialLocation.AtStation(slot.LineId, slot.StationSystemId);
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            unitId,
+            "product.board",
+            "serialNumber",
+            "SN-SAME-TIME-REWORK-001",
+            null,
+            "operator.main",
+            Now.AddMinutes(-1))));
+        Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(slot, Now.AddMinutes(-1))));
+        var materialService = new ProductionMaterialService(materials, repository);
+        await PrepareRunningSlotAsync(
+            materialService,
+            slot,
+            material,
+            station,
+            Now.AddSeconds(-4));
+
+        var testOperation = OperationPlan("operation.test", slot);
+        var reworkOperation = OperationPlan("operation.rework", slot);
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            "topology.main",
+            "line.main",
+            unitId,
+            new ProductionUnitIdentity(
+                "product.board",
+                "serialNumber",
+                "SN-SAME-TIME-REWORK-001"),
+            null,
+            null,
+            "operator.main",
+            testOperation.Definition.OperationId,
+            Now,
+            [testOperation.Definition, reworkOperation.Definition],
+            [new RouteTransitionDefinition(
+                "route.test-rework",
+                testOperation.Definition.OperationId,
+                reworkOperation.Definition.OperationId,
+                RuntimeRouteTransitionKind.Rework,
+                ResultJudgement.Failed,
+                maxTraversals: 1)]);
+        var plan = new ProductionRunExecutionPlan(run.Id, [testOperation, reworkOperation]);
+        var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(unitId));
+        Assert.True(await repository.TryAddAsync(
+            run,
+            plan,
+            new ProductionRunAdmission(unitEntry.Aggregate.ToSnapshot(), unitEntry.Revision)));
+        Assert.True(run.Start(Now).Succeeded);
+
+        var completedAtUtc = Now.AddSeconds(1);
+        StartOperation(run, "operation.test@0001", 10, Now);
+        Assert.Equal(1, await repository.SaveAsync(run, 0));
+        Assert.True(run.CompleteOperation(
+            "operation.test@0001",
+            ResultJudgement.Failed,
+            null,
+            1,
+            1,
+            0,
+            completedAtUtc).Succeeded);
+        Assert.Equal(2, await repository.SaveAsync(run, 1));
+
+        Assert.True((await materialService.UnloadSlotAsync(new UnloadSlotCommand(
+            slot,
+            material,
+            station,
+            "operator.main",
+            completedAtUtc))).Succeeded);
+        Assert.True((await materialService.ReserveSlotAsync(new ReserveSlotCommand(
+            slot,
+            material,
+            "coordinator.main",
+            completedAtUtc))).Succeeded);
+        Assert.True((await materialService.LoadSlotAsync(new LoadSlotCommand(
+            slot,
+            material,
+            "operator.main",
+            completedAtUtc))).Succeeded);
+        Assert.True((await materialService.StartSlotAsync(new StartSlotCommand(
+            slot,
+            material,
+            "agent.main",
+            completedAtUtc))).Succeeded);
+
+        StartOperation(run, "operation.rework@0001", 20, completedAtUtc);
+        Assert.Equal(3, await repository.SaveAsync(run, 2));
+        Assert.True(run.CompleteOperation(
+            "operation.rework@0001",
+            ResultJudgement.Failed,
+            null,
+            1,
+            1,
+            0,
+            completedAtUtc).Succeeded);
+        Assert.Equal(4, await repository.SaveAsync(run, 3));
+
+        var timeline = await materials.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+            productionUnitId: unitId,
+            productionRunId: run.Id));
+        var completions = timeline.Where(entry =>
+                entry.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition
+                && entry.Slot == slot
+                && entry.PreviousSlotStatus == SlotOccupancyStatus.Running
+                && entry.CurrentSlotStatus == SlotOccupancyStatus.Occupied)
+            .ToArray();
+        Assert.Equal(2, completions.Length);
+        Assert.All(completions, entry => Assert.Equal(completedAtUtc, entry.OccurredAtUtc));
+        Assert.Contains(completions, entry =>
+            string.Equals(entry.OperationRunId, "operation.test@0001", StringComparison.Ordinal)
+            && entry.SlotFencingToken == 11);
+        Assert.Contains(completions, entry =>
+            string.Equals(entry.OperationRunId, "operation.rework@0001", StringComparison.Ordinal)
+            && entry.SlotFencingToken == 21);
+        Assert.Equal(SlotOccupancyStatus.Occupied,
+            (await materials.GetSlotAsync(slot))!.Aggregate.Status);
+    }
+
+    private static OperationExecutionPlan OperationPlan(string operationId, SlotAddress slot)
+    {
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId($"process.{operationId}"),
+            new ProcessVersionId($"process-version.{operationId}"),
+            []);
+        return new OperationExecutionPlan(
+            operationId,
+            slot.StationSystemId,
+            new StationId(slot.StationSystemId),
+            new ConfigurationSnapshotId($"configuration.{operationId}"),
+            new RecipeSnapshotId($"recipe.{operationId}"),
+            process,
+            [
+                new ResourceRequirement(ResourceKind.Station, slot.StationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, slot.ToString())
+            ]);
+    }
+
+    private static void StartOperation(
+        ProductionRun run,
+        string operationRunId,
+        long firstToken,
+        DateTimeOffset startedAtUtc)
+    {
+        var operation = run.Operations.Single(candidate =>
+            string.Equals(candidate.OperationRunId, operationRunId, StringComparison.Ordinal));
+        var leases = operation.ResourceRequirements.Select((resource, index) => new ResourceLease(
+            resource,
+            run.Id,
+            operationRunId,
+            checked(firstToken + index),
+            startedAtUtc,
+            startedAtUtc.AddMinutes(5))).ToArray();
+        Assert.True(run.StartOperation(
+            operationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            startedAtUtc).Succeeded);
+    }
+
+    private static async Task PrepareRunningSlotAsync(
+        ProductionMaterialService service,
+        SlotAddress slot,
+        MaterialReference material,
+        MaterialLocation station,
+        DateTimeOffset startAtUtc,
+        bool arrive = true)
+    {
+        if (arrive)
+        {
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                material,
+                station,
+                "scanner.main",
+                startAtUtc))).Succeeded);
+        }
+
+        Assert.True((await service.ReserveSlotAsync(new ReserveSlotCommand(
+            slot,
+            material,
+            "coordinator.main",
+            startAtUtc.AddSeconds(1)))).Succeeded);
+        Assert.True((await service.LoadSlotAsync(new LoadSlotCommand(
+            slot,
+            material,
+            "operator.main",
+            startAtUtc.AddSeconds(2)))).Succeeded);
+        Assert.True((await service.StartSlotAsync(new StartSlotCommand(
+            slot,
+            material,
+            "agent.main",
+            startAtUtc.AddSeconds(3)))).Succeeded);
     }
 
     private sealed class TemporaryDatabase : IAsyncDisposable

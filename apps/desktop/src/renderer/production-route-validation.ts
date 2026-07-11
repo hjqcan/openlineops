@@ -333,9 +333,15 @@ function validateOperationResources(
     const valid = resource.kind === 'Fixture'
       ? group?.parentSystemId === operation.stationSystemId && group.kind === 'FixtureNest'
       : resource.kind === 'Device'
-        ? system?.parentSystemId === operation.stationSystemId
+        ? (system !== undefined
+            && isSystemWithinStation(system.systemId, operation.stationSystemId, topology))
           || (driver !== undefined
-            && (driver.providerKind === 'DeviceInstance' || driver.providerKind === 'PluginCommand'))
+            && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+              driver.providerKind)
+            && isSystemWithinStation(
+              driver.ownerSystemId,
+              operation.stationSystemId,
+              topology))
         : resource.kind === 'SlotGroup'
           ? group?.parentSystemId === operation.stationSystemId
           : resource.resolution === 'CurrentMaterialSlot'
@@ -713,9 +719,10 @@ function traverse(
   const pending = [start];
   while (pending.length > 0) {
     const operationId = pending.pop();
-    if (!operationId || !reachable.add(operationId)) {
+    if (!operationId || reachable.has(operationId)) {
       continue;
     }
+    reachable.add(operationId);
     for (const transition of outgoing.get(operationId) ?? []) {
       pending.push(transition.targetOperationId);
     }

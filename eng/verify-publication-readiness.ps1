@@ -181,6 +181,10 @@ function Test-ReleaseArtifacts {
         "--require-kind",
         "api",
         "--require-kind",
+        "agent",
+        "--require-kind",
+        "runner",
+        "--require-kind",
         "desktop",
         "--require-kind",
         "plugin-host",
@@ -195,61 +199,97 @@ function Test-ReleaseArtifacts {
         Add-Failure "Release manifest verification failed with exit code $LASTEXITCODE."
     }
 
-    Test-DesktopReleasePackage $resolvedArtifactsRoot
+    Test-WindowsReleasePackage `
+        -ResolvedArtifactsRoot $resolvedArtifactsRoot `
+        -ArtifactKind "desktop" `
+        -ArchivePattern "desktop-*.zip" `
+        -RequiredEntries @(
+            "package/win-unpacked/OpenLineOps.exe",
+            "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt") `
+        -SignedEntries @("package/win-unpacked/OpenLineOps.exe")
+    Test-WindowsReleasePackage `
+        -ResolvedArtifactsRoot $resolvedArtifactsRoot `
+        -ArtifactKind "agent" `
+        -ArchivePattern "agent-*.zip" `
+        -RequiredEntries @(
+            "OpenLineOps.Agent.exe",
+            "OpenLineOps.StationRuntime.exe",
+            "appsettings.json",
+            "bundle-manifest.json",
+            "bundle-checksums.sha256") `
+        -SignedEntries @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe")
+    Test-WindowsReleasePackage `
+        -ResolvedArtifactsRoot $resolvedArtifactsRoot `
+        -ArtifactKind "runner" `
+        -ArchivePattern "runner-*.zip" `
+        -RequiredEntries @(
+            "OpenLineOps.Runner.exe",
+            "bundle-manifest.json",
+            "bundle-checksums.sha256") `
+        -SignedEntries @("OpenLineOps.Runner.exe")
 }
 
-function Test-DesktopReleasePackage {
-    param([Parameter(Mandatory = $true)][string] $ResolvedArtifactsRoot)
+function Test-WindowsReleasePackage {
+    param(
+        [Parameter(Mandatory = $true)][string] $ResolvedArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind,
+        [Parameter(Mandatory = $true)][string] $ArchivePattern,
+        [Parameter(Mandatory = $true)][string[]] $RequiredEntries,
+        [Parameter(Mandatory = $true)][string[]] $SignedEntries
+    )
 
-    $desktopArtifactDirectory = Join-Path $ResolvedArtifactsRoot "desktop"
-    $desktopArchives = if (Test-Path -LiteralPath $desktopArtifactDirectory -PathType Container) {
-        @(Get-ChildItem -LiteralPath $desktopArtifactDirectory -Filter "desktop-*.zip" -File)
+    $artifactDirectory = Join-Path $ResolvedArtifactsRoot $ArtifactKind
+    $archives = if (Test-Path -LiteralPath $artifactDirectory -PathType Container) {
+        @(Get-ChildItem -LiteralPath $artifactDirectory -Filter $ArchivePattern -File)
     }
     else {
         @()
     }
-    if ($desktopArchives.Count -ne 1) {
-        Add-Failure "Expected exactly one desktop release archive, found $($desktopArchives.Count)."
+    if ($archives.Count -ne 1) {
+        Add-Failure "Expected exactly one $ArtifactKind release archive, found $($archives.Count)."
         return
     }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($desktopArchives[0].FullName)
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($archives[0].FullName)
     try {
         $entries = @($archive.Entries | ForEach-Object { $_.FullName })
         foreach ($entryName in $entries) {
             if ($entryName.Contains([char]92)) {
-                Add-Failure "Desktop release archive contains a non-canonical backslash zip entry path: $entryName"
+                Add-Failure "$ArtifactKind release archive contains a non-canonical backslash zip entry path: $entryName"
             }
         }
 
-        if (-not (Test-ContainsOrdinal `
-            -Values $entries `
-            -Expected "package/win-unpacked/OpenLineOps.exe")) {
-            Add-Failure "Desktop release archive is missing package/win-unpacked/OpenLineOps.exe."
+        foreach ($requiredEntry in $RequiredEntries) {
+            if (-not (Test-ContainsOrdinal -Values $entries -Expected $requiredEntry)) {
+                Add-Failure "$ArtifactKind release archive is missing $requiredEntry."
+            }
         }
 
-        if (-not (Test-ContainsOrdinal `
-            -Values $entries `
-            -Expected "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt")) {
-            Add-Failure "Desktop release archive is missing package notes."
+        foreach ($signedEntry in $SignedEntries) {
+            Test-WindowsReleaseSignature `
+                -Archive $archive `
+                -ArtifactKind $ArtifactKind `
+                -EntryName $signedEntry
         }
-
-        Test-DesktopReleaseSignature $archive
     }
     finally {
         $archive.Dispose()
     }
 }
 
-function Test-DesktopReleaseSignature {
-    param([Parameter(Mandatory = $true)]$Archive)
+function Test-WindowsReleaseSignature {
+    param(
+        [Parameter(Mandatory = $true)]$Archive,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind,
+        [Parameter(Mandatory = $true)][string] $EntryName
+    )
 
     $entry = $Archive.Entries |
         Where-Object {
             [string]::Equals(
                 $_.FullName,
-                "package/win-unpacked/OpenLineOps.exe",
+                $EntryName,
                 [System.StringComparison]::Ordinal)
         } |
         Select-Object -First 1
@@ -265,12 +305,13 @@ function Test-DesktopReleaseSignature {
     }
 
     New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
-    $extractedExe = Join-Path $resolvedWorkRoot "OpenLineOps.exe"
+    $safeName = ($ArtifactKind + "-" + $EntryName) -replace "[^A-Za-z0-9._-]", "_"
+    $extractedExe = Join-Path $resolvedWorkRoot $safeName
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedExe, $true)
 
     $signature = Get-AuthenticodeSignature -LiteralPath $extractedExe
     if ($signature.Status -ne "Valid") {
-        Add-PendingExternal "Desktop release package is not signed with a valid Authenticode signature. Status: $($signature.Status)."
+        Add-PendingExternal "$ArtifactKind release executable '$EntryName' is not signed with a valid Authenticode signature. Status: $($signature.Status)."
     }
 }
 
@@ -291,6 +332,7 @@ $requiredFiles = @(
     ".github/ISSUE_TEMPLATE/plugin_request.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
     "eng/verify-ci-workflow-actions.ps1",
+    "eng/verify-solution-project-coverage.ps1",
     "eng/inspect-ci-release-artifact.ps1",
     "eng/inspect-release-candidate.ps1",
     "eng/prepare-final-publication.ps1",
@@ -300,12 +342,14 @@ $requiredFiles = @(
     "eng/verify-release-candidate-inspection.ps1",
     "eng/verify-open-source-metadata.ps1",
     "eng/verify-third-party-license-metadata.ps1",
-    "eng/sign-desktop-package.ps1",
-    "eng/verify-desktop-signing-readiness.ps1",
+    "eng/sign-windows-package.ps1",
+    "eng/verify-windows-signing-readiness.ps1",
     "eng/finalize-publication-metadata.ps1",
     "eng/verify-publication-metadata-finalization.ps1",
     "eng/verify-publication-readiness.ps1",
     "docs/release-packaging.md",
+    "docs/station-agent-deployment.md",
+    "docs/headless-runner.md",
     "docs/plugin-authoring.md",
     "docs/python-scripting-integration.md"
 )
@@ -325,6 +369,7 @@ Test-FileContains "Directory.Build.props" "PackageLicenseExpression" ".NET proje
 Test-FileContains "apps/desktop/package.json" '"license"\s*:\s*"MIT"' "Desktop package.json must declare MIT license metadata."
 Test-FileContains ".github/workflows/build.yml" "dotnet-version:\s*10\.0\.x" "CI must use .NET 10."
 Test-FileContains ".github/workflows/build.yml" "Verify CI workflow actions" "CI must verify workflow action references."
+Test-FileContains ".github/workflows/build.yml" "Verify solution project coverage" "CI must verify every formal project is covered by the solution."
 Test-FileContains ".github/workflows/build.yml" "Verify open-source metadata" "CI must verify open-source metadata."
 Test-FileContains ".github/workflows/build.yml" "Verify third-party license metadata" "CI must verify third-party license metadata."
 Test-FileContains ".github/workflows/build.yml" "Stage release artifacts" "CI must stage release artifacts."
@@ -357,7 +402,9 @@ Test-FileContains "eng/verify-third-party-license-metadata.ps1" "UpdateNotice" "
 Test-FileContains "eng/verify-third-party-license-metadata.ps1" "InventoryPath" "Third-party license metadata verification must support writing dependency inventory."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-dependency-inventory.json" "Release staging must generate dependency inventory metadata."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-metadata-checksums.sha256" "Release staging must generate metadata checksums."
-Test-FileContains "eng/inspect-release-candidate.ps1" "RequireSignedDesktop" "Release candidate inspection must support signed desktop enforcement."
+Test-FileContains "eng/inspect-release-candidate.ps1" "RequireSignedWindowsArtifacts" "Release candidate inspection must enforce every shipped Windows executable signature."
+Test-FileContains "eng/inspect-release-candidate.ps1" "bundle-manifest.json" "Release candidate inspection must verify the Agent and Runner bundle manifests."
+Test-FileContains "eng/inspect-release-candidate.ps1" "OpenLineOps.StationRuntime.exe" "Release candidate inspection must require Station Runtime in the Agent bundle."
 Test-FileContains "eng/inspect-release-candidate.ps1" "path traversal zip entry" "Release candidate inspection must reject unsafe zip entry paths."
 Test-FileContains "eng/inspect-release-candidate.ps1" "sensitive source archive entry" "Release candidate inspection must reject sensitive source archive entries."
 Test-FileContains "eng/inspect-release-candidate.ps1" "release-provenance.json" "Release candidate inspection must verify release provenance metadata."
@@ -372,8 +419,8 @@ Test-FileContains "eng/inspect-release-candidate.ps1" "write-publication-evidenc
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-publication-evidence.ps1" "Release candidate inspection must require the publication evidence verification script in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-release-candidate-inspection.ps1" "Release candidate inspection must require its behavior verification script in the source archive."
 Test-FileContains "eng/prepare-final-publication.ps1" "ConfirmMitLicense is required" "Final publication preparation must require explicit MIT confirmation."
-Test-FileContains "eng/prepare-final-publication.ps1" "SignDesktopPackage" "Final publication preparation must require signed desktop staging."
-Test-FileContains "eng/prepare-final-publication.ps1" "RequireSignedDesktop" "Final publication preparation must inspect the signed desktop candidate."
+Test-FileContains "eng/prepare-final-publication.ps1" "SignWindowsPackages" "Final publication preparation must require signing every Windows deliverable."
+Test-FileContains "eng/prepare-final-publication.ps1" "RequireSignedWindowsArtifacts" "Final publication preparation must inspect all signed Windows deliverables."
 Test-FileContains "eng/prepare-final-publication.ps1" "RequirePublishable" "Final publication preparation must require publishable evidence."
 Test-FileContains "eng/verify-final-publication-preflight.ps1" "invalid-github-actions-url" "Final publication preflight verification must cover invalid GitHub Actions proof URLs."
 Test-FileContains "eng/verify-final-publication-preflight.ps1" "missing-signing-selector" "Final publication preflight verification must cover missing code-signing selectors."
@@ -394,13 +441,18 @@ Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-depende
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-dependency-inventory" "Release candidate inspection verification must cover bad dependency inventory metadata."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-metadata-checksums" "Release candidate inspection verification must cover missing metadata checksums."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-metadata-checksums" "Release candidate inspection verification must cover bad metadata checksums."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "tampered-agent-bundle" "Release candidate inspection verification must reject tampered Agent payloads."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-provenance.json" "Release staging must generate release provenance metadata."
-Test-FileContains "eng/verify-publication-readiness.ps1" "Get-AuthenticodeSignature" "Publication readiness must enforce signed desktop release packages."
+Test-FileContains "eng/stage-release-artifacts.ps1" "Publish-WindowsSelfContainedProject" "Release staging must publish self-contained Windows Agent and Runner hosts."
+Test-FileContains "eng/stage-release-artifacts.ps1" "OpenLineOps.StationRuntime.exe" "Release staging must bind Agent configuration to the co-packaged Station Runtime."
+Test-FileContains "eng/stage-release-artifacts.ps1" "ZipArchive\]::new" "Release staging must create ZIP archives with explicit canonical entry names."
+Test-FileContains "eng/stage-release-artifacts.ps1" "non-canonical or out-of-order entry" "Release staging must verify every emitted ZIP entry path and order."
+Test-FileContains "eng/verify-publication-readiness.ps1" "Get-AuthenticodeSignature" "Publication readiness must enforce shipped Windows executable signatures."
 Test-FileContains "apps/desktop/package.json" "package:win:ci" "Desktop package.json must define a CI desktop packaging script."
-Test-FileContains ".github/workflows/build.yml" "Verify desktop signing readiness" "CI must verify desktop signing readiness."
-Test-FileContains "eng/stage-release-artifacts.ps1" "SignDesktopPackage" "Release staging must expose optional desktop signing."
-Test-FileContains "eng/sign-desktop-package.ps1" "signtool.exe" "Desktop signing script must use Windows signtool."
-Test-FileContains "eng/verify-desktop-signing-readiness.ps1" "missing certificate selector" "Desktop signing readiness verification must reject missing certificate selectors."
+Test-FileContains ".github/workflows/build.yml" "Verify Windows package signing readiness" "CI must verify shared Windows package signing readiness."
+Test-FileContains "eng/stage-release-artifacts.ps1" "SignWindowsPackages" "Release staging must expose one formal Windows package signing switch."
+Test-FileContains "eng/sign-windows-package.ps1" "signtool.exe" "Windows package signing script must use Windows signtool."
+Test-FileContains "eng/verify-windows-signing-readiness.ps1" "missing certificate selector" "Windows package signing readiness verification must reject missing certificate selectors."
 Test-FileContains "eng/finalize-publication-metadata.ps1" "SecurityContact" "Publication finalization script must accept a security contact."
 Test-FileContains "eng/finalize-publication-metadata.ps1" "ConductContact" "Publication finalization script must accept a conduct contact."
 Test-FileContains ".github/workflows/build.yml" "Verify publication metadata finalization" "CI must verify publication metadata finalization."

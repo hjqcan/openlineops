@@ -109,9 +109,11 @@ public sealed class RabbitMqStationCoordinatorTransport :
 
     public async Task RunResultInboxAsync(
         Func<MaterialArrived, CancellationToken, ValueTask> materialArrivalHandler,
+        Func<StationJobRecoveryRequired, CancellationToken, ValueTask> recoveryRequiredHandler,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(materialArrivalHandler);
+        ArgumentNullException.ThrowIfNull(recoveryRequiredHandler);
         var channel = await GetInboxChannelAsync(cancellationToken).ConfigureAwait(false);
         var settlement = new RabbitMqSettlement(channel);
         var consumer = new AsyncEventingBasicConsumer(channel);
@@ -119,6 +121,7 @@ public sealed class RabbitMqStationCoordinatorTransport :
                 ToDelivery(delivery),
                 settlement,
                 materialArrivalHandler,
+                recoveryRequiredHandler,
                 cancellationToken)
             .AsTask();
         await channel.BasicConsumeAsync(
@@ -221,6 +224,7 @@ public sealed class RabbitMqStationCoordinatorTransport :
                      nameof(StationJobAccepted),
                      nameof(StationJobProgressed),
                      nameof(StationJobCompleted),
+                     nameof(StationJobRecoveryRequired),
                      nameof(MaterialArrived)
                  })
         {

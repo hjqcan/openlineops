@@ -4,6 +4,8 @@ public static class ReleaseArtifactKinds
 {
     public const string Source = "source";
     public const string Api = "api";
+    public const string Agent = "agent";
+    public const string Runner = "runner";
     public const string PluginHost = "plugin-host";
     public const string ScriptWorker = "script-worker";
     public const string SamplePlugin = "sample-plugin";
@@ -21,7 +23,7 @@ public static class ReleaseArtifactKinds
 
         throw new InvalidOperationException(
             $"Unsupported release artifact kind '{value}'. Expected exactly one of: "
-            + $"'{Source}', '{Api}', '{PluginHost}', '{ScriptWorker}', "
+            + $"'{Source}', '{Api}', '{Agent}', '{Runner}', '{PluginHost}', '{ScriptWorker}', "
             + $"'{SamplePlugin}', '{Desktop}'.");
     }
 
@@ -50,6 +52,8 @@ public static class ReleaseArtifactKinds
     [
         Source,
         Api,
+        Agent,
+        Runner,
         PluginHost,
         ScriptWorker,
         SamplePlugin,

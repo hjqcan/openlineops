@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
-using OpenLineOps.Runtime.Contracts;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Application.Abstractions.Paging;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Application.Queries;
 using OpenLineOps.Traceability.Domain.Records;
 using OpenLineOps.Traceability.Infrastructure.Persistence;

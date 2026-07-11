@@ -183,9 +183,9 @@ if ($validPlan.ExitCode -ne 0) {
 foreach ($expected in @(
         "finalize-publication-metadata.ps1",
         "stage-release-artifacts.ps1",
-        "-SignDesktopPackage",
+        "-SignWindowsPackages",
         "inspect-release-candidate.ps1",
-        "-RequireSignedDesktop",
+        "-RequireSignedWindowsArtifacts",
         "verify-publication-readiness.ps1",
         "write-publication-evidence.ps1",
         "-RequirePublishable")) {

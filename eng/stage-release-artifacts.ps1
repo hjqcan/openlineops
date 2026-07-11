@@ -12,7 +12,7 @@ param(
 
     [switch] $SkipDesktopBuild,
 
-    [switch] $SignDesktopPackage,
+    [switch] $SignWindowsPackages,
 
     [string] $CodeSigningSignToolPath,
 
@@ -32,7 +32,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -139,6 +139,31 @@ function Invoke-CheckedCommand {
     }
 }
 
+function Invoke-ExpectedExitCode {
+    param(
+        [Parameter(Mandatory = $true)][string] $FilePath,
+        [string[]] $Arguments = @(),
+        [Parameter(Mandatory = $true)][int] $ExpectedExitCode,
+        [string] $WorkingDirectory = $RepoRoot
+    )
+
+    Write-Host "> $FilePath $($Arguments -join ' ') (expected exit $ExpectedExitCode)"
+    $startProcessArguments = @{
+        FilePath = $FilePath
+        WorkingDirectory = $WorkingDirectory
+        NoNewWindow = $true
+        Wait = $true
+        PassThru = $true
+    }
+    if ($Arguments.Count -gt 0) {
+        $startProcessArguments.ArgumentList = $Arguments
+    }
+    $process = Start-Process @startProcessArguments
+    if ($process.ExitCode -ne $ExpectedExitCode) {
+        throw "Command exited $($process.ExitCode), expected ${ExpectedExitCode}: $FilePath"
+    }
+}
+
 function Publish-DotNetProject {
     param(
         [Parameter(Mandatory = $true)][string] $ProjectPath,
@@ -160,6 +185,171 @@ function Publish-DotNetProject {
     }
 
     Invoke-CheckedCommand -FilePath "dotnet" -Arguments $arguments
+}
+
+function Publish-WindowsSelfContainedProject {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProjectPath,
+        [Parameter(Mandatory = $true)][string] $OutputDirectory
+    )
+
+    $arguments = @(
+        "publish",
+        (Resolve-RepoPath $ProjectPath),
+        "-c",
+        $Configuration,
+        "-r",
+        "win-x64",
+        "--self-contained",
+        "true",
+        "-o",
+        $OutputDirectory,
+        "/p:UseAppHost=true"
+    )
+
+    if ($NoRestore) {
+        $arguments += "--no-restore"
+    }
+
+    Invoke-CheckedCommand -FilePath "dotnet" -Arguments $arguments
+}
+
+function Get-RelativePathUnderDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $rootPrefix = $resolvedRoot + [System.IO.Path]::DirectorySeparatorChar
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not $resolvedPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path '$resolvedPath' is not under '$resolvedRoot'."
+    }
+
+    return $resolvedPath.Substring($rootPrefix.Length)
+}
+
+function Merge-DirectoryContents {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourceDirectory,
+        [Parameter(Mandatory = $true)][string] $DestinationDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceDirectory -PathType Container)) {
+        throw "Required directory does not exist: $SourceDirectory"
+    }
+
+    New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+    foreach ($sourceFile in Get-ChildItem -LiteralPath $SourceDirectory -Recurse -File) {
+        $relativePath = Get-RelativePathUnderDirectory `
+            -Root $SourceDirectory `
+            -Path $sourceFile.FullName
+        $destinationPath = Join-Path $DestinationDirectory $relativePath
+        $destinationParent = Split-Path $destinationPath -Parent
+        New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+        if (Test-Path -LiteralPath $destinationPath -PathType Leaf) {
+            if ((Get-FileSha256 $sourceFile.FullName) -cne (Get-FileSha256 $destinationPath)) {
+                throw "Cannot merge different published files at '$relativePath'."
+            }
+
+            continue
+        }
+
+        Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath -Force
+    }
+}
+
+function Write-WindowsBundleMetadata {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind,
+        [Parameter(Mandatory = $true)][object[]] $EntryPoints
+    )
+
+    $manifestName = "bundle-manifest.json"
+    $checksumsName = "bundle-checksums.sha256"
+    $relativePaths = [string[]]@(
+        Get-ChildItem -LiteralPath $Root -Recurse -File |
+            ForEach-Object {
+                (Get-RelativePathUnderDirectory -Root $Root -Path $_.FullName).Replace(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    '/')
+            } |
+            Where-Object { $_ -cne $manifestName -and $_ -cne $checksumsName }
+    )
+    [System.Array]::Sort($relativePaths, [System.StringComparer]::Ordinal)
+    if ($relativePaths.Count -eq 0) {
+        throw "Cannot write metadata for an empty $ArtifactKind bundle."
+    }
+
+    $files = @($relativePaths | ForEach-Object {
+        $fullPath = Join-Path $Root $_.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $file = Get-Item -LiteralPath $fullPath
+        [ordered]@{
+            relativePath = $_
+            sizeBytes = $file.Length
+            sha256 = Get-FileSha256 $fullPath
+        }
+    })
+
+    foreach ($entryPoint in $EntryPoints) {
+        if ($entryPoint.role -isnot [string] -or [string]::IsNullOrWhiteSpace($entryPoint.role) `
+            -or $entryPoint.relativePath -isnot [string] `
+            -or $relativePaths -cnotcontains $entryPoint.relativePath) {
+            throw "The $ArtifactKind bundle entry point is invalid or missing: $($entryPoint.relativePath)"
+        }
+    }
+
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        product = "OpenLineOps"
+        artifactKind = $ArtifactKind
+        runtimeIdentifier = "win-x64"
+        selfContained = $true
+        entryPoints = $EntryPoints
+        files = $files
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $Root $manifestName),
+        (($manifest | ConvertTo-Json -Depth 8) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+
+    $checksumLines = @($files | ForEach-Object { "$($_.sha256)  $($_.relativePath)" })
+    [System.IO.File]::WriteAllText(
+        (Join-Path $Root $checksumsName),
+        (($checksumLines -join "`r`n") + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+function Assert-AgentBundleConfiguration {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    $configurationPath = Join-Path $Root "appsettings.json"
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        throw "The Station Agent bundle is missing appsettings.json."
+    }
+
+    $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    $runtimeExecutablePath = $configuration.OpenLineOps.Agent.RuntimeExecutablePath
+    if ($runtimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
+        throw "OpenLineOps:Agent:RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe' in the release bundle."
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $runtimeExecutablePath) -PathType Leaf)) {
+        throw "The configured Station Runtime executable is missing from the Agent bundle."
+    }
+
+    $agentExecutablePath = Join-Path $Root "OpenLineOps.Agent.exe"
+    $runtimeExecutableFullPath = Join-Path $Root $runtimeExecutablePath
+    if (-not (Test-Path -LiteralPath $agentExecutablePath -PathType Leaf)) {
+        throw "The Station Agent executable is missing from its release bundle."
+    }
+    if ((Get-FileSha256 $agentExecutablePath) -ceq (Get-FileSha256 $runtimeExecutableFullPath)) {
+        throw "The Station Agent and Station Runtime executable payloads must be distinct."
+    }
 }
 
 function Copy-DirectoryContents {
@@ -186,8 +376,8 @@ function Compress-StagedDirectory {
         throw "Cannot package missing directory: $SourceDirectory"
     }
 
-    $entries = @(Get-ChildItem -LiteralPath $SourceDirectory -Force)
-    if ($entries.Count -eq 0) {
+    $sourceFiles = @(Get-ChildItem -LiteralPath $SourceDirectory -Recurse -File -Force)
+    if ($sourceFiles.Count -eq 0) {
         throw "Cannot package empty directory: $SourceDirectory"
     }
 
@@ -197,7 +387,89 @@ function Compress-StagedDirectory {
 
     $archiveDirectory = Split-Path $DestinationArchive -Parent
     New-Item -ItemType Directory -Path $archiveDirectory -Force | Out-Null
-    Compress-Archive -Path (Join-Path $SourceDirectory "*") -DestinationPath $DestinationArchive -Force
+
+    $archivePaths = [string[]]@(
+        $sourceFiles |
+            ForEach-Object {
+                (Get-RelativePathUnderDirectory -Root $SourceDirectory -Path $_.FullName).Replace(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    '/')
+            }
+    )
+    [System.Array]::Sort($archivePaths, [System.StringComparer]::Ordinal)
+    if (($archivePaths | Select-Object -Unique).Count -ne $archivePaths.Count) {
+        throw "Cannot package duplicate canonical paths from '$SourceDirectory'."
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    $archiveStream = [System.IO.File]::Open(
+        $DestinationArchive,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None)
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new(
+            $archiveStream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $true)
+        try {
+            foreach ($archivePath in $archivePaths) {
+                $sourcePath = Join-Path `
+                    $SourceDirectory `
+                    $archivePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+                $sourceFile = Get-Item -LiteralPath $sourcePath
+                $archiveEntry = $archive.CreateEntry(
+                    $archivePath,
+                    [System.IO.Compression.CompressionLevel]::Optimal)
+                $archiveEntry.LastWriteTime = [System.DateTimeOffset]::new($sourceFile.LastWriteTimeUtc)
+                $sourceStream = $sourceFile.OpenRead()
+                try {
+                    $entryStream = $archiveEntry.Open()
+                    try {
+                        $sourceStream.CopyTo($entryStream)
+                    }
+                    finally {
+                        $entryStream.Dispose()
+                    }
+                }
+                finally {
+                    $sourceStream.Dispose()
+                }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    finally {
+        $archiveStream.Dispose()
+    }
+
+    $verificationStream = [System.IO.File]::OpenRead($DestinationArchive)
+    try {
+        $verificationArchive = [System.IO.Compression.ZipArchive]::new(
+            $verificationStream,
+            [System.IO.Compression.ZipArchiveMode]::Read,
+            $true)
+        try {
+            $actualPaths = [string[]]@($verificationArchive.Entries | ForEach-Object { $_.FullName })
+            if ($actualPaths.Count -ne $archivePaths.Count) {
+                throw "Archive '$DestinationArchive' contains $($actualPaths.Count) entries; expected $($archivePaths.Count)."
+            }
+
+            for ($index = 0; $index -lt $archivePaths.Count; $index++) {
+                if ($actualPaths[$index] -cne $archivePaths[$index] -or $actualPaths[$index].Contains('\')) {
+                    throw "Archive '$DestinationArchive' contains a non-canonical or out-of-order entry '$($actualPaths[$index])'."
+                }
+            }
+        }
+        finally {
+            $verificationArchive.Dispose()
+        }
+    }
+    finally {
+        $verificationStream.Dispose()
+    }
 }
 
 function Get-FileSha256 {
@@ -289,7 +561,7 @@ function Write-ReleaseProvenance {
             configuration = $Configuration
             noRestore = [bool]$NoRestore
             skipDesktopBuild = [bool]$SkipDesktopBuild
-            signDesktopPackage = [bool]$SignDesktopPackage
+            signWindowsPackages = [bool]$SignWindowsPackages
             requiredArtifactKinds = $RequiredKinds
         }
         tools = [ordered]@{
@@ -441,11 +713,25 @@ function Copy-SourceArchiveContent {
 
     New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
 
-    $sourceFiles = Get-ChildItem -LiteralPath $RepoRoot -Recurse -File -Force |
-        Where-Object {
-            $relativePath = Get-RepoRelativePath $_.FullName
-            -not (Test-IsExcludedSourcePath $relativePath)
+    $sourceFiles = @(
+        foreach ($topLevelEntry in Get-ChildItem -LiteralPath $RepoRoot -Force) {
+            $topLevelRelativePath = Get-RepoRelativePath $topLevelEntry.FullName
+            if (Test-IsExcludedSourcePath $topLevelRelativePath) {
+                continue
+            }
+
+            if (-not $topLevelEntry.PSIsContainer) {
+                $topLevelEntry
+                continue
+            }
+
+            Get-ChildItem -LiteralPath $topLevelEntry.FullName -Recurse -File -Force |
+                Where-Object {
+                    $relativePath = Get-RepoRelativePath $_.FullName
+                    -not (Test-IsExcludedSourcePath $relativePath)
+                }
         }
+    )
 
     foreach ($file in $sourceFiles) {
         $relativePath = Get-RepoRelativePath $file.FullName
@@ -467,6 +753,9 @@ New-CleanDirectory $resolvedWorkRoot
 $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 
 $apiPublish = Join-Path $resolvedWorkRoot "api"
+$agentPublish = Join-Path $resolvedWorkRoot "agent"
+$stationRuntimePublish = Join-Path $resolvedWorkRoot "station-runtime"
+$runnerPublish = Join-Path $resolvedWorkRoot "runner"
 $pluginHostPublish = Join-Path $resolvedWorkRoot "plugin-host"
 $scriptWorkerPublish = Join-Path $resolvedWorkRoot "script-worker"
 $samplePluginPublish = Join-Path $resolvedWorkRoot "sample-plugin"
@@ -476,6 +765,18 @@ $sourceStage = Join-Path $resolvedWorkRoot "source"
 Publish-DotNetProject `
     -ProjectPath "src/OpenLineOps.Api/OpenLineOps.Api.csproj" `
     -OutputDirectory $apiPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.Agent/OpenLineOps.Agent.csproj" `
+    -OutputDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj" `
+    -OutputDirectory $stationRuntimePublish
+Merge-DirectoryContents `
+    -SourceDirectory $stationRuntimePublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.Runner/OpenLineOps.Runner.csproj" `
+    -OutputDirectory $runnerPublish
 Publish-DotNetProject `
     -ProjectPath "src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" `
     -OutputDirectory $pluginHostPublish
@@ -491,6 +792,31 @@ Copy-Item `
     -Destination (Join-Path $samplePluginPublish "manifest.json") `
     -Force
 
+foreach ($bundle in @($agentPublish, $runnerPublish)) {
+    Copy-Item -LiteralPath (Resolve-RepoPath "LICENSE") -Destination (Join-Path $bundle "LICENSE.txt") -Force
+    Copy-Item `
+        -LiteralPath (Resolve-RepoPath "THIRD-PARTY-NOTICES.md") `
+        -Destination (Join-Path $bundle "THIRD-PARTY-NOTICES.md") `
+        -Force
+}
+Copy-Item `
+    -LiteralPath (Resolve-RepoPath "docs/station-agent-deployment.md") `
+    -Destination (Join-Path $agentPublish "DEPLOYMENT.md") `
+    -Force
+Copy-Item `
+    -LiteralPath (Resolve-RepoPath "docs/headless-runner.md") `
+    -Destination (Join-Path $runnerPublish "USAGE.md") `
+    -Force
+Assert-AgentBundleConfiguration -Root $agentPublish
+Invoke-CheckedCommand `
+    -FilePath (Join-Path $runnerPublish "OpenLineOps.Runner.exe") `
+    -Arguments @("--help") `
+    -WorkingDirectory $runnerPublish
+Invoke-ExpectedExitCode `
+    -FilePath (Join-Path $agentPublish "OpenLineOps.StationRuntime.exe") `
+    -ExpectedExitCode 64 `
+    -WorkingDirectory $agentPublish
+
 if (-not $SkipDesktopBuild) {
     Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "build") -WorkingDirectory (Resolve-RepoPath "apps/desktop")
 }
@@ -503,45 +829,66 @@ if (Test-Path -LiteralPath $desktopPackageOutput) {
 
 Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "package:win:ci") -WorkingDirectory (Resolve-RepoPath "apps/desktop")
 
-if ($SignDesktopPackage) {
-    $signArguments = @(
+if ($SignWindowsPackages) {
+    $signingRoots = @(
+        (Join-Path $desktopPackageOutput "win-unpacked"),
+        $agentPublish,
+        $runnerPublish
+    )
+    foreach ($signingRoot in $signingRoots) {
+        $signArguments = @(
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        (Resolve-RepoPath "eng/sign-desktop-package.ps1"),
+        (Resolve-RepoPath "eng/sign-windows-package.ps1"),
         "-PackageRoot",
-        (Join-Path $desktopPackageOutput "win-unpacked"),
+        $signingRoot,
         "-TimestampUrl",
         $CodeSigningTimestampUrl
-    )
+        )
 
-    if (-not [string]::IsNullOrWhiteSpace($CodeSigningSignToolPath)) {
-        $signArguments += @("-SignToolPath", $CodeSigningSignToolPath)
+        if (-not [string]::IsNullOrWhiteSpace($CodeSigningSignToolPath)) {
+            $signArguments += @("-SignToolPath", $CodeSigningSignToolPath)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePath)) {
+            $signArguments += @("-CertificatePath", $CodeSigningCertificatePath)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePassword)) {
+            $signArguments += @("-CertificatePassword", $CodeSigningCertificatePassword)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint)) {
+            $signArguments += @("-CertificateThumbprint", $CodeSigningCertificateThumbprint)
+        }
+
+        if ($CodeSigningAutoSelectCertificate) {
+            $signArguments += "-AutoSelectCertificate"
+        }
+
+        if ($CodeSigningStoreMachine) {
+            $signArguments += "-StoreMachine"
+        }
+
+        Invoke-CheckedCommand -FilePath "powershell" -Arguments $signArguments
     }
-
-    if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePath)) {
-        $signArguments += @("-CertificatePath", $CodeSigningCertificatePath)
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePassword)) {
-        $signArguments += @("-CertificatePassword", $CodeSigningCertificatePassword)
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint)) {
-        $signArguments += @("-CertificateThumbprint", $CodeSigningCertificateThumbprint)
-    }
-
-    if ($CodeSigningAutoSelectCertificate) {
-        $signArguments += "-AutoSelectCertificate"
-    }
-
-    if ($CodeSigningStoreMachine) {
-        $signArguments += "-StoreMachine"
-    }
-
-    Invoke-CheckedCommand -FilePath "powershell" -Arguments $signArguments
 }
+
+Write-WindowsBundleMetadata `
+    -Root $agentPublish `
+    -ArtifactKind "agent" `
+    -EntryPoints @(
+        [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
+        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+    )
+Write-WindowsBundleMetadata `
+    -Root $runnerPublish `
+    -ArtifactKind "runner" `
+    -EntryPoints @(
+        [ordered]@{ role = "headless-runner"; relativePath = "OpenLineOps.Runner.exe" }
+    )
 
 New-Item -ItemType Directory -Path $desktopStage -Force | Out-Null
 Copy-DirectoryContents -SourceDirectory $desktopPackageOutput -DestinationDirectory (Join-Path $desktopStage "package")
@@ -562,6 +909,16 @@ $archives = @(
         Kind = "api"
         Source = $apiPublish
         Archive = "api-openlineops-$safeVersion.zip"
+    },
+    @{
+        Kind = "agent"
+        Source = $agentPublish
+        Archive = "agent-openlineops-win-x64-$safeVersion.zip"
+    },
+    @{
+        Kind = "runner"
+        Source = $runnerPublish
+        Archive = "runner-openlineops-win-x64-$safeVersion.zip"
     },
     @{
         Kind = "desktop"

@@ -160,14 +160,16 @@ public sealed class VendorTestHelperProcessTests
         Assert.Contains("acknowledged cancellation", await standardError, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task SpawnChildDelayReportsPidAndRemovesTheChildWhenCanceled()
+    [Theory]
+    [InlineData("SpawnChildDelay")]
+    [InlineData("SpawnChildDelayRecovery")]
+    public async Task SpawnChildDelayReportsPidAndRemovesTheChildWhenCanceled(string mode)
     {
         await using var invocation = await VendorInvocation.CreateAsync(operationAttempt: 1);
         using var process = StartHelper(
             invocation,
             "--mode",
-            "SpawnChildDelay",
+            mode,
             "--delay-milliseconds",
             "300000");
         var standardOutput = process.StandardOutput.ReadToEndAsync();

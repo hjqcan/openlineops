@@ -1,7 +1,7 @@
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
-using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Domain.Resources;
 
 namespace OpenLineOps.Runtime.Domain.Runs;
 

@@ -109,13 +109,13 @@ export class ElectronCdpHarness {
     this.process = null;
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, timeoutMilliseconds = 30_000) {
     if (!this.cdp) throw new Error('Electron CDP is not connected.');
     const response = await this.cdp.send('Runtime.evaluate', {
       expression,
       awaitPromise: true,
       returnByValue: true
-    });
+    }, timeoutMilliseconds);
     if (response.exceptionDetails) {
       throw new Error(
         response.exceptionDetails.exception?.description
@@ -130,7 +130,9 @@ export class ElectronCdpHarness {
     let lastValue;
     while (Date.now() < deadline) {
       try {
-        lastValue = await this.evaluate(expression);
+        lastValue = await this.evaluate(
+          expression,
+          Math.max(250, Math.min(5_000, deadline - Date.now())));
         if (lastValue) return lastValue;
       } catch (error) {
         lastValue = error instanceof Error ? error.message : String(error);
@@ -138,6 +140,22 @@ export class ElectronCdpHarness {
       await delay(250);
     }
     throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+  }
+
+  async captureJavaScriptStack(timeoutMilliseconds = 10_000) {
+    if (!this.cdp) throw new Error('Electron CDP is not connected.');
+    await this.cdp.send('Debugger.enable', {}, timeoutMilliseconds);
+    const paused = this.cdp.waitForEvent('Debugger.paused', timeoutMilliseconds);
+    await this.cdp.send('Debugger.pause', {}, timeoutMilliseconds);
+    const event = await paused;
+    const frames = (event.callFrames ?? []).map(frame => ({
+      functionName: frame.functionName || '(anonymous)',
+      url: frame.url,
+      lineNumber: (frame.location?.lineNumber ?? -1) + 1,
+      columnNumber: (frame.location?.columnNumber ?? -1) + 1
+    }));
+    await this.cdp.send('Debugger.resume', {}, timeoutMilliseconds).catch(() => undefined);
+    return frames;
   }
 
   async click(testId) {
@@ -229,6 +247,7 @@ class CdpClient {
     this.socket = socket;
     this.nextId = 1;
     this.pending = new Map();
+    this.eventWaiters = new Map();
   }
 
   static connect(webSocketUrl) {
@@ -237,29 +256,82 @@ class CdpClient {
       const client = new CdpClient(socket);
       socket.addEventListener('open', () => resolve(client), { once: true });
       socket.addEventListener('error', event => reject(event.error ?? new Error('CDP socket error.')), { once: true });
+      socket.addEventListener('close', () => client.handleClose(), { once: true });
       socket.addEventListener('message', event => client.handle(event.data));
     });
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMilliseconds = 30_000) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(new Error(`CDP ${method} timed out after ${timeoutMilliseconds} ms.`));
+      }, timeoutMilliseconds);
+      this.pending.set(id, {
+        resolve: value => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: error => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
   }
 
   close() {
-    for (const pending of this.pending.values()) pending.reject(new Error('CDP connection closed.'));
-    this.pending.clear();
+    this.handleClose();
     if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.close();
     }
   }
 
+  handleClose() {
+    for (const pending of this.pending.values()) pending.reject(new Error('CDP connection closed.'));
+    this.pending.clear();
+    for (const waiters of this.eventWaiters.values()) {
+      for (const waiter of waiters) waiter.reject(new Error('CDP connection closed.'));
+    }
+    this.eventWaiters.clear();
+  }
+
+  waitForEvent(method, timeoutMilliseconds = 10_000) {
+    return new Promise((resolve, reject) => {
+      const waiters = this.eventWaiters.get(method) ?? [];
+      const waiter = {
+        resolve: value => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: error => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      };
+      const timeout = setTimeout(() => {
+        const current = this.eventWaiters.get(method) ?? [];
+        const index = current.indexOf(waiter);
+        if (index >= 0) current.splice(index, 1);
+        if (current.length === 0) this.eventWaiters.delete(method);
+        reject(new Error(`CDP event ${method} timed out after ${timeoutMilliseconds} ms.`));
+      }, timeoutMilliseconds);
+      waiters.push(waiter);
+      this.eventWaiters.set(method, waiters);
+    });
+  }
+
   handle(data) {
     const message = JSON.parse(data);
-    if (!message.id) return;
+    if (!message.id) {
+      const waiters = this.eventWaiters.get(message.method);
+      const waiter = waiters?.shift();
+      if (waiters?.length === 0) this.eventWaiters.delete(message.method);
+      waiter?.resolve(message.params ?? {});
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);

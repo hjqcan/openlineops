@@ -128,6 +128,7 @@ public sealed class RunnerProductionUnitPreparer(
             {
                 var arrived = await materialService.ArriveAsync(
                         new ArriveMaterialCommand(
+                            options.ProductionRunId,
                             MaterialReference.ForProductionUnit(productionUnitId),
                             entryLocation,
                             options.ActorId,

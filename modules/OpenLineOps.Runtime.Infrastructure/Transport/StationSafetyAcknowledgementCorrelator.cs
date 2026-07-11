@@ -69,101 +69,101 @@ public sealed class StationSafetyAcknowledgementCorrelator
         switch (delivery.Type)
         {
             case nameof(EmergencyStopAcknowledged):
-            {
-                var acknowledgement = Deserialize<EmergencyStopAcknowledged>(delivery.Body);
-                ValidateEnvelope(
-                    delivery,
-                    acknowledgement.MessageId,
-                    acknowledgement.RequestMessageId,
-                    acknowledgement.AgentId,
-                    acknowledgement.StationId,
-                    "emergency-stop-acknowledged");
-                ValidateCommon(
-                    acknowledgement.IdempotencyKey,
-                    acknowledgement.AcknowledgedAtUtc);
-                ValidateOutcome(
-                    acknowledgement.Accepted,
-                    acknowledgement.FailureCode,
-                    acknowledgement.FailureReason);
-                if (_emergency.TryGetValue(
-                        acknowledgement.RequestMessageId,
-                        out var pending))
                 {
-                    if (!Same(pending.Request, acknowledgement))
+                    var acknowledgement = Deserialize<EmergencyStopAcknowledged>(delivery.Body);
+                    ValidateEnvelope(
+                        delivery,
+                        acknowledgement.MessageId,
+                        acknowledgement.RequestMessageId,
+                        acknowledgement.AgentId,
+                        acknowledgement.StationId,
+                        "emergency-stop-acknowledged");
+                    ValidateCommon(
+                        acknowledgement.IdempotencyKey,
+                        acknowledgement.AcknowledgedAtUtc);
+                    ValidateOutcome(
+                        acknowledgement.Accepted,
+                        acknowledgement.FailureCode,
+                        acknowledgement.FailureReason);
+                    if (_emergency.TryGetValue(
+                            acknowledgement.RequestMessageId,
+                            out var pending))
                     {
-                        throw new InvalidDataException(
-                            "Emergency Stop acknowledgement does not match its pending request.");
+                        if (!Same(pending.Request, acknowledgement))
+                        {
+                            throw new InvalidDataException(
+                                "Emergency Stop acknowledgement does not match its pending request.");
+                        }
+
+                        pending.Completion.TrySetResult(acknowledgement);
                     }
 
-                    pending.Completion.TrySetResult(acknowledgement);
+                    break;
                 }
-
-                break;
-            }
             case nameof(StationSafeStopAcknowledged):
-            {
-                var acknowledgement = Deserialize<StationSafeStopAcknowledged>(delivery.Body);
-                ValidateEnvelope(
-                    delivery,
-                    acknowledgement.MessageId,
-                    acknowledgement.RequestMessageId,
-                    acknowledgement.AgentId,
-                    acknowledgement.StationId,
-                    "safe-stop-acknowledged");
-                ValidateCommon(
-                    acknowledgement.IdempotencyKey,
-                    acknowledgement.AcknowledgedAtUtc);
-                ValidateOutcome(
-                    acknowledgement.Accepted,
-                    acknowledgement.FailureCode,
-                    acknowledgement.FailureReason);
-                if (_safeStops.TryGetValue(
-                        acknowledgement.RequestMessageId,
-                        out var pending))
                 {
-                    if (!Same(pending.Request, acknowledgement))
+                    var acknowledgement = Deserialize<StationSafeStopAcknowledged>(delivery.Body);
+                    ValidateEnvelope(
+                        delivery,
+                        acknowledgement.MessageId,
+                        acknowledgement.RequestMessageId,
+                        acknowledgement.AgentId,
+                        acknowledgement.StationId,
+                        "safe-stop-acknowledged");
+                    ValidateCommon(
+                        acknowledgement.IdempotencyKey,
+                        acknowledgement.AcknowledgedAtUtc);
+                    ValidateOutcome(
+                        acknowledgement.Accepted,
+                        acknowledgement.FailureCode,
+                        acknowledgement.FailureReason);
+                    if (_safeStops.TryGetValue(
+                            acknowledgement.RequestMessageId,
+                            out var pending))
                     {
-                        throw new InvalidDataException(
-                            "Safe Stop acknowledgement does not match its pending request.");
+                        if (!Same(pending.Request, acknowledgement))
+                        {
+                            throw new InvalidDataException(
+                                "Safe Stop acknowledgement does not match its pending request.");
+                        }
+
+                        pending.Completion.TrySetResult(acknowledgement);
                     }
 
-                    pending.Completion.TrySetResult(acknowledgement);
+                    break;
                 }
-
-                break;
-            }
             case nameof(StationJobCancelAcknowledged):
-            {
-                var acknowledgement = Deserialize<StationJobCancelAcknowledged>(delivery.Body);
-                ValidateEnvelope(
-                    delivery,
-                    acknowledgement.MessageId,
-                    acknowledgement.RequestMessageId,
-                    acknowledgement.AgentId,
-                    acknowledgement.StationId,
-                    "job-cancel-acknowledged");
-                ValidateCommon(
-                    acknowledgement.IdempotencyKey,
-                    acknowledgement.AcknowledgedAtUtc);
-                ValidateOutcome(
-                    acknowledgement.Accepted,
-                    acknowledgement.FailureCode,
-                    acknowledgement.FailureReason);
-                if (_cancellations.TryGetValue(
-                        acknowledgement.RequestMessageId,
-                        out var pending))
                 {
-                    if (!Same(pending.Request, acknowledgement))
+                    var acknowledgement = Deserialize<StationJobCancelAcknowledged>(delivery.Body);
+                    ValidateEnvelope(
+                        delivery,
+                        acknowledgement.MessageId,
+                        acknowledgement.RequestMessageId,
+                        acknowledgement.AgentId,
+                        acknowledgement.StationId,
+                        "job-cancel-acknowledged");
+                    ValidateCommon(
+                        acknowledgement.IdempotencyKey,
+                        acknowledgement.AcknowledgedAtUtc);
+                    ValidateOutcome(
+                        acknowledgement.Accepted,
+                        acknowledgement.FailureCode,
+                        acknowledgement.FailureReason);
+                    if (_cancellations.TryGetValue(
+                            acknowledgement.RequestMessageId,
+                            out var pending))
                     {
-                        throw new InvalidDataException(
-                            "Station job cancellation acknowledgement does not match its pending request.");
+                        if (!Same(pending.Request, acknowledgement))
+                        {
+                            throw new InvalidDataException(
+                                "Station job cancellation acknowledgement does not match its pending request.");
+                        }
+
+                        pending.Completion.TrySetResult(acknowledgement);
                     }
 
-                    pending.Completion.TrySetResult(acknowledgement);
+                    break;
                 }
-
-                break;
-            }
             default:
                 throw new InvalidDataException(
                     $"Unsupported Station safety acknowledgement type '{delivery.Type}'.");

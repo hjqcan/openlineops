@@ -1,5 +1,5 @@
-using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Agent.Application.StationJobs;
@@ -88,10 +88,6 @@ public interface IStationOperationExecutor
 
 public interface IStationResourceFenceValidator
 {
-    ValueTask<StationResourceFenceValidationResult> ValidateAndAdvanceAsync(
-        StationJobSnapshot job,
-        CancellationToken cancellationToken = default);
-
     ValueTask<StationResourceFenceValidationResult> ValidateCurrentAsync(
         StationJobSnapshot job,
         CancellationToken cancellationToken = default);
@@ -229,12 +225,27 @@ public sealed record StationJobCancelExecutionResult(
 
 public sealed record StationOperationProgress(int Percent, string Phase);
 
-public sealed record StationResourceFenceValidationResult(bool Accepted, string? RejectionReason)
+public sealed record StationResourceFenceValidationResult(
+    bool Accepted,
+    bool Retryable,
+    string? RejectionReason)
 {
-    public static StationResourceFenceValidationResult Accept() => new(true, null);
+    public static StationResourceFenceValidationResult Accept() => new(true, false, null);
 
-    public static StationResourceFenceValidationResult Reject(string reason) => new(false, reason);
+    public static StationResourceFenceValidationResult Retry(string reason) =>
+        new(false, true, Required(reason));
+
+    public static StationResourceFenceValidationResult Reject(string reason) =>
+        new(false, false, Required(reason));
+
+    private static string Required(string reason) => string.IsNullOrWhiteSpace(reason)
+        ? throw new ArgumentException(
+            "Resource fence validation reason is required.",
+            nameof(reason))
+        : reason;
 }
+
+public sealed class StationResourceFenceUnavailableException(string message) : Exception(message);
 
 public sealed record StationRuntimeExecutionRequest(
     StationJobSnapshot Job,
@@ -268,6 +279,7 @@ public static class StationAgentMessageKinds
     public const string JobAccepted = "StationJobAccepted";
     public const string JobProgressed = "StationJobProgressed";
     public const string JobCompleted = "StationJobCompleted";
+    public const string JobRecoveryRequired = "StationJobRecoveryRequired";
     public const string JobCompletionPendingArtifactTransfer =
         "StationJobCompletionPendingArtifactTransfer";
 }

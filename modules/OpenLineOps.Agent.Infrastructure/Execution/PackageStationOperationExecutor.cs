@@ -72,6 +72,10 @@ public sealed class PackageStationOperationExecutor : IStationOperationExecutor
                 job.ProjectSnapshotId,
                 StringComparison.Ordinal)
             || !string.Equals(
+                installed.Manifest.ProductionLineDefinitionId,
+                job.ProductionLineDefinitionId,
+                StringComparison.Ordinal)
+            || !string.Equals(
                 installed.Manifest.StationSystemId,
                 job.StationSystemId,
                 StringComparison.Ordinal))

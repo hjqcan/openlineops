@@ -246,7 +246,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             return ValueTask.FromResult(new StationDeploymentRoute(
                 "agent.api",
                 "station.api",
-                new string('a', 64)));
+                new string('a', 64),
+                "line.api"));
         }
     }
 

@@ -12,6 +12,8 @@ internal sealed record StationAgentHostOptions(
     ushort MaximumConcurrentJobs,
     string PackageDistributionDirectory,
     string PackageCacheDirectory,
+    string MaterialArrivalPackageContentSha256,
+    string MaterialArrivalPipeName,
     IReadOnlyDictionary<string, string> TrustedPackagePublicKeys,
     string RuntimeExecutablePath,
     string RuntimeWorkingDirectory,
@@ -84,6 +86,12 @@ internal sealed record StationAgentHostOptions(
                 section["PackageDistributionDirectory"],
                 "OpenLineOps:Agent:PackageDistributionDirectory")),
             ResolvePath(section["PackageCacheDirectory"], Path.Combine(dataDirectory, "content")),
+            Sha256(
+                section["MaterialArrivalPackageContentSha256"],
+                "OpenLineOps:Agent:MaterialArrivalPackageContentSha256"),
+            PipeName(
+                section["MaterialArrivalPipeName"],
+                "OpenLineOps:Agent:MaterialArrivalPipeName"),
             trustedKeys,
             runtimeExecutablePath,
             ResolvePath(section["RuntimeWorkingDirectory"], Path.Combine(dataDirectory, "work")),
@@ -148,6 +156,27 @@ internal sealed record StationAgentHostOptions(
               && parsed > 0
                 ? parsed
                 : throw new InvalidDataException($"{name} must be a positive integer.");
+
+    private static string Sha256(string? value, string name)
+    {
+        var canonical = Required(value, name);
+        return canonical.Length == 64
+               && canonical.All(static character =>
+                   character is >= '0' and <= '9' or >= 'a' and <= 'f')
+            ? canonical
+            : throw new InvalidDataException($"{name} must be lowercase hexadecimal SHA-256.");
+    }
+
+    private static string PipeName(string? value, string name)
+    {
+        var canonical = Required(value, name);
+        return canonical.Length <= 128
+               && canonical.All(static character =>
+                   char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_')
+            ? canonical
+            : throw new InvalidDataException(
+                $"{name} may contain only ASCII letters, digits, dot, dash, or underscore.");
+    }
 
     private static string[] CanonicalCollection(
         IReadOnlyCollection<string> values,

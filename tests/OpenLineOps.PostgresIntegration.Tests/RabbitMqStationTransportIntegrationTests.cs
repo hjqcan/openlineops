@@ -5,6 +5,7 @@ using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Transport;
 using RabbitMQ.Client;
@@ -57,6 +58,7 @@ public sealed class RabbitMqStationTransportIntegrationTests
         await DeclareJobTopologyAsync(
             brokerUri,
             coordinatorId,
+            agentId,
             stationId,
             jobExchange,
             eventExchange);
@@ -101,6 +103,10 @@ public sealed class RabbitMqStationTransportIntegrationTests
             agentStop.Token);
 
         var request = JobRequest(agentId, stationId);
+        var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
+            request,
+            Assert.Single(request.ResourceFences));
+        Assert.True(await store.TryEnqueueAsync(request, [leaseChange]));
         await coordinator.PublishAsync(request);
         await redelivered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(2, Volatile.Read(ref calls));
@@ -113,7 +119,19 @@ public sealed class RabbitMqStationTransportIntegrationTests
                 cancellationToken.ThrowIfCancellationRequested();
                 return ValueTask.CompletedTask;
             },
+            static (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return ValueTask.CompletedTask;
+            },
             resultStop.Token);
+        await store.RecordAcceptedAsync(new StationJobAccepted(
+            Guid.NewGuid(),
+            request.JobId,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
+            DateTimeOffset.UtcNow));
         var completion = Completion(request);
         await agent.PublishAsync(
             nameof(StationJobCompleted),
@@ -146,6 +164,7 @@ public sealed class RabbitMqStationTransportIntegrationTests
         var brokerUri = BrokerUri();
         await DeclareSafetyCommandTopologyAsync(
             brokerUri,
+            agentId,
             stationId,
             commandExchange,
             eventExchange);
@@ -239,6 +258,7 @@ public sealed class RabbitMqStationTransportIntegrationTests
     private static async Task DeclareJobTopologyAsync(
         Uri brokerUri,
         string coordinatorId,
+        string agentId,
         string stationId,
         string jobExchange,
         string eventExchange)
@@ -248,9 +268,12 @@ public sealed class RabbitMqStationTransportIntegrationTests
         await using var channel = await connection.CreateChannelAsync();
         await channel.ExchangeDeclareAsync(jobExchange, ExchangeType.Direct, true, false);
         await channel.ExchangeDeclareAsync(eventExchange, ExchangeType.Topic, true, false);
-        var jobQueue = $"openlineops.station.{stationId}.jobs";
+        var jobQueue = $"openlineops.station.{agentId}.{stationId}.jobs";
         await channel.QueueDeclareAsync(jobQueue, true, false, false);
-        await channel.QueueBindAsync(jobQueue, jobExchange, $"station.{stationId}");
+        await channel.QueueBindAsync(
+            jobQueue,
+            jobExchange,
+            $"station.{agentId}.{stationId}");
         var resultQueue = $"openlineops.coordinator.{coordinatorId}.station-results";
         await channel.QueueDeclareAsync(resultQueue, true, false, false);
         foreach (var type in new[]
@@ -266,6 +289,7 @@ public sealed class RabbitMqStationTransportIntegrationTests
 
     private static async Task DeclareSafetyCommandTopologyAsync(
         Uri brokerUri,
+        string agentId,
         string stationId,
         string commandExchange,
         string eventExchange)
@@ -281,12 +305,12 @@ public sealed class RabbitMqStationTransportIntegrationTests
         };
         foreach (var suffix in new[] { "emergency-stop", "safe-stop", "job-cancel" })
         {
-            var queue = $"openlineops.station.{stationId}.{suffix}";
+            var queue = $"openlineops.station.{agentId}.{stationId}.{suffix}";
             await channel.QueueDeclareAsync(queue, true, false, false, arguments);
             await channel.QueueBindAsync(
                 queue,
                 commandExchange,
-                $"station.{stationId}.{suffix}");
+                $"station.{agentId}.{stationId}.{suffix}");
         }
     }
 
@@ -322,7 +346,11 @@ public sealed class RabbitMqStationTransportIntegrationTests
             "flow-version.main",
             "configuration.main",
             "recipe.main",
-            [],
+            [new StationResourceFence(
+                "Station",
+                "station-system.main",
+                1,
+                DateTimeOffset.UtcNow.AddMinutes(5))],
             inputs.RootElement.Clone(),
             DateTimeOffset.UtcNow);
     }

@@ -1,7 +1,7 @@
-using OpenLineOps.Runtime.Contracts;
-using OpenLineOps.Traceability.Domain.Identifiers;
 using System.Globalization;
 using System.Text.Json;
+using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Traceability.Domain.Identifiers;
 
 namespace OpenLineOps.Traceability.Domain.Records;
 

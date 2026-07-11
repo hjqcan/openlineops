@@ -1,6 +1,6 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Configuration;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Projects.Api.Integrations;
@@ -10,10 +10,11 @@ using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
-using OpenLineOps.Projects.Infrastructure.Persistence;
 using OpenLineOps.Projects.Infrastructure.ExternalPrograms;
+using OpenLineOps.Projects.Infrastructure.Persistence;
 using OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
 using OpenLineOps.Projects.Infrastructure.Releases;
+using OpenLineOps.Runtime.Application.Materials;
 
 namespace OpenLineOps.Projects.Api.DependencyInjection;
 
@@ -51,6 +52,8 @@ public static class ProjectsModuleServiceCollectionExtensions
         services.AddScoped<IProjectReleaseSnapshotReader, ProjectReleaseSnapshotReader>();
         services.AddScoped<IProjectReleaseProductionRunContextService, ProjectReleaseProductionRunContextService>();
         services.AddScoped<IProjectReleaseProductionRunLauncher, ProjectReleaseProductionRunLauncher>();
+        services.AddScoped<IProductionMaterialArrivalAuthorizer,
+            ProjectReleaseProductionMaterialArrivalAuthorizer>();
         services.AddScoped<IExternalProgramResourceService, ExternalProgramResourceService>();
         services.AddScoped<IAutomationProjectService, AutomationProjectService>();
         services.AddScoped<IAutomationProjectWorkspaceService, AutomationProjectWorkspaceService>();

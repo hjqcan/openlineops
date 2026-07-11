@@ -9,13 +9,13 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $InspectorScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "inspect-ci-release-artifact.ps1"))
 $CandidateVerificationScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "verify-release-candidate-inspection.ps1"))
-$ExpectedArtifactKinds = @("api", "desktop", "plugin-host", "sample-plugin", "script-worker", "source")
+$ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
 $ExpectedGateNames = @(
     "open-source metadata",
     "third-party license metadata",
     "release candidate inspection",
     "release candidate inspection behavior",
-    "desktop signing readiness",
+    "Windows package signing readiness",
     "publication metadata finalization behavior",
     "publication readiness with pending external allowed",
     "strict publication readiness",
@@ -120,7 +120,7 @@ function New-PublicationEvidence {
             artifactCount = @($Manifest.artifacts).Count
             artifactKinds = @($Manifest.artifacts | ForEach-Object { $_.kind } | Sort-Object)
         }
-        pendingExternal = @("Desktop signing proof remains external in this fixture.")
+        pendingExternal = @("Windows executable signing proof remains external in this fixture.")
         internalFailures = @($InternalFailures)
         gates = $gates
     }

@@ -131,6 +131,8 @@ public sealed class PostgreSqlProductionMaterialRepository :
             evidence_id uuid PRIMARY KEY,
             kind text NOT NULL,
             production_run_id uuid NULL,
+            operation_run_id text NULL,
+            slot_fencing_token bigint NULL,
             production_unit_id uuid NULL,
             carrier_id text NULL,
             genealogy_parent_unit_id uuid NULL,
@@ -139,12 +141,23 @@ public sealed class PostgreSqlProductionMaterialRepository :
             occurred_at_utc timestamptz NOT NULL,
             CONSTRAINT ck_olo_production_material_timeline_kind CHECK (
                 kind IN ('LocationTransition', 'SlotOccupancyTransition',
-                    'DispositionTransition', 'Genealogy'))
+                    'DispositionTransition', 'Genealogy')),
+            CONSTRAINT ck_olo_production_material_timeline_slot_completion_identity CHECK (
+                (operation_run_id IS NULL AND slot_fencing_token IS NULL)
+                OR (kind = 'SlotOccupancyTransition'
+                    AND production_run_id IS NOT NULL
+                    AND operation_run_id IS NOT NULL
+                    AND operation_run_id <> ''
+                    AND operation_run_id = btrim(operation_run_id)
+                    AND slot_fencing_token > 0))
         );
         CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_unit
             ON olo_production_material_timeline(production_unit_id, occurred_at_utc, evidence_id);
         CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_run
             ON olo_production_material_timeline(production_run_id, occurred_at_utc, evidence_id);
+        CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_slot_completion
+            ON olo_production_material_timeline(
+                production_run_id, operation_run_id, slot_fencing_token, occurred_at_utc);
         CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_carrier
             ON olo_production_material_timeline(carrier_id, occurred_at_utc, evidence_id);
         CREATE INDEX IF NOT EXISTS ix_olo_production_material_timeline_genealogy_parent
@@ -216,6 +229,8 @@ public sealed class PostgreSqlProductionMaterialRepository :
                 new("evidence_id", "uuid", false),
                 new("kind", "text", false),
                 new("production_run_id", "uuid", true),
+                new("operation_run_id", "text", true),
+                new("slot_fencing_token", "int8", true),
                 new("production_unit_id", "uuid", true),
                 new("carrier_id", "text", true),
                 new("genealogy_parent_unit_id", "uuid", true),
@@ -751,10 +766,12 @@ public sealed class PostgreSqlProductionMaterialRepository :
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_production_material_timeline (
-                evidence_id, kind, production_run_id, production_unit_id, carrier_id,
+                evidence_id, kind, production_run_id, operation_run_id, slot_fencing_token,
+                production_unit_id, carrier_id,
                 genealogy_parent_unit_id, genealogy_child_unit_id, document_json, occurred_at_utc)
             VALUES (
-                @evidence_id, @kind, @production_run_id, @production_unit_id, @carrier_id,
+                @evidence_id, @kind, @production_run_id, @operation_run_id, @slot_fencing_token,
+                @production_unit_id, @carrier_id,
                 @genealogy_parent_unit_id, @genealogy_child_unit_id, @document_json::jsonb,
                 @occurred_at_utc);
             """;
@@ -762,6 +779,10 @@ public sealed class PostgreSqlProductionMaterialRepository :
         command.Parameters.AddWithValue("kind", evidence.Kind.ToString());
         command.Parameters.Add("production_run_id", NpgsqlDbType.Uuid).Value =
             (object?)evidence.ProductionRunId?.Value ?? DBNull.Value;
+        command.Parameters.Add("operation_run_id", NpgsqlDbType.Text).Value =
+            (object?)evidence.OperationRunId ?? DBNull.Value;
+        command.Parameters.Add("slot_fencing_token", NpgsqlDbType.Bigint).Value =
+            (object?)evidence.SlotFencingToken ?? DBNull.Value;
         command.Parameters.Add("production_unit_id", NpgsqlDbType.Uuid).Value =
             (object?)evidence.ProductionUnitId?.Value ?? DBNull.Value;
         command.Parameters.Add("carrier_id", NpgsqlDbType.Text).Value =

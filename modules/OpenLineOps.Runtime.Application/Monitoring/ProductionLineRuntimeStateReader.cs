@@ -1,7 +1,7 @@
 using OpenLineOps.Application.Abstractions.Time;
-using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
@@ -117,12 +117,12 @@ public sealed class ProductionLineRuntimeStateReader(
         var stationIds = slots.Select(static slot => slot.StationSystemId)
             .Concat(units
                 .Where(unit => unit.Location is
-                    { Kind: MaterialLocationKind.StationQueue } location
+                { Kind: MaterialLocationKind.StationQueue } location
                     && string.Equals(location.LineId, lineId, StringComparison.Ordinal))
                 .Select(unit => unit.Location!.StationSystemId!))
             .Concat(carriers
                 .Where(carrier => carrier.Location is
-                    { Kind: MaterialLocationKind.StationQueue } location
+                { Kind: MaterialLocationKind.StationQueue } location
                     && string.Equals(location.LineId, lineId, StringComparison.Ordinal))
                 .Select(carrier => carrier.Location!.StationSystemId!))
             .Concat(runs.SelectMany(static run =>
@@ -298,7 +298,7 @@ public sealed class ProductionLineRuntimeStateReader(
     {
         var positions = units
             .Where(unit => unit.Location is
-                { Kind: MaterialLocationKind.CarrierPosition } location
+            { Kind: MaterialLocationKind.CarrierPosition } location
                 && Equals(location.CarrierId, carrier.Id))
             .OrderBy(unit => unit.Location!.CarrierPositionId, StringComparer.Ordinal)
             .Select(unit => new ProductionLineCarrierPositionState(

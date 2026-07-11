@@ -560,6 +560,8 @@ export interface ProjectReleaseProductionRunContextResponse {
   productModelIdentityInputKey: string;
   entryOperationId: string;
   entryStationSystemId: string;
+  entryStationId: string;
+  entryStationPackageContentSha256: string;
   stationSystemIds: string[];
 }
 
@@ -602,6 +604,11 @@ export interface RegisterProductionUnitRequest {
 }
 
 export interface MaterialArrivalRequest {
+  projectId: string;
+  applicationId: string;
+  projectSnapshotId: string;
+  packageContentSha256: string;
+  stationId: string;
   lineId: string;
   stationSystemId: string;
   actorId: string;

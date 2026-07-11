@@ -32,6 +32,7 @@ public sealed record RegisterSlotCommand(
     DateTimeOffset OccurredAtUtc);
 
 public sealed record ArriveMaterialCommand(
+    Guid EvidenceId,
     MaterialReference Material,
     MaterialLocation StationLocation,
     string ActorId,

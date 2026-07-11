@@ -589,6 +589,8 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
                 evidence_id,
                 kind,
                 production_run_id,
+                operation_run_id,
+                slot_fencing_token,
                 production_unit_id,
                 carrier_id,
                 genealogy_parent_unit_id,
@@ -599,6 +601,8 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
                 $evidence_id,
                 $kind,
                 $production_run_id,
+                $operation_run_id,
+                $slot_fencing_token,
                 $production_unit_id,
                 $carrier_id,
                 $genealogy_parent_unit_id,
@@ -611,6 +615,12 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         command.Parameters.AddWithValue(
             "$production_run_id",
             (object?)evidence.ProductionRunId?.Value.ToString("D") ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$operation_run_id",
+            (object?)evidence.OperationRunId ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$slot_fencing_token",
+            (object?)evidence.SlotFencingToken ?? DBNull.Value);
         command.Parameters.AddWithValue(
             "$production_unit_id",
             (object?)evidence.ProductionUnitId?.Value.ToString("D") ?? DBNull.Value);
@@ -797,18 +807,31 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
                     evidence_id TEXT NOT NULL PRIMARY KEY,
                     kind TEXT NOT NULL,
                     production_run_id TEXT NULL,
+                    operation_run_id TEXT NULL,
+                    slot_fencing_token INTEGER NULL,
                     production_unit_id TEXT NULL,
                     carrier_id TEXT NULL,
                     genealogy_parent_unit_id TEXT NULL,
                     genealogy_child_unit_id TEXT NULL,
                     document_json TEXT NOT NULL,
-                    occurred_at_utc TEXT NOT NULL
+                    occurred_at_utc TEXT NOT NULL,
+                    CHECK (
+                        (operation_run_id IS NULL AND slot_fencing_token IS NULL)
+                        OR (kind = 'SlotOccupancyTransition'
+                            AND production_run_id IS NOT NULL
+                            AND operation_run_id IS NOT NULL
+                            AND operation_run_id <> ''
+                            AND operation_run_id = trim(operation_run_id)
+                            AND slot_fencing_token > 0))
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_production_material_timeline_unit
                     ON production_material_timeline(production_unit_id, occurred_at_utc, evidence_id);
                 CREATE INDEX IF NOT EXISTS ix_production_material_timeline_run
                     ON production_material_timeline(production_run_id, occurred_at_utc, evidence_id);
+                CREATE INDEX IF NOT EXISTS ix_production_material_timeline_slot_completion
+                    ON production_material_timeline(
+                        production_run_id, operation_run_id, slot_fencing_token, occurred_at_utc);
                 CREATE INDEX IF NOT EXISTS ix_production_material_timeline_carrier
                     ON production_material_timeline(carrier_id, occurred_at_utc, evidence_id);
                 CREATE INDEX IF NOT EXISTS ix_production_material_timeline_genealogy_parent

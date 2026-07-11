@@ -2,8 +2,8 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Principal;
-using Microsoft.Win32.SafeHandles;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace OpenLineOps.ProcessIsolation;
 

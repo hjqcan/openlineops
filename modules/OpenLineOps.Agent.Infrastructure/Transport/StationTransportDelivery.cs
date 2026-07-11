@@ -72,33 +72,34 @@ public sealed class StationJobDeliveryProcessor(
             switch (delivery.Type)
             {
                 case nameof(ResourceLeaseChanged):
-                {
-                    ValidateEnvelope(
-                        delivery,
-                        nameof(ResourceLeaseChanged),
-                        $"station.{options.StationId}.resource-lease-changed");
-                    var change = JsonSerializer.Deserialize<ResourceLeaseChanged>(
-                        delivery.Body.Span,
-                        JsonOptions)
-                        ?? throw new InvalidDataException("Resource lease change message is null.");
-                    ValidateResourceLeaseEnvelope(delivery, change);
-                    await resourceLeaseHandler(change, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                    {
+                        ValidateEnvelope(
+                            delivery,
+                            nameof(ResourceLeaseChanged),
+                            $"station.{options.AgentId}.{options.StationId}.resource-lease-changed");
+                        var change = JsonSerializer.Deserialize<ResourceLeaseChanged>(
+                            delivery.Body.Span,
+                            JsonOptions)
+                            ?? throw new InvalidDataException("Resource lease change message is null.");
+                        ValidateResourceLeaseEnvelope(delivery, change);
+                        await resourceLeaseHandler(change, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case nameof(StationJobRequested):
-                {
-                    ValidateEnvelope(
-                        delivery,
-                        nameof(StationJobRequested),
-                        $"station.{options.StationId}");
-                    var request = JsonSerializer.Deserialize<StationJobRequested>(
-                        delivery.Body.Span,
-                        JsonOptions)
-                        ?? throw new InvalidDataException("Station job message is null.");
-                    ValidateRequestEnvelope(delivery, request);
-                    await jobHandler(request, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                    {
+                        ValidateEnvelope(
+                            delivery,
+                            nameof(StationJobRequested),
+                            $"station.{options.AgentId}.{options.StationId}");
+                        var request = JsonSerializer.Deserialize<StationJobRequested>(
+                            delivery.Body.Span,
+                            JsonOptions)
+                            ?? throw new InvalidDataException("Station job message is null.");
+                        StationMessageContract.Validate(request);
+                        ValidateRequestEnvelope(delivery, request);
+                        await jobHandler(request, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 default:
                     throw new InvalidDataException(
                         $"Unsupported Station command message type '{delivery.Type}'.");
@@ -221,14 +222,9 @@ public static class StationAgentEventPublicationFactory
 
         return kind switch
         {
-            nameof(MaterialArrived) => Create(
+            nameof(MaterialArrived) => CreateMaterial(
                 options,
-                kind,
-                Deserialize<MaterialArrived>(payloadJson),
-                static message => message.MessageId,
-                static message => message.ProductionUnitId,
-                static message => message.ProducerId,
-                static message => message.StationId),
+                Deserialize<MaterialArrived>(payloadJson)),
             nameof(StationJobAccepted) => Create(
                 options,
                 kind,
@@ -249,6 +245,14 @@ public static class StationAgentEventPublicationFactory
                 options,
                 kind,
                 Deserialize<StationJobCompleted>(payloadJson),
+                static message => message.MessageId,
+                static message => message.JobId,
+                static message => message.AgentId,
+                static message => message.StationId),
+            nameof(StationJobRecoveryRequired) => Create(
+                options,
+                kind,
+                Deserialize<StationJobRecoveryRequired>(payloadJson),
                 static message => message.MessageId,
                 static message => message.JobId,
                 static message => message.AgentId,
@@ -334,6 +338,21 @@ public static class StationAgentEventPublicationFactory
         var correlation = correlationId(message);
         var agent = agentId(message);
         var station = stationId(message);
+        switch (message)
+        {
+            case StationJobAccepted accepted:
+                StationMessageContract.Validate(accepted);
+                break;
+            case StationJobProgressed progressed:
+                StationMessageContract.Validate(progressed);
+                break;
+            case StationJobCompleted completed:
+                StationMessageContract.Validate(completed);
+                break;
+            case StationJobRecoveryRequired recoveryRequired:
+                StationMessageContract.Validate(recoveryRequired);
+                break;
+        }
         ValidateIdentity(id, correlation, agent, station, options.AgentId, options.StationId);
         return new StationAgentEventPublication(
             options.EventExchange,
@@ -343,6 +362,21 @@ public static class StationAgentEventPublicationFactory
             id,
             correlation,
             JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions));
+    }
+
+    private static StationAgentEventPublication CreateMaterial(
+        RabbitMqStationTransportOptions options,
+        MaterialArrived message)
+    {
+        StationMessageContract.Validate(message);
+        return Create(
+            options,
+            nameof(MaterialArrived),
+            message,
+            static value => value.MessageId,
+            static value => value.MessageId,
+            static value => value.ProducerId,
+            static value => value.StationId);
     }
 
     private static StationAgentEventPublication CreateSafety<T>(

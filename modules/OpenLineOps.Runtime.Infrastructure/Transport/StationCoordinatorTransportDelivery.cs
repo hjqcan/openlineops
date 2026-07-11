@@ -55,6 +55,7 @@ public static class StationCoordinatorPublicationFactory
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(request);
+        StationMessageContract.Validate(request);
         if (request.MessageId == Guid.Empty
             || request.JobId == Guid.Empty
             || request.ProductionRunId == Guid.Empty
@@ -74,7 +75,7 @@ public static class StationCoordinatorPublicationFactory
 
         return new StationCoordinatorPublication(
             options.JobExchange,
-            $"station.{request.StationId}",
+            $"station.{request.AgentId}.{request.StationId}",
             nameof(StationJobRequested),
             options.CoordinatorId,
             request.MessageId,
@@ -91,7 +92,7 @@ public static class StationCoordinatorPublicationFactory
         StationMessageContract.Validate(change);
         return new StationCoordinatorPublication(
             options.JobExchange,
-            $"station.{change.StationId}.resource-lease-changed",
+            $"station.{change.AgentId}.{change.StationId}.resource-lease-changed",
             nameof(ResourceLeaseChanged),
             options.CoordinatorId,
             change.MessageId,
@@ -113,6 +114,7 @@ public static class StationCoordinatorPublicationFactory
             nameof(EmergencyStopRequested),
             request.MessageId,
             request.MessageId,
+            request.AgentId,
             request.StationId,
             "emergency-stop",
             priority: 10,
@@ -143,6 +145,7 @@ public static class StationCoordinatorPublicationFactory
             nameof(StationSafeStopRequested),
             request.MessageId,
             request.ProductionRunId,
+            request.AgentId,
             request.StationId,
             "safe-stop",
             priority: 8,
@@ -171,6 +174,7 @@ public static class StationCoordinatorPublicationFactory
             nameof(StationJobCancelRequested),
             request.MessageId,
             request.JobId,
+            request.AgentId,
             request.StationId,
             "job-cancel",
             priority: 7,
@@ -182,12 +186,13 @@ public static class StationCoordinatorPublicationFactory
         string type,
         Guid messageId,
         Guid correlationId,
+        string agentId,
         string stationId,
         string routeSuffix,
         byte priority,
         T request) => new(
             options.SafetyCommandExchange,
-            $"station.{stationId}.{routeSuffix}",
+            $"station.{agentId}.{stationId}.{routeSuffix}",
             type,
             options.CoordinatorId,
             messageId,
@@ -228,11 +233,13 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
         StationCoordinatorTransportDelivery delivery,
         IStationCoordinatorTransportSettlement settlement,
         Func<MaterialArrived, CancellationToken, ValueTask> materialArrivalHandler,
+        Func<StationJobRecoveryRequired, CancellationToken, ValueTask> recoveryRequiredHandler,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
         ArgumentNullException.ThrowIfNull(settlement);
         ArgumentNullException.ThrowIfNull(materialArrivalHandler);
+        ArgumentNullException.ThrowIfNull(recoveryRequiredHandler);
 
         try
         {
@@ -240,79 +247,99 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             switch (delivery.Type)
             {
                 case nameof(MaterialArrived):
-                {
-                    var message = Deserialize<MaterialArrived>(delivery.Body);
-                    StationMessageContract.Validate(message);
-                    ValidateMaterialArrivalEnvelope(delivery, message);
-                    await materialArrivalHandler(message, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                    {
+                        var message = Deserialize<MaterialArrived>(delivery.Body);
+                        StationMessageContract.Validate(message);
+                        ValidateMaterialArrivalEnvelope(delivery, message);
+                        await materialArrivalHandler(message, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case nameof(StationJobAccepted):
-                {
-                    var message = Deserialize<StationJobAccepted>(delivery.Body);
-                    ValidateEnvelope(
-                        delivery,
-                        message.MessageId,
-                        message.JobId,
-                        message.AgentId,
-                        message.StationId,
-                        nameof(StationJobAccepted));
-                    ValidateCommon(message.IdempotencyKey, message.AcceptedAtUtc);
-                    await store.RecordAcceptedAsync(message, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                    {
+                        var message = Deserialize<StationJobAccepted>(delivery.Body);
+                        StationMessageContract.Validate(message);
+                        ValidateEnvelope(
+                            delivery,
+                            message.MessageId,
+                            message.JobId,
+                            message.AgentId,
+                            message.StationId,
+                            nameof(StationJobAccepted));
+                        ValidateCommon(message.IdempotencyKey, message.AcceptedAtUtc);
+                        await store.RecordAcceptedAsync(message, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case nameof(StationJobProgressed):
-                {
-                    var message = Deserialize<StationJobProgressed>(delivery.Body);
-                    ValidateEnvelope(
-                        delivery,
-                        message.MessageId,
-                        message.JobId,
-                        message.AgentId,
-                        message.StationId,
-                        nameof(StationJobProgressed));
-                    ValidateCommon(message.IdempotencyKey, message.ProgressedAtUtc);
-                    if (message.Percent is < 0 or > 100
-                        || string.IsNullOrWhiteSpace(message.Phase))
                     {
-                        throw new InvalidDataException("Station progress percent is outside 0..100.");
-                    }
+                        var message = Deserialize<StationJobProgressed>(delivery.Body);
+                        StationMessageContract.Validate(message);
+                        ValidateEnvelope(
+                            delivery,
+                            message.MessageId,
+                            message.JobId,
+                            message.AgentId,
+                            message.StationId,
+                            nameof(StationJobProgressed));
+                        ValidateCommon(message.IdempotencyKey, message.ProgressedAtUtc);
+                        if (message.Percent is < 0 or > 100
+                            || string.IsNullOrWhiteSpace(message.Phase))
+                        {
+                            throw new InvalidDataException("Station progress percent is outside 0..100.");
+                        }
 
-                    await store.RecordProgressAsync(message, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                        await store.RecordProgressAsync(message, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
                 case nameof(StationJobCompleted):
-                {
-                    var message = Deserialize<StationJobCompleted>(delivery.Body);
-                    ValidateEnvelope(
-                        delivery,
-                        message.MessageId,
-                        message.JobId,
-                        message.AgentId,
-                        message.StationId,
-                        nameof(StationJobCompleted));
-                    ValidateCommon(message.IdempotencyKey, message.CompletedAtUtc);
-                    if (message.RuntimeSessionId == Guid.Empty
-                        || message.Steps is null
-                        || message.Commands is null
-                        || message.Incidents is null
-                        || message.Artifacts is null
-                        || !Enum.IsDefined(message.ExecutionStatus)
-                        || message.ExecutionStatus is OpenLineOps.Runtime.Contracts.ExecutionStatus.Pending
-                            or OpenLineOps.Runtime.Contracts.ExecutionStatus.Running
-                        || !Enum.IsDefined(message.Judgement)
-                        || message.CompletedStepCount != message.Steps.Count(static step =>
-                            string.Equals(step.Status, "Completed", StringComparison.Ordinal))
-                        || message.CommandCount != message.Commands.Count
-                        || message.IncidentCount != message.Incidents.Count)
                     {
-                        throw new InvalidDataException(
-                            "Station completion identity or evidence counts are inconsistent.");
-                    }
+                        var message = Deserialize<StationJobCompleted>(delivery.Body);
+                        StationMessageContract.Validate(message);
+                        ValidateEnvelope(
+                            delivery,
+                            message.MessageId,
+                            message.JobId,
+                            message.AgentId,
+                            message.StationId,
+                            nameof(StationJobCompleted));
+                        ValidateCommon(message.IdempotencyKey, message.CompletedAtUtc);
+                        if (message.RuntimeSessionId == Guid.Empty
+                            || message.Steps is null
+                            || message.Commands is null
+                            || message.Incidents is null
+                            || message.Artifacts is null
+                            || !Enum.IsDefined(message.ExecutionStatus)
+                            || message.ExecutionStatus is OpenLineOps.Runtime.Contracts.ExecutionStatus.Pending
+                                or OpenLineOps.Runtime.Contracts.ExecutionStatus.Running
+                            || !Enum.IsDefined(message.Judgement)
+                            || message.CompletedStepCount != message.Steps.Count(static step =>
+                                string.Equals(step.Status, "Completed", StringComparison.Ordinal))
+                            || message.CommandCount != message.Commands.Count
+                            || message.IncidentCount != message.Incidents.Count)
+                        {
+                            throw new InvalidDataException(
+                                "Station completion identity or evidence counts are inconsistent.");
+                        }
 
-                    await store.RecordCompletionAsync(message, cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                        await store.RecordCompletionAsync(message, cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                case nameof(StationJobRecoveryRequired):
+                    {
+                        var message = Deserialize<StationJobRecoveryRequired>(delivery.Body);
+                        StationMessageContract.Validate(message);
+                        ValidateEnvelope(
+                            delivery,
+                            message.MessageId,
+                            message.JobId,
+                            message.AgentId,
+                            message.StationId,
+                            nameof(StationJobRecoveryRequired));
+                        await store.RecordRecoveryRequiredAsync(message, cancellationToken)
+                            .ConfigureAwait(false);
+                        await recoveryRequiredHandler(message, cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    }
                 default:
                     throw new InvalidDataException(
                         $"Unsupported Station result message type '{delivery.Type}'.");
@@ -424,10 +451,14 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
                 delivery.RoutingKey,
                 $"station.{message.StationId}.{nameof(MaterialArrived)}",
                 StringComparison.Ordinal)
-            || !Guid.TryParseExact(delivery.MessageId, "D", out var envelopeMessageId)
-            || envelopeMessageId != message.MessageId
-            || !Guid.TryParseExact(delivery.CorrelationId, "D", out var correlationId)
-            || correlationId != message.ProductionUnitId)
+            || !string.Equals(
+                delivery.MessageId,
+                message.MessageId.ToString("D"),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                delivery.CorrelationId,
+                message.MessageId.ToString("D"),
+                StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 "Material arrival AMQP identity does not match its message body.");

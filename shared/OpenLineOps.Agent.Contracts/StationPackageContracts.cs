@@ -9,6 +9,7 @@ public sealed record StationPackageManifest(
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
+    string ProductionLineDefinitionId,
     string StationSystemId,
     string ContentSha256,
     DateTimeOffset CreatedAtUtc,
@@ -23,6 +24,7 @@ public sealed record StationPackageDeployment(
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
+    string ProductionLineDefinitionId,
     string StationSystemId,
     string PackageContentSha256,
     DateTimeOffset PublishedAtUtc)

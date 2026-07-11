@@ -22,6 +22,7 @@ public sealed class AgentStationOperationDispatcher(
                 request.Run.ProjectSnapshotId,
                 request.Operation.Definition.StationSystemId),
             cancellationToken).ConfigureAwait(false);
+        RequireExactProductionLine(route, request.Run.ProductionLineDefinitionId);
         using var inputs = JsonDocument.Parse("{}");
         var message = new StationJobRequested(
             Guid.NewGuid(),
@@ -66,7 +67,9 @@ public sealed class AgentStationOperationDispatcher(
             || !string.Equals(
                 completion.IdempotencyKey,
                 message.IdempotencyKey,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal)
+            || !string.Equals(completion.AgentId, message.AgentId, StringComparison.Ordinal)
+            || !string.Equals(completion.StationId, message.StationId, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 "Station Agent returned a completion for a different idempotent job.");
@@ -91,6 +94,20 @@ public sealed class AgentStationOperationDispatcher(
             completion.CompletedAtUtc,
             completion.FailureCode,
             completion.FailureReason);
+    }
+
+    private static void RequireExactProductionLine(
+        StationDeploymentRoute route,
+        string productionLineDefinitionId)
+    {
+        if (!string.Equals(
+                route.ProductionLineDefinitionId,
+                productionLineDefinitionId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Station deployment does not match the Production Run's exact frozen Production Line.");
+        }
     }
 
 }

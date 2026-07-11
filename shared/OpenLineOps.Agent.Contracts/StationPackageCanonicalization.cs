@@ -19,6 +19,7 @@ public static class StationPackageCanonicalization
         string projectId,
         string applicationId,
         string projectSnapshotId,
+        string productionLineDefinitionId,
         string stationSystemId,
         IEnumerable<StationPackageEntry> entries)
     {
@@ -28,6 +29,8 @@ public static class StationPackageCanonicalization
         Append(hash, Required(applicationId, nameof(applicationId)));
         Append(hash, "\n");
         Append(hash, Required(projectSnapshotId, nameof(projectSnapshotId)));
+        Append(hash, "\n");
+        Append(hash, Required(productionLineDefinitionId, nameof(productionLineDefinitionId)));
         Append(hash, "\n");
         Append(hash, Required(stationSystemId, nameof(stationSystemId)));
         Append(hash, "\n");

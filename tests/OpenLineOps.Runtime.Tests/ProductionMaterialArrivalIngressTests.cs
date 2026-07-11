@@ -33,7 +33,12 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
             "material-arrival/plc/unit-main/scan-001",
             "agent.main",
             "station.main",
-            unitId.Value,
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.ProductionUnit,
+            unitId.Value.ToString("D"),
             "line.main",
             "station-system.main",
             StationMaterialArrivalSources.Plc,
@@ -54,10 +59,13 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
                 Now.AddMinutes(-1))));
             var ingress = new ProductionMaterialArrivalIngress(
                 inbox,
+                new AllowingAuthorizer(),
                 materials,
                 new ProductionMaterialService(materials, runs),
                 new FixedClock(Now.AddSeconds(1)));
-            var first = await ingress.HandleAsync(message);
+            var first = await ingress.HandleAsync(
+                message,
+                ProductionMaterialArrivalOrigin.StationAgent);
             Assert.True(first.Succeeded, first.Message);
         }
 
@@ -67,10 +75,13 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
         {
             var ingress = new ProductionMaterialArrivalIngress(
                 inbox,
+                new AllowingAuthorizer(),
                 materials,
                 new ProductionMaterialService(materials, runs),
                 new FixedClock(Now.AddSeconds(2)));
-            var duplicate = await ingress.HandleAsync(message);
+            var duplicate = await ingress.HandleAsync(
+                message,
+                ProductionMaterialArrivalOrigin.StationAgent);
             Assert.True(duplicate.Succeeded, duplicate.Message);
             var timeline = await materials.ListTimelineAsync(
                 new ProductionMaterialTimelineQuery(productionUnitId: unitId));
@@ -95,6 +106,7 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
             Now.AddMinutes(-1))));
         var ingress = new ProductionMaterialArrivalIngress(
             new InMemoryProductionMaterialArrivalInbox(),
+            new AllowingAuthorizer(),
             materials,
             new ProductionMaterialService(materials, runs),
             new FixedClock(Now.AddSeconds(1)));
@@ -103,16 +115,147 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
             "material-arrival/manual/unit-main/scan-002",
             "operator-terminal.main",
             "station.main",
-            unitId.Value,
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.ProductionUnit,
+            unitId.Value.ToString("D"),
             "line.main",
             "station-system.main",
             StationMaterialArrivalSources.Manual,
             "operator.main",
             Now);
-        Assert.True((await ingress.HandleAsync(message)).Succeeded);
+        Assert.True((await ingress.HandleAsync(
+            message,
+            ProductionMaterialArrivalOrigin.StationAgent)).Succeeded);
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await ingress.HandleAsync(message with { LineId = "line.other" }));
+            await ingress.HandleAsync(
+                message with { LineId = "line.other" },
+                ProductionMaterialArrivalOrigin.StationAgent));
+    }
+
+    [Fact]
+    public async Task CarrierArrivalUsesSameSqliteInboxAndColdRestartIdempotency()
+    {
+        Directory.CreateDirectory(_directory);
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(_directory, "carrier-runtime.sqlite"),
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared
+        }.ToString();
+        var carrierId = new CarrierId("carrier-main-001");
+        var message = new MaterialArrived(
+            Guid.NewGuid(),
+            "material-arrival/plc/carrier-main-001/scan-001",
+            "agent.main",
+            "station.main",
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.Carrier,
+            carrierId.Value,
+            "line.main",
+            "station-system.main",
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.main",
+            Now);
+
+        using (var runs = new SqliteProductionRunRepository(connectionString))
+        using (var materials = new SqliteProductionMaterialRepository(connectionString))
+        using (var inbox = new SqliteProductionMaterialArrivalInbox(connectionString))
+        {
+            Assert.True(await materials.TryAddAsync(Carrier.Register(
+                carrierId,
+                "carrier-type.panel",
+                4,
+                "operator.main",
+                Now.AddMinutes(-1))));
+            var ingress = new ProductionMaterialArrivalIngress(
+                inbox,
+                new AllowingAuthorizer(),
+                materials,
+                new ProductionMaterialService(materials, runs),
+                new FixedClock(Now.AddSeconds(1)));
+            Assert.True((await ingress.HandleAsync(
+                message,
+                ProductionMaterialArrivalOrigin.StationAgent)).Succeeded);
+        }
+
+        using (var runs = new SqliteProductionRunRepository(connectionString))
+        using (var materials = new SqliteProductionMaterialRepository(connectionString))
+        using (var inbox = new SqliteProductionMaterialArrivalInbox(connectionString))
+        {
+            var ingress = new ProductionMaterialArrivalIngress(
+                inbox,
+                new AllowingAuthorizer(),
+                materials,
+                new ProductionMaterialService(materials, runs),
+                new FixedClock(Now.AddSeconds(2)));
+            Assert.True((await ingress.HandleAsync(
+                message,
+                ProductionMaterialArrivalOrigin.StationAgent)).Succeeded);
+            var timeline = await materials.ListTimelineAsync(
+                new ProductionMaterialTimelineQuery(carrierId: carrierId));
+            Assert.Single(timeline, static evidence =>
+                evidence.Kind == ProductionMaterialEvidenceKind.LocationTransition);
+        }
+    }
+
+    [Fact]
+    public async Task DeploymentRejectionOccursBeforeDurableInboxClaim()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var runs = new InMemoryProductionRunRepository(materials);
+        var inbox = new InMemoryProductionMaterialArrivalInbox();
+        var unitId = ProductionUnitId.New();
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            unitId,
+            "product.board",
+            "serialNumber",
+            "SN-AUTHORIZATION-001",
+            null,
+            "operator.main",
+            Now.AddMinutes(-1))));
+        var message = new MaterialArrived(
+            Guid.NewGuid(),
+            $"material-arrival/{Guid.NewGuid():D}",
+            "agent.main",
+            "station.main",
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.ProductionUnit,
+            unitId.Value.ToString("D"),
+            "line.main",
+            "station-system.main",
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.main",
+            Now);
+        var rejectedIngress = new ProductionMaterialArrivalIngress(
+            inbox,
+            new RejectingAuthorizer(),
+            materials,
+            new ProductionMaterialService(materials, runs),
+            new FixedClock(Now.AddSeconds(1)));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await rejectedIngress.HandleAsync(
+                message,
+                ProductionMaterialArrivalOrigin.StationAgent));
+
+        var acceptedIngress = new ProductionMaterialArrivalIngress(
+            inbox,
+            new AllowingAuthorizer(),
+            materials,
+            new ProductionMaterialService(materials, runs),
+            new FixedClock(Now.AddSeconds(2)));
+        Assert.True((await acceptedIngress.HandleAsync(
+            message,
+            ProductionMaterialArrivalOrigin.StationAgent)).Succeeded);
     }
 
     public ValueTask DisposeAsync()
@@ -128,5 +271,29 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
     private sealed class FixedClock(DateTimeOffset nowUtc) : IClock
     {
         public DateTimeOffset UtcNow => nowUtc;
+    }
+
+    private sealed class AllowingAuthorizer : IProductionMaterialArrivalAuthorizer
+    {
+        public ValueTask AuthorizeAsync(
+            MaterialArrived message,
+            ProductionMaterialArrivalOrigin origin,
+            CancellationToken cancellationToken = default)
+        {
+            StationMessageContract.Validate(message);
+            Assert.Equal(ProductionMaterialArrivalOrigin.StationAgent, origin);
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RejectingAuthorizer : IProductionMaterialArrivalAuthorizer
+    {
+        public ValueTask AuthorizeAsync(
+            MaterialArrived message,
+            ProductionMaterialArrivalOrigin origin,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromException(new InvalidDataException(
+                "Frozen deployment identity does not match."));
     }
 }

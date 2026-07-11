@@ -32,6 +32,7 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
             {
                 AddOrValidate(new OutboxEntry(
                     orderedChanges[sequence].MessageId,
+                    request.JobId,
                     orderedChanges[sequence].IdempotencyKey,
                     nameof(ResourceLeaseChanged),
                     sequence,
@@ -41,6 +42,7 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
 
             AddOrValidate(new OutboxEntry(
                 request.MessageId,
+                request.JobId,
                 request.IdempotencyKey,
                 nameof(StationJobRequested),
                 orderedChanges.Length,
@@ -63,20 +65,70 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
                 : null);
     }
 
+    public ValueTask<StationJobRecoveryRequired?> GetRecoveryRequiredAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_dispatchGate)
+        {
+            var item = _events.Values.SingleOrDefault(entry =>
+                entry.JobId == jobId
+                && string.Equals(
+                    entry.Kind,
+                    nameof(StationJobRecoveryRequired),
+                    StringComparison.Ordinal));
+            return ValueTask.FromResult(item is null
+                ? null
+                : JsonSerializer.Deserialize<StationJobRecoveryRequired>(item.PayloadJson, JsonOptions)
+                  ?? throw new InvalidDataException(
+                      "Station recovery-required Inbox payload is empty."));
+        }
+    }
+
     public ValueTask RecordCompletionAsync(
         StationJobCompleted completion,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(completion);
-        var payload = JsonSerializer.Serialize(completion, JsonOptions);
-        if (!_completions.TryAdd(completion.IdempotencyKey, payload))
+        StationMessageContract.Validate(completion);
+        lock (_dispatchGate)
         {
-            EnsureSameJson(
-                _completions[completion.IdempotencyKey],
-                payload,
+            var request = RequireRequest(completion.JobId);
+            ValidateResultIdentity(
+                request,
+                completion.JobId,
                 completion.IdempotencyKey,
-                "Station completion");
+                completion.AgentId,
+                completion.StationId);
+            if (completion.RuntimeSessionId != request.RuntimeSessionId)
+            {
+                throw new InvalidDataException(
+                    "Station completion Runtime Session does not match its dispatch request.");
+            }
+
+            var latest = RequireAcceptedAndLatestEvent(request);
+            if (completion.CompletedAtUtc < latest
+                || _events.Values.Any(item => item.JobId == completion.JobId
+                    && string.Equals(
+                        item.Kind,
+                        nameof(StationJobRecoveryRequired),
+                        StringComparison.Ordinal)))
+            {
+                throw new InvalidDataException(
+                    "Station completion timestamp precedes its persisted event timeline.");
+            }
+
+            var payload = JsonSerializer.Serialize(completion, JsonOptions);
+            if (!_completions.TryAdd(completion.IdempotencyKey, payload))
+            {
+                EnsureSameJson(
+                    _completions[completion.IdempotencyKey],
+                    payload,
+                    completion.IdempotencyKey,
+                    "Station completion");
+            }
         }
 
         return ValueTask.CompletedTask;
@@ -87,15 +139,40 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(accepted);
-        return RecordEventAsync(
-            new StationJobEventInboxItem(
+        StationMessageContract.Validate(accepted);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_dispatchGate)
+        {
+            var item = new StationJobEventInboxItem(
                 accepted.MessageId,
                 accepted.JobId,
                 accepted.IdempotencyKey,
                 nameof(StationJobAccepted),
                 JsonSerializer.Serialize(accepted, JsonOptions),
-                accepted.AcceptedAtUtc),
-            cancellationToken);
+                accepted.AcceptedAtUtc);
+            if (_events.ContainsKey(item.MessageId))
+            {
+                RecordEventLocked(item);
+                return ValueTask.CompletedTask;
+            }
+
+            var request = RequireRequest(accepted.JobId);
+            ValidateResultIdentity(
+                request,
+                accepted.JobId,
+                accepted.IdempotencyKey,
+                accepted.AgentId,
+                accepted.StationId);
+            if (accepted.AcceptedAtUtc < request.RequestedAtUtc
+                || _events.Values.Any(item => item.JobId == accepted.JobId))
+            {
+                throw new InvalidDataException(
+                    "Station acceptance is out of order for its dispatch request.");
+            }
+
+            RecordEventLocked(item);
+            return ValueTask.CompletedTask;
+        }
     }
 
     public ValueTask RecordProgressAsync(
@@ -103,15 +180,110 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(progress);
-        return RecordEventAsync(
-            new StationJobEventInboxItem(
+        StationMessageContract.Validate(progress);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_dispatchGate)
+        {
+            var item = new StationJobEventInboxItem(
                 progress.MessageId,
                 progress.JobId,
                 progress.IdempotencyKey,
                 nameof(StationJobProgressed),
                 JsonSerializer.Serialize(progress, JsonOptions),
-                progress.ProgressedAtUtc),
-            cancellationToken);
+                progress.ProgressedAtUtc);
+            if (_events.ContainsKey(item.MessageId))
+            {
+                RecordEventLocked(item);
+                return ValueTask.CompletedTask;
+            }
+
+            var request = RequireRequest(progress.JobId);
+            ValidateResultIdentity(
+                request,
+                progress.JobId,
+                progress.IdempotencyKey,
+                progress.AgentId,
+                progress.StationId);
+            if (_completions.ContainsKey(progress.IdempotencyKey)
+                || _events.Values.Any(existing => existing.JobId == progress.JobId
+                    && string.Equals(
+                        existing.Kind,
+                        nameof(StationJobRecoveryRequired),
+                        StringComparison.Ordinal)))
+            {
+                throw new InvalidDataException(
+                    "Station progress cannot follow terminal completion or recovery evidence.");
+            }
+
+            var latest = RequireAcceptedAndLatestEvent(request);
+            var previousPercent = _events.Values
+                .Where(item => item.JobId == progress.JobId
+                    && string.Equals(item.Kind, nameof(StationJobProgressed), StringComparison.Ordinal))
+                .Select(item => JsonSerializer.Deserialize<StationJobProgressed>(item.PayloadJson, JsonOptions)
+                    ?? throw new InvalidDataException("Station progress Inbox payload is empty."))
+                .Select(static item => item.Percent)
+                .DefaultIfEmpty(0)
+                .Max();
+            if (progress.ProgressedAtUtc < latest || progress.Percent < previousPercent)
+            {
+                throw new InvalidDataException("Station progress is not monotonic.");
+            }
+
+            RecordEventLocked(item);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    public ValueTask RecordRecoveryRequiredAsync(
+        StationJobRecoveryRequired recoveryRequired,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(recoveryRequired);
+        StationMessageContract.Validate(recoveryRequired);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_dispatchGate)
+        {
+            var item = new StationJobEventInboxItem(
+                recoveryRequired.MessageId,
+                recoveryRequired.JobId,
+                recoveryRequired.IdempotencyKey,
+                nameof(StationJobRecoveryRequired),
+                JsonSerializer.Serialize(recoveryRequired, JsonOptions),
+                recoveryRequired.DetectedAtUtc);
+            if (_events.ContainsKey(item.MessageId))
+            {
+                RecordEventLocked(item);
+                return ValueTask.CompletedTask;
+            }
+
+            var request = RequireRequest(recoveryRequired.JobId);
+            ValidateResultIdentity(
+                request,
+                recoveryRequired.JobId,
+                recoveryRequired.JobIdempotencyKey,
+                recoveryRequired.AgentId,
+                recoveryRequired.StationId);
+            if (recoveryRequired.ProductionRunId != request.ProductionRunId
+                || recoveryRequired.RuntimeSessionId != request.RuntimeSessionId
+                || !string.Equals(
+                    recoveryRequired.OperationRunId,
+                    request.OperationRunId,
+                    StringComparison.Ordinal)
+                || _completions.ContainsKey(request.IdempotencyKey)
+                || _events.Values.Any(existing => existing.JobId == recoveryRequired.JobId
+                    && string.Equals(
+                        existing.Kind,
+                        nameof(StationJobRecoveryRequired),
+                        StringComparison.Ordinal))
+                || recoveryRequired.DetectedAtUtc < RequireAcceptedAndLatestEvent(request))
+            {
+                throw new InvalidDataException(
+                    "Station recovery-required evidence does not exactly follow its dispatch timeline.");
+            }
+
+            RecordEventLocked(item);
+            return ValueTask.CompletedTask;
+        }
     }
 
     public ValueTask<IReadOnlyCollection<StationJobEventInboxItem>> ListEventsAsync(
@@ -134,13 +306,19 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
         IReadOnlyCollection<StationJobOutboxItem> result = _outbox.Values
-            .Where(static entry => !entry.Published)
+            .Where(static entry => !entry.Published && entry.QuarantinedAtUtc is null)
+            .GroupBy(static entry => entry.JobId)
+            .Select(static group => group
+                .OrderBy(static entry => entry.Sequence)
+                .ThenBy(static entry => entry.MessageId)
+                .First())
             .OrderBy(static entry => entry.CreatedAtUtc)
             .ThenBy(static entry => entry.Sequence)
             .ThenBy(static entry => entry.MessageId)
             .Take(maximumCount)
             .Select(static entry => new StationJobOutboxItem(
                 entry.MessageId,
+                entry.JobId,
                 entry.IdempotencyKey,
                 entry.Kind,
                 entry.Sequence,
@@ -151,14 +329,122 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         return ValueTask.FromResult(result);
     }
 
+    public ValueTask<StationJobRequested?> GetDispatchRequestAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (jobId == Guid.Empty)
+        {
+            throw new ArgumentException("Station Job id cannot be empty.", nameof(jobId));
+        }
+
+        lock (_dispatchGate)
+        {
+            var entry = _outbox.Values.SingleOrDefault(item =>
+                item.JobId == jobId
+                && string.Equals(item.Kind, nameof(StationJobRequested), StringComparison.Ordinal));
+            return ValueTask.FromResult(entry is null
+                ? null
+                : JsonSerializer.Deserialize<StationJobRequested>(entry.PayloadJson, JsonOptions)
+                  ?? throw new InvalidDataException("Station dispatch request payload is empty."));
+        }
+    }
+
     public ValueTask MarkPublishedAsync(
         Guid messageId,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var entry = Find(messageId);
+        if (entry.QuarantinedAtUtc is not null)
+        {
+            throw new InvalidOperationException(
+                $"Station job outbox message {messageId:D} is quarantined and cannot be published.");
+        }
+
         entry.Published = true;
         return ValueTask.CompletedTask;
+    }
+
+    public ValueTask QuarantineJobAsync(
+        Guid jobId,
+        string reason,
+        DateTimeOffset quarantinedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        if (quarantinedAtUtc == default || quarantinedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station dispatch quarantine timestamp must be non-default UTC.",
+                nameof(quarantinedAtUtc));
+        }
+
+        lock (_dispatchGate)
+        {
+            var entries = _outbox.Values.Where(entry => entry.JobId == jobId).ToArray();
+            if (entries.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Station dispatch Job {jobId:D} does not exist.");
+            }
+
+            var unpublished = entries.Where(static entry => !entry.Published).ToArray();
+            if (unpublished.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Station dispatch Job {jobId:D} has no unpublished messages to quarantine.");
+            }
+
+            var existingEvidence = unpublished
+                .Where(static entry => entry.QuarantinedAtUtc is not null)
+                .ToArray();
+            if (existingEvidence.Any(entry => !string.Equals(
+                    entry.QuarantineReason,
+                    reason,
+                    StringComparison.Ordinal))
+                || existingEvidence.Select(static entry => entry.QuarantinedAtUtc)
+                    .Distinct()
+                    .Count() > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Station dispatch Job {jobId:D} already has different quarantine evidence.");
+            }
+
+            var effectiveTime = existingEvidence.FirstOrDefault()?.QuarantinedAtUtc
+                ?? quarantinedAtUtc;
+            foreach (var entry in unpublished.Where(static entry => entry.QuarantinedAtUtc is null))
+            {
+                entry.QuarantineReason = reason;
+                entry.QuarantinedAtUtc = effectiveTime;
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    public ValueTask<IReadOnlyCollection<StationJobQuarantineItem>> ListQuarantinedAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_dispatchGate)
+        {
+            IReadOnlyCollection<StationJobQuarantineItem> result = _outbox.Values
+                .Where(entry => entry.JobId == jobId && entry.QuarantinedAtUtc is not null)
+                .OrderBy(static entry => entry.Sequence)
+                .Select(static entry => new StationJobQuarantineItem(
+                    entry.MessageId,
+                    entry.JobId,
+                    entry.Kind,
+                    entry.Sequence,
+                    entry.QuarantineReason!,
+                    entry.QuarantinedAtUtc!.Value))
+                .ToArray();
+            return ValueTask.FromResult(result);
+        }
     }
 
     public ValueTask RecordPublishFailureAsync(
@@ -188,6 +474,7 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
 
         var existing = _outbox[candidate.IdempotencyKey];
         if (existing.MessageId != candidate.MessageId
+            || existing.JobId != candidate.JobId
             || !string.Equals(existing.Kind, candidate.Kind, StringComparison.Ordinal)
             || existing.Sequence != candidate.Sequence)
         {
@@ -234,11 +521,8 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         return supplied;
     }
 
-    private ValueTask RecordEventAsync(
-        StationJobEventInboxItem item,
-        CancellationToken cancellationToken)
+    private void RecordEventLocked(StationJobEventInboxItem item)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         if (!_events.TryAdd(item.MessageId, item))
         {
             var existing = _events[item.MessageId];
@@ -256,8 +540,55 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
                 item.MessageId.ToString("D"),
                 "Station event message");
         }
+    }
 
-        return ValueTask.CompletedTask;
+    private StationJobRequested RequireRequest(Guid jobId)
+    {
+        var entry = _outbox.Values.SingleOrDefault(item =>
+            item.JobId == jobId
+            && string.Equals(item.Kind, nameof(StationJobRequested), StringComparison.Ordinal));
+        if (entry is null)
+        {
+            throw new InvalidDataException(
+                $"Station result references unknown job {jobId:D}.");
+        }
+
+        return JsonSerializer.Deserialize<StationJobRequested>(entry.PayloadJson, JsonOptions)
+            ?? throw new InvalidDataException("Station dispatch request payload is empty.");
+    }
+
+    private DateTimeOffset RequireAcceptedAndLatestEvent(StationJobRequested request)
+    {
+        var events = _events.Values.Where(item => item.JobId == request.JobId).ToArray();
+        if (!events.Any(item => string.Equals(
+                item.Kind,
+                nameof(StationJobAccepted),
+                StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException(
+                "Station result arrived before durable acceptance evidence.");
+        }
+
+        return events.Select(static item => item.OccurredAtUtc)
+            .Append(request.RequestedAtUtc)
+            .Max();
+    }
+
+    private static void ValidateResultIdentity(
+        StationJobRequested request,
+        Guid jobId,
+        string idempotencyKey,
+        string agentId,
+        string stationId)
+    {
+        if (request.JobId != jobId
+            || !string.Equals(request.IdempotencyKey, idempotencyKey, StringComparison.Ordinal)
+            || !string.Equals(request.AgentId, agentId, StringComparison.Ordinal)
+            || !string.Equals(request.StationId, stationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Station result identity does not exactly match its dispatch request.");
+        }
     }
 
     private static void EnsureSameJson(
@@ -277,6 +608,7 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
 
     private sealed class OutboxEntry(
         Guid messageId,
+        Guid jobId,
         string idempotencyKey,
         string kind,
         int sequence,
@@ -284,6 +616,8 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         DateTimeOffset createdAtUtc)
     {
         public Guid MessageId { get; } = messageId;
+
+        public Guid JobId { get; } = jobId;
 
         public string IdempotencyKey { get; } = idempotencyKey;
 
@@ -300,5 +634,9 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         public string? LastError { get; set; }
 
         public bool Published { get; set; }
+
+        public string? QuarantineReason { get; set; }
+
+        public DateTimeOffset? QuarantinedAtUtc { get; set; }
     }
 }

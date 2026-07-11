@@ -19,7 +19,7 @@ public sealed class StationSafetyDeliveryProcessor(
         CancellationToken cancellationToken = default) => ProcessAsync(
             delivery,
             nameof(EmergencyStopRequested),
-            $"station.{options.StationId}.emergency-stop",
+            $"station.{options.AgentId}.{options.StationId}.emergency-stop",
             static body => Deserialize<EmergencyStopRequested>(body),
             request => Validate(request, delivery),
             request => coordinator.HandleEmergencyStopAsync(request, handler, cancellationToken),
@@ -36,7 +36,7 @@ public sealed class StationSafetyDeliveryProcessor(
         CancellationToken cancellationToken = default) => ProcessAsync(
             delivery,
             nameof(StationSafeStopRequested),
-            $"station.{options.StationId}.safe-stop",
+            $"station.{options.AgentId}.{options.StationId}.safe-stop",
             static body => Deserialize<StationSafeStopRequested>(body),
             request => Validate(request, delivery),
             request => coordinator.HandleSafeStopAsync(request, handler, cancellationToken),
@@ -53,7 +53,7 @@ public sealed class StationSafetyDeliveryProcessor(
         CancellationToken cancellationToken = default) => ProcessAsync(
             delivery,
             nameof(StationJobCancelRequested),
-            $"station.{options.StationId}.job-cancel",
+            $"station.{options.AgentId}.{options.StationId}.job-cancel",
             static body => Deserialize<StationJobCancelRequested>(body),
             request => Validate(request, delivery),
             request => coordinator.HandleJobCancelAsync(request, handler, cancellationToken),

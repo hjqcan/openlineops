@@ -10,10 +10,10 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Scripting;
+using OpenLineOps.Runtime.Infrastructure.Commands;
+using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
-using OpenLineOps.Runtime.Infrastructure.Events;
-using OpenLineOps.Runtime.Infrastructure.Commands;
 using OpenLineOps.Runtime.Infrastructure.Transport;
 
 namespace OpenLineOps.Api.Tests;

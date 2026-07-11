@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Application.Abstractions.Time;
-using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
@@ -101,6 +101,7 @@ public sealed class ProductionLineRuntimeStateReaderTests
                      })
             {
                 Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+                    Guid.NewGuid(),
                     arrival.Item1,
                     arrival.Item2,
                     "operator-a",

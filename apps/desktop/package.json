@@ -20,6 +20,7 @@
     "e2e:production-closure:package-and-run": "npm run package:win && npm run e2e:production-closure:packaged",
     "test:line-projection": "node scripts/line-runtime-projection-test.mjs",
     "test:editor-workspace": "node scripts/editor-workspace-test.mjs",
+    "test:production-route-validation": "node scripts/production-route-validation-test.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {

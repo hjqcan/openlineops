@@ -254,7 +254,7 @@ public sealed class RabbitMqStationTransport :
         await _receiverChannel.QueueBindAsync(
                 queueName,
                 _options.JobExchange,
-                $"station.{_options.StationId}",
+                $"station.{_options.AgentId}.{_options.StationId}",
                 arguments: null,
                 noWait: false,
                 cancellationToken)
@@ -262,7 +262,7 @@ public sealed class RabbitMqStationTransport :
         await _receiverChannel.QueueBindAsync(
                 queueName,
                 _options.JobExchange,
-                $"station.{_options.StationId}.resource-lease-changed",
+                $"station.{_options.AgentId}.{_options.StationId}.resource-lease-changed",
                 arguments: null,
                 noWait: false,
                 cancellationToken)
@@ -306,7 +306,8 @@ public sealed class RabbitMqStationTransport :
         }
     }
 
-    private string QueueName() => $"openlineops.station.{_options.StationId}.jobs";
+    private string QueueName() =>
+        $"openlineops.station.{_options.AgentId}.{_options.StationId}.jobs";
 
     private static StationTransportDelivery ToDelivery(BasicDeliverEventArgs delivery) => new(
         delivery.DeliveryTag,

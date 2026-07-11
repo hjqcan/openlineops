@@ -13,6 +13,8 @@ namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationJobCoordinatorTests
 {
+    private static readonly JsonSerializerOptions MessageJsonOptions =
+        new(JsonSerializerDefaults.Web);
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
 
@@ -21,7 +23,8 @@ public sealed class StationJobCoordinatorTests
     {
         var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
         var first = CreateAcceptedJob(42).ToSnapshot();
-        Assert.True((await validator.ValidateAndAdvanceAsync(first)).Accepted);
+        await ApplyLeaseAsync(validator, first);
+        Assert.True((await validator.ValidateCurrentAsync(first)).Accepted);
         var authority = new StationResourceFenceAuthorityServer(first, validator);
         using var cancellation = new CancellationTokenSource();
         var server = authority.RunAsync(cancellation.Token);
@@ -30,12 +33,13 @@ public sealed class StationJobCoordinatorTests
         {
             Assert.True((await ValidateViaAuthorityAsync(authority, first)).Accepted);
             var replacement = CreateAcceptedJob(43).ToSnapshot();
-            Assert.True((await validator.ValidateAndAdvanceAsync(replacement)).Accepted);
+            await ApplyLeaseAsync(validator, replacement);
+            Assert.True((await validator.ValidateCurrentAsync(replacement)).Accepted);
 
             var stale = await ValidateViaAuthorityAsync(authority, first);
 
             Assert.False(stale.Accepted);
-            Assert.Contains("no longer current", stale.RejectionReason, StringComparison.Ordinal);
+            Assert.Contains("does not exactly match", stale.RejectionReason, StringComparison.Ordinal);
         }
         finally
         {
@@ -48,6 +52,9 @@ public sealed class StationJobCoordinatorTests
     public async Task HandlePersistsInboxProgressAndCompletedResultBeforePublish()
     {
         var store = new InMemoryStationJobStore();
+        var request = CreateRequest();
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        await ApplyLeaseAsync(validator, request);
         var stepId = Guid.NewGuid();
         var executor = new RecordingExecutor(new StationOperationExecutionResult(
             ExecutionStatus.Completed,
@@ -103,16 +110,20 @@ public sealed class StationJobCoordinatorTests
         var coordinator = new StationJobCoordinator(
             store,
             executor,
-            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            validator,
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
             new FixedClock(Now));
-        var request = CreateRequest();
-
         var result = await coordinator.HandleAsync(request);
         var duplicate = await coordinator.HandleAsync(request);
-        var outbox = await store.ListPendingOutboxAsync(10, Now);
+        var outbox = new List<StationJobOutboxMessage>();
+        for (var sequence = 0; sequence < 3; sequence++)
+        {
+            var pending = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+            outbox.Add(pending);
+            await store.AcknowledgeOutboxAsync(pending.MessageId, Now);
+        }
 
         Assert.Equal(StationJobStatus.Completed, result.Status);
         Assert.Equal(ExecutionStatus.Completed, result.ExecutionStatus);
@@ -138,15 +149,17 @@ public sealed class StationJobCoordinatorTests
     [Fact]
     public async Task HandleRejectsReusedIdempotencyKeyWithDifferentEvidence()
     {
+        var request = CreateRequest();
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        await ApplyLeaseAsync(validator, request);
         var coordinator = new StationJobCoordinator(
             new InMemoryStationJobStore(),
             new RecordingExecutor(Success()),
-            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            validator,
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
             new FixedClock(Now));
-        var request = CreateRequest();
         await coordinator.HandleAsync(request);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -159,15 +172,17 @@ public sealed class StationJobCoordinatorTests
     public async Task StaleResourceFenceIsRejectedBeforeStationRuntimeExecutes()
     {
         var executor = new RecordingExecutor(Success());
+        var first = CreateRequest();
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        await ApplyLeaseAsync(validator, first);
         var coordinator = new StationJobCoordinator(
             new InMemoryStationJobStore(),
             executor,
-            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            validator,
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
             new FixedClock(Now));
-        var first = CreateRequest();
         var accepted = await coordinator.HandleAsync(first);
         var stale = first with
         {
@@ -178,7 +193,7 @@ public sealed class StationJobCoordinatorTests
             OperationAttempt = 2,
             ResourceFences = [new StationResourceFence(
                 "Station",
-                "station-assembly",
+                "system-station-assembly",
                 41,
                 Now.AddHours(1))]
         };
@@ -211,7 +226,7 @@ public sealed class StationJobCoordinatorTests
         {
             ResourceFences = [new StationResourceFence(
                 "Station",
-                "station-assembly",
+                "system-station-assembly",
                 42,
                 Now.AddMinutes(1))]
         };
@@ -224,6 +239,75 @@ public sealed class StationJobCoordinatorTests
         Assert.Equal("Agent.ResourceFenceRejected", rejected.FailureCode);
         Assert.Equal(0, executor.ExecutionCount);
         Assert.Null(rejected.StartedAtUtc);
+    }
+
+    [Fact]
+    public async Task AcceptedJobWaitsForDurableLeaseGrantAndExecutesExactlyOnceAfterRedelivery()
+    {
+        var request = CreateRequest();
+        var store = new InMemoryStationJobStore();
+        var executor = new RecordingExecutor(Success());
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        var coordinator = new StationJobCoordinator(
+            store,
+            executor,
+            validator,
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            new FixedClock(Now));
+
+        await Assert.ThrowsAsync<StationResourceFenceUnavailableException>(async () =>
+            await coordinator.HandleAsync(request));
+        Assert.Equal(0, executor.ExecutionCount);
+        Assert.Equal(
+            StationJobStatus.Accepted,
+            (await store.GetAsync(new StationJobId(request.JobId)))!.Job.Status);
+
+        await ApplyLeaseAsync(validator, request);
+        var completed = await coordinator.HandleAsync(request);
+        var duplicate = await coordinator.HandleAsync(request);
+
+        Assert.Equal(StationJobStatus.Completed, completed.Status);
+        Assert.Equal(completed.JobId, duplicate.JobId);
+        Assert.Equal(completed.Status, duplicate.Status);
+        Assert.Equal(completed.ExecutionStatus, duplicate.ExecutionStatus);
+        Assert.Equal(completed.Judgement, duplicate.Judgement);
+        Assert.Equal(completed.ResourceFences, duplicate.ResourceFences);
+        Assert.Equal(1, executor.ExecutionCount);
+    }
+
+    [Fact]
+    public async Task MissingLeaseBecomesPermanentRejectionAtFenceExpiryWithoutHardwareExecution()
+    {
+        var request = CreateRequest() with
+        {
+            ResourceFences = [new StationResourceFence(
+                "Station",
+                "system-station-assembly",
+                42,
+                Now.AddSeconds(1))]
+        };
+        var clock = new MutableClock(Now);
+        var executor = new RecordingExecutor(Success());
+        var coordinator = new StationJobCoordinator(
+            new InMemoryStationJobStore(),
+            executor,
+            new InMemoryStationResourceFenceValidator(clock),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            clock);
+
+        await Assert.ThrowsAsync<StationResourceFenceUnavailableException>(async () =>
+            await coordinator.HandleAsync(request));
+        clock.UtcNow = Now.AddSeconds(1);
+
+        var rejected = await coordinator.HandleAsync(request);
+
+        Assert.Equal(StationJobStatus.Rejected, rejected.Status);
+        Assert.Equal("Agent.ResourceFenceRejected", rejected.FailureCode);
+        Assert.Equal(0, executor.ExecutionCount);
     }
 
     [Fact]
@@ -256,6 +340,17 @@ public sealed class StationJobCoordinatorTests
             Assert.Equal(0, executor.ExecutionCount);
             Assert.Equal(StationJobStatus.RecoveryRequired, persisted!.Job.Status);
             Assert.Equal(fixture.Job.Id, Assert.Single(isolationCleaner.CleanedJobs).JobId);
+            var recoveryOutbox = Assert.Single(
+                await fixture.Store.ListPendingOutboxAsync(10, Now));
+            Assert.Equal(StationAgentMessageKinds.JobRecoveryRequired, recoveryOutbox.Kind);
+            var recoveryMessage = JsonSerializer.Deserialize<StationJobRecoveryRequired>(
+                recoveryOutbox.PayloadJson,
+                MessageJsonOptions);
+            Assert.NotNull(recoveryMessage);
+            Assert.Equal(fixture.Job.Id.Value, recoveryMessage.JobId);
+            Assert.Equal(fixture.Job.ProductionRunId, recoveryMessage.ProductionRunId);
+            Assert.Equal(fixture.Job.OperationRunId.Value, recoveryMessage.OperationRunId);
+            Assert.Equal(fixture.Job.RuntimeSessionId, recoveryMessage.RuntimeSessionId);
         }
         finally
         {
@@ -269,16 +364,17 @@ public sealed class StationJobCoordinatorTests
     {
         var store = new InMemoryStationJobStore();
         var cleaner = new RecordingIsolationCleaner();
+        var request = CreateRequest();
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        await ApplyLeaseAsync(validator, request);
         var coordinator = new StationJobCoordinator(
             store,
             new CleanupFailureExecutor(),
-            new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+            validator,
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             cleaner,
             new FixedClock(Now));
-        var request = CreateRequest();
-
         await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(async () =>
             await coordinator.HandleAsync(request));
         var persisted = await store.GetAsync(new StationJobId(request.JobId));
@@ -288,6 +384,41 @@ public sealed class StationJobCoordinatorTests
 
         Assert.Equal(StationJobStatus.RecoveryRequired, Assert.Single(recovered).Status);
         Assert.Equal(new StationJobId(request.JobId), Assert.Single(cleaner.CleanedJobs).JobId);
+    }
+
+    [Fact]
+    public async Task RestartWithAcceptedJobAndMissingLeaseKeepsAgentAvailableForBrokerRedelivery()
+    {
+        var request = CreateRequest();
+        var store = new InMemoryStationJobStore();
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        var executor = new RecordingExecutor(Success());
+        var first = new StationJobCoordinator(
+            store,
+            executor,
+            validator,
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            new FixedClock(Now));
+        await Assert.ThrowsAsync<StationResourceFenceUnavailableException>(async () =>
+            await first.HandleAsync(request));
+
+        var restarted = new StationJobCoordinator(
+            store,
+            executor,
+            validator,
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            new FixedClock(Now));
+        var recovered = await restarted.RecoverAsync();
+
+        Assert.Equal(StationJobStatus.Accepted, Assert.Single(recovered).Status);
+        Assert.Equal(0, executor.ExecutionCount);
+        await ApplyLeaseAsync(validator, request);
+        Assert.Equal(StationJobStatus.Completed, (await restarted.HandleAsync(request)).Status);
+        Assert.Equal(1, executor.ExecutionCount);
     }
 
     [Fact]
@@ -338,15 +469,17 @@ public sealed class StationJobCoordinatorTests
             var store = new InMemoryStationJobStore();
             var executor = new CancelableExecutor();
             var executions = new StationJobExecutionRegistry();
+            var request = CreateRequest();
+            var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+            await ApplyLeaseAsync(validator, request);
             var coordinator = new StationJobCoordinator(
                 store,
                 executor,
-                new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+                validator,
                 cancellations,
                 executions,
                 new RecordingIsolationCleaner(),
                 new FixedClock(Now));
-            var request = CreateRequest();
             var execution = coordinator.HandleAsync(request).AsTask();
             await executor.Started.WaitAsync(TimeSpan.FromSeconds(5));
             var control = new StationSafetyCommandCoordinator(cancellations, new FixedClock(Now));
@@ -355,6 +488,9 @@ public sealed class StationJobCoordinatorTests
                 CreateCancellation(request),
                 coordinator.CancelAsync);
             var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+            var accepted = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+            Assert.Equal(StationAgentMessageKinds.JobAccepted, accepted.Kind);
+            await store.AcknowledgeOutboxAsync(accepted.MessageId, Now);
             var outbox = await store.ListPendingOutboxAsync(10, Now);
 
             Assert.True(acknowledgement.Accepted);
@@ -415,6 +551,56 @@ public sealed class StationJobCoordinatorTests
         }
     }
 
+    [Fact]
+    public async Task SqliteOutboxRestartKeepsLaterCompletionBehindAcceptedRetryDeadline()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"openlineops-agent-hol-{Guid.NewGuid():N}.db");
+        try
+        {
+            var job = CreateAcceptedJob();
+            var accepted = new StationJobOutboxMessage(
+                Guid.NewGuid(),
+                job.Id,
+                0,
+                StationAgentMessageKinds.JobAccepted,
+                "{}",
+                Now,
+                0,
+                null,
+                null);
+            var completion = new StationJobOutboxMessage(
+                Guid.NewGuid(),
+                job.Id,
+                1,
+                StationAgentMessageKinds.JobCompleted,
+                "{}",
+                Now,
+                0,
+                null,
+                null);
+            using (var store = new SqliteStationJobStore($"Data Source={path}"))
+            {
+                Assert.True(await store.TryAddAsync(job, Guid.NewGuid(), [accepted, completion]));
+                await store.RecordOutboxFailureAsync(accepted.MessageId, Now.AddSeconds(2));
+            }
+
+            using var restarted = new SqliteStationJobStore($"Data Source={path}");
+            Assert.Empty(await restarted.ListPendingOutboxAsync(10, Now.AddSeconds(1)));
+            var retry = Assert.Single(
+                await restarted.ListPendingOutboxAsync(10, Now.AddSeconds(2)));
+            Assert.Equal(accepted.MessageId, retry.MessageId);
+            await restarted.AcknowledgeOutboxAsync(retry.MessageId, Now.AddSeconds(2));
+            Assert.Equal(
+                completion.MessageId,
+                Assert.Single(await restarted.ListPendingOutboxAsync(10, Now.AddSeconds(2))).MessageId);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteSqliteFiles(path);
+        }
+    }
+
     private static StationJobRequested CreateRequest(long fencingToken = 42)
     {
         using var inputs = JsonDocument.Parse("{\"serialNumber\":\"BOARD-001\"}");
@@ -449,7 +635,7 @@ public sealed class StationJobCoordinatorTests
             "recipe-default",
             [new StationResourceFence(
                 "Station",
-                "station-assembly",
+                "system-station-assembly",
                 fencingToken,
                 Now.AddHours(1))],
             inputs.RootElement.Clone(),
@@ -469,6 +655,52 @@ public sealed class StationJobCoordinatorTests
         "operator-cancel",
         "Terminate the active vendor process tree.",
         Now);
+
+    private static async ValueTask ApplyLeaseAsync(
+        InMemoryStationResourceFenceValidator inbox,
+        StationJobRequested request)
+    {
+        foreach (var fence in request.ResourceFences)
+        {
+            await inbox.ApplyAsync(new ResourceLeaseChanged(
+                Guid.NewGuid(),
+                $"{request.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
+                request.AgentId,
+                request.StationId,
+                request.JobId,
+                request.ProductionRunId,
+                request.OperationRunId,
+                fence.ResourceKind,
+                fence.ResourceId,
+                fence.FencingToken,
+                StationResourceLeaseStatuses.Granted,
+                request.RequestedAtUtc,
+                fence.ExpiresAtUtc));
+        }
+    }
+
+    private static async ValueTask ApplyLeaseAsync(
+        InMemoryStationResourceFenceValidator inbox,
+        StationJobSnapshot job)
+    {
+        foreach (var fence in job.ResourceFences)
+        {
+            await inbox.ApplyAsync(new ResourceLeaseChanged(
+                Guid.NewGuid(),
+                $"{job.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
+                job.AgentId,
+                job.StationId,
+                job.JobId.Value,
+                job.ProductionRunId,
+                job.OperationRunId.Value,
+                fence.ResourceKind,
+                fence.ResourceId,
+                fence.FencingToken,
+                StationResourceLeaseStatuses.Granted,
+                job.RequestedAtUtc,
+                fence.ExpiresAtUtc));
+        }
+    }
 
     private static StationJob CreateAcceptedJob(long fencingToken = 42)
     {
@@ -632,6 +864,11 @@ public sealed class StationJobCoordinatorTests
     private sealed class FixedClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class MutableClock(DateTimeOffset utcNow) : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = utcNow;
     }
 
     private sealed class EmptyCancellationStore : IStationSafetyInboxStore

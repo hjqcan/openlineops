@@ -259,6 +259,9 @@ public sealed class SignedStationPackageInstaller
         _ = Required(manifest.ProjectId, nameof(manifest.ProjectId));
         _ = Required(manifest.ApplicationId, nameof(manifest.ApplicationId));
         _ = Required(manifest.ProjectSnapshotId, nameof(manifest.ProjectSnapshotId));
+        _ = Required(
+            manifest.ProductionLineDefinitionId,
+            nameof(manifest.ProductionLineDefinitionId));
         _ = Required(manifest.StationSystemId, nameof(manifest.StationSystemId));
         if (manifest.CreatedAtUtc.Offset != TimeSpan.Zero)
         {
@@ -309,6 +312,7 @@ public sealed class SignedStationPackageInstaller
                     manifest.ProjectId,
                     manifest.ApplicationId,
                     manifest.ProjectSnapshotId,
+                    manifest.ProductionLineDefinitionId,
                     manifest.StationSystemId,
                     manifest.Entries),
                 manifestHash,

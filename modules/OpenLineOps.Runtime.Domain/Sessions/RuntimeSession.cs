@@ -1,6 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Entities;
-using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;

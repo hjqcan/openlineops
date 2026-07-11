@@ -384,8 +384,13 @@ public sealed class ProductionRunRunner(
 
         if (result.ExecutionStatus == ExecutionStatus.Canceled)
         {
-            return run.Cancel(
+            return run.CancelOperation(
+                operationRunId,
+                result.FailureCode ?? "Runtime.OperationCanceled",
                 result.FailureReason ?? "Station operation was canceled.",
+                result.CompletedStepCount,
+                result.CommandCount,
+                result.IncidentCount,
                 result.CompletedAtUtc);
         }
 
@@ -409,6 +414,21 @@ public sealed class ProductionRunRunner(
             var result = await stationDispatcher.DispatchAsync(request, cancellationToken)
                 .ConfigureAwait(false);
             return new StationDispatchOutcome(result, null);
+        }
+        catch (StationJobDispatchQuarantinedException exception) when (exception.NeverPublished)
+        {
+            return new StationDispatchOutcome(
+                new StationOperationDispatchResult(
+                    ExecutionStatus.Rejected,
+                    ResultJudgement.Unknown,
+                    null,
+                    0,
+                    0,
+                    1,
+                    exception.QuarantinedAtUtc,
+                    "Runtime.StationDispatchQuarantined",
+                    exception.Message),
+                null);
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {

@@ -77,6 +77,7 @@ public sealed class StationPackageBuilderSecurityTests : IDisposable
         "project.security",
         "application.security",
         "snapshot.security",
+        "line.security",
         "station.security",
         "security-key",
         privateKeyPem,

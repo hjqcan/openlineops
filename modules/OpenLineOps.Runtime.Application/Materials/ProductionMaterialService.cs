@@ -1,10 +1,10 @@
-using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
-using OpenLineOps.Runtime.Contracts;
-using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Materials;
@@ -114,6 +114,13 @@ public sealed class ProductionMaterialService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(command);
+        if (command.EvidenceId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Material arrival evidence id cannot be empty.",
+                nameof(command));
+        }
+
         ValidateEnvelope(command.ActorId, command.OccurredAtUtc);
         return command.Material.Kind switch
         {
@@ -368,6 +375,8 @@ public sealed class ProductionMaterialService
                         command.Slot,
                         command.Material,
                         MaterialProductionRunId(material),
+                        null,
+                        null,
                         SlotOccupancyStatus.Running,
                         SlotOccupancyStatus.Occupied,
                         command.ActorId,
@@ -744,6 +753,8 @@ public sealed class ProductionMaterialService
                         address,
                         null,
                         null,
+                        null,
+                        null,
                         previousStatus,
                         targetStatus,
                         actorId,
@@ -777,7 +788,7 @@ public sealed class ProductionMaterialService
                 timeline:
                 [
                     ProductionMaterialTimelineEntry.Location(
-                        Guid.NewGuid(),
+                        command.EvidenceId,
                         command.Material,
                         entry.Aggregate.ActiveProductionRunId,
                         null,
@@ -814,7 +825,7 @@ public sealed class ProductionMaterialService
                 timeline:
                 [
                     ProductionMaterialTimelineEntry.Location(
-                        Guid.NewGuid(),
+                        command.EvidenceId,
                         command.Material,
                         null,
                         null,
@@ -1008,6 +1019,8 @@ public sealed class ProductionMaterialService
                         slot.Aggregate.Address,
                         materialReference,
                         MaterialProductionRunId(material),
+                        null,
+                        null,
                         previousStatus,
                         slot.Aggregate.Status,
                         actorId,
@@ -1044,6 +1057,8 @@ public sealed class ProductionMaterialService
                 slotUpdate.Aggregate.Address,
                 material,
                 productionRunId,
+                null,
+                null,
                 previousSlotStatus ?? throw new InvalidOperationException(
                     "A Slot transfer requires its previous occupancy status."),
                 slotUpdate.Aggregate.Status,
@@ -1064,35 +1079,35 @@ public sealed class ProductionMaterialService
         switch (material.Kind)
         {
             case MaterialKind.ProductionUnit:
-            {
-                var entry = await _repository
-                    .GetProductionUnitAsync(material.RequireProductionUnitId(), cancellationToken)
-                    .ConfigureAwait(false);
-                return entry is null
-                    ? MaterialState.Missing
-                    : new MaterialState(
-                        true,
-                        entry.Aggregate.Location,
-                        entry.Aggregate.Disposition is ProductDisposition.InProcess
-                            or ProductDisposition.Nonconforming,
-                        new ProductionUnitUpdate(entry.Aggregate, entry.Revision),
-                        null);
-            }
+                {
+                    var entry = await _repository
+                        .GetProductionUnitAsync(material.RequireProductionUnitId(), cancellationToken)
+                        .ConfigureAwait(false);
+                    return entry is null
+                        ? MaterialState.Missing
+                        : new MaterialState(
+                            true,
+                            entry.Aggregate.Location,
+                            entry.Aggregate.Disposition is ProductDisposition.InProcess
+                                or ProductDisposition.Nonconforming,
+                            new ProductionUnitUpdate(entry.Aggregate, entry.Revision),
+                            null);
+                }
             case MaterialKind.Carrier:
-            {
-                var entry = await _repository.GetCarrierAsync(
-                        material.RequireCarrierId(),
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                return entry is null
-                    ? MaterialState.Missing
-                    : new MaterialState(
-                        true,
-                        entry.Aggregate.Location,
-                        true,
-                        null,
-                        new CarrierUpdate(entry.Aggregate, entry.Revision));
-            }
+                {
+                    var entry = await _repository.GetCarrierAsync(
+                            material.RequireCarrierId(),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    return entry is null
+                        ? MaterialState.Missing
+                        : new MaterialState(
+                            true,
+                            entry.Aggregate.Location,
+                            true,
+                            null,
+                            new CarrierUpdate(entry.Aggregate, entry.Revision));
+                }
             default:
                 throw new InvalidOperationException($"Unsupported material kind {material.Kind}.");
         }

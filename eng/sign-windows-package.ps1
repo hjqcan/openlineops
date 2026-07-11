@@ -1,5 +1,6 @@
 param(
-    [string] $PackageRoot = "apps/desktop/release/desktop/win-unpacked",
+    [Parameter(Mandatory = $true)]
+    [string] $PackageRoot,
 
     [string] $SignToolPath,
 
@@ -160,11 +161,11 @@ $signableFiles = @(
 )
 
 if ($signableFiles.Count -eq 0) {
-    throw "No signable desktop package files were found under $ResolvedPackageRoot."
+    throw "No signable Windows package files were found under $ResolvedPackageRoot."
 }
 
 if ($PlanOnly) {
-    Write-Host "Desktop signing plan only."
+    Write-Host "Windows package signing plan only."
     Write-Host "PackageRoot: $ResolvedPackageRoot"
     Write-Host "TimestampUrl: $TimestampUrl"
     Write-Host "Files: $($signableFiles.Count)"
@@ -200,5 +201,5 @@ if (-not $SkipVerify) {
     }
 }
 
-Write-Host "Desktop package signing completed."
+Write-Host "Windows package signing completed."
 Write-Host "Signed files: $($signableFiles.Count)"

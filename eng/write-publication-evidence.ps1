@@ -161,12 +161,12 @@ function Get-PendingExternalMessages {
 
     $normalized = @($messages | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $hasSignedStatus = @($normalized | Where-Object {
-        $_ -match "Desktop release package is not signed with a valid Authenticode signature\. Status:\s*NotSigned\.?"
+        $_ -match "release executable '.+' is not signed with a valid Authenticode signature\. Status:\s*NotSigned\.?"
     }).Count -gt 0
 
     if ($hasSignedStatus) {
         $normalized = @($normalized | Where-Object {
-            $_ -notmatch "Desktop release package is not signed with a valid Authenticode signature\. Status:\s*$"
+            $_ -notmatch "release executable '.+' is not signed with a valid Authenticode signature\. Status:\s*$"
         })
     }
 
@@ -209,7 +209,7 @@ function Test-SignedInspectionFailure {
     }
 
     if ($Gate.output -notmatch "Status:\s*NotSigned") {
-        $InternalFailures.Add("Signed release candidate inspection failed for a reason other than the expected unsigned desktop package.") | Out-Null
+        $InternalFailures.Add("Signed release candidate inspection failed for a reason other than expected unsigned Windows executables.") | Out-Null
     }
 }
 
@@ -218,7 +218,7 @@ New-CleanDirectory $resolvedOutputRoot
 $childWorkRoot = Join-Path $resolvedOutputRoot "work"
 $releaseCandidateInspectionWorkRoot = Join-Path $childWorkRoot "release-candidate-inspection"
 $releaseCandidateInspectionVerificationWorkRoot = Join-Path $childWorkRoot "release-candidate-inspection-verification"
-$desktopSigningReadinessWorkRoot = Join-Path $childWorkRoot "desktop-signing-readiness"
+$windowsSigningReadinessWorkRoot = Join-Path $childWorkRoot "windows-signing-readiness"
 $publicationMetadataFinalizationWorkRoot = Join-Path $childWorkRoot "publication-metadata-finalization"
 $publicationReadinessAllowedWorkRoot = Join-Path $childWorkRoot "publication-readiness-allowed"
 $publicationReadinessStrictWorkRoot = Join-Path $childWorkRoot "publication-readiness-strict"
@@ -246,8 +246,8 @@ $gates += Invoke-EvidenceCommand `
     -Command @("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Resolve-RepoPath "eng/verify-release-candidate-inspection.ps1"), "-WorkRoot", $releaseCandidateInspectionVerificationWorkRoot) `
     -Required
 $gates += Invoke-EvidenceCommand `
-    -Name "desktop signing readiness" `
-    -Command @("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Resolve-RepoPath "eng/verify-desktop-signing-readiness.ps1"), "-WorkRoot", $desktopSigningReadinessWorkRoot) `
+    -Name "Windows package signing readiness" `
+    -Command @("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Resolve-RepoPath "eng/verify-windows-signing-readiness.ps1"), "-WorkRoot", $windowsSigningReadinessWorkRoot) `
     -Required
 $gates += Invoke-EvidenceCommand `
     -Name "publication metadata finalization behavior" `
@@ -264,7 +264,7 @@ $strictReadiness = Invoke-EvidenceCommand `
 $gates += $strictReadiness
 $signedInspection = Invoke-EvidenceCommand `
     -Name "signed release candidate inspection" `
-    -Command @("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Resolve-RepoPath "eng/inspect-release-candidate.ps1"), "-ArtifactsRoot", $resolvedArtifactsRoot, "-WorkRoot", $signedInspectionWorkRoot, "-RequireSignedDesktop") `
+    -Command @("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Resolve-RepoPath "eng/inspect-release-candidate.ps1"), "-ArtifactsRoot", $resolvedArtifactsRoot, "-WorkRoot", $signedInspectionWorkRoot, "-RequireSignedWindowsArtifacts") `
     -PendingAllowed
 $gates += $signedInspection
 

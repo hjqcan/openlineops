@@ -9,12 +9,15 @@ public sealed class FileSystemStationDeploymentResolver : IStationDeploymentReso
     private const int MaximumCatalogBytes = 64 * 1024;
     private static readonly JsonSerializerOptions JsonOptions =
         StationPackageCanonicalization.CreateJsonOptions();
-    private readonly string? _catalogDirectory;
+    private readonly string _catalogDirectory;
     private readonly Dictionary<DeploymentKey, DeploymentTarget> _routes;
+    private readonly bool _allowCoordinatorLocalRoute;
 
     public FileSystemStationDeploymentResolver(StationCoordinatorTransportOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _allowCoordinatorLocalRoute = StationCoordinatorTransportProviders.Parse(options.Provider)
+            == StationCoordinatorTransportProvider.Disabled;
         var routes = new Dictionary<DeploymentKey, DeploymentTarget>();
         foreach (var deployment in options.Deployments)
         {
@@ -32,9 +35,7 @@ public sealed class FileSystemStationDeploymentResolver : IStationDeploymentReso
             }
         }
 
-        _catalogDirectory = routes.Count == 0
-            ? null
-            : ExistingCatalogDirectory(options.DeploymentCatalogDirectory);
+        _catalogDirectory = ExistingCatalogDirectory(options.DeploymentCatalogDirectory);
         _routes = routes;
     }
 
@@ -47,14 +48,19 @@ public sealed class FileSystemStationDeploymentResolver : IStationDeploymentReso
             Required(request.ProjectId, nameof(request.ProjectId)),
             Required(request.ApplicationId, nameof(request.ApplicationId)),
             Required(request.StationSystemId, nameof(request.StationSystemId)));
-        if (!_routes.TryGetValue(key, out var target))
+        if (!_routes.TryGetValue(key, out var target)
+            && (!_allowCoordinatorLocalRoute || _routes.Count != 0))
         {
             throw new InvalidOperationException(
                 $"No Station Agent deployment maps stable Project/Application/Station '{key}'.");
         }
 
+        target ??= new DeploymentTarget(
+            StationMaterialArrivalProducers.CoordinatorApi,
+            key.StationSystemId);
+
         var catalogPath = StationPackageCanonicalization.DeploymentCatalogPath(
-            _catalogDirectory!,
+            _catalogDirectory,
             key.ProjectId,
             key.ApplicationId,
             Required(request.ProjectSnapshotId, nameof(request.ProjectSnapshotId)),
@@ -94,6 +100,9 @@ public sealed class FileSystemStationDeploymentResolver : IStationDeploymentReso
                 deployment.ProjectSnapshotId,
                 request.ProjectSnapshotId,
                 StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(deployment.ProductionLineDefinitionId)
+            || char.IsWhiteSpace(deployment.ProductionLineDefinitionId[0])
+            || char.IsWhiteSpace(deployment.ProductionLineDefinitionId[^1])
             || !string.Equals(deployment.StationSystemId, key.StationSystemId, StringComparison.Ordinal)
             || deployment.PublishedAtUtc.Offset != TimeSpan.Zero)
         {
@@ -104,7 +113,8 @@ public sealed class FileSystemStationDeploymentResolver : IStationDeploymentReso
         return new StationDeploymentRoute(
             target.AgentId,
             target.StationId,
-            deployment.PackageContentSha256);
+            deployment.PackageContentSha256,
+            deployment.ProductionLineDefinitionId);
     }
 
     private static string ExistingCatalogDirectory(string? value)

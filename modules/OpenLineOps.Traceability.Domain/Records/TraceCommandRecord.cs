@@ -1,5 +1,5 @@
-using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 using OpenLineOps.Traceability.Domain.Identifiers;
+using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Traceability.Domain.Records;
 

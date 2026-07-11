@@ -73,6 +73,48 @@ public sealed class AgentStationDispatchTests
         Assert.Equal("operator.safety", message.ActorId);
     }
 
+    [Fact]
+    public async Task DispatcherRejectsSpoofedAgentCompletionIdentity()
+    {
+        var dispatcher = new AgentStationOperationDispatcher(
+            new RecordingJobGateway(spoofIdentity: true),
+            new FixedDeploymentResolver());
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await dispatcher.DispatchAsync(CreateDispatchRequest()));
+        Assert.Contains("different idempotent job", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SafetyControllerRejectsSpoofedStationAcknowledgementIdentity()
+    {
+        var request = CreateDispatchRequest();
+        var controller = new AgentStationSafetyController(
+            new RecordingSafetyGateway(spoofIdentity: true),
+            new FixedDeploymentResolver());
+
+        var result = await controller.RequestSafeStopAsync(new StationSafetyRequest(
+            request.Run,
+            "operator.safety",
+            "Guard opened."));
+
+        Assert.False(result.Accepted);
+        Assert.Equal("Runtime.SafeStopAcknowledgementMismatch", result.FailureCode);
+    }
+
+    [Fact]
+    public async Task DispatcherRejectsDeploymentLineBeforeEnqueue()
+    {
+        var gateway = new RecordingJobGateway();
+        var dispatcher = new AgentStationOperationDispatcher(
+            gateway,
+            new FixedDeploymentResolver("line.spoof"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await dispatcher.DispatchAsync(CreateDispatchRequest()));
+        Assert.Null(gateway.Request);
+    }
+
     private static StationOperationDispatchRequest CreateDispatchRequest()
     {
         var runId = ProductionRunId.New();
@@ -127,7 +169,8 @@ public sealed class AgentStationDispatchTests
             leases);
     }
 
-    private sealed class FixedDeploymentResolver : IStationDeploymentResolver
+    private sealed class FixedDeploymentResolver(string lineId = "line.main") :
+        IStationDeploymentResolver
     {
         public ValueTask<StationDeploymentRoute> ResolveAsync(
             StationDeploymentRequest request,
@@ -135,10 +178,11 @@ public sealed class AgentStationDispatchTests
             ValueTask.FromResult(new StationDeploymentRoute(
                 "agent.main",
                 "station.main",
-                new string('a', 64)));
+                new string('a', 64),
+                lineId));
     }
 
-    private sealed class RecordingJobGateway : IStationJobGateway
+    private sealed class RecordingJobGateway(bool spoofIdentity = false) : IStationJobGateway
     {
         public StationJobRequested? Request { get; private set; }
 
@@ -153,8 +197,8 @@ public sealed class AgentStationDispatchTests
                 Guid.NewGuid(),
                 request.JobId,
                 request.IdempotencyKey,
-                request.AgentId,
-                request.StationId,
+                spoofIdentity ? "agent.spoof" : request.AgentId,
+                spoofIdentity ? "station.spoof" : request.StationId,
                 request.RuntimeSessionId,
                 ExecutionStatus.Completed,
                 ResultJudgement.Passed,
@@ -172,7 +216,7 @@ public sealed class AgentStationDispatchTests
         }
     }
 
-    private sealed class RecordingSafetyGateway : IStationSafetyGateway
+    private sealed class RecordingSafetyGateway(bool spoofIdentity = false) : IStationSafetyGateway
     {
         public StationSafeStopRequested? Request { get; private set; }
 
@@ -185,8 +229,8 @@ public sealed class AgentStationDispatchTests
                 Guid.NewGuid(),
                 request.MessageId,
                 request.IdempotencyKey,
-                request.AgentId,
-                request.StationId,
+                spoofIdentity ? "agent.spoof" : request.AgentId,
+                spoofIdentity ? "station.spoof" : request.StationId,
                 true,
                 null,
                 null,

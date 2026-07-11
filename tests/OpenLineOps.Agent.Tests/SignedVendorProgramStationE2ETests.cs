@@ -216,6 +216,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         var request = CreateRequest(mode);
         var store = new InMemoryStationJobStore();
         var coordinator = CreateCoordinator(store);
+        await ApplyLeaseAsync(request);
 
         var snapshot = await coordinator.HandleAsync(request);
 
@@ -265,11 +266,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             }
         }
 
-        var pendingOutbox = await store.ListPendingOutboxAsync(100, Now);
-        var pendingMessage = Assert.Single(pendingOutbox, message => string.Equals(
-            message.Kind,
-            StationAgentMessageKinds.JobCompletionPendingArtifactTransfer,
-            StringComparison.Ordinal));
+        var pendingMessage = await AdvanceOutboxToAsync(
+            store,
+            request.JobId,
+            StationAgentMessageKinds.JobCompletionPendingArtifactTransfer);
         var pending = JsonSerializer.Deserialize<PendingStationJobCompletion>(
             pendingMessage.PayloadJson,
             MessageJsonOptions);
@@ -349,6 +349,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         var request = CreateRequest(mode);
         var store = new InMemoryStationJobStore();
         var coordinator = CreateCoordinator(store);
+        await ApplyLeaseAsync(request);
         var execution = coordinator.HandleAsync(request).AsTask();
         var vendorProcessId = await WaitForProcessEvidenceAsync(
             "vendor-process-id.txt",
@@ -396,11 +397,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         }
 
         Assert.Empty(Directory.EnumerateDirectories(_runtimeWorkRoot));
-        var pending = await store.ListPendingOutboxAsync(100, Now);
-        var completedMessage = Assert.Single(pending, message => string.Equals(
-            message.Kind,
-            StationAgentMessageKinds.JobCompleted,
-            StringComparison.Ordinal));
+        var completedMessage = await AdvanceOutboxToAsync(
+            store,
+            request.JobId,
+            StationAgentMessageKinds.JobCompleted);
         var completion = JsonSerializer.Deserialize<StationJobCompleted>(
             completedMessage.PayloadJson,
             MessageJsonOptions);
@@ -423,6 +423,58 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         new StationJobExecutionRegistry(),
         _runtimeHost ?? throw new InvalidOperationException("The Station runtime host is not initialized."),
         new FixedClock(Now));
+
+    private async ValueTask ApplyLeaseAsync(StationJobRequested request)
+    {
+        var inbox = _resourceFenceValidator
+            ?? throw new InvalidOperationException("The Station resource fence validator is not initialized.");
+        foreach (var fence in request.ResourceFences)
+        {
+            await inbox.ApplyAsync(new ResourceLeaseChanged(
+                Guid.NewGuid(),
+                $"{request.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
+                request.AgentId,
+                request.StationId,
+                request.JobId,
+                request.ProductionRunId,
+                request.OperationRunId,
+                fence.ResourceKind,
+                fence.ResourceId,
+                fence.FencingToken,
+                StationResourceLeaseStatuses.Granted,
+                request.RequestedAtUtc,
+                fence.ExpiresAtUtc));
+        }
+    }
+
+    private static async ValueTask<StationJobOutboxMessage> AdvanceOutboxToAsync(
+        InMemoryStationJobStore store,
+        Guid jobId,
+        string terminalKind)
+    {
+        for (var index = 0; index < 100; index++)
+        {
+            var message = Assert.Single(await store.ListPendingOutboxAsync(100, Now));
+            Assert.Equal(jobId, message.JobId.Value);
+            if (string.Equals(message.Kind, terminalKind, StringComparison.Ordinal))
+            {
+                return message;
+            }
+
+            Assert.Contains(
+                message.Kind,
+                new[]
+                {
+                    StationAgentMessageKinds.JobAccepted,
+                    StationAgentMessageKinds.JobProgressed
+                },
+                StringComparer.Ordinal);
+            await store.AcknowledgeOutboxAsync(message.MessageId, Now);
+        }
+
+        throw new InvalidOperationException(
+            $"Station job {jobId:D} did not expose terminal outbox message '{terminalKind}'.");
+    }
 
     private StationJobRequested CreateRequest(string mode)
     {

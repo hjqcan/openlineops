@@ -1,14 +1,14 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Runtime.Api.Models;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
-using OpenLineOps.Agent.Contracts;
-using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Runtime.Api.Controllers;
 
@@ -99,7 +99,13 @@ public sealed class ProductionUnitsController(
         try
         {
             var messageId = StationDispatchMessageIdentity.CreateMaterialArrivalMessageId(
-                id.Value,
+                StationMaterialKinds.ProductionUnit,
+                id.Value.ToString("D"),
+                request.ProjectId,
+                request.ApplicationId,
+                request.ProjectSnapshotId,
+                request.PackageContentSha256,
+                request.StationId,
                 request.LineId,
                 request.StationSystemId,
                 request.ActorId,
@@ -108,20 +114,27 @@ public sealed class ProductionUnitsController(
                     new MaterialArrived(
                         messageId,
                         StationDispatchMessageIdentity.CreateMaterialArrivalIdempotencyKey(messageId),
-                        "coordinator-api",
-                        request.StationSystemId,
-                        id.Value,
+                        StationMaterialArrivalProducers.CoordinatorApi,
+                        request.StationId,
+                        request.ProjectId,
+                        request.ApplicationId,
+                        request.ProjectSnapshotId,
+                        request.PackageContentSha256,
+                        StationMaterialKinds.ProductionUnit,
+                        id.Value.ToString("D"),
                         request.LineId,
                         request.StationSystemId,
                         StationMaterialArrivalSources.Api,
                         request.ActorId,
                         request.OccurredAtUtc),
+                    ProductionMaterialArrivalOrigin.CoordinatorApi,
                     cancellationToken)
                 .ConfigureAwait(false);
             return await ResultAsync(id, result, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is ArgumentException
-                                           or InvalidOperationException)
+                                           or InvalidOperationException
+                                           or InvalidDataException)
         {
             return ProductionMaterialApi.Validation(this, exception);
         }
@@ -301,6 +314,7 @@ public sealed class ProductionLotsController(
 [Route(OpenLineOpsApiRoutes.ProductionCarriers)]
 public sealed class ProductionCarriersController(
     ProductionMaterialService service,
+    ProductionMaterialArrivalIngress arrivalIngress,
     IProductionMaterialRepository repository) : ControllerBase
 {
     [HttpPost]
@@ -362,18 +376,43 @@ public sealed class ProductionCarriersController(
         try
         {
             var id = new CarrierId(carrierId);
-            var result = await service.ArriveAsync(
-                    new ArriveMaterialCommand(
-                        MaterialReference.ForCarrier(id),
-                        MaterialLocation.AtStation(request.LineId, request.StationSystemId),
+            var messageId = StationDispatchMessageIdentity.CreateMaterialArrivalMessageId(
+                StationMaterialKinds.Carrier,
+                id.Value,
+                request.ProjectId,
+                request.ApplicationId,
+                request.ProjectSnapshotId,
+                request.PackageContentSha256,
+                request.StationId,
+                request.LineId,
+                request.StationSystemId,
+                request.ActorId,
+                request.OccurredAtUtc);
+            var result = await arrivalIngress.HandleAsync(
+                    new MaterialArrived(
+                        messageId,
+                        StationDispatchMessageIdentity.CreateMaterialArrivalIdempotencyKey(messageId),
+                        StationMaterialArrivalProducers.CoordinatorApi,
+                        request.StationId,
+                        request.ProjectId,
+                        request.ApplicationId,
+                        request.ProjectSnapshotId,
+                        request.PackageContentSha256,
+                        StationMaterialKinds.Carrier,
+                        id.Value,
+                        request.LineId,
+                        request.StationSystemId,
+                        StationMaterialArrivalSources.Api,
                         request.ActorId,
                         request.OccurredAtUtc),
+                    ProductionMaterialArrivalOrigin.CoordinatorApi,
                     cancellationToken)
                 .ConfigureAwait(false);
             return await ResultAsync(id, result, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is ArgumentException
-                                           or InvalidOperationException)
+                                           or InvalidOperationException
+                                           or InvalidDataException)
         {
             return ProductionMaterialApi.Validation(this, exception);
         }

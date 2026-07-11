@@ -6,6 +6,10 @@ This document describes the first open-source release direction for OpenLineOps.
 
 - A contributor can clone, restore, build, test, and run the API.
 - A desktop user can install a signed Electron package.
+- A Station operator can install a signed self-contained Windows Agent bundle
+  containing the exact Station Runtime without installing Studio or .NET.
+- An integrator can run a completed Project through the signed self-contained
+  headless Runner without opening Studio.
 - A plugin author can build a plugin against stable abstractions.
 - Release artifacts include enough metadata for traceability and security review.
 
@@ -25,6 +29,8 @@ Initial release artifacts should include:
 
 - Source archive.
 - API build output.
+- Windows Station Agent bundle with the co-packaged Station Runtime.
+- Windows headless Runner bundle.
 - Electron desktop installer or portable package.
 - Plugin host build output.
 - Script worker build output.
@@ -41,7 +47,7 @@ Initial release artifacts should include:
 OpenLineOps includes a .NET 10 release metadata tool:
 
 ```powershell
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 ```
 
 The tool scans the artifact directory recursively, sorts artifact paths deterministically,
@@ -60,7 +66,7 @@ directory, the tool excludes those output files from the artifact list.
 To verify an existing staged release without regenerating metadata, run:
 
 ```powershell
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 ```
 
 Verify mode accepts one manifest representation only: `schemaVersion` is `1`,
@@ -83,9 +89,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/inspect-release-candidat
 This check verifies manifest/checksum parity, release provenance metadata,
 release dependency inventory metadata, release metadata checksums, release-note
 coverage, safe zip entry paths, sensitive-file exclusion for the source
-archive, expected zip contents for each artifact kind, and the desktop package entry point. When a real signed desktop package is required, add
-`-RequireSignedDesktop` to require a valid Authenticode signature on
-`OpenLineOps.exe` inside the desktop archive.
+archive, expected zip contents for each artifact kind, the desktop package entry
+point, and the complete Agent and Runner inner manifests/checksums. Add
+`-RequireSignedWindowsArtifacts` to require valid Authenticode signatures on
+the desktop executable, Station Agent, co-packaged Station Runtime, and headless
+Runner.
 
 The release candidate inspection behavior has its own repeatable verification
 script. It generates minimal positive and negative release candidates and
@@ -105,6 +113,8 @@ artifact-kind directory. The only accepted directory and manifest kind tokens ar
 
 - `source/`
 - `api/`
+- `agent/`
+- `runner/`
 - `plugin-host/`
 - `script-worker/`
 - `sample-plugin/`
@@ -127,6 +137,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-artifact-
 
 Run this after `.NET` build and desktop `npm run build`; the script does not
 compile projects and fails if the expected build outputs are missing.
+
+The `agent` and `runner` artifacts are `win-x64` self-contained bundles. Each
+contains `bundle-manifest.json` and `bundle-checksums.sha256`, which inventory
+every payload file by canonical path, size, and SHA-256. The Agent manifest has
+two distinct entry points at the archive root:
+`OpenLineOps.Agent.exe` and `OpenLineOps.StationRuntime.exe`. The bundled
+`appsettings.json` keeps `RuntimeExecutablePath` exactly
+`OpenLineOps.StationRuntime.exe`, so the service cannot silently select an
+unverified runtime elsewhere. See `docs/station-agent-deployment.md` and
+`docs/headless-runner.md` for deployment and invocation.
 
 The GitHub Actions workflow runs the full release staging script after the
 desktop production build, using `-SkipDesktopBuild` so the already-built
@@ -164,7 +184,7 @@ and `.md`, and CI uploads those diagnostics with the release bundle.
 
 After downloading `openlineops-release-<run-number>` from GitHub Actions, run
 the same command with `-BundleRoot <downloaded-artifact-root>`. For the final
-release assertion, add `-RequirePublishable`; this also enforces signed desktop
+release assertion, add `-RequirePublishable`; this also enforces signed Windows
 candidate inspection through the downloaded artifact contents.
 
 ### Local Release Staging
@@ -180,7 +200,8 @@ sample plugin; runs the desktop production build unless `-SkipDesktopBuild` is
 provided; creates a Windows unpacked Electron package under
 `apps/desktop/release/desktop/win-unpacked` containing the IDE, a self-contained
 Windows API runtime, and the bundled sample plugin; optionally signs that
-desktop package when `-SignDesktopPackage` and certificate selector arguments
+desktop, Agent, Station Runtime, and Runner packages when
+`-SignWindowsPackages` and certificate selector arguments
 are provided; creates zip artifacts under `artifacts/release`; and generates
 `release-manifest.json`, `checksums.sha256`, `release-notes.md`,
 `release-dependency-inventory.json`, `release-provenance.json`, and
@@ -192,7 +213,8 @@ By default, current desktop staging emits an unsigned, directly runnable
 diagnostics. `OpenLineOps.exe` starts its bundled API automatically, stores
 mutable databases under the current user profile, and requires neither a source
 checkout nor a separately installed .NET runtime.
-Passing `-SignDesktopPackage` signs the unpacked package contents before archive
+Passing `-SignWindowsPackages` signs the unpacked desktop, Agent, and Runner
+package contents before archive
 and manifest generation when a real code-signing certificate is available. A
 signed installer or portable Electron package still remains required before a
 public production desktop release.
@@ -207,7 +229,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-publication-readi
 ```
 
 The strict command fails while final release-only items are still pending,
-including an unsigned desktop release package. During local development, keep
+including unsigned Windows release executables. During local development, keep
 validating all non-external release prerequisites with:
 
 ```powershell
@@ -217,12 +239,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-publication-readi
 The gate checks required open-source governance files, .NET 10 SDK pinning,
 GitHub issue and pull-request templates, CI release staging and upload wiring,
 MIT license presence, plugin/Python scripting documentation, the current staged
-release manifest/checksum set, and the expected `win-unpacked` desktop package
-entries inside the desktop release archive. It also requires the generated
+release manifest/checksum set, the Agent/Runner bundle manifests and checksums,
+and the expected `win-unpacked` desktop package entries. It also requires the generated
 `THIRD-PARTY-NOTICES.md` file at the repository root. In strict mode, the
-desktop archive must contain an `OpenLineOps.exe` with a valid Authenticode
-signature. With `-AllowPendingExternal`, an unsigned desktop package remains a
-warning until the real code-signing certificate is available.
+desktop, Agent, Station Runtime, and Runner executables must have valid
+Authenticode signatures. With `-AllowPendingExternal`, unsigned Windows
+executables remain warnings until the real code-signing certificate is
+available.
 
 ### Publication Evidence
 
@@ -236,7 +259,7 @@ The script writes `output/publication-evidence/publication-evidence.json` and
 `output/publication-evidence/publication-evidence.md`. In local development it
 passes while recording pending external items when final proof arguments are
 not supplied, including final MIT confirmation, GitHub-hosted Windows CI proof,
-and unsigned desktop package evidence. Child gates receive
+and unsigned Windows executable evidence. Child gates receive
 evidence-run-specific work directories under the evidence output root, so
 parallel local evidence runs do not share temporary release inspection or
 readiness folders. For the final release assertion, provide the external proof
@@ -316,7 +339,7 @@ the expected security-policy URL and reporting contacts.
 
 When every external publication input is available, use the final preparation
 orchestrator to apply public metadata, stage signed release artifacts, inspect
-the signed desktop candidate, run strict publication readiness, and require
+the signed Windows candidates, run strict publication readiness, and require
 publishable evidence:
 
 ```powershell
@@ -336,15 +359,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-final-publication
 
 ## Signing
 
-Desktop packages should be signed before a public production release. Plugin
+All Windows executable packages must be signed before a public production release. Plugin
 packages should support signatures before third-party plugin distribution is
 encouraged.
 
-OpenLineOps includes a Windows desktop signing script for the unpacked Electron
-package:
+OpenLineOps includes one Windows package signing script for the unpacked
+Electron package and the staged Agent and Runner directories:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-desktop-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificateThumbprint <thumbprint>
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-windows-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificateThumbprint <thumbprint>
 ```
 
 For PFX-based signing, pass `-CertificatePath` and either
@@ -352,7 +375,7 @@ For PFX-based signing, pass `-CertificatePath` and either
 
 ```powershell
 $env:OPENLINEOPS_CODESIGN_PASSWORD = "<pfx-password>"
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-desktop-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificatePath C:\secure\openlineops-code-signing.pfx
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-windows-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificatePath C:\secure\openlineops-code-signing.pfx
 ```
 
 The script signs `.exe`, `.dll`, and `.node` files with `signtool.exe`, applies
@@ -364,13 +387,13 @@ Release staging can call the same signing script before archive and manifest
 generation:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.1.0 -NoRestore -SignDesktopPackage -CodeSigningCertificateThumbprint <thumbprint>
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.1.0 -NoRestore -SignWindowsPackages -CodeSigningCertificateThumbprint <thumbprint>
 ```
 
 The signing readiness check is safe to run without a certificate:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-desktop-signing-readiness.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-windows-signing-readiness.ps1
 ```
 
 ## CI Gates
@@ -395,7 +418,7 @@ Required gates:
   entry safety checks, and source archive sensitive-file checks
 - release candidate inspection behavior verification with positive, unsafe
   path, sensitive source, bad provenance, and missing provenance fixtures
-- desktop signing readiness verification
+- Windows package signing readiness verification
 - publication metadata finalization verification
 - publication readiness gate with pending external items allowed during early publication setup
 - publication evidence report generation
@@ -426,8 +449,9 @@ Optional gates:
   environment files out of the source archive.
 - Run default verification locally.
 - Keep public repository metadata synchronized with `hjqcan/openlineops`.
-- Build a signed desktop package with the real code-signing certificate.
-- Run the strict publication readiness gate after signed desktop release
+- Build signed desktop, Agent, Station Runtime, and Runner packages with the
+  real code-signing certificate.
+- Run the strict publication readiness gate after signed Windows release
   artifacts are final.
 - Prepare the final release with `eng/prepare-final-publication.ps1` once all
   external publication inputs are available.

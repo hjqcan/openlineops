@@ -73,14 +73,21 @@ This project is in early platform development.
   transport, and a separate safety channel. Packaging remains an infrastructure
   API rather than a Runner CLI command. Production Station account, AppContainer,
   immutable-cache ACL, and network-capability requirements are documented in
-  [Station Agent Security Boundary](docs/station-agent-security.md).
-- Open source packaging: initial documentation, contribution workflow, CI workflow, CI workflow action reference verification, CI release artifact bundle inspection evidence, sample plugin, bounded-context living template, module scaffolding command, release manifest tooling, artifact kind gates, local release staging script, third-party notice generation, release dependency inventory metadata, release metadata checksums, release provenance metadata, release candidate inspection verification, publication evidence reporting and verification, final publication preflight, unsigned desktop unpacked package staging, optional desktop signing pipeline, manifest/checksum verification, publication readiness gate with strict signed-desktop enforcement, publication metadata finalization script, and CI release artifact upload.
+  [Station Agent Security Boundary](docs/station-agent-security.md) and
+  [Windows Station Agent Deployment](docs/station-agent-deployment.md).
+- Open source packaging: source, API, self-contained `win-x64` Agent plus Station
+  Runtime, self-contained headless Runner, desktop, plugin-host, script-worker,
+  and sample-plugin artifacts; complete inner and outer SHA-256 inventories;
+  release provenance and dependency metadata; shared Windows signing and strict
+  executable inspection; publication evidence; and CI artifact upload.
 
 ## Repository Map
 
 - `src/OpenLineOps.Api`: ASP.NET Core host, health checks, OpenAPI, controllers, SignalR.
 - `src/OpenLineOps.PluginHost`: external plugin host process entry point.
 - `src/OpenLineOps.ScriptWorker`: process-isolated Python script worker entry point.
+- `src/OpenLineOps.Agent`: Windows service host for one physical Station.
+- `src/OpenLineOps.StationRuntime`: Agent-launched immutable Operation host.
 - `src/OpenLineOps.Runner`: one-shot headless immutable Project Snapshot runner.
 - `shared`: cross-cutting contracts, DDD/application abstractions, shared infrastructure foundations, and CAP-backed EventBus integration with optional EF Core transaction coordination.
 - `modules`: bounded contexts for projects, topology, production, processes, engineering,
@@ -109,7 +116,7 @@ From the repository root:
 ```powershell
 dotnet restore OpenLineOps.sln
 dotnet build OpenLineOps.sln --no-restore
-dotnet test OpenLineOps.sln --no-build
+dotnet test OpenLineOps.sln --no-build -m:1
 ```
 
 Run the local API:
@@ -169,7 +176,8 @@ fencing tokens, and incidents to standard output and returns a stable exit code.
 It accepts a project directory or
 `<projectId>.oloproj` path. It rejects every other project format and refuses
 draft-only projects or snapshots without an immutable release.
-See `docs/automation-ide-product-shell.md` for the current codes and limitations.
+See `docs/automation-ide-product-shell.md` and `docs/headless-runner.md` for the
+formal command and exit contract.
 
 The only Production-start path is the asynchronous Project Snapshot Production
 Run endpoint (or the Runner, which submits through the same launcher and waits
@@ -193,7 +201,7 @@ Default verification from the repository root:
 dotnet format OpenLineOps.sln whitespace --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --verbosity minimal
 dotnet format OpenLineOps.sln style --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --severity warn --verbosity minimal
 dotnet build OpenLineOps.sln --no-restore
-dotnet test OpenLineOps.sln --no-build
+dotnet test OpenLineOps.sln --no-build -m:1
 dotnet build lib/pythonscript/PythonScript.sln --no-restore
 dotnet list OpenLineOps.sln package --vulnerable --include-transitive
 dotnet test tests/OpenLineOps.SampleInspection.Tests/OpenLineOps.SampleInspection.Tests.csproj --no-restore
@@ -226,10 +234,10 @@ npm run package:win:ci
 Set-Location ..\..
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-artifact-gate.ps1 -Configuration Debug -Version 0.0.0-local
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-local -NoRestore -SkipDesktopBuild
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/inspect-release-candidate.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-candidate-inspection.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-desktop-signing-readiness.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-windows-signing-readiness.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-publication-metadata-finalization.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-publication-readiness.ps1 -AllowPendingExternal
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/write-publication-evidence.ps1

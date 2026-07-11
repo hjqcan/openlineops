@@ -4,6 +4,7 @@ using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Projects.Api.Models;
 using OpenLineOps.Projects.Application.Releases;
+using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Projects.Api.Controllers;
 
@@ -11,7 +12,8 @@ namespace OpenLineOps.Projects.Api.Controllers;
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.ProjectSnapshotProductionRunContext)]
 public sealed class ProjectSnapshotProductionRunContextsController(
-    IProjectReleaseProductionRunContextService contextService) : ControllerBase
+    IProjectReleaseProductionRunContextService contextService,
+    IStationDeploymentResolver deploymentResolver) : ControllerBase
 {
     [HttpGet]
     [ProducesResponseType<ProjectReleaseProductionRunContextResponse>(StatusCodes.Status200OK)]
@@ -26,13 +28,54 @@ public sealed class ProjectSnapshotProductionRunContextsController(
         var result = await contextService
             .GetAsync(projectId, snapshotId, cancellationToken)
             .ConfigureAwait(false);
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        try
+        {
+            var context = result.Value;
+            var deployment = await deploymentResolver.ResolveAsync(
+                    new StationDeploymentRequest(
+                        context.ProjectId,
+                        context.ApplicationId,
+                        context.SnapshotId,
+                        context.EntryStationSystemId),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(
+                    deployment.ProductionLineDefinitionId,
+                    context.ProductionLineDefinitionId,
+                    StringComparison.Ordinal))
+            {
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Projects.ProjectReleaseStationDeploymentMismatch",
+                    Detail = "Entry Station deployment does not match the immutable Production Line.",
+                    Status = StatusCodes.Status409Conflict
+                });
+            }
+
+            return Ok(ToResponse(context, deployment));
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+                                           or InvalidDataException
+                                           or IOException
+                                           or UnauthorizedAccessException)
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "Projects.ProjectReleaseStationDeploymentInvalid",
+                Detail = exception.Message,
+                Status = StatusCodes.Status409Conflict
+            });
+        }
     }
 
     private static ProjectReleaseProductionRunContextResponse ToResponse(
-        ProjectReleaseProductionRunContext context) =>
+        ProjectReleaseProductionRunContext context,
+        StationDeploymentRoute deployment) =>
         new(
             context.ProjectId,
             context.ApplicationId,
@@ -43,6 +86,8 @@ public sealed class ProjectSnapshotProductionRunContextsController(
             context.ProductModelIdentityInputKey,
             context.EntryOperationId,
             context.EntryStationSystemId,
+            deployment.StationId,
+            deployment.PackageContentSha256,
             context.StationSystemIds);
 
     private ObjectResult ToProblem(ApplicationError error)

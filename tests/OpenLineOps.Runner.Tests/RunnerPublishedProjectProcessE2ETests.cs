@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Projects.Api.Integrations;
@@ -31,7 +33,7 @@ public sealed class RunnerPublishedProjectProcessE2ETests
 
         try
         {
-            using var factory = new WebApplicationFactory<api::Program>();
+            using var factory = CreateApiFactory(testRoot);
             using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
             {
                 AllowAutoRedirect = false
@@ -242,6 +244,43 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             CultureInfo.InvariantCulture);
     }
 
+    private static WebApplicationFactory<api::Program> CreateApiFactory(string testRoot)
+    {
+        var packageRoot = Path.Combine(testRoot, "station-packages");
+        var distributionDirectory = Path.Combine(packageRoot, "distribution");
+        var deploymentCatalogDirectory = Path.Combine(packageRoot, "deployment-catalog");
+        var keyDirectory = Path.Combine(packageRoot, "keys");
+        Directory.CreateDirectory(distributionDirectory);
+        Directory.CreateDirectory(deploymentCatalogDirectory);
+        Directory.CreateDirectory(keyDirectory);
+
+        var privateKeyPath = Path.Combine(keyDirectory, "release-private.pem");
+        using (var rsa = RSA.Create(3072))
+        {
+            File.WriteAllText(privateKeyPath, rsa.ExportRSAPrivateKeyPem());
+        }
+
+        return new WebApplicationFactory<api::Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting(
+                    "OpenLineOps:Projects:StationPackages:DistributionDirectory",
+                    distributionDirectory);
+                builder.UseSetting(
+                    "OpenLineOps:Projects:StationPackages:DeploymentCatalogDirectory",
+                    deploymentCatalogDirectory);
+                builder.UseSetting(
+                    "OpenLineOps:Projects:StationPackages:SigningKeyId",
+                    "runner-process-e2e-signing");
+                builder.UseSetting(
+                    "OpenLineOps:Projects:StationPackages:SigningPrivateKeyPath",
+                    privateKeyPath);
+                builder.UseSetting(
+                    "OpenLineOps:Runtime:AgentTransport:DeploymentCatalogDirectory",
+                    deploymentCatalogDirectory);
+            });
+    }
+
     private static async Task<PublishedRunnerProject> PublishRunnableProjectAsync(
         HttpClient client,
         string projectPath,
@@ -269,8 +308,11 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.Created);
         }
 
-        using (var response = await client.PostAsJsonAsync(
-                   $"{topologiesPath}/{topologyId}/capabilities",
+        var topologyPath = $"{topologiesPath}/{topologyId}";
+        using (var response = await SendEditorMutationAsync(
+                   client,
+                   topologyPath,
+                   $"{topologyPath}/capabilities",
                    new
                    {
                        capabilityId,
@@ -285,8 +327,10 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.OK);
         }
 
-        using (var response = await client.PostAsJsonAsync(
-                   $"{topologiesPath}/{topologyId}/systems",
+        using (var response = await SendEditorMutationAsync(
+                   client,
+                   topologyPath,
+                   $"{topologyPath}/systems",
                    new
                    {
                        systemId = "station.main",
@@ -302,11 +346,14 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.OK);
         }
 
-        using (var response = await client.PostAsJsonAsync(
-                   $"{topologiesPath}/{topologyId}/driver-bindings",
+        using (var response = await SendEditorMutationAsync(
+                   client,
+                   topologyPath,
+                   $"{topologyPath}/driver-bindings",
                    new
                    {
                        bindingId,
+                       ownerSystemId = "station.main",
                        capabilityId,
                        providerKind = "Simulator",
                        providerKey = $"simulator.runner.{suffix}"
@@ -331,8 +378,11 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.Created);
         }
 
-        using (var response = await client.PostAsJsonAsync(
-                   $"{layoutsPath}/{layoutId}/elements",
+        var layoutPath = $"{layoutsPath}/{layoutId}";
+        using (var response = await SendEditorMutationAsync(
+                   client,
+                   layoutPath,
+                   $"{layoutPath}/elements",
                    new
                    {
                        elementId = "element.station.main",
@@ -362,9 +412,12 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.Created);
         }
 
-        using (var response = await client.PostAsync(
-                   $"{processesPath}/{processDefinitionId}/publish",
-                   content: null))
+        var processPath = $"{processesPath}/{processDefinitionId}";
+        using (var response = await SendEditorMutationAsync<object?>(
+                   client,
+                   processPath,
+                   $"{processPath}/publish",
+                   null))
         {
             await AssertStatusAsync(response, HttpStatusCode.OK);
         }
@@ -413,8 +466,9 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                                    }
                                }
                            }
-                       },
-                       transitions = Array.Empty<object>()
+                        },
+                       transitions = Array.Empty<object>(),
+                       lineControllerAuthorizations = Array.Empty<object>()
                    }))
         {
             await AssertStatusAsync(response, HttpStatusCode.Created);
@@ -442,10 +496,8 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 applicationId,
                 productionLineDefinitionId
             });
+        await AssertStatusAsync(publishResponse, HttpStatusCode.Created);
         using var publishBody = await ReadJsonAsync(publishResponse);
-        Assert.Equal(
-            HttpStatusCode.Created,
-            publishResponse.StatusCode);
 
         var snapshot = Assert.Single(
             publishBody.RootElement
@@ -822,6 +874,28 @@ public sealed class RunnerPublishedProjectProcessE2ETests
         var body = await response.Content.ReadAsStringAsync();
         throw new Xunit.Sdk.XunitException(
             $"Expected HTTP {(int)expectedStatus}, received {(int)response.StatusCode}: {body}");
+    }
+
+    private static async Task<HttpResponseMessage> SendEditorMutationAsync<T>(
+        HttpClient client,
+        string documentPath,
+        string mutationPath,
+        T? body)
+    {
+        using var current = await client.GetAsync(documentPath);
+        await AssertStatusAsync(current, HttpStatusCode.OK);
+        using var currentBody = await ReadJsonAsync(current);
+        var revision = currentBody.RootElement.GetProperty("revision").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(revision));
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, mutationPath);
+        request.Headers.TryAddWithoutValidation("If-Match", $"\"{revision}\"");
+        if (body is not null)
+        {
+            request.Content = JsonContent.Create(body);
+        }
+
+        return await client.SendAsync(request);
     }
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)

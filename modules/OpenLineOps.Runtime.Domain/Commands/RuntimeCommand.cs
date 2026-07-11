@@ -1,8 +1,8 @@
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Identifiers;
-using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Targets;
+using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Runtime.Domain.Commands;
 

@@ -1,7 +1,7 @@
+using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Runtime.Versioning;
 
 namespace OpenLineOps.ContentProtection;
 

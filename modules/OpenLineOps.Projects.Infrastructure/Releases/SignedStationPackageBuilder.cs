@@ -12,6 +12,7 @@ public sealed record BuildStationPackageRequest(
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
+    string ProductionLineDefinitionId,
     string StationSystemId,
     string SigningKeyId,
     string SigningPrivateKeyPem,
@@ -102,6 +103,9 @@ public sealed class SignedStationPackageBuilder
         var projectId = Required(request.ProjectId, nameof(request.ProjectId));
         var applicationId = Required(request.ApplicationId, nameof(request.ApplicationId));
         var snapshotId = Required(request.ProjectSnapshotId, nameof(request.ProjectSnapshotId));
+        var productionLineDefinitionId = Required(
+            request.ProductionLineDefinitionId,
+            nameof(request.ProductionLineDefinitionId));
         var stationSystemId = Required(request.StationSystemId, nameof(request.StationSystemId));
         var manifest = new StationPackageManifest(
             StationPackageManifest.RequiredFormat,
@@ -109,11 +113,13 @@ public sealed class SignedStationPackageBuilder
             projectId,
             applicationId,
             snapshotId,
+            productionLineDefinitionId,
             stationSystemId,
             StationPackageCanonicalization.ComputeContentSha256(
                 projectId,
                 applicationId,
                 snapshotId,
+                productionLineDefinitionId,
                 stationSystemId,
                 entries),
             createdAtUtc,

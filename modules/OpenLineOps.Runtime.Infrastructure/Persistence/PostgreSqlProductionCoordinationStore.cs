@@ -669,6 +669,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 connection,
                 transaction,
                 change.MessageId,
+                request.JobId,
                 change.IdempotencyKey,
                 nameof(ResourceLeaseChanged),
                 sequence,
@@ -681,6 +682,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
             connection,
             transaction,
             request.MessageId,
+            request.JobId,
             request.IdempotencyKey,
             nameof(StationJobRequested),
             orderedChanges.Length,
@@ -711,34 +713,100 @@ public sealed class PostgreSqlProductionCoordinationStore :
               ?? throw new InvalidDataException("Station result inbox payload is empty.");
     }
 
+    public async ValueTask<StationJobRecoveryRequired?> GetRecoveryRequiredAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT payload_json::text
+            FROM olo_station_job_event_inbox
+            WHERE job_id = @job_id
+              AND kind = 'StationJobRecoveryRequired';
+            """;
+        command.Parameters.AddWithValue("job_id", jobId);
+        var payload = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+            as string;
+        return payload is null
+            ? null
+            : JsonSerializer.Deserialize<StationJobRecoveryRequired>(payload, JsonOptions)
+              ?? throw new InvalidDataException(
+                  "Station recovery-required Inbox payload is empty.");
+    }
+
     public async ValueTask RecordCompletionAsync(
         StationJobCompleted completion,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(completion);
+        StationMessageContract.Validate(completion);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         var payload = JsonSerializer.Serialize(completion, JsonOptions);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await LockStationJobAsync(connection, transaction, completion.JobId, cancellationToken)
+            .ConfigureAwait(false);
+        if (await TryEnsureExistingCompletionAsync(
+                connection,
+                transaction,
+                completion,
+                payload,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var request = await RequireDispatchRequestAsync(
+                connection,
+                transaction,
+                completion.JobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        ValidateStationResultIdentity(
+            request,
+            completion.JobId,
+            completion.IdempotencyKey,
+            completion.AgentId,
+            completion.StationId);
+        if (completion.RuntimeSessionId != request.RuntimeSessionId)
+        {
+            throw new InvalidDataException(
+                "Station completion Runtime Session does not match its dispatch request.");
+        }
+
+        var timeline = await ReadStationEventTimelineAsync(
+                connection,
+                transaction,
+                completion.JobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!timeline.HasAccepted
+            || timeline.HasRecoveryRequired
+            || completion.CompletedAtUtc < timeline.LatestAtUtc)
+        {
+            throw new InvalidDataException(
+                "Station completion arrived before durable acceptance or precedes its event timeline.");
+        }
+
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_station_job_result_inbox (
                 message_id, idempotency_key, payload_json, received_at_utc)
             VALUES (@message_id, @idempotency_key, @payload_json::jsonb, @received_at_utc)
-            ON CONFLICT (idempotency_key) DO NOTHING;
+            ;
             """;
         command.Parameters.AddWithValue("message_id", completion.MessageId);
         command.Parameters.AddWithValue("idempotency_key", completion.IdempotencyKey);
         command.Parameters.AddWithValue("payload_json", payload);
         command.Parameters.AddWithValue("received_at_utc", completion.CompletedAtUtc);
-        var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
-        if (!added)
-        {
-            await EnsureSameCompletionAsync(
-                connection,
-                completion.IdempotencyKey,
-                payload,
-                cancellationToken).ConfigureAwait(false);
-        }
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask RecordAcceptedAsync(
@@ -746,6 +814,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(accepted);
+        StationMessageContract.Validate(accepted);
         return RecordStationEventAsync(
             accepted.MessageId,
             accepted.JobId,
@@ -761,6 +830,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(progress);
+        StationMessageContract.Validate(progress);
         return RecordStationEventAsync(
             progress.MessageId,
             progress.JobId,
@@ -768,6 +838,22 @@ public sealed class PostgreSqlProductionCoordinationStore :
             nameof(StationJobProgressed),
             JsonSerializer.Serialize(progress, JsonOptions),
             progress.ProgressedAtUtc,
+            cancellationToken);
+    }
+
+    public ValueTask RecordRecoveryRequiredAsync(
+        StationJobRecoveryRequired recoveryRequired,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(recoveryRequired);
+        StationMessageContract.Validate(recoveryRequired);
+        return RecordStationEventAsync(
+            recoveryRequired.MessageId,
+            recoveryRequired.JobId,
+            recoveryRequired.IdempotencyKey,
+            nameof(StationJobRecoveryRequired),
+            JsonSerializer.Serialize(recoveryRequired, JsonOptions),
+            recoveryRequired.DetectedAtUtc,
             cancellationToken);
     }
 
@@ -810,11 +896,21 @@ public sealed class PostgreSqlProductionCoordinationStore :
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT message_id, idempotency_key, kind, sequence, payload_json::text,
+            SELECT message_id, job_id, idempotency_key, kind, sequence, payload_json::text,
                    attempt_count, created_at_utc
-            FROM olo_station_job_outbox
-            WHERE published_at_utc IS NULL
-            ORDER BY created_at_utc, sequence, message_id
+            FROM olo_station_job_outbox AS candidate
+            WHERE candidate.published_at_utc IS NULL
+              AND candidate.quarantined_at_utc IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM olo_station_job_outbox AS predecessor
+                  WHERE predecessor.job_id = candidate.job_id
+                    AND predecessor.published_at_utc IS NULL
+                    AND predecessor.sequence < candidate.sequence)
+            ORDER BY candidate.created_at_utc,
+                     candidate.job_id,
+                     candidate.sequence,
+                     candidate.message_id
             LIMIT @maximum_count;
             """;
         command.Parameters.AddWithValue("maximum_count", maximumCount);
@@ -824,22 +920,49 @@ public sealed class PostgreSqlProductionCoordinationStore :
         {
             items.Add(new StationJobOutboxItem(
                 reader.GetGuid(0),
-                reader.GetString(1),
+                reader.GetGuid(1),
                 reader.GetString(2),
-                reader.GetInt32(3),
-                reader.GetString(4),
-                reader.GetInt32(5),
-                reader.GetFieldValue<DateTimeOffset>(6)));
+                reader.GetString(3),
+                reader.GetInt32(4),
+                reader.GetString(5),
+                reader.GetInt32(6),
+                reader.GetFieldValue<DateTimeOffset>(7)));
         }
 
         return items;
+    }
+
+    public async ValueTask<StationJobRequested?> GetDispatchRequestAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        if (jobId == Guid.Empty)
+        {
+            throw new ArgumentException("Station Job id cannot be empty.", nameof(jobId));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT payload_json::text
+            FROM olo_station_job_outbox
+            WHERE job_id = @job_id
+              AND kind = 'StationJobRequested';
+            """;
+        command.Parameters.AddWithValue("job_id", jobId);
+        var payload = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        return payload is null
+            ? null
+            : JsonSerializer.Deserialize<StationJobRequested>(payload, JsonOptions)
+              ?? throw new InvalidDataException("Station dispatch request payload is empty.");
     }
 
     public ValueTask MarkPublishedAsync(
         Guid messageId,
         CancellationToken cancellationToken = default) =>
         ExecuteRequiredAsync(
-            "UPDATE olo_station_job_outbox SET published_at_utc = now() WHERE message_id = @id;",
+            "UPDATE olo_station_job_outbox SET published_at_utc = now() WHERE message_id = @id AND quarantined_at_utc IS NULL;",
             messageId,
             "Station job outbox message",
             cancellationToken);
@@ -866,6 +989,137 @@ public sealed class PostgreSqlProductionCoordinationStore :
         {
             throw new InvalidOperationException($"Station job outbox message {messageId:D} does not exist.");
         }
+    }
+
+    public async ValueTask QuarantineJobAsync(
+        Guid jobId,
+        string reason,
+        DateTimeOffset quarantinedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (jobId == Guid.Empty)
+        {
+            throw new ArgumentException("Station Job id cannot be empty.", nameof(jobId));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        if (quarantinedAtUtc == default || quarantinedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station dispatch quarantine timestamp must be non-default UTC.",
+                nameof(quarantinedAtUtc));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var rows = new List<(DateTimeOffset? PublishedAtUtc, string? Reason, DateTimeOffset? QuarantinedAtUtc)>();
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT published_at_utc, quarantine_reason, quarantined_at_utc
+                FROM olo_station_job_outbox
+                WHERE job_id = @job_id
+                ORDER BY sequence, message_id
+                FOR UPDATE;
+                """;
+            read.Parameters.AddWithValue("job_id", jobId);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                rows.Add((
+                    reader.IsDBNull(0) ? null : reader.GetFieldValue<DateTimeOffset>(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTimeOffset>(2)));
+            }
+        }
+
+        if (rows.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch Job {jobId:D} does not exist.");
+        }
+
+        var unpublished = rows.Where(static row => row.PublishedAtUtc is null).ToArray();
+        if (unpublished.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch Job {jobId:D} has no unpublished messages to quarantine.");
+        }
+
+        var existingEvidence = unpublished
+            .Where(static row => row.QuarantinedAtUtc is not null)
+            .ToArray();
+        if (existingEvidence.Any(row => !string.Equals(
+                row.Reason,
+                reason,
+                StringComparison.Ordinal))
+            || existingEvidence.Select(static row => row.QuarantinedAtUtc)
+                .Distinct()
+                .Count() > 1)
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch Job {jobId:D} already has different quarantine evidence.");
+        }
+
+        var effectiveTime = existingEvidence.FirstOrDefault().QuarantinedAtUtc
+            ?? quarantinedAtUtc;
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE olo_station_job_outbox
+            SET quarantine_reason = @reason,
+                quarantined_at_utc = @quarantined_at_utc
+            WHERE job_id = @job_id
+              AND published_at_utc IS NULL
+              AND quarantined_at_utc IS NULL;
+            """;
+        update.Parameters.AddWithValue("job_id", jobId);
+        update.Parameters.AddWithValue("reason", reason);
+        update.Parameters.AddWithValue("quarantined_at_utc", effectiveTime);
+        var updated = await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (updated != unpublished.Count(static row => row.QuarantinedAtUtc is null))
+        {
+            throw new InvalidOperationException(
+                $"Station dispatch Job {jobId:D} quarantine update was not atomic.");
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyCollection<StationJobQuarantineItem>> ListQuarantinedAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT message_id, job_id, kind, sequence, quarantine_reason, quarantined_at_utc
+            FROM olo_station_job_outbox
+            WHERE job_id = @job_id
+              AND quarantined_at_utc IS NOT NULL
+            ORDER BY sequence, message_id;
+            """;
+        command.Parameters.AddWithValue("job_id", jobId);
+        var result = new List<StationJobQuarantineItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(new StationJobQuarantineItem(
+                reader.GetGuid(0),
+                reader.GetGuid(1),
+                reader.GetString(2),
+                reader.GetInt32(3),
+                reader.GetString(4),
+                reader.GetFieldValue<DateTimeOffset>(5)));
+        }
+
+        return result;
     }
 
     private async ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRunsAsync(
@@ -976,6 +1230,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
                 CREATE TABLE IF NOT EXISTS olo_station_job_outbox (
                     message_id uuid PRIMARY KEY,
+                    job_id uuid NOT NULL,
                     idempotency_key text NOT NULL UNIQUE,
                     kind text NOT NULL,
                     sequence integer NOT NULL,
@@ -983,7 +1238,10 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     created_at_utc timestamptz NOT NULL,
                     attempt_count integer NOT NULL,
                     last_error text NULL,
-                    published_at_utc timestamptz NULL
+                    quarantine_reason text NULL,
+                    quarantined_at_utc timestamptz NULL,
+                    published_at_utc timestamptz NULL,
+                    UNIQUE(job_id, sequence)
                 );
                 CREATE TABLE IF NOT EXISTS olo_station_job_result_inbox (
                     message_id uuid PRIMARY KEY,
@@ -1022,7 +1280,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
             ["olo_production_terminal_outbox"] = ["run_id", "document_json", "occurred_at_utc", "attempt_count", "last_error"],
             ["olo_resource_fencing_tokens"] = ["resource_kind", "resource_id", "fencing_token"],
             ["olo_resource_leases"] = ["resource_kind", "resource_id", "run_id", "operation_run_id", "fencing_token", "acquired_at_utc", "expires_at_utc"],
-            ["olo_station_job_outbox"] = ["message_id", "idempotency_key", "kind", "sequence", "payload_json", "created_at_utc", "attempt_count", "last_error", "published_at_utc"],
+            ["olo_station_job_outbox"] = ["message_id", "job_id", "idempotency_key", "kind", "sequence", "payload_json", "created_at_utc", "attempt_count", "last_error", "quarantine_reason", "quarantined_at_utc", "published_at_utc"],
             ["olo_station_job_result_inbox"] = ["message_id", "idempotency_key", "payload_json", "received_at_utc"],
             ["olo_station_job_event_inbox"] = ["message_id", "job_id", "idempotency_key", "kind", "payload_json", "occurred_at_utc"]
         };
@@ -1220,15 +1478,12 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     $"Resolved Slot {slot.Address} is bound to {slot.Material}, not {expectedMaterial}.");
             }
 
-            if (slot.Status == SlotOccupancyStatus.Occupied)
-            {
-                continue;
-            }
-
             if (slot.Status != SlotOccupancyStatus.Running)
             {
                 throw new InvalidDataException(
-                    $"Resolved Slot {slot.Address} must be Running or idempotently Occupied, not {slot.Status}.");
+                    $"Resolved Slot {slot.Address} has no exact completion evidence for Operation Run "
+                    + $"{completedSlot.OperationRunId} at fencing token {completedSlot.FencingToken}; "
+                    + $"its status must be Running, not {slot.Status}.");
             }
 
             var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
@@ -1272,6 +1527,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
                         slot.Address,
                         expectedMaterial,
                         run.Id,
+                        completedSlot.OperationRunId,
+                        completedSlot.FencingToken,
                         SlotOccupancyStatus.Running,
                         SlotOccupancyStatus.Occupied,
                         run.ActorId,
@@ -1295,12 +1552,16 @@ public sealed class PostgreSqlProductionCoordinationStore :
             FROM olo_production_material_timeline
             WHERE kind = @kind
               AND production_run_id = @production_run_id
+              AND operation_run_id = @operation_run_id
+              AND slot_fencing_token = @slot_fencing_token
               AND occurred_at_utc = @occurred_at_utc;
             """;
         command.Parameters.AddWithValue(
             "kind",
             ProductionMaterialEvidenceKind.SlotOccupancyTransition.ToString());
         command.Parameters.AddWithValue("production_run_id", runId.Value);
+        command.Parameters.AddWithValue("operation_run_id", completedSlot.OperationRunId);
+        command.Parameters.AddWithValue("slot_fencing_token", completedSlot.FencingToken);
         command.Parameters.AddWithValue("occurred_at_utc", completedSlot.CompletedAtUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -1332,10 +1593,12 @@ public sealed class PostgreSqlProductionCoordinationStore :
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_production_material_timeline (
-                evidence_id, kind, production_run_id, production_unit_id, carrier_id,
+                evidence_id, kind, production_run_id, operation_run_id, slot_fencing_token,
+                production_unit_id, carrier_id,
                 genealogy_parent_unit_id, genealogy_child_unit_id, document_json, occurred_at_utc)
             VALUES (
-                @evidence_id, @kind, @production_run_id, @production_unit_id, @carrier_id,
+                @evidence_id, @kind, @production_run_id, @operation_run_id, @slot_fencing_token,
+                @production_unit_id, @carrier_id,
                 @genealogy_parent_unit_id, @genealogy_child_unit_id, @document_json::jsonb,
                 @occurred_at_utc);
             """;
@@ -1343,6 +1606,10 @@ public sealed class PostgreSqlProductionCoordinationStore :
         command.Parameters.AddWithValue("kind", evidence.Kind.ToString());
         command.Parameters.Add("production_run_id", NpgsqlDbType.Uuid).Value =
             (object?)evidence.ProductionRunId?.Value ?? DBNull.Value;
+        command.Parameters.Add("operation_run_id", NpgsqlDbType.Text).Value =
+            (object?)evidence.OperationRunId ?? DBNull.Value;
+        command.Parameters.Add("slot_fencing_token", NpgsqlDbType.Bigint).Value =
+            (object?)evidence.SlotFencingToken ?? DBNull.Value;
         command.Parameters.Add("production_unit_id", NpgsqlDbType.Uuid).Value =
             (object?)evidence.ProductionUnitId?.Value ?? DBNull.Value;
         command.Parameters.Add("carrier_id", NpgsqlDbType.Text).Value =
@@ -1466,12 +1733,131 @@ public sealed class PostgreSqlProductionCoordinationStore :
     {
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await LockStationJobAsync(connection, transaction, jobId, cancellationToken)
+            .ConfigureAwait(false);
+        if (await TryEnsureExistingStationEventAsync(
+                connection,
+                transaction,
+                messageId,
+                jobId,
+                idempotencyKey,
+                kind,
+                payload,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var request = await RequireDispatchRequestAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var timeline = await ReadStationEventTimelineAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        switch (kind)
+        {
+            case nameof(StationJobAccepted):
+                {
+                    var accepted = JsonSerializer.Deserialize<StationJobAccepted>(payload, JsonOptions)
+                        ?? throw new InvalidDataException("Station acceptance payload is empty.");
+                    ValidateStationResultIdentity(
+                        request,
+                        accepted.JobId,
+                        accepted.IdempotencyKey,
+                        accepted.AgentId,
+                        accepted.StationId);
+                    if (accepted.AcceptedAtUtc < request.RequestedAtUtc
+                        || timeline.HasAccepted
+                        || timeline.EventCount != 0)
+                    {
+                        throw new InvalidDataException(
+                            "Station acceptance is out of order for its dispatch request.");
+                    }
+
+                    break;
+                }
+            case nameof(StationJobProgressed):
+                {
+                    var progress = JsonSerializer.Deserialize<StationJobProgressed>(payload, JsonOptions)
+                        ?? throw new InvalidDataException("Station progress payload is empty.");
+                    ValidateStationResultIdentity(
+                        request,
+                        progress.JobId,
+                        progress.IdempotencyKey,
+                        progress.AgentId,
+                        progress.StationId);
+                    if (!timeline.HasAccepted
+                        || timeline.HasRecoveryRequired
+                        || progress.ProgressedAtUtc < timeline.LatestAtUtc
+                        || progress.Percent < timeline.MaximumProgressPercent
+                        || await CompletionExistsAsync(
+                                connection,
+                                transaction,
+                                progress.IdempotencyKey,
+                                cancellationToken)
+                            .ConfigureAwait(false))
+                    {
+                        throw new InvalidDataException("Station progress is not monotonic.");
+                    }
+
+                    break;
+                }
+            case nameof(StationJobRecoveryRequired):
+                {
+                    var recoveryRequired = JsonSerializer.Deserialize<StationJobRecoveryRequired>(
+                        payload,
+                        JsonOptions)
+                        ?? throw new InvalidDataException(
+                            "Station recovery-required payload is empty.");
+                    ValidateStationResultIdentity(
+                        request,
+                        recoveryRequired.JobId,
+                        recoveryRequired.JobIdempotencyKey,
+                        recoveryRequired.AgentId,
+                        recoveryRequired.StationId);
+                    if (!timeline.HasAccepted
+                        || timeline.HasRecoveryRequired
+                        || recoveryRequired.ProductionRunId != request.ProductionRunId
+                        || recoveryRequired.RuntimeSessionId != request.RuntimeSessionId
+                        || !string.Equals(
+                            recoveryRequired.OperationRunId,
+                            request.OperationRunId,
+                            StringComparison.Ordinal)
+                        || recoveryRequired.DetectedAtUtc < timeline.LatestAtUtc
+                        || await CompletionExistsAsync(
+                                connection,
+                                transaction,
+                                request.IdempotencyKey,
+                                cancellationToken)
+                            .ConfigureAwait(false))
+                    {
+                        throw new InvalidDataException(
+                            "Station recovery-required evidence does not exactly follow its dispatch timeline.");
+                    }
+
+                    break;
+                }
+            default:
+                throw new InvalidDataException($"Unsupported Station event kind '{kind}'.");
+        }
+
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_station_job_event_inbox (
                 message_id, job_id, idempotency_key, kind, payload_json, occurred_at_utc)
             VALUES (@message_id, @job_id, @idempotency_key, @kind, @payload_json::jsonb, @occurred_at_utc)
-            ON CONFLICT (message_id) DO NOTHING;
+            ;
             """;
         command.Parameters.AddWithValue("message_id", messageId);
         command.Parameters.AddWithValue("job_id", jobId);
@@ -1479,35 +1865,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
         command.Parameters.AddWithValue("kind", kind);
         command.Parameters.AddWithValue("payload_json", payload);
         command.Parameters.AddWithValue("occurred_at_utc", occurredAtUtc);
-        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
-        {
-            await using var existing = connection.CreateCommand();
-            existing.CommandText = """
-                SELECT job_id, idempotency_key, kind, payload_json::text
-                FROM olo_station_job_event_inbox
-                WHERE message_id = @message_id;
-                """;
-            existing.Parameters.AddWithValue("message_id", messageId);
-            await using var reader = await existing.ExecuteReaderAsync(cancellationToken)
-                .ConfigureAwait(false);
-            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-                || reader.GetGuid(0) != jobId
-                || !string.Equals(reader.GetString(1), idempotencyKey, StringComparison.Ordinal)
-                || !string.Equals(reader.GetString(2), kind, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Station event message {messageId:D} was reused with different identity.");
-            }
-
-            var existingPayload = reader.GetString(3);
-            using var existingJson = JsonDocument.Parse(existingPayload);
-            using var candidateJson = JsonDocument.Parse(payload);
-            if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
-            {
-                throw new InvalidOperationException(
-                    $"Station event message {messageId:D} was reused with different evidence.");
-            }
-        }
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask ExecuteRequiredAsync(
@@ -1527,10 +1886,221 @@ public sealed class PostgreSqlProductionCoordinationStore :
         }
     }
 
+    private static async ValueTask LockStationJobAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT pg_advisory_xact_lock(hashtextextended(@job_id::text, 0));";
+        command.Parameters.AddWithValue("job_id", jobId);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<StationJobRequested> RequireDispatchRequestAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT payload_json::text
+            FROM olo_station_job_outbox
+            WHERE job_id = @job_id
+              AND kind = 'StationJobRequested';
+            """;
+        command.Parameters.AddWithValue("job_id", jobId);
+        var payload = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+            as string;
+        return payload is null
+            ? throw new InvalidDataException(
+                $"Station result references unknown job {jobId:D}.")
+            : JsonSerializer.Deserialize<StationJobRequested>(payload, JsonOptions)
+              ?? throw new InvalidDataException("Station dispatch request payload is empty.");
+    }
+
+    private static async ValueTask<StationEventTimeline> ReadStationEventTimelineAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+                count(*)::integer,
+                count(*) FILTER (WHERE kind = 'StationJobAccepted')::integer,
+                count(*) FILTER (WHERE kind = 'StationJobRecoveryRequired')::integer,
+                max(occurred_at_utc),
+                coalesce(max((payload_json ->> 'percent')::integer)
+                    FILTER (WHERE kind = 'StationJobProgressed'), 0)::integer
+            FROM olo_station_job_event_inbox
+            WHERE job_id = @job_id;
+            """;
+        command.Parameters.AddWithValue("job_id", jobId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException("Station event timeline query returned no aggregate row.");
+        }
+
+        return new StationEventTimeline(
+            reader.GetInt32(0),
+            reader.GetInt32(1) == 1,
+            reader.GetInt32(2) == 1,
+            reader.IsDBNull(3)
+                ? default
+                : reader.GetFieldValue<DateTimeOffset>(3),
+            reader.GetInt32(4));
+    }
+
+    private static async ValueTask<bool> TryEnsureExistingStationEventAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid messageId,
+        Guid jobId,
+        string idempotencyKey,
+        string kind,
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT job_id, idempotency_key, kind, payload_json::text
+            FROM olo_station_job_event_inbox
+            WHERE message_id = @message_id;
+            """;
+        command.Parameters.AddWithValue("message_id", messageId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        if (reader.GetGuid(0) != jobId
+            || !string.Equals(reader.GetString(1), idempotencyKey, StringComparison.Ordinal)
+            || !string.Equals(reader.GetString(2), kind, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Station event message {messageId:D} was reused with different identity.");
+        }
+
+        EnsureSameJsonEvidence(
+            reader.GetString(3),
+            payload,
+            $"Station event message {messageId:D}");
+        return true;
+    }
+
+    private static async ValueTask<bool> TryEnsureExistingCompletionAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        StationJobCompleted completion,
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT message_id, idempotency_key, payload_json::text
+            FROM olo_station_job_result_inbox
+            WHERE message_id = @message_id OR idempotency_key = @idempotency_key
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("message_id", completion.MessageId);
+        command.Parameters.AddWithValue("idempotency_key", completion.IdempotencyKey);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        if (reader.GetGuid(0) != completion.MessageId
+            || !string.Equals(
+                reader.GetString(1),
+                completion.IdempotencyKey,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Station completion identity was reused with different evidence.");
+        }
+
+        EnsureSameJsonEvidence(reader.GetString(2), payload, "Station completion");
+        return true;
+    }
+
+    private static async ValueTask<bool> CompletionExistsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM olo_station_job_result_inbox
+                WHERE idempotency_key = @idempotency_key);
+            """;
+        command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("Station completion existence query returned null."));
+    }
+
+    private static void ValidateStationResultIdentity(
+        StationJobRequested request,
+        Guid jobId,
+        string idempotencyKey,
+        string agentId,
+        string stationId)
+    {
+        if (request.JobId != jobId
+            || !string.Equals(request.IdempotencyKey, idempotencyKey, StringComparison.Ordinal)
+            || !string.Equals(request.AgentId, agentId, StringComparison.Ordinal)
+            || !string.Equals(request.StationId, stationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Station result identity does not exactly match its dispatch request.");
+        }
+    }
+
+    private static void EnsureSameJsonEvidence(
+        string existing,
+        string candidate,
+        string description)
+    {
+        using var existingJson = JsonDocument.Parse(existing);
+        using var candidateJson = JsonDocument.Parse(candidate);
+        if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
+        {
+            throw new InvalidOperationException(
+                $"{description} was reused with different evidence.");
+        }
+    }
+
+    private sealed record StationEventTimeline(
+        int EventCount,
+        bool HasAccepted,
+        bool HasRecoveryRequired,
+        DateTimeOffset LatestAtUtc,
+        int MaximumProgressPercent);
+
     private static async ValueTask<bool> InsertStationDispatchOutboxAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         Guid messageId,
+        Guid jobId,
         string idempotencyKey,
         string kind,
         int sequence,
@@ -1542,14 +2112,15 @@ public sealed class PostgreSqlProductionCoordinationStore :
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO olo_station_job_outbox (
-                message_id, idempotency_key, kind, sequence, payload_json, created_at_utc,
-                attempt_count, last_error, published_at_utc)
+                message_id, job_id, idempotency_key, kind, sequence, payload_json, created_at_utc,
+                attempt_count, last_error, quarantine_reason, quarantined_at_utc, published_at_utc)
             VALUES (
-                @message_id, @idempotency_key, @kind, @sequence, @payload_json::jsonb,
-                @created_at_utc, 0, NULL, NULL)
+                @message_id, @job_id, @idempotency_key, @kind, @sequence, @payload_json::jsonb,
+                @created_at_utc, 0, NULL, NULL, NULL, NULL)
             ON CONFLICT (idempotency_key) DO NOTHING;
             """;
         command.Parameters.AddWithValue("message_id", messageId);
+        command.Parameters.AddWithValue("job_id", jobId);
         command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
         command.Parameters.AddWithValue("kind", kind);
         command.Parameters.AddWithValue("sequence", sequence);
@@ -1564,7 +2135,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
         await using var existingCommand = connection.CreateCommand();
         existingCommand.Transaction = transaction;
         existingCommand.CommandText = """
-            SELECT message_id, kind, sequence, payload_json::text
+            SELECT message_id, job_id, kind, sequence, payload_json::text
             FROM olo_station_job_outbox
             WHERE idempotency_key = @idempotency_key;
             """;
@@ -1578,14 +2149,15 @@ public sealed class PostgreSqlProductionCoordinationStore :
         }
 
         if (reader.GetGuid(0) != messageId
-            || !string.Equals(reader.GetString(1), kind, StringComparison.Ordinal)
-            || reader.GetInt32(2) != sequence)
+            || reader.GetGuid(1) != jobId
+            || !string.Equals(reader.GetString(2), kind, StringComparison.Ordinal)
+            || reader.GetInt32(3) != sequence)
         {
             throw new InvalidOperationException(
                 $"Station dispatch idempotency key '{idempotencyKey}' was reused with different identity.");
         }
 
-        using var existingJson = JsonDocument.Parse(reader.GetString(3));
+        using var existingJson = JsonDocument.Parse(reader.GetString(4));
         using var candidateJson = JsonDocument.Parse(payload);
         if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
         {
@@ -1625,41 +2197,6 @@ public sealed class PostgreSqlProductionCoordinationStore :
         }
 
         return supplied;
-    }
-
-    private static async ValueTask EnsureSameCompletionAsync(
-        NpgsqlConnection connection,
-        string idempotencyKey,
-        string payload,
-        CancellationToken cancellationToken) =>
-        await EnsureSamePayloadAsync(
-            connection,
-            "olo_station_job_result_inbox",
-            idempotencyKey,
-            payload,
-            "Station completion",
-            cancellationToken).ConfigureAwait(false);
-
-    private static async ValueTask EnsureSamePayloadAsync(
-        NpgsqlConnection connection,
-        string table,
-        string idempotencyKey,
-        string payload,
-        string description,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT payload_json::text FROM {table} WHERE idempotency_key = @idempotency_key;";
-        command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
-        var existing = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        using var existingJson = JsonDocument.Parse(existing ?? throw new InvalidDataException(
-            $"{description} idempotency conflict has no stored payload."));
-        using var candidateJson = JsonDocument.Parse(payload);
-        if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
-        {
-            throw new InvalidOperationException(
-                $"{description} idempotency key '{idempotencyKey}' was reused with different evidence.");
-        }
     }
 
     private static ProductionRun DeserializeRun(string json) =>

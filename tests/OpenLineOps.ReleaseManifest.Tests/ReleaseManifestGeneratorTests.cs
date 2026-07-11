@@ -138,6 +138,31 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
     }
 
     [Fact]
+    public void GenerateAcceptsFormalAgentAndRunnerArtifactKinds()
+    {
+        var artifacts = Path.Combine(_directory, "production-host-kinds");
+        Directory.CreateDirectory(Path.Combine(artifacts, "agent"));
+        Directory.CreateDirectory(Path.Combine(artifacts, "runner"));
+        File.WriteAllText(Path.Combine(artifacts, "agent", "agent.zip"), "agent package");
+        File.WriteAllText(Path.Combine(artifacts, "runner", "runner.zip"), "runner package");
+
+        var document = ReleaseManifestGenerator.Generate(new ReleaseManifestOptions(
+            Version: "0.1.0",
+            ArtifactsDirectory: artifacts,
+            ManifestPath: Path.Combine(_directory, "production-host-manifest.json"),
+            ChecksumsPath: Path.Combine(_directory, "production-host-checksums.sha256"),
+            NotesPath: null,
+            Commit: null,
+            GeneratedAtUtc: new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero),
+            RequiredArtifactKinds: ["agent", "runner"]));
+
+        Assert.Collection(
+            document.Artifacts,
+            artifact => Assert.Equal("agent", artifact.Kind),
+            artifact => Assert.Equal("runner", artifact.Kind));
+    }
+
+    [Fact]
     public void VerifySucceedsForGeneratedManifestAndChecksums()
     {
         var artifacts = Path.Combine(_directory, "verify-success");

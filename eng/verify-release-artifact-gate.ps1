@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -57,6 +57,14 @@ $SourceArtifacts = @(
         Source = "src/OpenLineOps.Api/bin/$Configuration/net10.0/OpenLineOps.Api.dll"
     },
     @{
+        Kind = "agent"
+        Source = "src/OpenLineOps.Agent/bin/$Configuration/net10.0/OpenLineOps.Agent.dll"
+    },
+    @{
+        Kind = "runner"
+        Source = "src/OpenLineOps.Runner/bin/$Configuration/net10.0/OpenLineOps.Runner.dll"
+    },
+    @{
         Kind = "desktop"
         Source = "apps/desktop/dist/index.html"
     },
@@ -73,6 +81,11 @@ $SourceArtifacts = @(
         Source = "samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/bin/$Configuration/net10.0/OpenLineOps.SamplePlugins.LoopbackDevice.dll"
     }
 )
+
+$stationRuntimePath = Resolve-RepoPath "src/OpenLineOps.StationRuntime/bin/$Configuration/net10.0/OpenLineOps.StationRuntime.dll"
+if (-not (Test-Path -LiteralPath $stationRuntimePath -PathType Leaf)) {
+    throw "Missing Station Runtime build output required by the Agent artifact: $stationRuntimePath"
+}
 
 foreach ($artifact in $SourceArtifacts) {
     $sourcePath = Resolve-RepoPath $artifact.Source

@@ -1,5 +1,5 @@
 param(
-    [string] $WorkRoot = "output/desktop-signing-readiness",
+    [string] $WorkRoot = "output/windows-signing-readiness",
 
     [switch] $SkipClean
 )
@@ -107,9 +107,9 @@ $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
 
-$SigningScript = Resolve-RepoPath "eng/sign-desktop-package.ps1"
+$SigningScript = Resolve-RepoPath "eng/sign-windows-package.ps1"
 if (-not (Test-Path -LiteralPath $SigningScript -PathType Leaf)) {
-    throw "Missing desktop signing script: $SigningScript"
+    throw "Missing Windows package signing script: $SigningScript"
 }
 
 $packageRoot = Join-Path $ResolvedWorkRoot "win-unpacked"
@@ -147,15 +147,15 @@ $plan = Invoke-SigningScript -Arguments @(
     "-PlanOnly")
 
 if ($plan.ExitCode -ne 0) {
-    throw "Expected desktop signing plan to pass, but got exit code $($plan.ExitCode): $($plan.Output)"
+    throw "Expected Windows package signing plan to pass, but got exit code $($plan.ExitCode): $($plan.Output)"
 }
 
-Assert-OutputContains -Output $plan.Output -Expected "Desktop signing plan only." -Description "Signing plan"
+Assert-OutputContains -Output $plan.Output -Expected "Windows package signing plan only." -Description "Signing plan"
 Assert-OutputContains -Output $plan.Output -Expected "Files: 3" -Description "Signing plan"
 Assert-OutputContains -Output $plan.Output -Expected "OpenLineOps.exe" -Description "Signing plan"
 Assert-OutputContains -Output $plan.Output -Expected "resources/app/lib/helper.dll" -Description "Signing plan"
 Assert-OutputContains -Output $plan.Output -Expected "resources/app/native/device.node" -Description "Signing plan"
 Assert-OutputDoesNotContain -Output $plan.Output -Forbidden "README.md" -Description "Signing plan"
 
-Write-Host "Desktop signing readiness verification passed."
+Write-Host "Windows package signing readiness verification passed."
 Write-Host "Package fixture: $packageRoot"

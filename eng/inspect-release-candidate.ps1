@@ -3,7 +3,7 @@ param(
 
     [string] $WorkRoot = "output/release-candidate-inspection",
 
-    [switch] $RequireSignedDesktop,
+    [switch] $RequireSignedWindowsArtifacts,
 
     [switch] $SkipClean
 )
@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
 $Failures = New-Object System.Collections.Generic.List[string]
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -263,6 +263,231 @@ function Test-ZipContains {
     }
 }
 
+function Read-ZipEntryText {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    try {
+        $stream = $Entry.Open()
+        try {
+            $reader = [System.IO.StreamReader]::new(
+                $stream,
+                [System.Text.UTF8Encoding]::new($false, $true),
+                $true,
+                1024,
+                $true)
+            try {
+                return $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        Add-Failure "$Description is not valid UTF-8 text: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-ZipEntrySha256 {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    $stream = $Entry.Open()
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hex = [System.BitConverter]::ToString($hasher.ComputeHash($stream))
+        return $hex.Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Test-WindowsBundle {
+    param(
+        [Parameter(Mandatory = $true)]$Archive,
+        [Parameter(Mandatory = $true)][string] $ArchiveName,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind,
+        [Parameter(Mandatory = $true)][object[]] $ExpectedEntryPoints
+    )
+
+    $manifestEntry = @($Archive.Entries | Where-Object {
+        [string]::Equals($_.FullName, "bundle-manifest.json", [System.StringComparison]::Ordinal)
+    })
+    $checksumsEntry = @($Archive.Entries | Where-Object {
+        [string]::Equals($_.FullName, "bundle-checksums.sha256", [System.StringComparison]::Ordinal)
+    })
+    if ($manifestEntry.Count -ne 1 -or $checksumsEntry.Count -ne 1) {
+        Add-Failure "$ArchiveName must contain exactly one bundle-manifest.json and bundle-checksums.sha256."
+        return
+    }
+
+    $manifestText = Read-ZipEntryText -Entry $manifestEntry[0] -Description "$ArchiveName bundle manifest"
+    $checksumsText = Read-ZipEntryText -Entry $checksumsEntry[0] -Description "$ArchiveName bundle checksums"
+    if ($null -eq $manifestText -or $null -eq $checksumsText) {
+        return
+    }
+
+    try {
+        $bundleManifest = $manifestText | ConvertFrom-Json
+    }
+    catch {
+        Add-Failure "$ArchiveName bundle manifest is not valid JSON: $($_.Exception.Message)"
+        return
+    }
+
+    Test-ExactJsonObjectShape `
+        -Value $bundleManifest `
+        -Description "$ArchiveName bundle manifest" `
+        -ExpectedProperties @(
+            "schemaVersion",
+            "product",
+            "artifactKind",
+            "runtimeIdentifier",
+            "selfContained",
+            "entryPoints",
+            "files") | Out-Null
+    if ($bundleManifest.schemaVersion -isnot [int] -or $bundleManifest.schemaVersion -ne 1) {
+        Add-Failure "$ArchiveName bundle manifest schemaVersion must be the JSON integer 1."
+    }
+    if ($bundleManifest.product -cne "OpenLineOps") {
+        Add-Failure "$ArchiveName bundle manifest product must be exactly 'OpenLineOps'."
+    }
+    if ($bundleManifest.artifactKind -cne $ArtifactKind) {
+        Add-Failure "$ArchiveName bundle manifest artifactKind must be exactly '$ArtifactKind'."
+    }
+    if ($bundleManifest.runtimeIdentifier -cne "win-x64") {
+        Add-Failure "$ArchiveName bundle runtimeIdentifier must be exactly 'win-x64'."
+    }
+    if ($bundleManifest.selfContained -isnot [bool] -or -not $bundleManifest.selfContained) {
+        Add-Failure "$ArchiveName bundle selfContained must be the JSON boolean true."
+    }
+
+    $entryPoints = @($bundleManifest.entryPoints)
+    if ($entryPoints.Count -ne $ExpectedEntryPoints.Count) {
+        Add-Failure "$ArchiveName bundle entry point count must be $($ExpectedEntryPoints.Count)."
+    }
+    else {
+        for ($index = 0; $index -lt $ExpectedEntryPoints.Count; $index++) {
+            Test-ExactJsonObjectShape `
+                -Value $entryPoints[$index] `
+                -Description "$ArchiveName bundle entryPoints[$index]" `
+                -ExpectedProperties @("role", "relativePath") | Out-Null
+            if ($entryPoints[$index].role -cne $ExpectedEntryPoints[$index].role `
+                -or $entryPoints[$index].relativePath -cne $ExpectedEntryPoints[$index].relativePath) {
+                Add-Failure "$ArchiveName bundle entryPoints[$index] must be '$($ExpectedEntryPoints[$index].role)' at '$($ExpectedEntryPoints[$index].relativePath)'."
+            }
+        }
+    }
+
+    $payloadEntries = @($Archive.Entries | Where-Object {
+        -not $_.FullName.EndsWith("/", [System.StringComparison]::Ordinal) `
+            -and $_.FullName -cne "bundle-manifest.json" `
+            -and $_.FullName -cne "bundle-checksums.sha256"
+    })
+    $files = @($bundleManifest.files)
+    if ($files.Count -ne $payloadEntries.Count) {
+        Add-Failure "$ArchiveName bundle manifest file count $($files.Count) does not match payload count $($payloadEntries.Count)."
+    }
+
+    $recordedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $expectedChecksumLines = New-Object System.Collections.Generic.List[string]
+    $previousPath = $null
+    foreach ($file in $files) {
+        Test-ExactJsonObjectShape `
+            -Value $file `
+            -Description "$ArchiveName bundle file" `
+            -ExpectedProperties @("relativePath", "sizeBytes", "sha256") | Out-Null
+        if ($file.relativePath -isnot [string] `
+            -or [string]::IsNullOrWhiteSpace($file.relativePath) `
+            -or $file.relativePath -cne $file.relativePath.Trim() `
+            -or $file.relativePath.Contains([char]92) `
+            -or -not $recordedPaths.Add($file.relativePath)) {
+            Add-Failure "$ArchiveName bundle contains an invalid or duplicate file path '$($file.relativePath)'."
+            continue
+        }
+
+        if ($null -ne $previousPath `
+            -and [System.StringComparer]::Ordinal.Compare($previousPath, $file.relativePath) -ge 0) {
+            Add-Failure "$ArchiveName bundle file inventory must be sorted by ordinal relative path."
+        }
+        $previousPath = $file.relativePath
+
+        $entryMatches = @($payloadEntries | Where-Object {
+            [string]::Equals($_.FullName, $file.relativePath, [System.StringComparison]::Ordinal)
+        })
+        if ($entryMatches.Count -ne 1) {
+            Add-Failure "$ArchiveName bundle manifest path '$($file.relativePath)' does not identify exactly one payload entry."
+            continue
+        }
+
+        if (($file.sizeBytes -isnot [int] -and $file.sizeBytes -isnot [long]) `
+            -or [long]$file.sizeBytes -ne [long]$entryMatches[0].Length) {
+            Add-Failure "$ArchiveName bundle size mismatch for '$($file.relativePath)'."
+        }
+        if ($file.sha256 -isnot [string] -or $file.sha256 -cnotmatch "^[0-9a-f]{64}$") {
+            Add-Failure "$ArchiveName bundle hash must be lowercase SHA-256 for '$($file.relativePath)'."
+            continue
+        }
+
+        $actualHash = Get-ZipEntrySha256 -Entry $entryMatches[0]
+        if ($actualHash -cne $file.sha256) {
+            Add-Failure "$ArchiveName bundle hash mismatch for '$($file.relativePath)'."
+        }
+        $expectedChecksumLines.Add("$($file.sha256)  $($file.relativePath)") | Out-Null
+    }
+
+    foreach ($payloadEntry in $payloadEntries) {
+        if (-not $recordedPaths.Contains($payloadEntry.FullName)) {
+            Add-Failure "$ArchiveName bundle contains an unrecorded payload entry '$($payloadEntry.FullName)'."
+        }
+    }
+
+    $actualChecksumLines = @($checksumsText -split "\r?\n" | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    })
+    if ($actualChecksumLines.Count -ne $expectedChecksumLines.Count) {
+        Add-Failure "$ArchiveName bundle checksum count does not match its manifest."
+    }
+    else {
+        for ($index = 0; $index -lt $expectedChecksumLines.Count; $index++) {
+            if ($actualChecksumLines[$index] -cne $expectedChecksumLines[$index]) {
+                Add-Failure "$ArchiveName bundle checksums do not exactly match the manifest inventory."
+                break
+            }
+        }
+    }
+
+    if ($ArtifactKind -ceq "agent") {
+        $configurationEntry = @($payloadEntries | Where-Object {
+            [string]::Equals($_.FullName, "appsettings.json", [System.StringComparison]::Ordinal)
+        })
+        if ($configurationEntry.Count -eq 1) {
+            $configurationText = Read-ZipEntryText `
+                -Entry $configurationEntry[0] `
+                -Description "$ArchiveName appsettings.json"
+            if ($null -ne $configurationText) {
+                try {
+                    $configuration = $configurationText | ConvertFrom-Json
+                    if ($configuration.OpenLineOps.Agent.RuntimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
+                        Add-Failure "$ArchiveName RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe'."
+                    }
+                }
+                catch {
+                    Add-Failure "$ArchiveName appsettings.json is not valid JSON: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+}
+
 function Test-SensitiveSourceArchiveEntries {
     param(
         [Parameter(Mandatory = $true)]$Archive,
@@ -431,7 +656,7 @@ function Test-ProvenanceBuild {
             "configuration",
             "noRestore",
             "skipDesktopBuild",
-            "signDesktopPackage",
+            "signWindowsPackages",
             "requiredArtifactKinds") | Out-Null
 
     $configuration = Get-ExactJsonPropertyValue -Value $Build -PropertyName "configuration"
@@ -441,7 +666,7 @@ function Test-ProvenanceBuild {
         Add-Failure "Release provenance build.configuration must be exactly 'Debug' or 'Release'."
     }
 
-    foreach ($propertyName in @("noRestore", "skipDesktopBuild", "signDesktopPackage")) {
+    foreach ($propertyName in @("noRestore", "skipDesktopBuild", "signWindowsPackages")) {
         $propertyValue = Get-ExactJsonPropertyValue -Value $Build -PropertyName $propertyName
         if ($propertyValue -isnot [bool]) {
             Add-Failure "Release provenance build.$propertyName must be a JSON boolean."
@@ -787,36 +1012,37 @@ function Test-ProvenanceHash {
     }
 }
 
-function Test-DesktopSignature {
-    param([Parameter(Mandatory = $true)]$DesktopArchive)
+function Test-WindowsExecutableSignature {
+    param(
+        [Parameter(Mandatory = $true)]$Archive,
+        [Parameter(Mandatory = $true)][string] $ArchiveName,
+        [Parameter(Mandatory = $true)][string] $EntryName
+    )
 
-    $entry = $DesktopArchive.Entries |
+    $entry = $Archive.Entries |
         Where-Object {
             [string]::Equals(
                 $_.FullName,
-                "package/win-unpacked/OpenLineOps.exe",
+                $EntryName,
                 [System.StringComparison]::Ordinal)
         } |
         Select-Object -First 1
 
     if ($entry -eq $null) {
-        Add-Failure "Cannot verify desktop signature because OpenLineOps.exe was not found in the desktop archive."
+        Add-Failure "Cannot verify Windows signature because '$EntryName' was not found in $ArchiveName."
         return
     }
 
     $resolvedWorkRoot = Resolve-RepoPath $WorkRoot
     Assert-UnderRepoRoot $resolvedWorkRoot
-    if ((Test-Path -LiteralPath $resolvedWorkRoot) -and -not $SkipClean) {
-        Remove-Item -LiteralPath $resolvedWorkRoot -Recurse -Force
-    }
-
     New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
-    $extractedExe = Join-Path $resolvedWorkRoot "OpenLineOps.exe"
+    $safeName = ($ArchiveName + "-" + $EntryName) -replace "[^A-Za-z0-9._-]", "_"
+    $extractedExe = Join-Path $resolvedWorkRoot $safeName
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractedExe, $true)
 
     $signature = Get-AuthenticodeSignature -LiteralPath $extractedExe
     if ($signature.Status -ne "Valid") {
-        Add-Failure "Desktop OpenLineOps.exe signature is not valid. Status: $($signature.Status)."
+        Add-Failure "$ArchiveName executable '$EntryName' signature is not valid. Status: $($signature.Status)."
     }
 }
 
@@ -885,6 +1111,34 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
     $requiredZipEntries = @{
         "api" = @("OpenLineOps.Api.dll")
+        "agent" = @(
+            "OpenLineOps.Agent.exe",
+            "OpenLineOps.Agent.deps.json",
+            "OpenLineOps.Agent.runtimeconfig.json",
+            "OpenLineOps.StationRuntime.exe",
+            "OpenLineOps.StationRuntime.deps.json",
+            "OpenLineOps.StationRuntime.runtimeconfig.json",
+            "appsettings.json",
+            "coreclr.dll",
+            "hostfxr.dll",
+            "DEPLOYMENT.md",
+            "LICENSE.txt",
+            "THIRD-PARTY-NOTICES.md",
+            "bundle-manifest.json",
+            "bundle-checksums.sha256"
+        )
+        "runner" = @(
+            "OpenLineOps.Runner.exe",
+            "OpenLineOps.Runner.deps.json",
+            "OpenLineOps.Runner.runtimeconfig.json",
+            "coreclr.dll",
+            "hostfxr.dll",
+            "USAGE.md",
+            "LICENSE.txt",
+            "THIRD-PARTY-NOTICES.md",
+            "bundle-manifest.json",
+            "bundle-checksums.sha256"
+        )
         "desktop" = @(
             "dist/index.html",
             "dist-electron/main/main.js",
@@ -906,6 +1160,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
+            "eng/verify-solution-project-coverage.ps1",
             "eng/inspect-ci-release-artifact.ps1",
             "eng/inspect-release-candidate.ps1",
             "eng/prepare-final-publication.ps1",
@@ -914,7 +1169,11 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/verify-publication-evidence.ps1",
             "eng/verify-release-candidate-inspection.ps1",
             "eng/verify-open-source-metadata.ps1",
-            "eng/verify-third-party-license-metadata.ps1"
+            "eng/verify-third-party-license-metadata.ps1",
+            "eng/sign-windows-package.ps1",
+            "eng/verify-windows-signing-readiness.ps1",
+            "docs/station-agent-deployment.md",
+            "docs/headless-runner.md"
         )
     }
 
@@ -953,8 +1212,40 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -ArchiveName $artifactByKind[$kind].fileName
             }
 
-            if ($kind -ceq "desktop" -and $RequireSignedDesktop) {
-                Test-DesktopSignature -DesktopArchive $archive
+            if ($kind -ceq "agent") {
+                Test-WindowsBundle `
+                    -Archive $archive `
+                    -ArchiveName $artifactByKind[$kind].fileName `
+                    -ArtifactKind "agent" `
+                    -ExpectedEntryPoints @(
+                        [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
+                        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+                    )
+            }
+
+            if ($kind -ceq "runner") {
+                Test-WindowsBundle `
+                    -Archive $archive `
+                    -ArchiveName $artifactByKind[$kind].fileName `
+                    -ArtifactKind "runner" `
+                    -ExpectedEntryPoints @(
+                        [ordered]@{ role = "headless-runner"; relativePath = "OpenLineOps.Runner.exe" }
+                    )
+            }
+
+            if ($RequireSignedWindowsArtifacts) {
+                $signedEntries = switch ($kind) {
+                    "desktop" { @("package/win-unpacked/OpenLineOps.exe") }
+                    "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe") }
+                    "runner" { @("OpenLineOps.Runner.exe") }
+                    default { @() }
+                }
+                foreach ($signedEntry in $signedEntries) {
+                    Test-WindowsExecutableSignature `
+                        -Archive $archive `
+                        -ArchiveName $artifactByKind[$kind].fileName `
+                        -EntryName $signedEntry
+                }
             }
         }
         finally {
@@ -985,6 +1276,6 @@ if ($Failures.Count -gt 0) {
 
 Write-Host "Release candidate inspection passed."
 Write-Host "Artifacts: $ResolvedArtifactsRoot"
-if ($RequireSignedDesktop) {
-    Write-Host "Desktop signature requirement: enforced"
+if ($RequireSignedWindowsArtifacts) {
+    Write-Host "Windows executable signature requirement: enforced"
 }

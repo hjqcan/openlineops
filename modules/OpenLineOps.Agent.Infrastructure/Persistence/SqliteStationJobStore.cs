@@ -221,8 +221,15 @@ public sealed class SqliteStationJobStore : IStationJobStore, IDisposable
                    next_attempt_at_utc,
                    acknowledged_at_utc
             FROM station_job_outbox
-            WHERE acknowledged_at_utc IS NULL
-              AND (next_attempt_at_utc IS NULL OR next_attempt_at_utc <= $now_utc)
+            WHERE station_job_outbox.acknowledged_at_utc IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM station_job_outbox AS predecessor
+                  WHERE predecessor.job_id = station_job_outbox.job_id
+                    AND predecessor.acknowledged_at_utc IS NULL
+                    AND predecessor.sequence < station_job_outbox.sequence)
+              AND (station_job_outbox.next_attempt_at_utc IS NULL
+                   OR station_job_outbox.next_attempt_at_utc <= $now_utc)
             ORDER BY created_at_utc, job_id, sequence, message_id
             LIMIT $maximum_count;
             """;

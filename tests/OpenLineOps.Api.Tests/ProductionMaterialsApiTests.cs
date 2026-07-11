@@ -5,6 +5,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
@@ -36,6 +38,12 @@ public sealed class ProductionMaterialsApiTests :
                     ["OpenLineOps:Runtime:AgentTransport:Provider"] = "Disabled",
                     ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
                 });
+            });
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IProductionMaterialArrivalAuthorizer>();
+                services.AddSingleton<IProductionMaterialArrivalAuthorizer,
+                    AllowingApiMaterialArrivalAuthorizer>();
             });
         });
         _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
@@ -118,6 +126,11 @@ public sealed class ProductionMaterialsApiTests :
             $"/api/production-units/{productionUnitId:D}/arrivals",
             new
             {
+                projectId = "project.material-api",
+                applicationId = "application.material-api",
+                projectSnapshotId = "snapshot.material-api",
+                packageContentSha256 = new string('a', 64),
+                stationId = stationSystemId,
                 lineId,
                 stationSystemId,
                 actorId = "scanner.material-api",
@@ -286,6 +299,11 @@ public sealed class ProductionMaterialsApiTests :
             $"/api/production-carriers/{carrierId}/arrivals",
             new
             {
+                projectId = "project.material-api",
+                applicationId = "application.material-api",
+                projectSnapshotId = "snapshot.material-api",
+                packageContentSha256 = new string('a', 64),
+                stationId = stationSystemId,
                 lineId,
                 stationSystemId,
                 actorId = "scanner.material-api",
@@ -303,6 +321,11 @@ public sealed class ProductionMaterialsApiTests :
             $"/api/production-units/{productionUnitId:D}/arrivals",
             new
             {
+                projectId = "project.material-api",
+                applicationId = "application.material-api",
+                projectSnapshotId = "snapshot.material-api",
+                packageContentSha256 = new string('a', 64),
+                stationId = stationSystemId,
                 lineId,
                 stationSystemId,
                 actorId = "scanner.material-api",
@@ -433,6 +456,11 @@ public sealed class ProductionMaterialsApiTests :
             $"/api/production-units/{missingId:D}/arrivals",
             new
             {
+                projectId = "project.material-api",
+                applicationId = "application.material-api",
+                projectSnapshotId = "snapshot.material-api",
+                packageContentSha256 = new string('a', 64),
+                stationId = "station.missing",
                 lineId = "line.missing",
                 stationSystemId = "station.missing",
                 actorId = "scanner.material-api",
@@ -502,6 +530,11 @@ public sealed class ProductionMaterialsApiTests :
             $"/api/production-units/{productionUnitId:D}/arrivals",
             new
             {
+                projectId = "project.material-api",
+                applicationId = "application.material-api",
+                projectSnapshotId = "snapshot.material-api",
+                packageContentSha256 = new string('a', 64),
+                stationId = stationSystemId,
                 lineId,
                 stationSystemId,
                 actorId = "scanner.material-api",
@@ -674,4 +707,21 @@ public sealed class ProductionMaterialsApiTests :
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
         await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+
+    private sealed class AllowingApiMaterialArrivalAuthorizer :
+        IProductionMaterialArrivalAuthorizer
+    {
+        public ValueTask AuthorizeAsync(
+            MaterialArrived message,
+            ProductionMaterialArrivalOrigin origin,
+            CancellationToken cancellationToken = default)
+        {
+            StationMessageContract.Validate(message);
+            Assert.Equal(ProductionMaterialArrivalOrigin.CoordinatorApi, origin);
+            Assert.Equal(StationMaterialArrivalSources.Api, message.Source);
+            Assert.Equal(StationMaterialArrivalProducers.CoordinatorApi, message.ProducerId);
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
+    }
 }

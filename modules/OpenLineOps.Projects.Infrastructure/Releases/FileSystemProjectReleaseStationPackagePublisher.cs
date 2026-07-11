@@ -1,6 +1,6 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Security.Cryptography;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Projects.Application.Releases;
 
@@ -136,6 +136,7 @@ public sealed class FileSystemProjectReleaseStationPackagePublisher(
                             release.ProjectId,
                             release.ApplicationId,
                             release.SnapshotId,
+                            request.Metadata.ProductionLine.LineDefinitionId,
                             stationSystemId,
                             signingKeyId,
                             privateKeyPem,
@@ -155,6 +156,7 @@ public sealed class FileSystemProjectReleaseStationPackagePublisher(
                     release.ProjectId,
                     release.ApplicationId,
                     release.SnapshotId,
+                    request.Metadata.ProductionLine.LineDefinitionId,
                     stationSystemId,
                     built.Manifest.ContentSha256,
                     request.PublishedAtUtc);

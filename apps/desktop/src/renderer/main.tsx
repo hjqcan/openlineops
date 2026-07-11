@@ -721,7 +721,9 @@ function App(): React.ReactElement {
           || context.productModelId.length === 0
           || context.productModelIdentityInputKey.length === 0
           || context.entryOperationId.length === 0
-          || context.entryStationSystemId.length === 0) {
+          || context.entryStationSystemId.length === 0
+          || context.entryStationId.length === 0
+          || !/^[0-9a-f]{64}$/.test(context.entryStationPackageContentSha256)) {
         throw new Error('Immutable production context identity differs from the selected snapshot.');
       }
 
@@ -751,6 +753,11 @@ function App(): React.ReactElement {
 
       if (!unitResponse.body.location) {
         unitResponse = await arriveProductionUnit(productionRunForm.productionUnitId, {
+          projectId: context.projectId,
+          applicationId: context.applicationId,
+          projectSnapshotId: context.snapshotId,
+          packageContentSha256: context.entryStationPackageContentSha256,
+          stationId: context.entryStationId,
           lineId: context.productionLineDefinitionId,
           stationSystemId: context.entryStationSystemId,
           actorId: productionRunForm.actorId,

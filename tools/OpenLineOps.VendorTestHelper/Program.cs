@@ -143,9 +143,12 @@ public static class Program
             return CrashExitCode;
         }
 
-        if (options.Mode is VendorTestMode.Delay or VendorTestMode.SpawnChildDelay)
+        if (options.Mode is VendorTestMode.Delay
+            or VendorTestMode.SpawnChildDelay
+            or VendorTestMode.SpawnChildDelayRecovery)
         {
-            var completed = options.Mode == VendorTestMode.SpawnChildDelay
+            var completed = options.Mode is VendorTestMode.SpawnChildDelay
+                or VendorTestMode.SpawnChildDelayRecovery
                 ? await RunSpawnChildDelayAsync(invocation.OutputDirectory, options.DelayMilliseconds, cancellationToken)
                     .ConfigureAwait(false)
                 : await WaitForDelayAsync(invocation.OutputDirectory, options.DelayMilliseconds, cancellationToken)
@@ -193,7 +196,10 @@ public static class Program
 
         return options.Mode switch
         {
-            VendorTestMode.Passed or VendorTestMode.Delay or VendorTestMode.SpawnChildDelay =>
+            VendorTestMode.Passed
+                or VendorTestMode.Delay
+                or VendorTestMode.SpawnChildDelay
+                or VendorTestMode.SpawnChildDelayRecovery =>
                 nameof(VendorTestMode.Passed),
             VendorTestMode.Failed => nameof(VendorTestMode.Failed),
             VendorTestMode.Aborted => nameof(VendorTestMode.Aborted),
@@ -273,6 +279,7 @@ public static class Program
             nameof(VendorTestMode.UnknownToken) => VendorTestMode.UnknownToken,
             nameof(VendorTestMode.Delay) => VendorTestMode.Delay,
             nameof(VendorTestMode.SpawnChildDelay) => VendorTestMode.SpawnChildDelay,
+            nameof(VendorTestMode.SpawnChildDelayRecovery) => VendorTestMode.SpawnChildDelayRecovery,
             _ => throw new ArgumentException($"Mode '{value}' is not supported.", nameof(value))
         };
     }
@@ -807,7 +814,8 @@ public static class Program
         InvalidJson,
         UnknownToken,
         Delay,
-        SpawnChildDelay
+        SpawnChildDelay,
+        SpawnChildDelayRecovery
     }
 
     private sealed record VendorTestHelperOptions(

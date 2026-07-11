@@ -29,16 +29,35 @@ builder.Services.AddSingleton<IStationJobStore>(_ =>
     new SqliteStationJobStore(sqliteBuilder.ToString()));
 builder.Services.AddSingleton<IStationSafetyInboxStore>(_ =>
     new SqliteStationSafetyInboxStore(sqliteBuilder.ToString()));
-builder.Services.AddSingleton<IStationResourceFenceValidator>(serviceProvider =>
+builder.Services.AddSingleton(_ =>
+    new SqliteStationMaterialArrivalOutboxStore(sqliteBuilder.ToString()));
+builder.Services.AddSingleton<IStationMaterialArrivalOutboxStore>(serviceProvider =>
+    serviceProvider.GetRequiredService<SqliteStationMaterialArrivalOutboxStore>());
+builder.Services.AddSingleton(serviceProvider =>
     new SqliteStationResourceFenceValidator(
         sqliteBuilder.ToString(),
         serviceProvider.GetRequiredService<IClock>()));
+builder.Services.AddSingleton<IStationResourceFenceValidator>(serviceProvider =>
+    serviceProvider.GetRequiredService<SqliteStationResourceFenceValidator>());
+builder.Services.AddSingleton<IStationResourceLeaseChangeInbox>(serviceProvider =>
+    serviceProvider.GetRequiredService<SqliteStationResourceFenceValidator>());
 builder.Services.AddSingleton(_ => new SignedStationPackageInstaller(
     new StationPackageTrustOptions(
         options.PackageCacheDirectory,
         options.TrustedPackagePublicKeys,
         ImmutableReaderSid: WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName))));
+builder.Services.AddSingleton<IStationMaterialArrivalDeploymentProvider>(serviceProvider =>
+    new SignedStationMaterialArrivalDeploymentProvider(
+        new SignedStationMaterialArrivalDeploymentOptions(
+            options.AgentId,
+            options.StationId,
+            Path.Combine(
+                options.PackageDistributionDirectory,
+                $"{options.MaterialArrivalPackageContentSha256}.olopkg"),
+            options.MaterialArrivalPackageContentSha256),
+        serviceProvider.GetRequiredService<SignedStationPackageInstaller>()));
+builder.Services.AddSingleton<StationMaterialArrivalReporter>();
 builder.Services.AddSingleton(serviceProvider => new ProcessStationRuntimeHost(
     new ProcessStationRuntimeHostOptions(
         options.RuntimeExecutablePath,
@@ -84,6 +103,10 @@ builder.Services.AddSingleton<IStationJobReceiver>(provider =>
     provider.GetRequiredService<RabbitMqStationTransport>());
 builder.Services.AddSingleton<IStationAgentMessagePublisher>(provider =>
     provider.GetRequiredService<RabbitMqStationTransport>());
+builder.Services.AddSingleton<StationMaterialArrivalOutboxDispatcher>();
+builder.Services.AddSingleton(_ => new StationMaterialArrivalLocalIpcOptions(
+    options.MaterialArrivalPipeName));
+builder.Services.AddSingleton<StationMaterialArrivalLocalIpcServer>();
 builder.Services.AddSingleton<IStationArtifactTransfer>(_ =>
     new FileSystemStationArtifactTransfer(
         new FileSystemStationArtifactTransferOptions(
@@ -100,8 +123,13 @@ builder.Services.AddSingleton<IStationSafetyReceiver>(provider =>
     provider.GetRequiredService<RabbitMqStationSafetyReceiver>());
 builder.Services.AddSingleton<StationJobExecutionRegistry>();
 builder.Services.AddSingleton<StationJobCoordinator>();
+builder.Services.AddSingleton(serviceProvider => new StationResourceLeaseChangeCoordinator(
+    options.AgentId,
+    options.StationId,
+    serviceProvider.GetRequiredService<IStationResourceLeaseChangeInbox>()));
 builder.Services.AddSingleton<StationSafetyCommandCoordinator>();
 builder.Services.AddSingleton<StationJobOutboxDispatcher>();
 builder.Services.AddHostedService<StationAgentWorker>();
+builder.Services.AddHostedService<StationMaterialArrivalWorker>();
 
 await builder.Build().RunAsync();

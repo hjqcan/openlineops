@@ -1,8 +1,10 @@
+using System.Text;
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Runtime.Application.Execution;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Transport;
-using OpenLineOps.Runtime.Application.Runs;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -22,7 +24,10 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             store,
             publisher);
         var request = JobRequest();
-        Assert.True(await store.TryEnqueueAsync(request, []));
+        Assert.True(await EnqueueAsync(store, request));
+        var lease = Assert.Single(await store.ListPendingAsync(10));
+        Assert.Equal(nameof(ResourceLeaseChanged), lease.Kind);
+        await store.MarkPublishedAsync(lease.MessageId);
 
         await Assert.ThrowsAsync<IOException>(async () =>
             await DispatchPendingAsync(store, transport));
@@ -43,7 +48,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         var publication = publisher.Publications[1];
         Assert.Equal(request.MessageId, publication.MessageId);
         Assert.Equal(request.JobId, publication.CorrelationId);
-        Assert.Equal($"station.{request.StationId}", publication.RoutingKey);
+        Assert.Equal($"station.{request.AgentId}.{request.StationId}", publication.RoutingKey);
         Assert.Empty(await store.ListPendingAsync(10));
     }
 
@@ -52,20 +57,29 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     {
         var store = new InMemoryStationJobCoordinationStore();
         var processor = new StationResultDeliveryProcessor(store);
-        var completion = Completion();
+        var request = JobRequest();
+        Assert.True(await EnqueueAsync(store, request));
+        var accepted = Accepted(request);
+        await store.RecordAcceptedAsync(accepted);
+        await store.RecordAcceptedAsync(accepted);
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordAcceptedAsync(accepted with { MessageId = Guid.NewGuid() }));
+        var completion = Completion(request);
         var first = new RecordingSettlement(failAcknowledgement: true);
 
         await Assert.ThrowsAsync<IOException>(async () =>
             await processor.ProcessAsync(
                 ResultDelivery(completion, deliveryTag: 1, redelivered: false),
                 first,
-                IgnoreMaterialArrivalAsync));
+                IgnoreMaterialArrivalAsync,
+                IgnoreRecoveryRequiredAsync));
 
         var redelivery = new RecordingSettlement();
         await processor.ProcessAsync(
             ResultDelivery(completion, deliveryTag: 2, redelivered: true),
             redelivery,
-            IgnoreMaterialArrivalAsync);
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
 
         var persisted = await store.GetCompletionAsync(completion.IdempotencyKey);
         Assert.NotNull(persisted);
@@ -82,7 +96,10 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     public async Task CompletionWithWrongEnvelopeIdentityIsRejectedBeforeInboxWrite()
     {
         var store = new InMemoryStationJobCoordinationStore();
-        var completion = Completion();
+        var request = JobRequest();
+        Assert.True(await EnqueueAsync(store, request));
+        await store.RecordAcceptedAsync(Accepted(request));
+        var completion = Completion(request);
         var delivery = ResultDelivery(completion, 3, redelivered: false) with
         {
             AppId = "agent.other"
@@ -92,7 +109,8 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         await new StationResultDeliveryProcessor(store).ProcessAsync(
             delivery,
             settlement,
-            IgnoreMaterialArrivalAsync);
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
 
         Assert.Null(await store.GetCompletionAsync(completion.IdempotencyKey));
         Assert.Equal([(3UL, false)], settlement.Rejected);
@@ -118,18 +136,199 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         var store = new InMemoryStationJobCoordinationStore();
         Assert.True(await store.TryEnqueueAsync(request, [change]));
 
-        var pending = (await store.ListPendingAsync(10)).ToArray();
-        Assert.Equal(2, pending.Length);
-        Assert.Equal(nameof(ResourceLeaseChanged), pending[0].Kind);
-        Assert.Equal(0, pending[0].Sequence);
-        Assert.Equal(nameof(StationJobRequested), pending[1].Kind);
-        Assert.Equal(1, pending[1].Sequence);
+        var leaseHead = Assert.Single(await store.ListPendingAsync(10));
+        Assert.Equal(nameof(ResourceLeaseChanged), leaseHead.Kind);
+        Assert.Equal(0, leaseHead.Sequence);
+        await store.MarkPublishedAsync(leaseHead.MessageId);
+        var jobHead = Assert.Single(await store.ListPendingAsync(10));
+        Assert.Equal(nameof(StationJobRequested), jobHead.Kind);
+        Assert.Equal(1, jobHead.Sequence);
 
         var publication = StationCoordinatorPublicationFactory.Create(Options(), change);
         Assert.Equal(request.JobId, publication.CorrelationId);
         Assert.Equal(
-            "station.station.main.resource-lease-changed",
+            "station.agent.main.station.main.resource-lease-changed",
             publication.RoutingKey);
+    }
+
+    [Fact]
+    public async Task FailedFirstFenceBlocksEveryLaterFenceAndJobUntilHeadIsConfirmed()
+    {
+        var request = JobRequest() with
+        {
+            ResourceFences =
+            [
+                new StationResourceFence(
+                    "Station",
+                    "station-system.main",
+                    7,
+                    Now.AddMinutes(5)),
+                new StationResourceFence(
+                    "Device",
+                    "device.vendor.main",
+                    9,
+                    Now.AddMinutes(5))
+            ]
+        };
+        var store = new InMemoryStationJobCoordinationStore();
+        Assert.True(await EnqueueAsync(store, request));
+        var first = Assert.Single(await store.ListPendingAsync(10));
+        Assert.Equal(0, first.Sequence);
+
+        await store.RecordPublishFailureAsync(first.MessageId, "synthetic broker nack");
+
+        var retry = Assert.Single(await store.ListPendingAsync(10));
+        Assert.Equal(first.MessageId, retry.MessageId);
+        Assert.Equal(nameof(ResourceLeaseChanged), retry.Kind);
+        Assert.DoesNotContain(
+            (await store.ListPendingAsync(10)),
+            static item => item.Kind == nameof(StationJobRequested));
+    }
+
+    [Fact]
+    public async Task QuarantineIsPermanentForEveryUnpublishedMessageInJobGroup()
+    {
+        var request = JobRequest();
+        var store = new InMemoryStationJobCoordinationStore();
+        Assert.True(await EnqueueAsync(store, request));
+
+        await store.QuarantineJobAsync(
+            request.JobId,
+            "Production Run entered RecoveryRequired before dispatch.",
+            Now.AddSeconds(1));
+        await store.QuarantineJobAsync(
+            request.JobId,
+            "Production Run entered RecoveryRequired before dispatch.",
+            Now.AddSeconds(2));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await store.QuarantineJobAsync(
+                request.JobId,
+                "Conflicting quarantine evidence.",
+                Now.AddSeconds(3)));
+
+        Assert.Empty(await store.ListPendingAsync(10));
+        var quarantined = (await store.ListQuarantinedAsync(request.JobId)).ToArray();
+        Assert.Equal(2, quarantined.Length);
+        Assert.Equal([0, 1], quarantined.Select(static item => item.Sequence).ToArray());
+        Assert.All(quarantined, item => Assert.Equal(
+            "Production Run entered RecoveryRequired before dispatch.",
+            item.Reason));
+        Assert.All(quarantined, item => Assert.Equal(Now.AddSeconds(1), item.QuarantinedAtUtc));
+        var exception = await Assert.ThrowsAsync<StationJobDispatchQuarantinedException>(async () =>
+            await new DurableStationJobGateway(store)
+                .DispatchAsync(request)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(1)));
+        Assert.True(exception.NeverPublished);
+    }
+
+    [Fact]
+    public async Task ResultInboxRejectsUnknownOutOfOrderSpoofedAndNullNestedEvidence()
+    {
+        var store = new InMemoryStationJobCoordinationStore();
+        var request = JobRequest();
+        var completion = Completion(request);
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordCompletionAsync(completion));
+
+        Assert.True(await EnqueueAsync(store, request));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordCompletionAsync(completion));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordAcceptedAsync(Accepted(request) with { AgentId = "agent.spoof" }));
+
+        await store.RecordAcceptedAsync(Accepted(request));
+        var malformed = completion with
+        {
+            MessageId = Guid.NewGuid(),
+            Steps = [null!]
+        };
+        var settlement = new RecordingSettlement();
+        await new StationResultDeliveryProcessor(store).ProcessAsync(
+            ResultDelivery(malformed, 30, redelivered: false),
+            settlement,
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
+
+        Assert.Equal([(30UL, false)], settlement.Rejected);
+        Assert.Null(await store.GetCompletionAsync(request.IdempotencyKey));
+
+        var invalidOutcomes = new[]
+        {
+            completion with
+            {
+                MessageId = Guid.NewGuid(),
+                Judgement = OpenLineOps.Runtime.Contracts.ResultJudgement.Unknown
+            },
+            completion with
+            {
+                MessageId = Guid.NewGuid(),
+                ExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus.Failed,
+                Judgement = OpenLineOps.Runtime.Contracts.ResultJudgement.Passed,
+                FailureCode = "Agent.ExecutionFailed",
+                FailureReason = "Synthetic failure"
+            },
+            completion with
+            {
+                MessageId = Guid.NewGuid(),
+                ExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus.Canceled,
+                Judgement = OpenLineOps.Runtime.Contracts.ResultJudgement.Aborted,
+                FailureCode = "Agent.ExecutionCanceled",
+                FailureReason = null
+            }
+        };
+        for (var index = 0; index < invalidOutcomes.Length; index++)
+        {
+            var invalidSettlement = new RecordingSettlement();
+            await new StationResultDeliveryProcessor(store).ProcessAsync(
+                ResultDelivery(
+                    invalidOutcomes[index],
+                    checked((ulong)(31 + index)),
+                    redelivered: false),
+                invalidSettlement,
+                IgnoreMaterialArrivalAsync,
+                IgnoreRecoveryRequiredAsync);
+            Assert.Equal(
+                [(checked((ulong)(31 + index)), false)],
+                invalidSettlement.Rejected);
+        }
+
+        Assert.Null(await store.GetCompletionAsync(request.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task DurableGatewayStopsPollingWhenAgentReportsRecoveryRequired()
+    {
+        var store = new InMemoryStationJobCoordinationStore();
+        var request = JobRequest();
+        Assert.True(await EnqueueAsync(store, request));
+        await store.RecordAcceptedAsync(Accepted(request));
+        var evidence = RecoveryRequired(request);
+        await store.RecordRecoveryRequiredAsync(evidence);
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordCompletionAsync(Completion(request)));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordProgressAsync(new StationJobProgressed(
+                Guid.NewGuid(),
+                request.JobId,
+                request.IdempotencyKey,
+                request.AgentId,
+                request.StationId,
+                75,
+                "Late progress",
+                Now.AddSeconds(3))));
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await store.RecordRecoveryRequiredAsync(evidence with
+            {
+                MessageId = Guid.NewGuid(),
+                IdempotencyKey = $"{request.IdempotencyKey}/recovery-required/0002"
+            }));
+        var gateway = new DurableStationJobGateway(store);
+
+        var exception = await Assert.ThrowsAsync<StationJobRecoveryRequiredException>(async () =>
+            await gateway.DispatchAsync(request).AsTask().WaitAsync(TimeSpan.FromSeconds(1)));
+
+        Assert.Equal(evidence, exception.Evidence);
     }
 
     [Fact]
@@ -142,7 +341,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             "material-arrival/plc/unit-001/scan-001",
             "agent.main",
             "station.main",
-            Guid.NewGuid(),
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
             "line.main",
             "station-system.main",
             StationMaterialArrivalSources.Plc,
@@ -166,15 +370,79 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             await processor.ProcessAsync(
                 MaterialDelivery(message, 20, redelivered: false),
                 first,
-                HandleAsync));
+                HandleAsync,
+                IgnoreRecoveryRequiredAsync));
         var redelivery = new RecordingSettlement();
         await processor.ProcessAsync(
             MaterialDelivery(message, 21, redelivered: true),
             redelivery,
-            HandleAsync);
+            HandleAsync,
+            IgnoreRecoveryRequiredAsync);
 
         Assert.Equal(1, applications);
         Assert.Equal([21UL], redelivery.Acknowledged);
+    }
+
+    [Fact]
+    public async Task MaterialArrivalRejectsUppercaseUuidHashAndUnknownJsonPermanently()
+    {
+        var processor = new StationResultDeliveryProcessor(
+            new InMemoryStationJobCoordinationStore());
+        var message = new MaterialArrived(
+            Guid.NewGuid(),
+            $"material-arrival/{Guid.NewGuid():D}",
+            "agent.main",
+            "station.main",
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            StationMaterialKinds.Carrier,
+            "carrier-main",
+            "line.main",
+            "station-system.main",
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.main",
+            Now);
+        var canonicalJson = Encoding.UTF8.GetString(
+            JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions()));
+        var uppercaseUuidJson = canonicalJson.Replace(
+            message.MessageId.ToString("D"),
+            message.MessageId.ToString("D").ToUpperInvariant(),
+            StringComparison.Ordinal);
+        var unknownFieldJson = $"{canonicalJson[..^1]},\"unknownToken\":true}}";
+        var uppercaseHashJson = canonicalJson.Replace(
+            new string('a', 64),
+            new string('A', 64),
+            StringComparison.Ordinal);
+        var handled = 0;
+        ValueTask HandleAsync(MaterialArrived _, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            handled++;
+            return ValueTask.CompletedTask;
+        }
+
+        foreach (var (deliveryTag, json) in new[]
+                 {
+                     (31UL, uppercaseUuidJson),
+                     (32UL, uppercaseHashJson),
+                     (33UL, unknownFieldJson)
+                 })
+        {
+            var settlement = new RecordingSettlement();
+            await processor.ProcessAsync(
+                MaterialDelivery(message, deliveryTag, redelivered: false) with
+                {
+                    Body = Encoding.UTF8.GetBytes(json)
+                },
+                settlement,
+                HandleAsync,
+                IgnoreRecoveryRequiredAsync);
+            Assert.Equal([(deliveryTag, false)], settlement.Rejected);
+        }
+
+        Assert.Equal(0, handled);
     }
 
     [Fact]
@@ -252,7 +520,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         Assert.Equal(request.MessageId, publication.MessageId);
         Assert.Equal(request.MessageId, publication.CorrelationId);
         Assert.Equal(
-            "station.station.main.emergency-stop",
+            "station.agent.main.station.main.emergency-stop",
             publication.RoutingKey);
     }
 
@@ -318,21 +586,46 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             "flow-version.main",
             "configuration.main",
             "recipe.main",
-            [],
+            [new StationResourceFence(
+                "Station",
+                "station-system.main",
+                7,
+                Now.AddMinutes(5))],
             inputs.RootElement.Clone(),
             Now);
     }
 
-    private static StationJobCompleted Completion()
+    private static StationJobAccepted Accepted(StationJobRequested request) => new(
+        Guid.NewGuid(),
+        request.JobId,
+        request.IdempotencyKey,
+        request.AgentId,
+        request.StationId,
+        Now.AddSeconds(1));
+
+    private static StationJobRecoveryRequired RecoveryRequired(StationJobRequested request) => new(
+        Guid.NewGuid(),
+        $"{request.IdempotencyKey}/recovery-required/0001",
+        request.JobId,
+        request.IdempotencyKey,
+        request.AgentId,
+        request.StationId,
+        request.ProductionRunId,
+        request.OperationRunId,
+        request.RuntimeSessionId,
+        "Agent restarted during non-idempotent execution.",
+        Now.AddSeconds(2));
+
+    private static StationJobCompleted Completion(StationJobRequested request)
     {
         using var outputs = JsonDocument.Parse("{}");
         return new StationJobCompleted(
             Guid.NewGuid(),
-            Guid.NewGuid(),
-            "job/unit-001/operation.main/1",
-            "agent.main",
-            "station.main",
-            Guid.NewGuid(),
+            request.JobId,
+            request.IdempotencyKey,
+            request.AgentId,
+            request.StationId,
+            request.RuntimeSessionId,
             OpenLineOps.Runtime.Contracts.ExecutionStatus.Completed,
             OpenLineOps.Runtime.Contracts.ResultJudgement.Passed,
             outputs.RootElement.Clone(),
@@ -345,7 +638,17 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             [],
             null,
             null,
-            Now);
+            Now.AddSeconds(2));
+    }
+
+    private static async ValueTask<bool> EnqueueAsync(
+        InMemoryStationJobCoordinationStore store,
+        StationJobRequested request)
+    {
+        var changes = request.ResourceFences
+            .Select(fence => StationDispatchMessageIdentity.CreateLeaseGranted(request, fence))
+            .ToArray();
+        return await store.TryEnqueueAsync(request, changes);
     }
 
     private static StationSafeStopRequested SafeStopRequest() => new(
@@ -422,7 +725,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         nameof(MaterialArrived),
         message.ProducerId,
         message.MessageId.ToString("D"),
-        message.ProductionUnitId.ToString("D"),
+        message.MessageId.ToString("D"),
         $"station.{message.StationId}.{nameof(MaterialArrived)}",
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions()));
@@ -431,6 +734,14 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
 
     private static ValueTask IgnoreMaterialArrivalAsync(
         MaterialArrived _,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.CompletedTask;
+    }
+
+    private static ValueTask IgnoreRecoveryRequiredAsync(
+        StationJobRecoveryRequired _,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

@@ -74,46 +74,6 @@ public sealed class InMemoryStationResourceFenceValidator(IClock clock) :
         }
     }
 
-    public ValueTask<StationResourceFenceValidationResult> ValidateAndAdvanceAsync(
-        StationJobSnapshot job,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(job);
-        cancellationToken.ThrowIfCancellationRequested();
-        var invalid = ValidateCurrentFences(job, clock.UtcNow);
-        if (invalid is not null)
-        {
-            return ValueTask.FromResult(StationResourceFenceValidationResult.Reject(invalid));
-        }
-
-        lock (_gate)
-        {
-            foreach (var fence in job.ResourceFences)
-            {
-                if (_fences.TryGetValue((fence.ResourceKind, fence.ResourceId), out var current)
-                    && (current.FencingToken > fence.FencingToken
-                        || (current.FencingToken == fence.FencingToken && current.JobId != job.JobId)))
-                {
-                    return ValueTask.FromResult(StationResourceFenceValidationResult.Reject(
-                        $"Resource {fence.ResourceKind}/{fence.ResourceId} has fencing token "
-                        + $"{current.FencingToken}; job token {fence.FencingToken} is stale."));
-                }
-            }
-
-            foreach (var fence in job.ResourceFences)
-            {
-                _fences[(fence.ResourceKind, fence.ResourceId)] = new FenceOwner(
-                    fence.FencingToken,
-                    job.JobId,
-                    job.ProductionRunId,
-                    job.OperationRunId.Value,
-                    fence.ExpiresAtUtc);
-            }
-
-            return ValueTask.FromResult(StationResourceFenceValidationResult.Accept());
-        }
-    }
-
     public ValueTask<StationResourceFenceValidationResult> ValidateCurrentAsync(
         StationJobSnapshot job,
         CancellationToken cancellationToken = default)
@@ -130,13 +90,29 @@ public sealed class InMemoryStationResourceFenceValidator(IClock clock) :
         {
             foreach (var fence in job.ResourceFences)
             {
-                if (!_fences.TryGetValue((fence.ResourceKind, fence.ResourceId), out var current)
-                    || current.FencingToken != fence.FencingToken
+                if (!_fences.TryGetValue((fence.ResourceKind, fence.ResourceId), out var current))
+                {
+                    return ValueTask.FromResult(StationResourceFenceValidationResult.Retry(
+                        $"Resource {fence.ResourceKind}/{fence.ResourceId} lease grant has not arrived."));
+                }
+
+                if (current.FencingToken < fence.FencingToken)
+                {
+                    return ValueTask.FromResult(StationResourceFenceValidationResult.Retry(
+                        $"Resource {fence.ResourceKind}/{fence.ResourceId} lease grant token {fence.FencingToken} has not arrived."));
+                }
+
+                if (current.FencingToken != fence.FencingToken
                     || current.JobId != job.JobId
+                    || current.ProductionRunId != job.ProductionRunId
+                    || !string.Equals(
+                        current.OperationRunId,
+                        job.OperationRunId.Value,
+                        StringComparison.Ordinal)
                     || current.ExpiresAtUtc != fence.ExpiresAtUtc)
                 {
                     return ValueTask.FromResult(StationResourceFenceValidationResult.Reject(
-                        $"Resource {fence.ResourceKind}/{fence.ResourceId} token {fence.FencingToken} is no longer current for job {job.JobId}."));
+                        $"Resource {fence.ResourceKind}/{fence.ResourceId} token {fence.FencingToken} does not exactly match the persisted lease grant for job {job.JobId}."));
                 }
             }
 

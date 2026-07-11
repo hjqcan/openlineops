@@ -133,7 +133,7 @@ The repository gate is the combination of:
 
 ```powershell
 dotnet build OpenLineOps.sln --configuration Release --property:TreatWarningsAsErrors=true
-dotnet test OpenLineOps.sln --configuration Release --no-build
+dotnet test OpenLineOps.sln --configuration Release --no-build -m:1
 powershell -NoProfile -File eng/verify-no-version-suffix-implementations.ps1
 powershell -NoProfile -File eng/verify-no-legacy-production-contracts.ps1
 powershell -NoProfile -File eng/verify-no-technical-debt-markers.ps1

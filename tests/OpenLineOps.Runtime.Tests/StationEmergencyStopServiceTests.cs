@@ -232,7 +232,8 @@ public sealed class StationEmergencyStopServiceTests
             ValueTask.FromResult(new StationDeploymentRoute(
                 "agent.safety",
                 "station.safety",
-                new string('a', 64)));
+                new string('a', 64),
+                "line.safety"));
     }
 
     private sealed class RejectingDeploymentResolver : IStationDeploymentResolver

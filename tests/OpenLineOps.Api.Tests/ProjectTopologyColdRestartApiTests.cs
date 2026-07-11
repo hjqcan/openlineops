@@ -24,6 +24,10 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Path.GetTempPath(),
         "openlineops-project-topology-api-tests",
         Guid.NewGuid().ToString("N"));
+    private readonly string _stationPackageDirectory = Path.Combine(
+        Path.GetTempPath(),
+        "openlineops-project-topology-station-packages",
+        Guid.NewGuid().ToString("N"));
 
     [Fact]
     public async Task ProjectScopedTopologyAndLayoutSurviveHostRestartFolderMoveAndIsolateApplications()
@@ -46,7 +50,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         PublishedProjectRelease? publishedReleaseA = null;
         PublishedProjectRelease? publishedReleaseB = null;
 
-        using (var firstFactory = new ScriptWorkerWebApplicationFactory())
+        using (var firstFactory = new ScriptWorkerWebApplicationFactory(
+                   _stationPackageDirectory))
         using (var client = firstFactory.CreateClient())
         {
             using var createWorkspace = await client.PostAsJsonAsync(
@@ -266,7 +271,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
             Directory.GetFiles(_projectDirectory, "source.*.py", SearchOption.AllDirectories).Length >= 2);
         Directory.Move(_projectDirectory, MovedProjectDirectory);
 
-        using (var secondFactory = new ScriptWorkerWebApplicationFactory())
+        using (var secondFactory = new ScriptWorkerWebApplicationFactory(
+                   _stationPackageDirectory))
         using (var client = secondFactory.CreateClient())
         {
             using var openWorkspace = await client.PostAsJsonAsync(
@@ -521,6 +527,11 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         if (Directory.Exists(MovedProjectDirectory))
         {
             Directory.Delete(MovedProjectDirectory, recursive: true);
+        }
+
+        if (Directory.Exists(_stationPackageDirectory))
+        {
+            Directory.Delete(_stationPackageDirectory, recursive: true);
         }
     }
 
@@ -961,10 +972,22 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 occurredAtUtc = DateTimeOffset.UtcNow
             });
         Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
+        using var contextResponse = await client.GetAsync(
+            $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/snapshots/"
+            + $"{Uri.EscapeDataString(projectSnapshotId)}/production-run-context");
+        using var contextBody = await ReadJsonAsync(contextResponse);
+        Assert.Equal(HttpStatusCode.OK, contextResponse.StatusCode);
         using var arriveUnitResponse = await client.PostAsJsonAsync(
             $"/api/production-units/{productionUnitId:D}/arrivals",
             new
             {
+                projectId,
+                applicationId,
+                projectSnapshotId,
+                packageContentSha256 = contextBody.RootElement
+                    .GetProperty("entryStationPackageContentSha256")
+                    .GetString(),
+                stationId = contextBody.RootElement.GetProperty("entryStationId").GetString(),
                 lineId = productionLineDefinitionId,
                 stationSystemId = "station.main",
                 actorId,
@@ -1155,7 +1178,8 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         string ContentSha256,
         string AbsoluteManifestPath);
 
-    private sealed class ScriptWorkerWebApplicationFactory : StationPackageWebApplicationFactory
+    private sealed class ScriptWorkerWebApplicationFactory(string stationPackageDirectory) :
+        StationPackageWebApplicationFactory(stationPackageDirectory)
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

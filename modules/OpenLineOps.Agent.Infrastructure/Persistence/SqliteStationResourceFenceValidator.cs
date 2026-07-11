@@ -31,75 +31,6 @@ public sealed class SqliteStationResourceFenceValidator :
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     }
 
-    public async ValueTask<StationResourceFenceValidationResult> ValidateAndAdvanceAsync(
-        StationJobSnapshot job,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(job);
-        var nowUtc = _clock.UtcNow;
-        if (nowUtc.Offset != TimeSpan.Zero)
-        {
-            throw new InvalidOperationException("Agent clock must use UTC offset zero.");
-        }
-
-        if (job.ResourceFences
-                .Select(static fence => (fence.ResourceKind, fence.ResourceId))
-                .Distinct()
-                .Count() != job.ResourceFences.Count)
-        {
-            return StationResourceFenceValidationResult.Reject(
-                "Station job contains duplicate resource fences.");
-        }
-
-        var expired = job.ResourceFences.FirstOrDefault(fence =>
-            fence.ExpiresAtUtc.Offset != TimeSpan.Zero || fence.ExpiresAtUtc <= nowUtc);
-        if (expired is not null)
-        {
-            return StationResourceFenceValidationResult.Reject(
-                $"Resource {expired.ResourceKind}/{expired.ResourceId} fence expired before hardware start.");
-        }
-
-        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
-        await _validationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await using var connection = new SqliteConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using var transaction = (SqliteTransaction)await connection
-                .BeginTransactionAsync(cancellationToken)
-                .ConfigureAwait(false);
-            foreach (var fence in job.ResourceFences
-                         .OrderBy(fence => fence.ResourceKind, StringComparer.Ordinal)
-                         .ThenBy(fence => fence.ResourceId, StringComparer.Ordinal))
-            {
-                var current = await GetCurrentAsync(connection, transaction, fence, cancellationToken)
-                    .ConfigureAwait(false);
-                if (current is not null
-                    && (current.FencingToken > fence.FencingToken
-                        || (current.FencingToken == fence.FencingToken && current.JobId != job.JobId)))
-                {
-                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-                    return StationResourceFenceValidationResult.Reject(
-                        $"Resource {fence.ResourceKind}/{fence.ResourceId} has fencing token "
-                        + $"{current.FencingToken}; job token {fence.FencingToken} is stale.");
-                }
-            }
-
-            foreach (var fence in job.ResourceFences)
-            {
-                await UpsertAsync(connection, transaction, job.JobId, fence, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return StationResourceFenceValidationResult.Accept();
-        }
-        finally
-        {
-            _validationLock.Release();
-        }
-    }
-
     public async ValueTask ApplyAsync(
         ResourceLeaseChanged change,
         CancellationToken cancellationToken = default)
@@ -170,13 +101,18 @@ public sealed class SqliteStationResourceFenceValidator :
                 && (current.FencingToken > change.FencingToken
                     || (current.FencingToken == change.FencingToken
                         && (current.JobId != jobId
+                            || current.ProductionRunId != change.ProductionRunId
+                            || !string.Equals(
+                                current.OperationRunId,
+                                change.OperationRunId,
+                                StringComparison.Ordinal)
                             || current.ExpiresAtUtc != change.ExpiresAtUtc))))
             {
                 throw new InvalidOperationException(
                     $"Resource {change.ResourceKind}/{change.ResourceId} lease change is stale or conflicts with its current owner.");
             }
 
-            await UpsertAsync(connection, transaction, jobId, evidence, cancellationToken)
+            await UpsertAsync(connection, transaction, change, cancellationToken)
                 .ConfigureAwait(false);
             await using (var insert = connection.CreateCommand())
             {
@@ -223,6 +159,16 @@ public sealed class SqliteStationResourceFenceValidator :
                 "Station job contains duplicate resource fences.");
         }
 
+        var invalid = job.ResourceFences.FirstOrDefault(fence =>
+            fence.ExpiresAtUtc == default
+            || fence.ExpiresAtUtc.Offset != TimeSpan.Zero
+            || fence.ExpiresAtUtc <= nowUtc);
+        if (invalid is not null)
+        {
+            return StationResourceFenceValidationResult.Reject(
+                $"Resource {invalid.ResourceKind}/{invalid.ResourceId} fence expired before hardware start.");
+        }
+
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await _validationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -238,15 +184,26 @@ public sealed class SqliteStationResourceFenceValidator :
             {
                 var current = await GetCurrentAsync(connection, transaction, fence, cancellationToken)
                     .ConfigureAwait(false);
-                if (current is null
-                    || current.FencingToken != fence.FencingToken
+                if (current is null || current.FencingToken < fence.FencingToken)
+                {
+                    await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                    return StationResourceFenceValidationResult.Retry(
+                        $"Resource {fence.ResourceKind}/{fence.ResourceId} lease grant token {fence.FencingToken} has not arrived.");
+                }
+
+                if (current.FencingToken != fence.FencingToken
                     || current.JobId != job.JobId
+                    || current.ProductionRunId != job.ProductionRunId
+                    || !string.Equals(
+                        current.OperationRunId,
+                        job.OperationRunId.Value,
+                        StringComparison.Ordinal)
                     || current.ExpiresAtUtc != fence.ExpiresAtUtc
                     || current.ExpiresAtUtc <= nowUtc)
                 {
                     await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
                     return StationResourceFenceValidationResult.Reject(
-                        $"Resource {fence.ResourceKind}/{fence.ResourceId} token {fence.FencingToken} is no longer current for job {job.JobId}.");
+                        $"Resource {fence.ResourceKind}/{fence.ResourceId} token {fence.FencingToken} does not exactly match the persisted lease grant for job {job.JobId}.");
                 }
             }
 
@@ -292,6 +249,8 @@ public sealed class SqliteStationResourceFenceValidator :
                     resource_id TEXT NOT NULL,
                     fencing_token INTEGER NOT NULL,
                     owner_job_id TEXT NOT NULL,
+                    production_run_id TEXT NOT NULL,
+                    operation_run_id TEXT NOT NULL,
                     expires_at_utc TEXT NOT NULL,
                     PRIMARY KEY(resource_kind, resource_id)
                 );
@@ -320,7 +279,12 @@ public sealed class SqliteStationResourceFenceValidator :
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT fencing_token, owner_job_id, expires_at_utc
+            SELECT
+                fencing_token,
+                owner_job_id,
+                production_run_id,
+                operation_run_id,
+                expires_at_utc
             FROM station_resource_fences
             WHERE resource_kind = $resource_kind
               AND resource_id = $resource_id
@@ -333,8 +297,10 @@ public sealed class SqliteStationResourceFenceValidator :
             ? new CurrentFence(
                 reader.GetInt64(0),
                 new StationJobId(Guid.Parse(reader.GetString(1))),
+                Guid.Parse(reader.GetString(2)),
+                reader.GetString(3),
                 DateTimeOffset.ParseExact(
-                    reader.GetString(2),
+                    reader.GetString(4),
                     "O",
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.None))
@@ -344,8 +310,7 @@ public sealed class SqliteStationResourceFenceValidator :
     private static async ValueTask UpsertAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        StationJobId jobId,
-        StationResourceFenceEvidence fence,
+        ResourceLeaseChanged change,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -356,25 +321,33 @@ public sealed class SqliteStationResourceFenceValidator :
                 resource_id,
                 fencing_token,
                 owner_job_id,
+                production_run_id,
+                operation_run_id,
                 expires_at_utc)
             VALUES (
                 $resource_kind,
                 $resource_id,
                 $fencing_token,
                 $owner_job_id,
+                $production_run_id,
+                $operation_run_id,
                 $expires_at_utc)
             ON CONFLICT(resource_kind, resource_id) DO UPDATE SET
                 fencing_token = excluded.fencing_token,
                 owner_job_id = excluded.owner_job_id,
+                production_run_id = excluded.production_run_id,
+                operation_run_id = excluded.operation_run_id,
                 expires_at_utc = excluded.expires_at_utc;
             """;
-        command.Parameters.AddWithValue("$resource_kind", fence.ResourceKind);
-        command.Parameters.AddWithValue("$resource_id", fence.ResourceId);
-        command.Parameters.AddWithValue("$fencing_token", fence.FencingToken);
-        command.Parameters.AddWithValue("$owner_job_id", jobId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$resource_kind", change.ResourceKind);
+        command.Parameters.AddWithValue("$resource_id", change.ResourceId);
+        command.Parameters.AddWithValue("$fencing_token", change.FencingToken);
+        command.Parameters.AddWithValue("$owner_job_id", change.JobId.ToString("D"));
+        command.Parameters.AddWithValue("$production_run_id", change.ProductionRunId.ToString("D"));
+        command.Parameters.AddWithValue("$operation_run_id", change.OperationRunId);
         command.Parameters.AddWithValue(
             "$expires_at_utc",
-            fence.ExpiresAtUtc.ToString("O", CultureInfo.InvariantCulture));
+            change.ExpiresAtUtc.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -402,5 +375,7 @@ public sealed class SqliteStationResourceFenceValidator :
     private sealed record CurrentFence(
         long FencingToken,
         StationJobId JobId,
+        Guid ProductionRunId,
+        string OperationRunId,
         DateTimeOffset ExpiresAtUtc);
 }

@@ -33,15 +33,50 @@ public static class StationDispatchMessageIdentity
     }
 
     public static Guid CreateMaterialArrivalMessageId(
-        Guid productionUnitId,
+        string materialKind,
+        string materialId,
+        string projectId,
+        string applicationId,
+        string projectSnapshotId,
+        string packageContentSha256,
+        string stationId,
         string lineId,
         string stationSystemId,
         string actorId,
         DateTimeOffset arrivedAtUtc)
     {
-        if (productionUnitId == Guid.Empty)
+        if (!StationMaterialKinds.IsDefined(materialKind))
         {
-            throw new ArgumentException("Production Unit id cannot be empty.", nameof(productionUnitId));
+            throw new ArgumentException(
+                "Material kind must be exactly ProductionUnit or Carrier.",
+                nameof(materialKind));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(materialId);
+        if (materialKind == StationMaterialKinds.ProductionUnit
+            && (!Guid.TryParseExact(materialId, "D", out var productionUnitId)
+                || !string.Equals(
+                    materialId,
+                    productionUnitId.ToString("D"),
+                    StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "Production Unit material id must be canonical lowercase D-format UUID text.",
+                nameof(materialId));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(applicationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectSnapshotId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageContentSha256);
+        if (packageContentSha256.Length != 64
+            || packageContentSha256.Any(static character =>
+                character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        {
+            throw new ArgumentException(
+                "Package content SHA-256 must be lowercase hexadecimal.",
+                nameof(packageContentSha256));
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(lineId);
@@ -55,8 +90,9 @@ public static class StationDispatchMessageIdentity
         }
 
         return DeterministicGuid(
-            $"material-arrival/{productionUnitId:D}/{lineId}/{stationSystemId}/"
-            + $"{actorId}/{arrivedAtUtc:O}");
+            $"material-arrival/{projectId}/{applicationId}/{projectSnapshotId}/"
+            + $"{packageContentSha256}/{stationId}/{materialKind}/{materialId}/{lineId}/"
+            + $"{stationSystemId}/{actorId}/{arrivedAtUtc:O}");
     }
 
     public static string CreateMaterialArrivalIdempotencyKey(Guid messageId)

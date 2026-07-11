@@ -70,7 +70,7 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         _units[unit.Id] = new Stored<ProductionUnitSnapshot>(
             unit.ToSnapshot(),
             checked(stored.Revision + 1));
-        foreach (var (address, slot, revision) in slotUpdates)
+        foreach (var (address, slot, revision, completedOperation) in slotUpdates)
         {
             _slots[address] = new Stored<SlotOccupancySnapshot>(
                 slot.ToSnapshot(),
@@ -81,6 +81,8 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
                 slot.Material ?? throw new InvalidDataException(
                     $"Completed Slot {address} lost its material binding."),
                 run.Id,
+                completedOperation.OperationRunId,
+                completedOperation.FencingToken,
                 SlotOccupancyStatus.Running,
                 SlotOccupancyStatus.Occupied,
                 run.ActorId,
@@ -101,10 +103,18 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         }
     }
 
-    private List<(SlotAddress Address, SlotOccupancy Slot, long Revision)>
+    private List<(
+        SlotAddress Address,
+        SlotOccupancy Slot,
+        long Revision,
+        CompletedSlotOperation CompletedOperation)>
         ResolveCompletedSlotUpdates(ProductionRun run, ProductionUnit unit)
     {
-        var updates = new List<(SlotAddress, SlotOccupancy, long)>();
+        var updates = new List<(
+            SlotAddress,
+            SlotOccupancy,
+            long,
+            CompletedSlotOperation)>();
         var expectedMaterial = unit.Location is
         {
             Kind: MaterialLocationKind.CarrierPosition,
@@ -136,21 +146,21 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
                     $"Resolved Slot {address} is bound to {slot.Material}, not {expectedMaterial}.");
             }
 
-            if (slot.Status == SlotOccupancyStatus.Running)
-            {
-                var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
-                if (!completed.Succeeded)
-                {
-                    throw new InvalidDataException(completed.Message);
-                }
-
-                updates.Add((address, slot, storedSlot.Revision));
-            }
-            else if (slot.Status != SlotOccupancyStatus.Occupied)
+            if (slot.Status != SlotOccupancyStatus.Running)
             {
                 throw new InvalidDataException(
-                    $"Resolved Slot {address} must be Running or idempotently Occupied, not {slot.Status}.");
+                    $"Resolved Slot {address} has no exact completion evidence for Operation Run "
+                    + $"{completedSlot.OperationRunId} at fencing token {completedSlot.FencingToken}; "
+                    + $"its status must be Running, not {slot.Status}.");
             }
+
+            var completed = slot.Complete(expectedMaterial, completedSlot.CompletedAtUtc);
+            if (!completed.Succeeded)
+            {
+                throw new InvalidDataException(completed.Message);
+            }
+
+            updates.Add((address, slot, storedSlot.Revision, completedSlot));
         }
 
         return updates;

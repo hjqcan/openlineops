@@ -114,6 +114,30 @@ Test-ContentContains `
     -Message "Workflow must reject legacy production contracts and compatibility aliases."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "verify-solution-project-coverage\.ps1" `
+    -Message "Workflow must prove every formal project, including Agent and Runner hosts, is covered by the solution."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "dotnet restore src/OpenLineOps\.Agent/OpenLineOps\.Agent\.csproj --runtime win-x64" `
+    -Message "Workflow must restore the self-contained win-x64 Station Agent host."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "dotnet restore src/OpenLineOps\.StationRuntime/OpenLineOps\.StationRuntime\.csproj --runtime win-x64" `
+    -Message "Workflow must restore the self-contained win-x64 Station Runtime host."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "dotnet restore src/OpenLineOps\.Runner/OpenLineOps\.Runner\.csproj --runtime win-x64" `
+    -Message "Workflow must restore the self-contained win-x64 headless Runner host."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "--require-kind agent --require-kind runner" `
+    -Message "Workflow must require formal Agent and Runner release artifacts."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern "verify-windows-signing-readiness\.ps1" `
+    -Message "Workflow must verify the shared Windows package signing path."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "npm run test:line-projection" `
     -Message "Workflow must verify the persisted production-line projection independently from renderer memory."
 Test-ContentContains `

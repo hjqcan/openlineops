@@ -38,6 +38,11 @@ public sealed record RegisterSlotOccupancyApiRequest(
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record MaterialArrivalApiRequest(
+    string ProjectId,
+    string ApplicationId,
+    string ProjectSnapshotId,
+    string PackageContentSha256,
+    string StationId,
     string LineId,
     string StationSystemId,
     string ActorId,

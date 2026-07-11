@@ -113,6 +113,39 @@ public sealed class RabbitMqStationTransportReliabilityTests
     }
 
     [Fact]
+    public async Task MalformedNestedFenceAndDefaultEvidenceArePermanentlyRejected()
+    {
+        var valid = JobRequest();
+        var malformed = new[]
+        {
+            valid with { ResourceFences = [null!] },
+            valid with { ResourceFences = [] },
+            valid with { PackageContentSha256 = null! },
+            valid with { Inputs = JsonSerializer.SerializeToElement<object?>(null) },
+            valid with { RequestedAtUtc = default }
+        };
+        var handled = 0;
+        for (var index = 0; index < malformed.Length; index++)
+        {
+            var settlement = new RecordingSettlement();
+            await new StationJobDeliveryProcessor(JobOptions()).ProcessAsync(
+                Delivery(malformed[index], checked((ulong)(20 + index)), redelivered: false),
+                (_, _) =>
+                {
+                    handled++;
+                    return ValueTask.CompletedTask;
+                },
+                IgnoreResourceLeaseAsync,
+                settlement);
+
+            Assert.Equal([(checked((ulong)(20 + index)), false)], settlement.Rejected);
+            Assert.Empty(settlement.Acknowledged);
+        }
+
+        Assert.Equal(0, handled);
+    }
+
+    [Fact]
     public async Task SafetyAckPublishFailureRequeuesAndRedeliveryDoesNotReplayActuator()
     {
         var coordinator = new StationSafetyCommandCoordinator(
@@ -238,7 +271,11 @@ public sealed class RabbitMqStationTransportReliabilityTests
             "flow-version.main",
             "configuration.main",
             "recipe.main",
-            [],
+            [new StationResourceFence(
+                "Station",
+                "station-system.main",
+                1,
+                Now.AddMinutes(5))],
             inputs.RootElement.Clone(),
             Now);
     }
@@ -254,7 +291,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
         "coordinator.main",
         request.MessageId.ToString("D"),
         request.JobId.ToString("D"),
-        $"station.{request.StationId}",
+        $"station.{request.AgentId}.{request.StationId}",
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions()));
 
@@ -269,7 +306,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
         "coordinator.main",
         request.MessageId.ToString("D"),
         request.MessageId.ToString("D"),
-        $"station.{request.StationId}.emergency-stop",
+        $"station.{request.AgentId}.{request.StationId}.emergency-stop",
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions()));
 

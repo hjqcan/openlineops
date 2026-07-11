@@ -351,6 +351,62 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         return result;
     }
 
+    public RuntimeOperationResult CancelOperation(
+        string operationRunId,
+        string code,
+        string reason,
+        int completedStepCount,
+        int commandCount,
+        int incidentCount,
+        DateTimeOffset canceledAtUtc)
+    {
+        if (IsTerminal
+            || ControlState is not (ProductionRunControlState.Active
+                or ProductionRunControlState.StopRequested))
+        {
+            return Reject("Runtime.OperationCancelRejected", "capture operation cancellation");
+        }
+
+        RequireUtc(canceledAtUtc, nameof(canceledAtUtc));
+        var operation = FindOperationRun(operationRunId);
+        if (operation is null)
+        {
+            return OperationNotFound(operationRunId);
+        }
+
+        var from = operation.ExecutionStatus;
+        var result = operation.CancelAfterExecution(
+            code,
+            reason,
+            completedStepCount,
+            commandCount,
+            incidentCount,
+            canceledAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
+
+        LastTransitionAtUtc = canceledAtUtc > LastTransitionAtUtc
+            ? canceledAtUtc
+            : LastTransitionAtUtc;
+        RaiseOperationStatusChanged(operation, from, reason);
+        FailureCode = "Runtime.ProductionRunCancelRequested";
+        FailureReason = ProductionRunText.Required(reason, nameof(reason));
+        ControlState = ProductionRunControlState.StopRequested;
+        Disposition = ProductDisposition.Held;
+        foreach (var pending in _operations.Where(candidate =>
+                     candidate.ExecutionStatus == ExecutionStatus.Pending))
+        {
+            var pendingFrom = pending.ExecutionStatus;
+            pending.Cancel(reason, LastTransitionAtUtc);
+            RaiseOperationStatusChanged(pending, pendingFrom, reason);
+        }
+
+        TryFinishRequestedStop(LastTransitionAtUtc);
+        return result;
+    }
+
     public RuntimeOperationResult Pause(DateTimeOffset pausedAtUtc)
     {
         if (ExecutionStatus != ExecutionStatus.Running
@@ -433,9 +489,23 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 
     public RuntimeOperationResult MarkRecoveryRequired(string reason, DateTimeOffset detectedAtUtc)
     {
+        if (detectedAtUtc == default || detectedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Recovery detection timestamp must be non-default UTC.",
+                nameof(detectedAtUtc));
+        }
+
         if (ExecutionStatus != ExecutionStatus.Running)
         {
             return Reject("Runtime.ProductionRunRecoveryRejected", "enter recovery");
+        }
+
+        if (detectedAtUtc < LastTransitionAtUtc)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.RecoveryDetectionPredatesRun",
+                "Recovery detection cannot precede the Production Run's latest transition.");
         }
 
         FailureCode = "Runtime.RecoveryRequired";
@@ -937,7 +1007,12 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             ResultJudgement.Aborted,
             ProductDisposition.Held,
             stoppedAtUtc,
-            "Runtime.ProductionRunStopped",
+            string.Equals(
+                FailureCode,
+                "Runtime.ProductionRunCancelRequested",
+                StringComparison.Ordinal)
+                ? "Runtime.ProductionRunCanceled"
+                : "Runtime.ProductionRunStopped",
             FailureReason ?? "Production Run stopped at an operation boundary.");
     }
 
@@ -1187,23 +1262,23 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             switch (decision.Kind)
             {
                 case ProductionRecoveryDecisionKind.Reconcile:
-                {
-                    var operation = _operations.SingleOrDefault(candidate => string.Equals(
-                        candidate.OperationRunId,
-                        decision.OperationRunId,
-                        StringComparison.Ordinal));
-                    Require(
-                        operation is not null
-                        && operation.ExecutionStatus == ExecutionStatus.Completed
-                        && operation.CompletedAtUtc == decision.DecidedAtUtc
-                        && operation.Judgement == decision.ObservedJudgement
-                        && operation.Outputs.Count == decision.ObservedOutputs.Count
-                        && operation.Outputs.All(output =>
-                            decision.ObservedOutputs.TryGetValue(output.Key, out var value)
-                            && value == output.Value),
-                        "Reconcile Recovery Decision differs from its completed Operation evidence.");
-                    break;
-                }
+                    {
+                        var operation = _operations.SingleOrDefault(candidate => string.Equals(
+                            candidate.OperationRunId,
+                            decision.OperationRunId,
+                            StringComparison.Ordinal));
+                        Require(
+                            operation is not null
+                            && operation.ExecutionStatus == ExecutionStatus.Completed
+                            && operation.CompletedAtUtc == decision.DecidedAtUtc
+                            && operation.Judgement == decision.ObservedJudgement
+                            && operation.Outputs.Count == decision.ObservedOutputs.Count
+                            && operation.Outputs.All(output =>
+                                decision.ObservedOutputs.TryGetValue(output.Key, out var value)
+                                && value == output.Value),
+                            "Reconcile Recovery Decision differs from its completed Operation evidence.");
+                        break;
+                    }
                 case ProductionRecoveryDecisionKind.Retry:
                     Require(
                         _operations.Count(operation => string.Equals(

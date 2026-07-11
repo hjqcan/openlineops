@@ -46,6 +46,7 @@ public sealed class StationJobCoordinator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
+        StationMessageContract.Validate(message);
         Validate(message);
 
         var existing = await _store
@@ -54,7 +55,13 @@ public sealed class StationJobCoordinator
         if (existing is not null)
         {
             EnsureSameRequest(existing.Job, message);
-            return existing.Job;
+            return existing.Job.Status == StationJobStatus.Accepted
+                ? await ExecuteAcceptedAsync(
+                        StationJob.Restore(existing.Job),
+                        existing.Revision,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : existing.Job;
         }
 
         var job = StationJob.Request(new StationJobRequest(
@@ -107,7 +114,13 @@ public sealed class StationJobCoordinator
                 .ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Station job idempotency race did not persist a job.");
             EnsureSameRequest(raced.Job, message);
-            return raced.Job;
+            return raced.Job.Status == StationJobStatus.Accepted
+                ? await ExecuteAcceptedAsync(
+                        StationJob.Restore(raced.Job),
+                        raced.Revision,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : raced.Job;
         }
 
         return await ExecuteAcceptedAsync(job, 0, cancellationToken).ConfigureAwait(false);
@@ -123,17 +136,34 @@ public sealed class StationJobCoordinator
             var job = StationJob.Restore(entry.Job);
             if (job.Status == StationJobStatus.Accepted)
             {
-                recovered.Add(await ExecuteAcceptedAsync(job, entry.Revision, cancellationToken)
-                    .ConfigureAwait(false));
+                try
+                {
+                    recovered.Add(await ExecuteAcceptedAsync(job, entry.Revision, cancellationToken)
+                        .ConfigureAwait(false));
+                }
+                catch (StationResourceFenceUnavailableException)
+                {
+                    recovered.Add(job.ToSnapshot());
+                }
+
                 continue;
             }
 
             if (job.Status == StationJobStatus.Running)
             {
-                job.RequireRecovery(
+                const string reason =
                     "The Agent restarted while a non-idempotent station operation was running. "
-                    + "An operator must reconcile the physical station before any retry.");
-                await _store.SaveAsync(job, entry.Revision, [], CancellationToken.None)
+                    + "An operator must reconcile the physical station before any retry.";
+                job.RequireRecovery(reason);
+                var recoveryRequired = CreateRecoveryRequired(
+                    job,
+                    reason,
+                    checked(entry.Revision + 1));
+                await _store.SaveAsync(
+                        job,
+                        entry.Revision,
+                        [recoveryRequired],
+                        CancellationToken.None)
                     .ConfigureAwait(false);
                 _executions.Forget(job.Id);
             }
@@ -232,7 +262,7 @@ public sealed class StationJobCoordinator
         }
 
         var fenceValidation = await _resourceFences
-            .ValidateAndAdvanceAsync(job.ToSnapshot(), cancellationToken)
+            .ValidateCurrentAsync(job.ToSnapshot(), cancellationToken)
             .ConfigureAwait(false);
         if (execution.CancellationToken.IsCancellationRequested)
         {
@@ -245,6 +275,13 @@ public sealed class StationJobCoordinator
 
         if (!fenceValidation.Accepted)
         {
+            if (fenceValidation.Retryable)
+            {
+                throw new StationResourceFenceUnavailableException(
+                    fenceValidation.RejectionReason
+                    ?? "Station resource lease change has not arrived.");
+            }
+
             job.RejectBeforeStart(
                 "Agent.ResourceFenceRejected",
                 fenceValidation.RejectionReason
@@ -442,6 +479,33 @@ public sealed class StationJobCoordinator
             job.ProgressPhase!,
             job.LastProgressAtUtc!.Value);
         return Outbox(message.MessageId, job.Id, sequence, StationAgentMessageKinds.JobProgressed, message);
+    }
+
+    private StationJobOutboxMessage CreateRecoveryRequired(
+        StationJob job,
+        string reason,
+        long sequence)
+    {
+        var messageId = Guid.NewGuid();
+        var message = new StationJobRecoveryRequired(
+            messageId,
+            $"{job.IdempotencyKey}/recovery-required/{messageId:D}",
+            job.Id.Value,
+            job.IdempotencyKey,
+            job.AgentId,
+            job.StationId,
+            job.ProductionRunId,
+            job.OperationRunId.Value,
+            job.RuntimeSessionId,
+            reason,
+            _clock.UtcNow);
+        StationMessageContract.Validate(message);
+        return Outbox(
+            message.MessageId,
+            job.Id,
+            sequence,
+            StationAgentMessageKinds.JobRecoveryRequired,
+            message);
     }
 
     private StationJobOutboxMessage Outbox<TMessage>(

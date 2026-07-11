@@ -12,12 +12,15 @@ public sealed class InMemoryStationMaterialArrivalOutboxStore :
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Entry> _byMessageId = [];
     private readonly Dictionary<string, Guid> _byIdempotencyKey = new(StringComparer.Ordinal);
+    private long _nextSequence;
 
     public ValueTask<bool> TryEnqueueAsync(
         MaterialArrived message,
+        DateTimeOffset receivedAtUtc,
         CancellationToken cancellationToken = default)
     {
         StationMessageContract.Validate(message);
+        ValidateUtc(receivedAtUtc, nameof(receivedAtUtc));
         cancellationToken.ThrowIfCancellationRequested();
         var payload = JsonSerializer.Serialize(message, JsonOptions);
         lock (_gate)
@@ -43,10 +46,11 @@ public sealed class InMemoryStationMaterialArrivalOutboxStore :
             _byMessageId.Add(
                 message.MessageId,
                 new Entry(
+                    checked(++_nextSequence),
                     message.MessageId,
                     message.IdempotencyKey,
                     payload,
-                    message.ArrivedAtUtc));
+                    receivedAtUtc));
             _byIdempotencyKey.Add(message.IdempotencyKey, message.MessageId);
             return ValueTask.FromResult(true);
         }
@@ -54,23 +58,30 @@ public sealed class InMemoryStationMaterialArrivalOutboxStore :
 
     public ValueTask<IReadOnlyCollection<StationMaterialArrivalOutboxItem>> ListPendingAsync(
         int maximumCount,
+        DateTimeOffset nowUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        ValidateUtc(nowUtc, nameof(nowUtc));
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            IReadOnlyCollection<StationMaterialArrivalOutboxItem> result = _byMessageId.Values
+            var ordered = _byMessageId.Values
                 .Where(static entry => entry.PublishedAtUtc is null)
-                .OrderBy(static entry => entry.CreatedAtUtc)
-                .ThenBy(static entry => entry.MessageId)
+                .Where(static entry => entry.QuarantinedAtUtc is null)
+                .OrderBy(static entry => entry.Sequence)
                 .Take(maximumCount)
+                .ToArray();
+            IReadOnlyCollection<StationMaterialArrivalOutboxItem> result = ordered
+                .TakeWhile(entry => entry.NextAttemptAtUtc <= nowUtc)
                 .Select(static entry => new StationMaterialArrivalOutboxItem(
+                    entry.Sequence,
                     entry.MessageId,
                     entry.IdempotencyKey,
                     entry.PayloadJson,
                     entry.CreatedAtUtc,
-                    entry.AttemptCount))
+                    entry.AttemptCount,
+                    entry.NextAttemptAtUtc))
                 .ToArray();
             return ValueTask.FromResult(result);
         }
@@ -99,15 +110,37 @@ public sealed class InMemoryStationMaterialArrivalOutboxStore :
     public ValueTask RecordPublishFailureAsync(
         Guid messageId,
         string failure,
+        DateTimeOffset nextAttemptAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(failure);
+        ValidateUtc(nextAttemptAtUtc, nameof(nextAttemptAtUtc));
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
             var entry = Find(messageId);
             entry.AttemptCount = checked(entry.AttemptCount + 1);
             entry.LastError = failure.Length <= 4096 ? failure : failure[..4096];
+            entry.NextAttemptAtUtc = nextAttemptAtUtc;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    public ValueTask QuarantineAsync(
+        Guid messageId,
+        string failure,
+        DateTimeOffset quarantinedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure);
+        ValidateUtc(quarantinedAtUtc, nameof(quarantinedAtUtc));
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var entry = Find(messageId);
+            entry.AttemptCount = checked(entry.AttemptCount + 1);
+            entry.LastError = failure.Length <= 4096 ? failure : failure[..4096];
+            entry.QuarantinedAtUtc = quarantinedAtUtc;
             return ValueTask.CompletedTask;
         }
     }
@@ -127,18 +160,32 @@ public sealed class InMemoryStationMaterialArrivalOutboxStore :
         }
     }
 
+    private static void ValidateUtc(DateTimeOffset value, string parameterName)
+    {
+        if (value == default || value.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station material arrival outbox timestamp must be non-default UTC.",
+                parameterName);
+        }
+    }
+
     private sealed class Entry(
+        long sequence,
         Guid messageId,
         string idempotencyKey,
         string payloadJson,
         DateTimeOffset createdAtUtc)
     {
+        public long Sequence { get; } = sequence;
         public Guid MessageId { get; } = messageId;
         public string IdempotencyKey { get; } = idempotencyKey;
         public string PayloadJson { get; } = payloadJson;
         public DateTimeOffset CreatedAtUtc { get; } = createdAtUtc;
+        public DateTimeOffset NextAttemptAtUtc { get; set; } = createdAtUtc;
         public int AttemptCount { get; set; }
         public string? LastError { get; set; }
         public DateTimeOffset? PublishedAtUtc { get; set; }
+        public DateTimeOffset? QuarantinedAtUtc { get; set; }
     }
 }

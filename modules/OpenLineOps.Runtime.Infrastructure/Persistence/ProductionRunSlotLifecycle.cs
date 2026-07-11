@@ -1,5 +1,5 @@
-using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -46,6 +46,8 @@ internal static class ProductionRunSlotLifecycle
             .Where(static pair => pair.Value.IsTerminal)
             .Select(pair => new CompletedSlotOperation(
                 pair.Key,
+                pair.Value.OperationRunId,
+                pair.Value.FencingToken,
                 pair.Value.CompletedAtUtc
                 ?? throw new InvalidDataException(
                     $"Terminal Operation Run {pair.Value.OperationRunId} has no completion timestamp.")))
@@ -61,6 +63,11 @@ internal static class ProductionRunSlotLifecycle
         ArgumentNullException.ThrowIfNull(completedSlot);
         return evidence.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition
             && evidence.ProductionRunId == runId
+            && string.Equals(
+                evidence.OperationRunId,
+                completedSlot.OperationRunId,
+                StringComparison.Ordinal)
+            && evidence.SlotFencingToken == completedSlot.FencingToken
             && evidence.Slot == completedSlot.Address
             && evidence.PreviousSlotStatus == SlotOccupancyStatus.Running
             && evidence.CurrentSlotStatus == SlotOccupancyStatus.Occupied
@@ -86,4 +93,6 @@ internal static class ProductionRunSlotLifecycle
 
 internal sealed record CompletedSlotOperation(
     SlotAddress Address,
+    string OperationRunId,
+    long FencingToken,
     DateTimeOffset CompletedAtUtc);

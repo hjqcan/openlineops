@@ -21,6 +21,16 @@ const packagedExecutable = path.join(
   'desktop',
   'win-unpacked',
   'OpenLineOps.exe');
+const packagedRuntimeApiExecutable = path.join(
+  desktopRoot,
+  'release',
+  'desktop',
+  'win-unpacked',
+  'resources',
+  'app',
+  'runtime',
+  'api',
+  'OpenLineOps.Api.exe');
 const helperOutputDirectory = path.join(
   repoRoot,
   'tools',
@@ -46,6 +56,11 @@ const summary = {
   startedAtUtc: new Date().toISOString(),
   completedAtUtc: null,
   packagedExecutable,
+  packagedBinaries: {
+    before: null,
+    after: null,
+    unchangedDuringRun: null
+  },
   artifactRoot,
   projectPath: null,
   projectId: null,
@@ -54,6 +69,7 @@ const summary = {
   productionLineDefinitionId: null,
   projectSnapshotId: null,
   frozenRelease: null,
+  studioAuthoring: null,
   scenarios: {},
   restart: null,
   diagnostics: null,
@@ -72,7 +88,10 @@ async function main() {
     throw new Error('Node.js 22 or newer is required for the Electron CDP harness.');
   }
   await assertFile(packagedExecutable, 'Packaged OpenLineOps executable');
+  await assertFile(packagedRuntimeApiExecutable, 'Packaged OpenLineOps runtime API executable');
   await fs.mkdir(screenshotRoot, { recursive: true });
+  summary.packagedBinaries.before = await capturePackagedBinaryIdentity();
+  await persistSummary();
   await buildVendorHelper();
 
   const apiPort = await getFreePort();
@@ -98,6 +117,7 @@ async function main() {
   await persistSummary();
 
   await reopenProjectFromStartCenter(projectPath, fixture.projectId);
+  await verifySavedRouteAuthoring();
   await registerLineSlots();
   await runConcurrentAndPassedScenario();
   await runFailedReworkScenario();
@@ -106,6 +126,11 @@ async function main() {
   await runRecoveryScenario();
   await restartStudioAndVerifyProjection();
 
+  summary.packagedBinaries.after = await capturePackagedBinaryIdentity();
+  assertPackagedBinaryIdentityUnchanged(
+    summary.packagedBinaries.before,
+    summary.packagedBinaries.after);
+  summary.packagedBinaries.unchangedDuringRun = true;
   summary.status = 'passed';
   summary.completedAtUtc = new Date().toISOString();
   summary.logs = logs.slice(-200);
@@ -184,9 +209,9 @@ async function reopenProjectFromStartCenter(targetPath, expectedProjectId) {
     'Boolean(document.querySelector("[data-testid=\\"switch-project-workspace\\"]"))');
   if (switchButton) await harness.click('switch-project-workspace');
   await harness.waitFor(
-    'Boolean(document.querySelector("[data-testid=\\"start-open-project-by-path\\"]"))',
+    'document.querySelector("[data-testid=\\"start-open-project-by-path\\"]")?.disabled === false',
     20_000,
-    'the Open Project entry point');
+    'the enabled Open Project entry point');
   await harness.click('start-open-project-by-path');
   await harness.waitFor(
     'Boolean(document.querySelector("[data-testid=\\"open-project-path-input\\"]"))',
@@ -361,13 +386,90 @@ async function createProductionFixture(targetPath) {
   const snapshot = publishedProject.snapshots.find(candidate => candidate.snapshotId === snapshotId);
   assert(snapshot, 'Published Project snapshot is absent from the project response.');
   const frozenRelease = await verifyFrozenRelease(ids, snapshot, externalPrograms);
+  const runContext = (await expectApi(
+    `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
+      + `/snapshots/${encodeURIComponent(snapshotId)}/production-run-context`,
+    { method: 'GET' },
+    200,
+    'resolve immutable Production Run context')).body;
+  assert(
+    runContext.entryStationSystemId === ids.station1,
+    'Production Run context entry Station differs from the published route.');
+  assert(
+    typeof runContext.entryStationId === 'string' && runContext.entryStationId.length > 0,
+    'Production Run context has no physical entry Station identity.');
+  assert(
+    /^[0-9a-f]{64}$/u.test(runContext.entryStationPackageContentSha256),
+    'Production Run context has no canonical entry Station package content SHA-256.');
   return {
     ...ids,
     snapshotId,
     productModelId: line.productModel.productModelId,
     identityKey: line.productModel.identityInputKey,
-    frozenRelease
+    entryStationId: runContext.entryStationId,
+    entryStationPackageContentSha256: runContext.entryStationPackageContentSha256,
+    frozenRelease: {
+      ...frozenRelease,
+      entryStationDeployment: {
+        stationSystemId: runContext.entryStationSystemId,
+        stationId: runContext.entryStationId,
+        packageContentSha256: runContext.entryStationPackageContentSha256
+      }
+    }
   };
+}
+
+async function verifySavedRouteAuthoring() {
+  await harness.click('nav-production');
+  await harness.waitFor(
+    'Boolean(document.querySelector("[data-testid=\\"production-workbench\\"]"))'
+      + ' && Boolean(document.querySelector("[data-testid=\\"production-line-'
+      + `${fixture.lineId.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}`
+      + '\\"]"))',
+    30_000,
+    'the saved production route to appear in Line Designer');
+  await harness.cdp.send('Debugger.enable');
+  await harness.click(`production-line-${fixture.lineId}`);
+  let evidence;
+  try {
+    evidence = await harness.waitFor(
+      `new Promise(resolve => requestAnimationFrame(() => {
+        const model = document.querySelector('[data-testid="production-product-model-id"]');
+        const nodes = document.querySelectorAll('[data-testid^="production-operation-node-"]');
+        const edges = document.querySelectorAll('[data-testid^="production-transition-edge-"]');
+        const publish = document.querySelector('[data-testid="publish-production-line-snapshot"]');
+        const ready = model?.value === ${JSON.stringify(fixture.productModelId)}
+          && nodes.length === 2
+          && edges.length === 2
+          && publish?.disabled === false;
+        resolve(ready ? {
+          productModelId: model.value,
+          operationCount: nodes.length,
+          transitionCount: edges.length,
+          publishEnabled: true
+        } : false);
+      }))`,
+      15_000,
+      'the saved Sequence and bounded Rework route to remain responsive');
+  } catch (error) {
+    const rendererStack = await harness.captureJavaScriptStack().catch(stackError => ([{
+      captureError: stackError instanceof Error ? stackError.message : String(stackError)
+    }]));
+    summary.diagnostics = { rendererStack };
+    await persistSummary();
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Renderer stack: ${JSON.stringify(rendererStack)}`,
+      { cause: error });
+  }
+  await harness.click('production-operation-node-operation.vendor-test');
+  await harness.waitFor(
+    'document.querySelector("[data-testid=\\"production-operation-inspector\\"]")'
+      + '?.textContent?.includes("Run Vendor Test") === true',
+    15_000,
+    'the saved Vendor Test Operation inspector to respond');
+  const screenshot = await recordScreenshot('studio-saved-route-authoring');
+  summary.studioAuthoring = { status: 'passed', ...evidence, screenshot };
+  await persistSummary();
 }
 
 function createFixtureIds(projectId, applicationId) {
@@ -378,7 +480,7 @@ function createFixtureIds(projectId, applicationId) {
     topologyId,
     topologyCollectionPath: `/api/automation-projects/${encodeURIComponent(projectId)}`
       + `/applications/${encodeURIComponent(applicationId)}/topologies`,
-    layoutId: `${applicationId}.layout.production-closure`,
+    layoutId: `${applicationId}.layout.main`,
     station1: `${applicationId}.station.preparation`,
     station2: `${applicationId}.station.vendor-test`,
     slotGroup1: `${applicationId}.station.preparation.group.fixture`,
@@ -778,11 +880,17 @@ function resource(bindingId, kind, topologyTargetId) {
 
 async function verifyFrozenRelease(ids, snapshot, externalPrograms) {
   assertSha256(snapshot.releaseContentSha256, 'Published release content');
+  assert(
+    snapshot.layoutIds?.includes(ids.layoutId),
+    `Published snapshot does not include the Application line layout ${ids.layoutId}.`);
   const releaseManifestPath = path.resolve(projectPath, ...snapshot.releaseManifestPath.split('/'));
   await assertFile(releaseManifestPath, 'Published release manifest');
   const manifestText = await fs.readFile(releaseManifestPath, 'utf8');
   const manifest = JSON.parse(manifestText);
   const manifestTextLower = manifestText.toLowerCase();
+  assert(
+    manifest.metadata?.layoutIds?.includes(ids.layoutId),
+    `Frozen release manifest does not include the Application line layout ${ids.layoutId}.`);
   assert(
     manifestTextLower.includes(ids.externalProgramResourceId.toLowerCase()),
     'Frozen release manifest does not include the external program resource.');
@@ -987,7 +1095,9 @@ async function runCancellationScenario() {
   await waitForOperation(unit.runId, fixture.operationPrep, 1, 'Completed');
   await moveUnitBetweenSlots(unit, fixture.station1, fixture.slot1, fixture.station2, fixture.slot2);
   await waitForOperation(unit.runId, fixture.operationTest, 1, 'Running');
-  const vendorProcesses = await waitForVendorProcesses(processes => processes.length >= 2, 'vendor parent and child processes');
+  const vendorProcesses = await waitForVendorProcesses(
+    processes => hasSpawnChildProcessTree(processes, 'SpawnChildDelay'),
+    'vendor parent and child processes');
   await openOperationsDashboard(unit.runId);
   const beforeScreenshot = await recordScreenshot('scenario-cancel-spawn-child-running');
   await harness.click(`active-run-${unit.runId}`);
@@ -1043,13 +1153,15 @@ async function runCrashScenario() {
 }
 
 async function runRecoveryScenario() {
-  const unit = await prepareRunAtStation1('SpawnChildDelay');
+  const unit = await prepareRunAtStation1('SpawnChildDelayRecovery');
   await waitForOperation(unit.runId, fixture.operationPrep, 1, 'Completed');
   await moveUnitBetweenSlots(unit, fixture.station1, fixture.slot1, fixture.station2, fixture.slot2);
   const running = await waitForOperation(unit.runId, fixture.operationTest, 1, 'Running');
   const operationRunId = running.operations.find(operation => (
     operation.operationId === fixture.operationTest && operation.attempt === 1)).operationRunId;
-  const vendorProcesses = await waitForVendorProcesses(processes => processes.length >= 2, 'recovery vendor parent and child');
+  const vendorProcesses = await waitForVendorProcesses(
+    processes => hasSpawnChildProcessTree(processes, 'SpawnChildDelayRecovery'),
+    'recovery vendor parent and child');
   const backend = await harness.evaluate('window.openlineopsDesktop.getBackendStatus()');
   assert(Number.isInteger(backend.pid) && backend.pid > 0, 'Packaged backend PID is unavailable.');
   await execFileAsync('taskkill.exe', ['/PID', String(backend.pid), '/F'], { windowsHide: true });
@@ -1177,6 +1289,11 @@ async function prepareRunAtStation1(identityValue, options = {}) {
   await expectApi(`/api/production-units/${unit.unitId}/arrivals`, {
     method: 'POST',
     body: {
+      projectId: fixture.projectId,
+      applicationId: fixture.applicationId,
+      projectSnapshotId: fixture.snapshotId,
+      packageContentSha256: fixture.entryStationPackageContentSha256,
+      stationId: fixture.entryStationId,
       lineId: fixture.lineId,
       stationSystemId: fixture.station1,
       actorId,
@@ -1328,6 +1445,11 @@ async function openTraceAndScreenshot(runId, name) {
     30_000,
     'the Trace workbench');
   await harness.waitFor(
+    '!document.querySelector("[data-testid=\\"trace-search-run\\"]")?.disabled',
+    30_000,
+    'the Trace search action');
+  await harness.click('trace-search-run');
+  await harness.waitFor(
     `Array.from(document.querySelectorAll('.trace-result-row')).some(row => row.textContent?.includes(${JSON.stringify(runId)}))`,
     30_000,
     `Trace row ${runId}`);
@@ -1378,10 +1500,18 @@ async function waitForVendorProcesses(predicate, description, timeoutMillisecond
   throw new Error(`Timed out waiting for ${description}: ${JSON.stringify(latest)}`);
 }
 
+function hasSpawnChildProcessTree(processes, mode) {
+  const parent = processes.find(process => (
+    process.processName?.toLowerCase() === 'openlineops.vendortesthelper.exe'
+      && process.commandLine?.includes(`--mode ${mode}`)));
+  return Boolean(parent && processes.some(process => process.parentProcessId === parent.processId));
+}
+
 async function listVendorProcesses() {
-  const command = "$items = @(Get-CimInstance Win32_Process -Filter \"Name = 'OpenLineOps.VendorTestHelper.exe'\" | "
+  const command = "$items = @(Get-CimInstance Win32_Process -Filter \"Name = 'OpenLineOps.VendorTestHelper.exe' OR Name = 'dotnet.exe'\" | "
     + 'Select-Object @{Name=\'processId\';Expression={$_.ProcessId}},'
     + "@{Name='parentProcessId';Expression={$_.ParentProcessId}},"
+    + "@{Name='processName';Expression={$_.Name}},"
     + "@{Name='commandLine';Expression={$_.CommandLine}}); "
     + 'if ($items.Count -eq 0) { Write-Output \'[]\' } else { $items | ConvertTo-Json -Compress -Depth 3 }';
   const { stdout } = await execFileAsync(
@@ -1389,11 +1519,15 @@ async function listVendorProcesses() {
     ['-NoProfile', '-NonInteractive', '-Command', command],
     { windowsHide: true, maxBuffer: 1024 * 1024 });
   const parsed = JSON.parse(stdout.trim() || '[]');
-  return (Array.isArray(parsed) ? parsed : [parsed]).map(item => ({
-    processId: Number(item.processId),
-    parentProcessId: Number(item.parentProcessId),
-    commandLine: item.commandLine ?? null
-  }));
+  const projectNeedle = projectPath.toLowerCase();
+  return (Array.isArray(parsed) ? parsed : [parsed])
+    .map(item => ({
+      processId: Number(item.processId),
+      parentProcessId: Number(item.parentProcessId),
+      processName: item.processName ?? null,
+      commandLine: item.commandLine ?? null
+    }))
+    .filter(item => item.commandLine?.toLowerCase().includes(projectNeedle));
 }
 
 function compactRun(run) {
@@ -1483,6 +1617,32 @@ async function sha256File(filePath) {
   const hash = createHash('sha256');
   hash.update(await fs.readFile(filePath));
   return hash.digest('hex');
+}
+
+async function capturePackagedBinaryIdentity() {
+  return {
+    desktopExecutable: await captureFileIdentity(packagedExecutable),
+    runtimeApiExecutable: await captureFileIdentity(packagedRuntimeApiExecutable)
+  };
+}
+
+async function captureFileIdentity(filePath) {
+  const stat = await fs.stat(filePath);
+  return {
+    path: filePath,
+    sha256: await sha256File(filePath),
+    sizeBytes: stat.size,
+    modifiedAtUtc: stat.mtime.toISOString()
+  };
+}
+
+function assertPackagedBinaryIdentityUnchanged(before, after) {
+  for (const key of ['desktopExecutable', 'runtimeApiExecutable']) {
+    assert(before?.[key]?.path === after?.[key]?.path, `${key} path changed during packaged E2E.`);
+    assert(before?.[key]?.sha256 === after?.[key]?.sha256, `${key} SHA-256 changed during packaged E2E.`);
+    assert(before?.[key]?.sizeBytes === after?.[key]?.sizeBytes, `${key} size changed during packaged E2E.`);
+    assert(before?.[key]?.modifiedAtUtc === after?.[key]?.modifiedAtUtc, `${key} mtime changed during packaged E2E.`);
+  }
 }
 
 async function listFiles(root, extension) {

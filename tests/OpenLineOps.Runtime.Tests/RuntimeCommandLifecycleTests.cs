@@ -1,10 +1,10 @@
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
-using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
+using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 
 namespace OpenLineOps.Runtime.Tests;
 

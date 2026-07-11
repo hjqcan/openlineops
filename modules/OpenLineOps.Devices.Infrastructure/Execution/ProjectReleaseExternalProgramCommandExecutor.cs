@@ -3,8 +3,8 @@ using System.Text;
 using System.Text.Json;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
-using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Application.ExternalPrograms;
+using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Contracts;
 

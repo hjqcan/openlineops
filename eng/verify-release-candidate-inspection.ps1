@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -82,6 +82,86 @@ function New-TestZip {
     }
     finally {
         $archive.Dispose()
+    }
+}
+
+function New-TestWindowsBundleZip {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind,
+        [Parameter(Mandatory = $true)][string[]] $Files,
+        [Parameter(Mandatory = $true)][object[]] $EntryPoints,
+        [string] $TamperPath
+    )
+
+    $stagingRoot = Join-Path $ResolvedWorkRoot ("bundle-staging/" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+    foreach ($relativePath in $Files) {
+        $path = Join-Path $stagingRoot $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+        $content = if ($relativePath -ceq "appsettings.json") {
+            '{"OpenLineOps":{"Agent":{"RuntimeExecutablePath":"OpenLineOps.StationRuntime.exe"}}}'
+        }
+        else {
+            "test content for $relativePath"
+        }
+        [System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    $relativePaths = [string[]]@($Files)
+    [System.Array]::Sort($relativePaths, [System.StringComparer]::Ordinal)
+    $fileRecords = @($relativePaths | ForEach-Object {
+        $path = Join-Path $stagingRoot $_.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $file = Get-Item -LiteralPath $path
+        [ordered]@{
+            relativePath = $_
+            sizeBytes = $file.Length
+            sha256 = Get-FileSha256 $path
+        }
+    })
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        product = "OpenLineOps"
+        artifactKind = $ArtifactKind
+        runtimeIdentifier = "win-x64"
+        selfContained = $true
+        entryPoints = $EntryPoints
+        files = $fileRecords
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $stagingRoot "bundle-manifest.json"),
+        (($manifest | ConvertTo-Json -Depth 8) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText(
+        (Join-Path $stagingRoot "bundle-checksums.sha256"),
+        ((@($fileRecords | ForEach-Object { "$($_.sha256)  $($_.relativePath)" }) -join "`r`n") + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+
+    $zipPath = Join-Path $Root $Name
+    New-Item -ItemType Directory -Path (Split-Path $zipPath -Parent) -Force | Out-Null
+    Compress-Archive -Path (Join-Path $stagingRoot "*") -DestinationPath $zipPath -Force
+
+    if (-not [string]::IsNullOrWhiteSpace($TamperPath)) {
+        $archive = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $archive.GetEntry($TamperPath)
+            if ($null -eq $entry) {
+                throw "Cannot tamper missing bundle entry '$TamperPath'."
+            }
+            $entry.Delete()
+            $replacement = $archive.CreateEntry($TamperPath)
+            $writer = [System.IO.StreamWriter]::new($replacement.Open())
+            try {
+                $writer.Write("tampered payload")
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
     }
 }
 
@@ -167,7 +247,7 @@ function Write-TestProvenance {
             configuration = "Release"
             noRestore = $true
             skipDesktopBuild = $true
-            signDesktopPackage = $false
+            signWindowsPackages = $false
             requiredArtifactKinds = $RequiredKinds
         }
         tools = [ordered]@{
@@ -363,6 +443,7 @@ function New-MinimalReleaseCandidate {
         [string] $MetadataChecksumMutation,
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
+        [switch] $TamperAgentBundle,
         [switch] $SkipDependencyInventory,
         [switch] $SkipMetadataChecksums,
         [switch] $TamperMetadataChecksums,
@@ -380,6 +461,7 @@ function New-MinimalReleaseCandidate {
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
+        "eng/verify-solution-project-coverage.ps1",
         "eng/inspect-ci-release-artifact.ps1",
         "eng/inspect-release-candidate.ps1",
         "eng/prepare-final-publication.ps1",
@@ -388,9 +470,49 @@ function New-MinimalReleaseCandidate {
         "eng/verify-publication-evidence.ps1",
         "eng/verify-release-candidate-inspection.ps1",
         "eng/verify-open-source-metadata.ps1",
-        "eng/verify-third-party-license-metadata.ps1"
+        "eng/verify-third-party-license-metadata.ps1",
+        "eng/sign-windows-package.ps1",
+        "eng/verify-windows-signing-readiness.ps1",
+        "docs/station-agent-deployment.md",
+        "docs/headless-runner.md"
     ) + $ExtraSourceEntries)
     New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @("OpenLineOps.Api.dll")
+    New-TestWindowsBundleZip `
+        -Root $root `
+        -Name "agent/agent-openlineops-win-x64-$version.zip" `
+        -ArtifactKind "agent" `
+        -Files @(
+            "OpenLineOps.Agent.exe",
+            "OpenLineOps.Agent.deps.json",
+            "OpenLineOps.Agent.runtimeconfig.json",
+            "OpenLineOps.StationRuntime.exe",
+            "OpenLineOps.StationRuntime.deps.json",
+            "OpenLineOps.StationRuntime.runtimeconfig.json",
+            "appsettings.json",
+            "coreclr.dll",
+            "hostfxr.dll",
+            "DEPLOYMENT.md",
+            "LICENSE.txt",
+            "THIRD-PARTY-NOTICES.md") `
+        -EntryPoints @(
+            [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
+            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }) `
+        -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" })
+    New-TestWindowsBundleZip `
+        -Root $root `
+        -Name "runner/runner-openlineops-win-x64-$version.zip" `
+        -ArtifactKind "runner" `
+        -Files @(
+            "OpenLineOps.Runner.exe",
+            "OpenLineOps.Runner.deps.json",
+            "OpenLineOps.Runner.runtimeconfig.json",
+            "coreclr.dll",
+            "hostfxr.dll",
+            "USAGE.md",
+            "LICENSE.txt",
+            "THIRD-PARTY-NOTICES.md") `
+        -EntryPoints @(
+            [ordered]@{ role = "headless-runner"; relativePath = "OpenLineOps.Runner.exe" })
     $desktopEntries = @(
         "dist/index.html",
         "dist-electron/main/main.js",
@@ -489,6 +611,14 @@ New-CleanDirectory $ResolvedWorkRoot
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
 Assert-InspectionPasses -Root $positiveRoot -Name "positive"
+
+$tamperedAgentBundleRoot = New-MinimalReleaseCandidate `
+    -Name "tampered-agent-bundle" `
+    -TamperAgentBundle
+Assert-InspectionFails `
+    -Root $tamperedAgentBundleRoot `
+    -Name "tampered-agent-bundle" `
+    -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
 
 $unsafePathRoot = New-MinimalReleaseCandidate -Name "unsafe-path" -ExtraSourceEntries @("../evil.txt")
 Assert-InspectionFails `

@@ -142,4 +142,6 @@ public sealed record ProjectReleaseProductionRunContextResponse(
     string ProductModelIdentityInputKey,
     string EntryOperationId,
     string EntryStationSystemId,
+    string EntryStationId,
+    string EntryStationPackageContentSha256,
     IReadOnlyCollection<string> StationSystemIds);
