@@ -75,9 +75,12 @@ public sealed class ProductionLineRuntimeStateReaderTests
             [new ResourceRequirement(ResourceKind.Station, "station-b")],
             carrier.Id.Value);
 
+        var leaseClock = new FixedClock(BaseTimeUtc);
         using (var runRepository = new SqliteProductionRunRepository(database.ConnectionString))
         using (var materialRepository = new SqliteProductionMaterialRepository(database.ConnectionString))
-        using (var leaseRepository = new SqliteResourceLeaseRepository(database.ConnectionString))
+        using (var leaseRepository = new SqliteResourceLeaseRepository(
+                   database.ConnectionString,
+                   leaseClock))
         {
             Assert.True(await materialRepository.TryAddAsync(unitInSlot));
             Assert.True(await materialRepository.TryAddAsync(unitOnCarrier));
@@ -159,7 +162,9 @@ public sealed class ProductionLineRuntimeStateReaderTests
 
         using var restartedRuns = new SqliteProductionRunRepository(database.ConnectionString);
         using var restartedMaterials = new SqliteProductionMaterialRepository(database.ConnectionString);
-        using var restartedLeases = new SqliteResourceLeaseRepository(database.ConnectionString);
+        using var restartedLeases = new SqliteResourceLeaseRepository(
+            database.ConnectionString,
+            new FixedClock(BaseTimeUtc.AddMinutes(1)));
         var reader = new ProductionLineRuntimeStateReader(
             restartedRuns,
             restartedMaterials,
@@ -219,7 +224,7 @@ public sealed class ProductionLineRuntimeStateReaderTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var runs = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
+        var leases = new InMemoryResourceLeaseRepository(new FixedClock(BaseTimeUtc));
         var unit = CreateUnit("SN-WAITING-001");
         Assert.True(await materials.TryAddAsync(unit));
         var run = CreateRun(
@@ -320,7 +325,6 @@ public sealed class ProductionLineRuntimeStateReaderTests
                 fixture.Run.Id,
                 operation.OperationRunId,
                 operation.ResourceRequirements,
-                BaseTimeUtc,
                 TimeSpan.FromMinutes(10)));
         Assert.True(fixture.Run.StartOperation(
             operation.OperationRunId,

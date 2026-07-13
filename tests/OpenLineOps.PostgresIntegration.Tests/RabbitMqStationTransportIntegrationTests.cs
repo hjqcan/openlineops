@@ -141,8 +141,14 @@ public sealed class RabbitMqStationTransportIntegrationTests
             TimeSpan.FromSeconds(10));
 
         var unroutable = JobRequest(agentId, $"missing-{suffix}");
-        await Assert.ThrowsAsync<PublishException>(async () =>
+        var returned = await Assert.ThrowsAsync<PublishReturnException>(async () =>
             await coordinator.PublishAsync(unroutable));
+        Assert.Equal(312, returned.ReplyCode);
+        Assert.Equal("NO_ROUTE", returned.ReplyText);
+        Assert.Equal(jobExchange, returned.Exchange);
+        Assert.Equal(
+            $"station.{unroutable.AgentId}.{unroutable.StationId}",
+            returned.RoutingKey);
         await coordinator.PublishAsync(JobRequest(agentId, stationId));
         await resumedAfterReturn.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
@@ -283,7 +289,10 @@ public sealed class RabbitMqStationTransportIntegrationTests
                      nameof(StationJobCompleted)
                  })
         {
-            await channel.QueueBindAsync(resultQueue, eventExchange, $"station.*.{type}");
+            await channel.QueueBindAsync(
+                resultQueue,
+                eventExchange,
+                StationTransportRoute.EventPattern(type));
         }
     }
 

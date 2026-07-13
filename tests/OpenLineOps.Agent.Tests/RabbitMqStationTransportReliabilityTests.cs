@@ -42,7 +42,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
         Assert.Equal(accepted.MessageId, publication.MessageId);
         Assert.Equal(accepted.JobId, publication.CorrelationId);
         Assert.Equal(
-            "station.station.main.StationJobAccepted",
+            StationTransportRoute.Event("station.main", nameof(StationJobAccepted)),
             publication.RoutingKey);
     }
 
@@ -194,6 +194,14 @@ public sealed class RabbitMqStationTransportReliabilityTests
         Assert.Equal(
             publisher.Publications[0].MessageId,
             publisher.Publications[1].MessageId);
+        Assert.All(
+            publisher.Publications,
+            publication => Assert.Equal(
+                StationTransportRoute.Event(
+                    options.StationId,
+                    "emergency-stop-acknowledged"),
+                publication.RoutingKey));
+        Assert.Equal(3, publisher.Publications[1].RoutingKey.Split('.').Length);
     }
 
     [Fact]

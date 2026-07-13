@@ -36,6 +36,26 @@ function Assert-UnderRepoRoot {
     }
 }
 
+function Assert-DirectChildDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Parent,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    $resolvedParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedPathParent = [System.IO.Path]::GetDirectoryName($resolvedPath)
+    if (-not $resolvedPathParent.Equals(
+            $resolvedParent,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Fixture directory must be a direct child of its dedicated work root: $resolvedPath"
+    }
+}
+
 function New-CleanDirectory {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -51,6 +71,21 @@ function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-FixturePhysicalId {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($Name)
+        $hash = $sha256.ComputeHash($nameBytes)
+        $shortHash = [System.BitConverter]::ToString($hash, 0, 8).Replace("-", "").ToLowerInvariant()
+        return "f-$shortHash"
+    }
+    finally {
+        $sha256.Dispose()
+    }
 }
 
 function New-TestZip {
@@ -92,7 +127,10 @@ function New-TestWindowsBundleZip {
         [Parameter(Mandatory = $true)][string] $ArtifactKind,
         [Parameter(Mandatory = $true)][string[]] $Files,
         [Parameter(Mandatory = $true)][object[]] $EntryPoints,
-        [string] $TamperPath
+        [string] $TamperPath,
+        [switch] $ExposeRemovedAgentContainerSetting,
+        [switch] $OmitAgentSafetyExecutablePath,
+        [string] $AgentSafetyExecutablePath = ""
     )
 
     $stagingRoot = Join-Path $ResolvedWorkRoot ("bundle-staging/" + [System.Guid]::NewGuid().ToString("N"))
@@ -101,7 +139,36 @@ function New-TestWindowsBundleZip {
         $path = Join-Path $stagingRoot $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
         $content = if ($relativePath -ceq "appsettings.json") {
-            '{"OpenLineOps":{"Agent":{"RuntimeExecutablePath":"OpenLineOps.StationRuntime.exe"}}}'
+            $pythonSandbox = [ordered]@{
+                RequireLeastPrivilegeExecution = $true
+                IsolationMode = "LeastPrivilegeIdentity"
+                LeastPrivilegeIdentity = "RestrictedCurrentLowIntegrity"
+                LeastPrivilegeLauncherExecutable = "OpenLineOps.LeastPrivilegeLauncher.exe"
+                LeastPrivilegeNoInteractivePrompt = $true
+            }
+            if ($ExposeRemovedAgentContainerSetting) {
+                $pythonSandbox["ContainerImage"] =
+                    "openlineops/python@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+
+            $agentConfiguration = [ordered]@{
+                RuntimeExecutablePath = "OpenLineOps.StationRuntime.exe"
+                PluginHostExecutablePath = "OpenLineOps.PluginHost.exe"
+                PythonScript = [ordered]@{
+                    WorkerExecutablePath = "OpenLineOps.ScriptWorker.exe"
+                    HostPythonRuntimeDllPath = ""
+                    Sandbox = $pythonSandbox
+                }
+            }
+            if (-not $OmitAgentSafetyExecutablePath) {
+                $agentConfiguration["SafetyExecutablePath"] = $AgentSafetyExecutablePath
+            }
+
+            ([ordered]@{
+                OpenLineOps = [ordered]@{
+                    Agent = $agentConfiguration
+                }
+            } | ConvertTo-Json -Depth 8 -Compress)
         }
         else {
             "test content for $relativePath"
@@ -444,16 +511,21 @@ function New-MinimalReleaseCandidate {
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
         [switch] $TamperAgentBundle,
+        [switch] $ExposeRemovedAgentContainerSetting,
+        [switch] $OmitAgentSafetyExecutablePath,
+        [string] $AgentSafetyExecutablePath = "",
         [switch] $SkipDependencyInventory,
         [switch] $SkipMetadataChecksums,
         [switch] $TamperMetadataChecksums,
         [switch] $SkipProvenance
     )
 
-    $root = Join-Path $ResolvedWorkRoot $Name
+    $fixturePhysicalId = Get-FixturePhysicalId $Name
+    $root = Join-Path $ResolvedWorkRoot $fixturePhysicalId
+    Assert-DirectChildDirectory -Parent $ResolvedWorkRoot -Path $root
     New-CleanDirectory $root
 
-    $version = "0.0.0-$Name"
+    $version = "0.0.0-$fixturePhysicalId"
     New-TestZip -Root $root -Name "source/source-openlineops-$version.zip" -Entries (@(
         "README.md",
         "THIRD-PARTY-NOTICES.md",
@@ -461,6 +533,7 @@ function New-MinimalReleaseCandidate {
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
+        "eng/verify-staged-agent-bundle-e2e.ps1",
         "eng/verify-solution-project-coverage.ps1",
         "eng/inspect-ci-release-artifact.ps1",
         "eng/inspect-release-candidate.ps1",
@@ -486,8 +559,9 @@ function New-MinimalReleaseCandidate {
             "OpenLineOps.Agent.deps.json",
             "OpenLineOps.Agent.runtimeconfig.json",
             "OpenLineOps.StationRuntime.exe",
-            "OpenLineOps.StationRuntime.deps.json",
-            "OpenLineOps.StationRuntime.runtimeconfig.json",
+            "OpenLineOps.PluginHost.exe",
+            "OpenLineOps.ScriptWorker.exe",
+            "OpenLineOps.LeastPrivilegeLauncher.exe",
             "appsettings.json",
             "coreclr.dll",
             "hostfxr.dll",
@@ -496,8 +570,13 @@ function New-MinimalReleaseCandidate {
             "THIRD-PARTY-NOTICES.md") `
         -EntryPoints @(
             [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }) `
-        -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" })
+            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+            [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+            [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }) `
+        -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" }) `
+        -ExposeRemovedAgentContainerSetting:$ExposeRemovedAgentContainerSetting `
+        -OmitAgentSafetyExecutablePath:$OmitAgentSafetyExecutablePath `
+        -AgentSafetyExecutablePath $AgentSafetyExecutablePath
     New-TestWindowsBundleZip `
         -Root $root `
         -Name "runner/runner-openlineops-win-x64-$version.zip" `
@@ -619,6 +698,30 @@ Assert-InspectionFails `
     -Root $tamperedAgentBundleRoot `
     -Name "tampered-agent-bundle" `
     -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
+
+$removedAgentContainerSettingRoot = New-MinimalReleaseCandidate `
+    -Name "removed-agent-container-setting" `
+    -ExposeRemovedAgentContainerSetting
+Assert-InspectionFails `
+    -Root $removedAgentContainerSettingRoot `
+    -Name "removed-agent-container-setting" `
+    -ExpectedPattern "removed Station Agent Python Container settings"
+
+$missingAgentSafetyExecutablePathRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-safety-executable-path" `
+    -OmitAgentSafetyExecutablePath
+Assert-InspectionFails `
+    -Root $missingAgentSafetyExecutablePathRoot `
+    -Name "missing-agent-safety-executable-path" `
+    -ExpectedPattern "must declare SafetyExecutablePath"
+
+$configuredAgentSafetyExecutablePathRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-safety-executable-path" `
+    -AgentSafetyExecutablePath "C:\\MachineSafety\\station-safety.exe"
+Assert-InspectionFails `
+    -Root $configuredAgentSafetyExecutablePathRoot `
+    -Name "configured-agent-safety-executable-path" `
+    -ExpectedPattern "SafetyExecutablePath release template must be empty"
 
 $unsafePathRoot = New-MinimalReleaseCandidate -Name "unsafe-path" -ExtraSourceEntries @("../evil.txt")
 Assert-InspectionFails `

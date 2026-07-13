@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using OpenLineOps.Domain.Abstractions.EventBus;
 using OpenLineOps.Infrastructure.Data.Core.Context;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
@@ -30,25 +31,55 @@ public sealed class OperationsDbContext(
 
     public void EnsureSchemaReady()
     {
-        if (_schemaReady || !IsMigrationManagedProvider())
+        if (_schemaReady)
         {
             return;
         }
 
-        EnsureProviderStorageReady();
-        Database.Migrate();
+        if (IsSqliteProvider())
+        {
+            SqliteOperationsStorage.EnsureDatabaseDirectory(
+                Database.GetDbConnection().ConnectionString);
+            Database.Migrate();
+        }
+        else if (IsNpgsqlProvider())
+        {
+            PostgreSqlOperationsSchema.EnsureReady(
+                (NpgsqlConnection)Database.GetDbConnection());
+        }
+        else
+        {
+            return;
+        }
+
         _schemaReady = true;
     }
 
     public async Task EnsureSchemaReadyAsync(CancellationToken cancellationToken = default)
     {
-        if (_schemaReady || !IsMigrationManagedProvider())
+        if (_schemaReady)
         {
             return;
         }
 
-        EnsureProviderStorageReady();
-        await Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+        if (IsSqliteProvider())
+        {
+            SqliteOperationsStorage.EnsureDatabaseDirectory(
+                Database.GetDbConnection().ConnectionString);
+            await Database.MigrateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else if (IsNpgsqlProvider())
+        {
+            await PostgreSqlOperationsSchema.EnsureReadyAsync(
+                    (NpgsqlConnection)Database.GetDbConnection(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            return;
+        }
+
         _schemaReady = true;
     }
 
@@ -75,22 +106,13 @@ public sealed class OperationsDbContext(
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(OperationsDbContext).Assembly);
     }
 
-    private void EnsureProviderStorageReady()
-    {
-        if (IsSqliteProvider())
-        {
-            SqliteOperationsStorage.EnsureDatabaseDirectory(Database.GetDbConnection().ConnectionString);
-        }
-    }
-
-    private bool IsMigrationManagedProvider()
-    {
-        return IsSqliteProvider()
-            || string.Equals(Database.ProviderName, NpgsqlProviderName, StringComparison.Ordinal);
-    }
-
     private bool IsSqliteProvider()
     {
         return string.Equals(Database.ProviderName, SqliteProviderName, StringComparison.Ordinal);
+    }
+
+    private bool IsNpgsqlProvider()
+    {
+        return string.Equals(Database.ProviderName, NpgsqlProviderName, StringComparison.Ordinal);
     }
 }

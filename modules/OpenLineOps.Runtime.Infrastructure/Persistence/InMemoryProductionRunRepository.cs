@@ -14,6 +14,7 @@ public sealed class InMemoryProductionRunRepository :
 {
     private readonly InMemoryProductionMaterialRepository _materials;
     private readonly ConcurrentDictionary<ProductionRunId, StoredProductionRun> _runs = [];
+    private readonly ConcurrentDictionary<ProductionRunId, StoredCreatedOutboxItem> _createdOutbox = [];
     private readonly ConcurrentDictionary<ProductionRunId, StoredTerminalOutboxItem> _terminalOutbox = [];
     private int _saveCount;
 
@@ -41,6 +42,8 @@ public sealed class InMemoryProductionRunRepository :
                 nameof(run));
         }
 
+        var createdOutboxItem = ProductionRunCreatedOutboxItem.FromAdmission(run);
+
         bool added;
         lock (_materials.CoordinationGate)
         {
@@ -54,6 +57,18 @@ public sealed class InMemoryProductionRunRepository :
                 return ValueTask.FromResult(false);
             }
 
+            if (!_createdOutbox.TryAdd(
+                    run.Id,
+                    new StoredCreatedOutboxItem(
+                        createdOutboxItem.EventId,
+                        createdOutboxItem.OccurredAtUtc,
+                        0,
+                        null)))
+            {
+                throw new InvalidDataException(
+                    $"Production Run {run.Id} has orphaned Created-event outbox state.");
+            }
+
             added = _runs.TryAdd(
                 run.Id,
                 new StoredProductionRun(
@@ -62,12 +77,14 @@ public sealed class InMemoryProductionRunRepository :
                     0));
             if (!added)
             {
+                _createdOutbox.TryRemove(run.Id, out _);
                 throw new InvalidOperationException(
                     $"Production Run {run.Id} admission lost atomic ownership.");
             }
         }
         if (added)
         {
+            run.ClearDomainEvents();
             Interlocked.Increment(ref _saveCount);
         }
 
@@ -186,6 +203,76 @@ public sealed class InMemoryProductionRunRepository :
         return ValueTask.FromResult(plan);
     }
 
+    public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+        ListPendingCreatedOutboxAsync(
+            int maximumCount,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        cancellationToken.ThrowIfCancellationRequested();
+        var items = _createdOutbox
+            .OrderBy(static pair => pair.Value.OccurredAtUtc)
+            .ThenBy(static pair => pair.Key.Value)
+            .Take(maximumCount)
+            .Select(static pair => new ProductionRunCreatedOutboxItem(
+                pair.Key,
+                pair.Value.EventId,
+                pair.Value.OccurredAtUtc,
+                pair.Value.AttemptCount,
+                pair.Value.LastError))
+            .ToArray();
+        return ValueTask.FromResult<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>(items);
+    }
+
+    public ValueTask MarkCreatedOutboxProcessedAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_createdOutbox.TryRemove(runId, out _))
+        {
+            throw new InvalidOperationException(
+                $"Production Run Created-event outbox item {runId} does not exist.");
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask RecordCreatedOutboxFailureAsync(
+        ProductionRunId runId,
+        string failureDescription,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentException.ThrowIfNullOrWhiteSpace(failureDescription);
+        if (char.IsWhiteSpace(failureDescription[0])
+            || char.IsWhiteSpace(failureDescription[^1]))
+        {
+            throw new ArgumentException(
+                "Created-event failure description must be canonical.",
+                nameof(failureDescription));
+        }
+
+        var boundedFailure = failureDescription.Length <= 4096
+            ? failureDescription
+            : failureDescription[..4096];
+        while (_createdOutbox.TryGetValue(runId, out var stored))
+        {
+            var updated = stored with
+            {
+                AttemptCount = checked(stored.AttemptCount + 1),
+                LastError = boundedFailure
+            };
+            if (_createdOutbox.TryUpdate(runId, updated, stored))
+            {
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Production Run Created-event outbox item {runId} does not exist.");
+    }
+
     public ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
         ListPendingTerminalOutboxAsync(
             int maximumCount,
@@ -247,6 +334,11 @@ public sealed class InMemoryProductionRunRepository :
         PersistedProductionRun Snapshot,
         ProductionRunExecutionPlan ExecutionPlan,
         long Revision);
+    private sealed record StoredCreatedOutboxItem(
+        Guid EventId,
+        DateTimeOffset OccurredAtUtc,
+        int AttemptCount,
+        string? LastError);
     private sealed record StoredTerminalOutboxItem(
         ProductionRunSnapshot Run,
         int AttemptCount,

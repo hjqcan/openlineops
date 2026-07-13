@@ -356,7 +356,7 @@ public static class StationAgentEventPublicationFactory
         ValidateIdentity(id, correlation, agent, station, options.AgentId, options.StationId);
         return new StationAgentEventPublication(
             options.EventExchange,
-            $"station.{station}.{kind}",
+            StationTransportRoute.Event(station, kind),
             kind,
             agent,
             id,
@@ -398,7 +398,7 @@ public static class StationAgentEventPublicationFactory
             options.StationId);
         return new StationAgentEventPublication(
             options.EventExchange,
-            $"station.{stationId}.{routeSuffix}",
+            StationTransportRoute.Event(stationId, routeSuffix),
             kind,
             agentId,
             messageId,

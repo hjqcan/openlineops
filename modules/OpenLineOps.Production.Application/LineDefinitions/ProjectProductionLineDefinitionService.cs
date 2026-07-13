@@ -242,7 +242,10 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         var transitions = request.Transitions.Select(transition => RouteTransition.Create(
             new RouteTransitionId(transition.TransitionId),
             new OperationDefinitionId(transition.SourceOperationId),
-            new OperationDefinitionId(transition.TargetOperationId),
+            transition.TargetOperationId is null
+                ? null
+                : new OperationDefinitionId(transition.TargetOperationId),
+            transition.TerminalDisposition,
             transition.Kind,
             transition.RequiredJudgement,
             transition.MaxTraversals,
@@ -296,6 +299,13 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
 
         foreach (var transition in request.Transitions)
         {
+            if ((transition.TargetOperationId is null) == (transition.TerminalDisposition is null))
+            {
+                throw new ArgumentException(
+                    $"Route transition {transition.TransitionId} requires exactly one target Operation or terminal disposition.",
+                    nameof(request));
+            }
+
             var hasAllConditionFields = transition.OutputKey is not null
                 && transition.ExpectedOutputKind is not null
                 && transition.ExpectedOutputValue is not null;

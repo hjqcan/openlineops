@@ -250,7 +250,8 @@ export interface TraceOperationExecutionResponse {
 export interface TraceRouteDecisionResponse {
   sourceOperationRunId: string;
   transitionId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   sourceJudgement: ProductionResultJudgement;
   traversal: number;
   decidedAtUtc: string;
@@ -658,6 +659,8 @@ export type ProductionDisposition =
   | 'Held'
   | 'Scrapped';
 
+export type ProductionTerminalDisposition = Exclude<ProductionDisposition, 'InProcess'>;
+
 export type ProductionRunControlState =
   | 'Active'
   | 'Paused'
@@ -759,7 +762,8 @@ export interface ProductionRunOutputReadModel {
 export interface ProductionRouteDecisionReadModel {
   sourceOperationRunId: string;
   transitionId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   sourceJudgement: ProductionResultJudgement;
   traversal: number;
   decidedAtUtc: string;
@@ -1350,7 +1354,8 @@ export type RouteJudgement =
 export interface RouteTransitionResponse {
   transitionId: string;
   sourceOperationId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   kind: RouteTransitionKind;
   requiredJudgement: RouteJudgement | null;
   maxTraversals: number | null;
@@ -1389,7 +1394,8 @@ export interface ProductionOperationRequest {
 export interface RouteTransitionRequest {
   transitionId: string;
   sourceOperationId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   kind: RouteTransitionKind;
   requiredJudgement: RouteJudgement | null;
   maxTraversals: number | null;

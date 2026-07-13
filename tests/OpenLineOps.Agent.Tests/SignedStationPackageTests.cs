@@ -1,5 +1,8 @@
 using System.IO.Compression;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Packages;
 using OpenLineOps.ContentProtection;
@@ -60,6 +63,73 @@ public sealed class SignedStationPackageTests : IDisposable
         Assert.All(
             Directory.EnumerateFiles(installed.ContentDirectory, "*", SearchOption.AllDirectories),
             path => Assert.True(File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly)));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public async Task InstallerRevalidatesInventoryAndAclBeforeReusingProtectedContent()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var source = CreateSource();
+        using var rsa = RSA.Create(3072);
+        var packagePath = Path.Combine(_root, "out", "revalidated.olopkg");
+        var built = await SignedStationPackageBuilder.BuildAsync(new BuildStationPackageRequest(
+            source,
+            packagePath,
+            "package-line-a",
+            "project-a",
+            "application-line",
+            "snapshot-001",
+            "line.main",
+            "station.eol",
+            "factory-signing",
+            rsa.ExportRSAPrivateKeyPem(),
+            new DateTimeOffset(2026, 7, 11, 8, 0, 0, TimeSpan.Zero)));
+        var installer = CreateInstaller(rsa.ExportSubjectPublicKeyInfoPem());
+        var installed = await installer.InstallAsync(packagePath, built.Manifest.ContentSha256);
+        var flowPath = Path.Combine(installed.ContentDirectory, "flows", "main.json");
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        var current = identity.User
+                      ?? throw new InvalidOperationException("Current Windows identity has no SID.");
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(
+            current,
+            FileSystemRights.FullControl,
+            AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(new FileInfo(flowPath), security);
+
+        var aclException = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await installer.InstallAsync(packagePath, built.Manifest.ContentSha256));
+        Assert.Contains("owner and ACL", aclException.Message, StringComparison.Ordinal);
+
+        new ImmutableContentProtector().DeleteProtectedInstallation(
+            Path.Combine(_root, "cache"),
+            installed.ContentDirectory);
+        installed = await installer.InstallAsync(packagePath, built.Manifest.ContentSha256);
+        flowPath = Path.Combine(installed.ContentDirectory, "flows", "main.json");
+        var tamperSecurity = new FileSecurity();
+        tamperSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        tamperSecurity.AddAccessRule(new FileSystemAccessRule(
+            current,
+            FileSystemRights.FullControl,
+            AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(new FileInfo(flowPath), tamperSecurity);
+        File.SetAttributes(flowPath, File.GetAttributes(flowPath) & ~FileAttributes.ReadOnly);
+        await File.WriteAllTextAsync(flowPath, "{\"tamperedAtRuntime\":true}");
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await installer.InstallAsync(packagePath, built.Manifest.ContentSha256));
+
+        Assert.Contains(
+            "Immutable content file 'flows/main.json'",
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -263,6 +333,8 @@ public sealed class SignedStationPackageTests : IDisposable
                 protector.DeleteProtectedInstallation(cacheRoot, contentDirectory);
             }
         }
+
+        Directory.Delete(cacheRoot);
     }
 
     private string CreateSource()

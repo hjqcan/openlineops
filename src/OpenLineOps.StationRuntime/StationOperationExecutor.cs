@@ -1,11 +1,16 @@
+using System.Runtime.ExceptionServices;
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Devices.Api.DependencyInjection;
 using OpenLineOps.Engineering.Api.DependencyInjection;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Plugins.Api.DependencyInjection;
+using OpenLineOps.Plugins.Application.Discovery;
+using OpenLineOps.Plugins.Application.Lifecycle;
 using OpenLineOps.Processes.Api.DependencyInjection;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Projects.Api.Integrations;
@@ -13,6 +18,7 @@ using OpenLineOps.Projects.Application.Persistence;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.Releases;
 using OpenLineOps.Runtime.Api.DependencyInjection;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -28,6 +34,7 @@ internal static class StationOperationExecutor
 {
     public static async ValueTask<StationOperationResultDocument> ExecuteAsync(
         StationOperationRequestDocument request,
+        StationRuntimeHostOptions hostOptions,
         string workDirectory,
         DateTimeOffset startedAtUtc,
         CancellationToken cancellationToken)
@@ -40,8 +47,12 @@ internal static class StationOperationExecutor
                 request.ProjectSnapshotId,
                 cancellationToken)
             .ConfigureAwait(false);
+        ValidateReleaseRoot(release, request);
+        var pluginCatalog = await FrozenReleasePluginPackageCatalog
+            .OpenAsync(release, cancellationToken)
+            .ConfigureAwait(false);
         var operation = ResolveOperation(release, request);
-        var configuration = BuildConfiguration(workDirectory);
+        var configuration = BuildConfiguration(workDirectory, pluginCatalog, hostOptions);
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSingleton<IConfiguration>(configuration);
@@ -58,6 +69,7 @@ internal static class StationOperationExecutor
         services.Replace(ServiceDescriptor.Singleton<IResourceLeaseRepository>(
             new AgentResourceLeaseFenceRepository(request)));
         services.AddOpenLineOpsPluginsModule(configuration);
+        services.Replace(ServiceDescriptor.Singleton<IPluginPackageCatalog>(pluginCatalog));
         services.AddOpenLineOpsDevicesModule(configuration);
 
         await using var provider = services.BuildServiceProvider(new ServiceProviderOptions
@@ -66,38 +78,151 @@ internal static class StationOperationExecutor
             ValidateOnBuild = true
         });
         await using var scope = provider.CreateAsyncScope();
-        await ValidateConfigurationAsync(
-                scope.ServiceProvider,
-                release,
-                operation,
-                request,
-                cancellationToken)
-            .ConfigureAwait(false);
-        var process = ResolveProcess(scope.ServiceProvider, operation);
-        var sessionId = new RuntimeSessionId(request.RuntimeSessionId);
-        var runner = scope.ServiceProvider.GetRequiredService<IRuntimeSessionRunner>();
-        _ = await runner.RunAsync(
-                new StartRuntimeSessionRequest(
-                    sessionId,
-                    new StationId(request.StationId),
-                    new ConfigurationSnapshotId(request.ConfigurationSnapshotId),
-                    new RecipeSnapshotId(request.RecipeSnapshotId),
-                    process,
-                    CreateTraceMetadata(request)),
-                cancellationToken)
-            .ConfigureAwait(false);
-        var repository = scope.ServiceProvider.GetRequiredService<IRuntimeSessionRepository>();
-        var session = await repository.GetByIdAsync(sessionId, CancellationToken.None)
-            .ConfigureAwait(false)
-            ?? throw new InvalidDataException(
-                $"Runtime Session {request.RuntimeSessionId:D} did not persist its execution evidence.");
-        return await StationOperationResultMapper.MapAsync(
-                request,
-                session,
-                workDirectory,
-                startedAtUtc,
-                cancellationToken)
-            .ConfigureAwait(false);
+        var monitoringInitializer = scope.ServiceProvider
+            .GetRequiredService<IRuntimeMonitoringProjectionInitializer>();
+        await monitoringInitializer.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        var lifecycle = scope.ServiceProvider.GetRequiredService<IPluginLifecycleManager>();
+        StationOperationResultDocument? executionResult = null;
+        Exception? primaryFailure = null;
+        try
+        {
+            var startedPlugins = await lifecycle
+                .StartAsync(scope.ServiceProvider, cancellationToken)
+                .ConfigureAwait(false);
+            ValidatePluginLifecycle(
+                pluginCatalog.Packages,
+                startedPlugins,
+                PluginLifecycleState.Initialized);
+            await ValidateConfigurationAsync(
+                    scope.ServiceProvider,
+                    release,
+                    operation,
+                    request,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var process = ResolveProcess(scope.ServiceProvider, operation);
+            var sessionId = new RuntimeSessionId(request.RuntimeSessionId);
+            var runner = scope.ServiceProvider.GetRequiredService<IRuntimeSessionRunner>();
+            _ = await runner.RunAsync(
+                    new StartRuntimeSessionRequest(
+                        sessionId,
+                        new StationId(request.StationId),
+                        new ConfigurationSnapshotId(request.ConfigurationSnapshotId),
+                        new RecipeSnapshotId(request.RecipeSnapshotId),
+                        process,
+                        CreateTraceMetadata(request)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var repository = scope.ServiceProvider.GetRequiredService<IRuntimeSessionRepository>();
+            var session = await repository.GetByIdAsync(sessionId, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Runtime Session {request.RuntimeSessionId:D} did not persist its execution evidence.");
+            executionResult = await StationOperationResultMapper.MapAsync(
+                    request,
+                    session,
+                    workDirectory,
+                    startedAtUtc,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+
+        IReadOnlyCollection<PluginLifecycleRecord> stoppedPlugins;
+        try
+        {
+            stoppedPlugins = await lifecycle
+                .StopAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception stopFailure)
+        {
+            if (primaryFailure is null)
+            {
+                throw;
+            }
+
+            throw new AggregateException(
+                "Frozen plugin execution and shutdown both failed.",
+                primaryFailure,
+                stopFailure);
+        }
+
+        var stopFailures = stoppedPlugins
+            .Where(record => record.State == PluginLifecycleState.Failed)
+            .Select(record => new InvalidOperationException(
+                record.FailureReason
+                ?? $"Frozen plugin '{record.Manifest.Id}' failed to stop."))
+            .ToArray();
+        if (primaryFailure is not null)
+        {
+            if (stopFailures.Length != 0)
+            {
+                throw new AggregateException(
+                    "Frozen plugin execution and shutdown both failed.",
+                    [primaryFailure, .. stopFailures]);
+            }
+
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        }
+
+        ValidatePluginLifecycle(
+            pluginCatalog.Packages,
+            stoppedPlugins,
+            PluginLifecycleState.Stopped);
+        return executionResult
+            ?? throw new InvalidOperationException("Station Runtime produced no execution result.");
+    }
+
+    private static void ValidateReleaseRoot(
+        OpenedProjectReleaseArtifact release,
+        StationOperationRequestDocument request)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (!string.Equals(
+                Path.GetFullPath(release.ReleaseRootPath),
+                Path.GetFullPath(request.PackageContentDirectory),
+                comparison))
+        {
+            throw new InvalidDataException(
+                "Station Runtime release root differs from the verified request package directory.");
+        }
+    }
+
+    private static void ValidatePluginLifecycle(
+        IReadOnlyCollection<PluginPackageDescriptor> packages,
+        IReadOnlyCollection<PluginLifecycleRecord> records,
+        PluginLifecycleState expectedState)
+    {
+        if (records.Count != packages.Count)
+        {
+            throw new InvalidDataException(
+                $"Frozen plugin lifecycle {expectedState} did not cover the exact release package set.");
+        }
+
+        foreach (var package in packages)
+        {
+            var matches = records.Where(record =>
+                    string.Equals(record.Manifest.Id, package.Manifest.Id, StringComparison.Ordinal)
+                    && string.Equals(record.Manifest.Version, package.Manifest.Version, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            if (matches.Length != 1
+                || matches[0].State != expectedState
+                || matches[0].FailureReason is not null)
+            {
+                var detail = matches.Length == 1
+                    ? matches[0].FailureReason ?? matches[0].State.ToString()
+                    : "missing or duplicated lifecycle record";
+                throw new InvalidDataException(
+                    $"Frozen plugin '{package.Manifest.Id}' lifecycle {expectedState} failed: {detail}.");
+            }
+        }
     }
 
     private static ProjectReleaseOperation ResolveOperation(
@@ -278,7 +403,10 @@ internal static class StationOperationExecutor
         };
     }
 
-    private static IConfigurationRoot BuildConfiguration(string workDirectory)
+    private static IConfigurationRoot BuildConfiguration(
+        string workDirectory,
+        FrozenReleasePluginPackageCatalog pluginCatalog,
+        StationRuntimeHostOptions hostOptions)
     {
         var root = Path.GetFullPath(workDirectory);
         return new ConfigurationBuilder()
@@ -299,6 +427,20 @@ internal static class StationOperationExecutor
                 ["OpenLineOps:Devices:ExternalProgramHost:RequireImmutableContentProtection"] = "true"
             })
             .AddEnvironmentVariables()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenLineOps:Plugins:PackageRoot"] = pluginCatalog.PackageRootPath,
+                ["OpenLineOps:Plugins:Activator"] = PluginActivators.ExternalProcess,
+                ["OpenLineOps:Plugins:EventLog:Provider"] = PluginEventLogProviders.Sqlite,
+                ["OpenLineOps:Plugins:EventLog:DatabasePath"] = Path.Combine(
+                    root,
+                    "plugin-events.sqlite"),
+                ["OpenLineOps:Plugins:ExternalHost:ExecutablePath"] =
+                    hostOptions.PluginHostExecutablePath,
+                ["OpenLineOps:Plugins:ExternalHost:ArgumentsTemplate"] =
+                    "--openlineops-plugin-host --manifest \"{ManifestPath}\" --entry \"{EntryAssemblyPath}\" --type \"{EntryType}\"",
+                ["OpenLineOps:Plugins:ExternalHost:Sandbox:IsolationMode"] = "ExternalProcess"
+            })
             .Build();
     }
 }

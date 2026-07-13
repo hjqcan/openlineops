@@ -635,6 +635,27 @@ async function main() {
     + ' && !document.querySelector("[data-testid=\\"production-transition-edge-route-1\\"]"))()',
     15000,
     'Condition editor exercise to return to the single-Operation runtime route');
+  await clickByTestId('production-operation-node-operation-1');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"production-operation-inspector\\"]")))()',
+    15000,
+    'remaining production Operation inspector to render');
+  await evaluate(`(() => {
+    const card = document.querySelector('.production-disposition-card');
+    const button = Array.from(card?.querySelectorAll('button') ?? [])
+      .find(candidate => candidate.textContent?.trim() === 'Mark terminal');
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error('Missing formal Mark terminal action for the remaining Operation');
+    }
+    button.click();
+    return true;
+  })()`);
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"production-transition-edge-route-terminal-1\\"]"))'
+    + ' && document.querySelector("[data-testid=\\"production-operation-node-operation-1\\"]")'
+    + '   ?.textContent?.includes("COMPLETED"))()',
+    15000,
+    'explicit Completed terminal Route Transition to appear');
   await clickByTestId('save-production-line');
   await waitForExpression(
     '(() => document.body.innerText.includes("Production line saved line-"))()',
@@ -734,6 +755,7 @@ async function main() {
           transitionId: transition.transitionId,
           sourceOperationId: transition.sourceOperationId,
           targetOperationId: transition.targetOperationId,
+          terminalDisposition: transition.terminalDisposition,
           kind: transition.kind,
           requiredJudgement: transition.requiredJudgement,
           maxTraversals: transition.maxTraversals,

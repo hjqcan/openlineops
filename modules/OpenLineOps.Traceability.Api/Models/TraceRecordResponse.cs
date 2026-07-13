@@ -143,7 +143,8 @@ public sealed record TraceOperationExecutionResponse(
 public sealed record TraceRouteDecisionResponse(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);

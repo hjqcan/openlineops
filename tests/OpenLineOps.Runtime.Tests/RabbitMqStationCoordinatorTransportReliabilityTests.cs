@@ -674,7 +674,9 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         completion.AgentId,
         completion.MessageId.ToString("D"),
         completion.JobId.ToString("D"),
-        $"station.{completion.StationId}.{nameof(StationJobCompleted)}",
+        StationTransportRoute.Event(
+            completion.StationId,
+            nameof(StationJobCompleted)),
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(completion, JsonOptions()));
 
@@ -710,7 +712,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             agentId,
             messageId.ToString("D"),
             requestId.ToString("D"),
-            $"station.{stationId}.{routeSuffix}",
+            StationTransportRoute.Event(stationId, routeSuffix),
             false,
             JsonSerializer.SerializeToUtf8Bytes(acknowledgement, JsonOptions()));
     }
@@ -726,7 +728,9 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         message.ProducerId,
         message.MessageId.ToString("D"),
         message.MessageId.ToString("D"),
-        $"station.{message.StationId}.{nameof(MaterialArrived)}",
+        StationTransportRoute.Event(
+            message.StationId,
+            nameof(MaterialArrived)),
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions()));
 

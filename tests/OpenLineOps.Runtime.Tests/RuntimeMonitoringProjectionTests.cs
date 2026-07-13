@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Execution;
@@ -34,6 +35,7 @@ public sealed class RuntimeMonitoringProjectionTests
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var projection = new RuntimeMonitoringProjection(repository);
+        await projection.InitializeAsync();
         var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
         var runner = new RuntimeSessionRunner(
             repository,
@@ -116,6 +118,7 @@ public sealed class RuntimeMonitoringProjectionTests
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var projection = new RuntimeMonitoringProjection(repository);
+        await projection.InitializeAsync();
         var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
         var executor = new ObservingRuntimeCommandExecutor(
             projection,
@@ -242,6 +245,7 @@ public sealed class RuntimeMonitoringProjectionTests
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var projection = new RuntimeMonitoringProjection(repository);
+        await projection.InitializeAsync();
         var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
         var runner = new RuntimeSessionRunner(
             repository,
@@ -296,6 +300,7 @@ public sealed class RuntimeMonitoringProjectionTests
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var projection = new RuntimeMonitoringProjection(repository);
+        await projection.InitializeAsync();
         var eventPublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
         var runner = new RuntimeSessionRunner(
             repository,
@@ -355,6 +360,149 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.NotEmpty(await projection.GetSessionTimelineAsync(firstRun.Value.SessionId, firstScope));
     }
 
+    [Fact]
+    public async Task FileBackedSqliteColdRestartReplaysUnpublishedEventsAndRestoresExactProjection()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        RuntimeSessionRunResult firstRun;
+
+        using (var repository = new SqliteRuntimeSessionRepository(database.ConnectionString))
+        using (var projection = new RuntimeMonitoringProjection(repository))
+        {
+            await projection.InitializeAsync();
+            var runner = new RuntimeSessionRunner(
+                repository,
+                new InMemoryRuntimeDomainEventPublisher([]),
+                new ScriptedRuntimeCommandExecutor(RuntimeCommandExecutionResult.Failed("scanner returned NG")),
+                new DeterministicRuntimeIdProvider(),
+                new FixedClock(StartedAtUtc));
+
+            var result = await runner.RunAsync(CreateStartRequest());
+            Assert.True(result.IsSuccess);
+            firstRun = result.Value;
+            Assert.Empty(await projection.GetStationStatusesAsync(MonitoringScope));
+            Assert.Empty(await projection.GetSessionTimelineAsync(firstRun.SessionId, MonitoringScope));
+            Assert.Empty(await projection.GetAlarmsAsync(includeAcknowledged: true));
+            Assert.True(await CountRowsAsync(database.ConnectionString, "runtime_monitoring_events") > 0);
+        }
+
+        RuntimeStationStatusProjection expectedStation;
+        RuntimeTargetStatusProjection expectedTarget;
+        RuntimeTimelineEntry[] expectedTimeline;
+        RuntimeAlarmProjection expectedAlarm;
+        RuntimeSessionRunResult liveRun;
+        RuntimeStationStatusProjection expectedLiveStation;
+        RuntimeTargetStatusProjection expectedLiveTarget;
+        RuntimeTimelineEntry[] expectedLiveTimeline;
+        using (var repository = new SqliteRuntimeSessionRepository(database.ConnectionString))
+        using (var projection = new RuntimeMonitoringProjection(repository))
+        {
+            await projection.InitializeAsync();
+            Assert.Equal(1, await CountRowsAsync(
+                database.ConnectionString,
+                "runtime_monitoring_station_statuses"));
+            var rawStation = Assert.Single(await repository.ListStationStatusesAsync());
+            Assert.Equal(MonitoringScope.ProjectId, rawStation.ProjectId);
+            Assert.Equal(MonitoringScope.ApplicationId, rawStation.ApplicationId);
+            Assert.Equal(MonitoringScope.ProjectSnapshotId, rawStation.ProjectSnapshotId);
+            Assert.Equal(MonitoringScope.TopologyId, rawStation.TopologyId);
+            Assert.Equal(MonitoringScope.ProductionRunId, rawStation.ProductionRunId);
+            expectedStation = Assert.Single(await projection.GetStationStatusesAsync(MonitoringScope));
+            expectedTarget = Assert.Single(await projection.GetTargetStatusesAsync(MonitoringScope));
+            expectedTimeline = (await projection.GetSessionTimelineAsync(firstRun.SessionId, MonitoringScope)).ToArray();
+            var alarm = Assert.Single(await projection.GetAlarmsAsync());
+            var acknowledgement = await projection.AcknowledgeAlarmAsync(
+                alarm.AlarmId,
+                "operator-cold-restart",
+                StartedAtUtc.AddMinutes(10));
+            Assert.True(acknowledgement.IsSuccess);
+            expectedAlarm = acknowledgement.Value;
+
+            Assert.Equal(RuntimeSessionStatus.Failed, expectedStation.SessionStatus);
+            Assert.Equal(RuntimeCommandStatus.Failed, expectedTarget.CommandStatus);
+            Assert.True(expectedTimeline.Length > 1);
+            Assert.Equal(
+                expectedTimeline.Select(entry => entry.EventId).Distinct().Count(),
+                expectedTimeline.Length);
+            Assert.True(expectedTimeline.Zip(expectedTimeline.Skip(1),
+                (left, right) => left.Sequence < right.Sequence).All(value => value));
+
+            var livePublisher = new InMemoryRuntimeDomainEventPublisher([projection]);
+            var liveRunner = new RuntimeSessionRunner(
+                repository,
+                livePublisher,
+                new ScriptedRuntimeCommandExecutor(RuntimeCommandExecutionResult.Completed()),
+                new DeterministicRuntimeIdProvider(),
+                new FixedClock(StartedAtUtc.AddHours(1)));
+            var liveResult = await liveRunner.RunAsync(CreateStartRequest("station-monitoring-live"));
+            Assert.True(liveResult.IsSuccess);
+            liveRun = liveResult.Value;
+            expectedLiveStation = Assert.Single(await projection.GetStationStatusesAsync(
+                MonitoringScope,
+                "station-monitoring-live"));
+            expectedLiveTarget = Assert.Single(await projection.GetTargetStatusesAsync(
+                MonitoringScope,
+                "station-monitoring-live"));
+            expectedLiveTimeline = (await projection.GetSessionTimelineAsync(
+                liveRun.SessionId,
+                MonitoringScope)).ToArray();
+            Assert.Equal(RuntimeSessionStatus.Completed, expectedLiveStation.SessionStatus);
+            Assert.Equal(RuntimeCommandStatus.Completed, expectedLiveTarget.CommandStatus);
+        }
+
+        using (var repository = new SqliteRuntimeSessionRepository(database.ConnectionString))
+        using (var projection = new RuntimeMonitoringProjection(repository))
+        {
+            await projection.InitializeAsync();
+            Assert.Equal(expectedStation, Assert.Single(
+                await projection.GetStationStatusesAsync(MonitoringScope, "station-monitoring")));
+            Assert.Equal(expectedTarget, Assert.Single(
+                await projection.GetTargetStatusesAsync(MonitoringScope, "station-monitoring")));
+            Assert.Equal(
+                expectedTimeline,
+                (await projection.GetSessionTimelineAsync(firstRun.SessionId, MonitoringScope)).ToArray());
+            Assert.Equal(expectedAlarm, Assert.Single(
+                await projection.GetAlarmsAsync(includeAcknowledged: true)));
+            Assert.Equal(expectedLiveStation, Assert.Single(await projection.GetStationStatusesAsync(
+                MonitoringScope,
+                "station-monitoring-live")));
+            Assert.Equal(expectedLiveTarget, Assert.Single(await projection.GetTargetStatusesAsync(
+                MonitoringScope,
+                "station-monitoring-live")));
+            Assert.Equal(
+                expectedLiveTimeline,
+                (await projection.GetSessionTimelineAsync(liveRun.SessionId, MonitoringScope)).ToArray());
+
+            using var repeatedRebuild = new RuntimeMonitoringProjection(repository);
+            await repeatedRebuild.InitializeAsync();
+            Assert.Equal(2, (await repeatedRebuild.GetStationStatusesAsync(MonitoringScope)).Count);
+            Assert.Equal(2, (await repeatedRebuild.GetTargetStatusesAsync(MonitoringScope)).Count);
+            Assert.Equal(
+                expectedTimeline.Length,
+                (await repeatedRebuild.GetSessionTimelineAsync(firstRun.SessionId, MonitoringScope)).Count);
+            Assert.Equal(expectedAlarm, Assert.Single(
+                await repeatedRebuild.GetAlarmsAsync(includeAcknowledged: true)));
+            Assert.Equal(
+                expectedLiveTimeline.Length,
+                (await repeatedRebuild.GetSessionTimelineAsync(liveRun.SessionId, MonitoringScope)).Count);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectionRejectsRuntimeEventPublishedBeforeDurableSessionSave()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        using var projection = new RuntimeMonitoringProjection(repository);
+        await projection.InitializeAsync();
+        var domainEvent = new RuntimeSessionCreatedDomainEvent(RuntimeSessionId.New());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await projection.HandleAsync([domainEvent]));
+
+        Assert.Contains("before durable session persistence", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(await projection.GetStationStatusesAsync(MonitoringScope));
+    }
+
     private static StartRuntimeSessionRequest CreateStartRequest(
         string stationSystemId = "station-monitoring",
         params ExecutableRuntimeNode[]? nodes)
@@ -390,6 +538,22 @@ public sealed class RuntimeMonitoringProjectionTests
                 applicationId: "application-monitoring",
                 projectSnapshotId: "snapshot-monitoring",
                 topologyId: "topology-monitoring"));
+    }
+
+    private static async Task<long> CountRowsAsync(string connectionString, string tableName)
+    {
+        var commandText = tableName switch
+        {
+            "runtime_monitoring_events" => "SELECT COUNT(*) FROM runtime_monitoring_events;",
+            "runtime_monitoring_station_statuses" =>
+                "SELECT COUNT(*) FROM runtime_monitoring_station_statuses;",
+            _ => throw new ArgumentOutOfRangeException(nameof(tableName), tableName, "Unknown test table.")
+        };
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = commandText;
+        return (long)(await command.ExecuteScalarAsync())!;
     }
 
     private static StartRuntimeSessionRequest CreateScopedStartRequest(
@@ -595,6 +759,42 @@ public sealed class RuntimeMonitoringProjectionTests
             return _results.Count == 0
                 ? RuntimeCommandExecutionResult.Completed()
                 : _results.Dequeue();
+        }
+    }
+
+    private sealed class TemporarySqliteDatabase : IDisposable
+    {
+        private TemporarySqliteDatabase(string directoryPath, string connectionString)
+        {
+            DirectoryPath = directoryPath;
+            ConnectionString = connectionString;
+        }
+
+        public string DirectoryPath { get; }
+
+        public string ConnectionString { get; }
+
+        public static TemporarySqliteDatabase Create()
+        {
+            var directoryPath = Path.Combine(
+                Path.GetTempPath(),
+                "openlineops-runtime-monitoring-tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directoryPath);
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(directoryPath, "runtime.sqlite"),
+                Pooling = false
+            }.ToString();
+            return new TemporarySqliteDatabase(directoryPath, connectionString);
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(DirectoryPath))
+            {
+                Directory.Delete(DirectoryPath, recursive: true);
+            }
         }
     }
 }

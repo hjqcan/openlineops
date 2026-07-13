@@ -26,6 +26,19 @@ public sealed class ReadinessHealthCheckConfigurationTests
     }
 
     [Fact]
+    public void AddOpenLineOpsReadinessHealthChecksRegistersAResolvableHealthCheckService()
+    {
+        var configuration = new ConfigurationBuilder().Build();
+        var services = new ServiceCollection();
+
+        services.AddOpenLineOpsReadinessHealthChecks(configuration);
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        Assert.NotNull(serviceProvider.GetRequiredService<HealthCheckService>());
+    }
+
+    [Fact]
     public void AddOpenLineOpsReadinessHealthChecksRegistersPostgreSqlChecksForServerProfile()
     {
         var configuration = new ConfigurationBuilder()

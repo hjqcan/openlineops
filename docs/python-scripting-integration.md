@@ -61,13 +61,12 @@ The only accepted execution mode is process-isolated:
       "Scripting": {
         "Python": {
           "ExecutionMode": "ProcessIsolated",
-          "WorkerFileName": "dotnet",
-          "WorkerArguments": "path/to/OpenLineOps.ScriptWorker.dll",
+          "WorkerFileName": "C:/Program Files/OpenLineOps/StationAgent/OpenLineOps.ScriptWorker.exe",
           "Sandbox": {
             "RequireLeastPrivilegeExecution": true,
             "IsolationMode": "Container",
             "ContainerRuntimeExecutable": "podman",
-            "ContainerImage": "openlineops/script-worker:1.0.0",
+            "ContainerImage": "openlineops/script-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "ContainerNetwork": "none"
           }
         }
@@ -81,6 +80,21 @@ The adapter starts a worker process for every script command, exchanges one JSON
 request/result over standard streams, and kills the process tree on cancellation
 or timeout. There is no in-process fallback. Container and least-privilege launch
 policies remain infrastructure concerns.
+
+These generic Runtime container settings are only for a different host that
+ships and verifies a real container-native worker image. Station Agent does not
+bind or forward the container fields. On a production Station,
+`StationAgentHostOptions` validates the co-packaged Windows worker, the absolute
+host Python runtime DLL, the signed co-packaged
+`OpenLineOps.LeastPrivilegeLauncher.exe`, and the fixed
+`RestrictedCurrentLowIntegrity` identity. The launcher derives a restricted
+primary token from the current Agent token and applies mandatory Low integrity
+(RID 4096); it cannot be replaced or given a custom argument template.
+`ProcessStationRuntimeHost` supplies only those canonical values after clearing
+the inherited environment. `ExternalProcess` remains available only when
+required least privilege is explicitly disabled for development or testing.
+The Agent bundle manifest records Agent, Station Runtime, Plugin Host, and
+Python Script Worker as distinct self-contained entry points.
 
 Execution and isolation tokens are case-sensitive. `ExecutionMode` accepts only
 `ProcessIsolated`; sandbox `IsolationMode` accepts only

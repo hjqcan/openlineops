@@ -121,19 +121,24 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
                 decision.SourceOperationRunId,
                 decision.TransitionId,
                 decision.TargetOperationId,
+                decision.TerminalDisposition?.ToString(),
                 decision.SourceJudgement.ToString(),
                 decision.Traversal,
                 decision.DecidedAtUtc))
             .ToArray();
         var completedAtUtc = run.CompletedAtUtc.Value;
-        var materialTimeline = await _materials.ListTimelineAsync(
-                new ProductionMaterialTimelineQuery(
-                    new ProductionUnitId(run.ProductionUnitId.Value),
-                    run.RunId,
-                    run.CarrierId is null ? null : new CarrierId(run.CarrierId),
-                    completedAtUtc),
+        var materialTimeline = (await _materials.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.UnionScope(
+                    productionUnitId: new ProductionUnitId(run.ProductionUnitId.Value),
+                    productionRunId: run.RunId,
+                    carrierId: run.CarrierId is null ? null : new CarrierId(run.CarrierId),
+                    throughUtc: completedAtUtc),
                 cancellationToken)
-            .ConfigureAwait(false);
+            .ConfigureAwait(false))
+            .DistinctBy(entry => entry.EvidenceId)
+            .OrderBy(entry => entry.OccurredAtUtc)
+            .ThenBy(entry => entry.EvidenceId)
+            .ToArray();
         var result = await _traceRecordService.CreateAsync(
             new CreateTraceRecordRequest(
                 run.RunId.Value,
@@ -175,20 +180,7 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
                     .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.DispositionTransition)
                     .Select(ToDispositionTransitionRequest)
                     .ToArray(),
-                [
-                    .. run.RecoveryDecisions.Select(decision => new CreateAuditEntryRequest(
-                        CreateRecoveryAuditEntryId(run.RunId.Value, decision.DecisionId),
-                        decision.ActorId,
-                        $"ProductionRun.Recovery.{decision.Kind}",
-                        CreateRecoveryAuditDetail(decision),
-                        decision.DecidedAtUtc)),
-                    new CreateAuditEntryRequest(
-                        run.RunId.Value,
-                        run.ActorId,
-                        $"ProductionRun.{run.ExecutionStatus}",
-                        $"Trace record generated from terminal Production Run {run.RunId}.",
-                        completedAtUtc)
-                ]),
+                CreateRunAuditEntries(run, completedAtUtc)),
             cancellationToken).ConfigureAwait(false);
 
         if (result.IsFailure
@@ -526,6 +518,63 @@ public sealed class ProductionRunTraceDomainEventSubscriber :
     private static Guid CreateRecoveryAuditEntryId(Guid runId, Guid decisionId)
     {
         var input = Encoding.UTF8.GetBytes($"recovery:{runId:N}:{decisionId:N}");
+        var hash = SHA256.HashData(input);
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    private static List<CreateAuditEntryRequest> CreateRunAuditEntries(
+        ProductionRunSnapshot run,
+        DateTimeOffset completedAtUtc)
+    {
+        var entries = run.RecoveryDecisions
+            .Select(decision => new CreateAuditEntryRequest(
+                CreateRecoveryAuditEntryId(run.RunId.Value, decision.DecisionId),
+                decision.ActorId,
+                $"ProductionRun.Recovery.{decision.Kind}",
+                CreateRecoveryAuditDetail(decision),
+                decision.DecidedAtUtc))
+            .ToList();
+        if (run.SafeStopRequestedAtUtc is { } requestedAtUtc)
+        {
+            entries.Add(new CreateAuditEntryRequest(
+                CreateRunAuditEntryId(run.RunId.Value, "safe-stop-requested"),
+                run.SafeStopRequestedBy
+                ?? throw new InvalidDataException("Safe Stop Trace evidence has no requesting actor."),
+                "ProductionRun.SafeStop.Requested",
+                JsonSerializer.Serialize(new
+                {
+                    Reason = run.SafeStopReason,
+                    RequestedAtUtc = requestedAtUtc
+                }),
+                requestedAtUtc));
+        }
+
+        if (run.SafeStopAcknowledgedAtUtc is { } acknowledgedAtUtc)
+        {
+            entries.Add(new CreateAuditEntryRequest(
+                CreateRunAuditEntryId(run.RunId.Value, "safe-stop-acknowledged"),
+                "system.station-safety",
+                "ProductionRun.SafeStop.Acknowledged",
+                JsonSerializer.Serialize(new
+                {
+                    RequestedAtUtc = run.SafeStopRequestedAtUtc,
+                    AcknowledgedAtUtc = acknowledgedAtUtc
+                }),
+                acknowledgedAtUtc));
+        }
+
+        entries.Add(new CreateAuditEntryRequest(
+            run.RunId.Value,
+            run.ActorId,
+            $"ProductionRun.{run.ExecutionStatus}",
+            $"Trace record generated from terminal Production Run {run.RunId}.",
+            completedAtUtc));
+        return entries;
+    }
+
+    private static Guid CreateRunAuditEntryId(Guid runId, string evidenceKind)
+    {
+        var input = Encoding.UTF8.GetBytes($"production-run:{runId:N}:{evidenceKind}");
         var hash = SHA256.HashData(input);
         return new Guid(hash.AsSpan(0, 16));
     }

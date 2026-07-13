@@ -137,7 +137,7 @@ same Station.
 
 Removed node/module target kinds and fields are not accepted.
 
-## 2D layout and future 3D
+## Shared 2D and 3D layout
 
 The layout schema is hierarchical. Each element has a semantic target and a
 `parentElementId`; child coordinates are local to their parent. The editor
@@ -148,8 +148,10 @@ Edit mode renders design semantics. Monitor mode renders the same layout with
 live state keyed by `systemId` and target identity. It never stores status in
 the layout JSON.
 
-3D will be a renderer over the same published topology and state. Studio must
-not offer a second topology file or fake a 3D model disconnected from 2D.
+The semantic 3D renderer projects the same published topology and state. In
+edit mode, dragging a 3D block updates the same parent-local geometry used by
+2D; in monitor mode, both dimensions display the same live target state. Studio
+does not keep a second topology file or a disconnected 3D model.
 
 ## Flow resources
 

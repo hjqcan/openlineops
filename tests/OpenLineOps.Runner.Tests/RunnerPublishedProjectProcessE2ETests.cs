@@ -467,7 +467,17 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                                }
                            }
                         },
-                       transitions = Array.Empty<object>(),
+                       transitions = new[]
+                       {
+                           new
+                           {
+                               transitionId = "operation.main-completed",
+                               sourceOperationId = "operation.main",
+                               targetOperationId = (string?)null,
+                               terminalDisposition = "Completed",
+                               kind = "Sequence"
+                           }
+                       },
                        lineControllerAuthorizations = Array.Empty<object>()
                    }))
         {

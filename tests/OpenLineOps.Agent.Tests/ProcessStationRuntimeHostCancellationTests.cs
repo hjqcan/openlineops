@@ -21,6 +21,125 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         $"openlineops-station-host-{Guid.NewGuid():N}");
 
     [Fact]
+    public void ConstructorRejectsMissingPythonWorkerPolicy()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            new ProcessStationRuntimeHostOptions(
+                Path.Combine(_root, "station-runtime.exe"),
+                Path.Combine(_root, "plugin-host.exe"),
+                Path.Combine(_root, "work"),
+                Path.Combine(_root, "artifacts"),
+                TimeSpan.FromMinutes(1)),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("Python script", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsExternalProcessWhenLeastPrivilegeIsRequired()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            new ProcessStationRuntimeHostOptions(
+                Path.Combine(_root, "station-runtime.exe"),
+                Path.Combine(_root, "plugin-host.exe"),
+                Path.Combine(_root, "work"),
+                Path.Combine(_root, "artifacts"),
+                TimeSpan.FromMinutes(1),
+                PythonScript: new StationRuntimePythonScriptOptions(
+                    Path.Combine(_root, "script-worker.exe"),
+                    Path.Combine(_root, "python312.dll"),
+                    new StationRuntimePythonScriptSandboxOptions(
+                        RequireLeastPrivilegeExecution: true,
+                        IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess))),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("least-privilege", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ConstructorRejectsStationAgentContainerIsolation(bool requireLeastPrivilege)
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: requireLeastPrivilege,
+            IsolationMode: "Container");
+
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            ConstructorOptions(sandbox),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("Unsupported Station Agent", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsRelativeLeastPrivilegeLauncher()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: true,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            LeastPrivilegeIdentity: "station-python",
+            LeastPrivilegeLauncherExecutable: "launcher.exe");
+
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            ConstructorOptions(sandbox),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("must be absolute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsMissingLeastPrivilegeLauncher()
+    {
+        var missingLauncher = Path.Combine(_root, "missing-launcher.exe");
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: true,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            LeastPrivilegeIdentity: "station-python",
+            LeastPrivilegeLauncherExecutable: missingLauncher);
+
+        var exception = Assert.Throws<FileNotFoundException>(() => new ProcessStationRuntimeHost(
+            ConstructorOptions(sandbox),
+            new AcceptingFenceValidator()));
+
+        Assert.Equal(Path.GetFullPath(missingLauncher), exception.FileName);
+    }
+
+    [Fact]
+    public void ConstructorRejectsInteractiveRequiredLeastPrivilegeLauncher()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: true,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            LeastPrivilegeIdentity: "station-python",
+            LeastPrivilegeLauncherExecutable: CreatePlaceholder("least-privilege-launcher.exe"),
+            LeastPrivilegeNoInteractivePrompt: false);
+
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            ConstructorOptions(sandbox),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("interactive launcher prompts", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsCustomRequiredLeastPrivilegeLauncherTemplate()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: true,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            LeastPrivilegeIdentity: "station-python",
+            LeastPrivilegeLauncherExecutable: CreatePlaceholder("least-privilege-launcher.exe"),
+            LeastPrivilegeArgumentsTemplate: "{ExecutablePath} {Arguments}");
+
+        var exception = Assert.Throws<ArgumentException>(() => new ProcessStationRuntimeHost(
+            ConstructorOptions(sandbox),
+            new AcceptingFenceValidator()));
+
+        Assert.Contains("custom launcher", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AgentCancellationKillsStationRuntimeChildProcessTree()
     {
         if (!OperatingSystem.IsWindows())
@@ -190,15 +309,120 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         return new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
                 executable,
+                PluginHostExecutablePath(),
                 Path.Combine(_root, "work"),
                 Path.Combine(_root, "artifacts"),
                 timeout,
                 RequireExternalProgramAppContainerIsolation:
                     appContainerProfileNamespace is not null,
                 ExternalProgramAppContainerProfileNamespace:
-                    appContainerProfileNamespace),
+                    appContainerProfileNamespace,
+                PythonScript: PythonScriptOptions()),
             new AcceptingFenceValidator(),
             clock: new FixedClock(Now));
+    }
+
+    private ProcessStationRuntimeHostOptions ConstructorOptions(
+        StationRuntimePythonScriptSandboxOptions sandbox) => new(
+        CreatePlaceholder("station-runtime.exe"),
+        CreatePlaceholder("plugin-host.exe"),
+        Path.Combine(_root, "constructor-work"),
+        Path.Combine(_root, "constructor-artifacts"),
+        TimeSpan.FromMinutes(1),
+        PythonScript: new StationRuntimePythonScriptOptions(
+            CreatePlaceholder("script-worker.exe"),
+            CreatePlaceholder("python312.dll"),
+            sandbox));
+
+    private string CreatePlaceholder(string fileName)
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, fileName);
+        if (!File.Exists(path))
+        {
+            File.WriteAllBytes(path, []);
+        }
+
+        return path;
+    }
+
+    private static StationRuntimePythonScriptOptions PythonScriptOptions()
+    {
+        var configuration = AppContext.BaseDirectory.Contains(
+            $"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}",
+            StringComparison.OrdinalIgnoreCase)
+            ? "Release"
+            : "Debug";
+        var pythonRuntime = Environment.GetEnvironmentVariable("PYTHONNET_PYDLL");
+        if (string.IsNullOrWhiteSpace(pythonRuntime) || !File.Exists(pythonRuntime))
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "python",
+                Arguments = "-c \"import pathlib,sysconfig; print(pathlib.Path(sysconfig.get_config_var('BINDIR')).joinpath(sysconfig.get_config_var('LDLIBRARY')).resolve())\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }) ?? throw new InvalidOperationException("Python runtime discovery process did not start.");
+            if (!process.WaitForExit(2_000) || process.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    "Station Runtime host tests could not discover the Python runtime DLL.");
+            }
+
+            pythonRuntime = process.StandardOutput.ReadLine();
+            if (string.IsNullOrWhiteSpace(pythonRuntime) || !File.Exists(pythonRuntime))
+            {
+                throw new InvalidOperationException(
+                    "Station Runtime host tests require an installed Python runtime DLL.");
+            }
+        }
+
+        return new StationRuntimePythonScriptOptions(
+            Path.Combine(
+                RepositoryRoot(),
+                "src",
+                "OpenLineOps.ScriptWorker",
+                "bin",
+                configuration,
+                "net10.0",
+                "OpenLineOps.ScriptWorker.exe"),
+            Path.GetFullPath(pythonRuntime),
+            new StationRuntimePythonScriptSandboxOptions(
+                RequireLeastPrivilegeExecution: false,
+                IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess));
+    }
+
+    private static string PluginHostExecutablePath()
+    {
+        var configuration = AppContext.BaseDirectory.Contains(
+            $"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}",
+            StringComparison.OrdinalIgnoreCase)
+            ? "Release"
+            : "Debug";
+        return Path.Combine(
+            RepositoryRoot(),
+            "src",
+            "OpenLineOps.PluginHost",
+            "bin",
+            configuration,
+            "net10.0",
+            "OpenLineOps.PluginHost.exe");
+    }
+
+    private static string RepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null
+               && !File.Exists(Path.Combine(directory.FullName, "OpenLineOps.slnx")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName
+               ?? throw new DirectoryNotFoundException(
+                   "OpenLineOps repository root could not be found.");
     }
 
     private StationRuntimeExecutionRequest CreateRequest(string pidFile)

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -23,6 +24,7 @@ using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.ExternalPrograms;
 using OpenLineOps.Projects.Infrastructure.Releases;
+using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
@@ -43,6 +45,12 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
     private const string StationSystemId = "station.main";
     private const string TopologyId = "topology.main";
     private const long VendorTimeoutMilliseconds = 120_000;
+    private const string StagedAgentBundleRootEnvironmentVariable =
+        "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT";
+    private const string StagedSamplePluginRootEnvironmentVariable =
+        "OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT";
+    private const string StagedPythonTokenEvidenceEnvironmentVariable =
+        "OPENLINEOPS_STAGED_PYTHON_TOKEN_EVIDENCE_PATH";
 
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
@@ -130,6 +138,130 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         await VerifyCancellationAsync("SpawnChildDelay", expectsChildProcess: true);
     }
 
+    [Fact]
+    public async Task SignedFrozenPythonFlowRunsThroughAgentStationRuntimeAndWorker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await InitializePythonAsync();
+        var request = CreateRequest("python-e2e");
+        var store = new InMemoryStationJobStore();
+        var coordinator = CreateCoordinator(store);
+        await ApplyLeaseAsync(request);
+
+        var snapshot = await coordinator.HandleAsync(request);
+
+        Assert.True(
+            snapshot.ExecutionStatus == ExecutionStatus.Completed,
+            $"Python Flow ended as {snapshot.ExecutionStatus}: "
+            + $"{snapshot.FailureCode}: {snapshot.FailureReason}");
+        Assert.Equal(ResultJudgement.NotApplicable, snapshot.Judgement);
+        Assert.Equal(StationJobStatus.Completed, snapshot.Status);
+        Assert.Equal(1, snapshot.CommandCount);
+        Assert.Equal(1, snapshot.CompletedStepCount);
+        using var outputs = JsonDocument.Parse(snapshot.OutputsJson!);
+        AssertTypedOutput(outputs.RootElement, "python.input", "Text", "signed-package-input");
+        var stagedBundleRoot = OptionalStagedArtifactRoot(
+            StagedAgentBundleRootEnvironmentVariable);
+        AssertTypedOutput(
+            outputs.RootElement,
+            "python.isolation",
+            "Text",
+            stagedBundleRoot is null ? "ExternalProcess" : "LeastPrivilegeIdentity");
+        AssertTypedOutput(outputs.RootElement, "python.station", "Text", StationSystemId);
+        if (stagedBundleRoot is not null)
+        {
+            AssertTypedOutput(outputs.RootElement, "python.tokenRestricted", "Boolean", "true");
+            AssertTypedOutput(outputs.RootElement, "python.integrityRid", "WholeNumber", "4096");
+            var evidencePath = Environment.GetEnvironmentVariable(
+                StagedPythonTokenEvidenceEnvironmentVariable);
+            if (evidencePath is not null)
+            {
+                if (string.IsNullOrWhiteSpace(evidencePath)
+                    || char.IsWhiteSpace(evidencePath[0])
+                    || char.IsWhiteSpace(evidencePath[^1])
+                    || !Path.IsPathFullyQualified(evidencePath))
+                {
+                    throw new InvalidDataException(
+                        $"{StagedPythonTokenEvidenceEnvironmentVariable} must be a canonical absolute file path.");
+                }
+
+                var fullEvidencePath = Path.GetFullPath(evidencePath);
+                var evidenceDirectory = Path.GetDirectoryName(fullEvidencePath)
+                    ?? throw new InvalidDataException(
+                        "Staged Python token evidence path has no parent directory.");
+                Directory.CreateDirectory(evidenceDirectory);
+                var evidence = JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    isolationMode = TypedOutputValue(
+                        outputs.RootElement,
+                        "python.isolation"),
+                    tokenRestricted = bool.Parse(TypedOutputValue(
+                        outputs.RootElement,
+                        "python.tokenRestricted")),
+                    integrityRid = int.Parse(
+                        TypedOutputValue(outputs.RootElement, "python.integrityRid"),
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture)
+                });
+                await File.WriteAllTextAsync(
+                    fullEvidencePath,
+                    evidence + Environment.NewLine,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SignedFrozenPluginRunsThroughAgentStationRuntimeAndBundledHost()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await InitializePluginAsync();
+        var request = CreateRequest("plugin-e2e");
+        var store = new InMemoryStationJobStore();
+        var coordinator = CreateCoordinator(store);
+        await ApplyLeaseAsync(request);
+
+        var snapshot = await coordinator.HandleAsync(request);
+
+        Assert.True(
+            snapshot.ExecutionStatus == ExecutionStatus.Completed,
+            $"Plugin Flow ended as {snapshot.ExecutionStatus}: "
+            + $"{snapshot.FailureCode}: {snapshot.FailureReason}");
+        Assert.Equal(ResultJudgement.NotApplicable, snapshot.Judgement);
+        Assert.Equal(StationJobStatus.Completed, snapshot.Status);
+        var terminalOutbox = await AdvanceOutboxToAsync(
+            store,
+            request.JobId,
+            StationAgentMessageKinds.JobCompleted);
+        var completion = JsonSerializer.Deserialize<StationJobCompleted>(
+            terminalOutbox.PayloadJson,
+            MessageJsonOptions)
+            ?? throw new InvalidDataException("Plugin E2E completion message is null.");
+        Assert.Equal(request.JobId, completion.JobId);
+        Assert.Equal(ExecutionStatus.Completed, completion.ExecutionStatus);
+        Assert.Equal(ResultJudgement.NotApplicable, completion.Judgement);
+        var command = Assert.Single(completion.Commands);
+        Assert.Equal("Completed", command.Status);
+        Assert.Equal("Echo", command.CommandName);
+        Assert.NotNull(command.ResultPayload);
+        using var resultPayload = JsonDocument.Parse(command.ResultPayload);
+        Assert.Equal("loopback-device-01", resultPayload.RootElement
+            .GetProperty("deviceInstanceId")
+            .GetString());
+        Assert.Equal("frozen-plugin-payload", resultPayload.RootElement
+            .GetProperty("echo")
+            .GetString());
+    }
+
     [SupportedOSPlatform("windows")]
     private async ValueTask InitializeAsync()
     {
@@ -185,6 +317,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         _runtimeHost = new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
                 StationRuntimeExecutablePath(),
+                PluginHostExecutablePath(),
                 _runtimeWorkRoot,
                 _artifactRoot,
                 TimeSpan.FromMinutes(3),
@@ -196,7 +329,135 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 RequireRestrictedExternalProgramHostIdentity: false,
                 RequireExternalProgramAppContainerIsolation: true,
                 ExternalProgramAppContainerProfileNamespace: AppContainerProfileNamespace,
-                RequireImmutableExternalProgramContent: true),
+                RequireImmutableExternalProgramContent: true,
+                PythonScript: PythonScriptOptions()),
+            _resourceFenceValidator,
+            clock: new FixedClock(Now));
+        _executor = new PackageStationOperationExecutor(
+            new PackageStationOperationExecutorOptions(distribution),
+            installer,
+            _runtimeHost);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private async ValueTask InitializePythonAsync()
+    {
+        Directory.CreateDirectory(_root);
+        var scope = CreateApplication();
+        var flow = CreatePythonFlow();
+        var metadata = CreatePythonMetadata(flow);
+        var release = await new FileSystemProjectReleaseArtifactStore().PublishAsync(
+            scope,
+            "snapshot.main",
+            Now,
+            metadata);
+
+        using var signingKey = RSA.Create(3072);
+        var privateKeyPath = Path.Combine(_root, "python-station-signing-key.pem");
+        await File.WriteAllTextAsync(privateKeyPath, signingKey.ExportRSAPrivateKeyPem());
+        var distribution = Path.Combine(_root, "package-distribution");
+        var publisher = new FileSystemProjectReleaseStationPackagePublisher(
+            new StationPackagePublicationOptions(
+                distribution,
+                Path.Combine(_root, "deployment-catalog"),
+                "python-station-release-signing",
+                privateKeyPath));
+        var package = Assert.Single((await publisher.PublishAsync(
+            new ProjectReleaseStationPackageRequest(release, metadata, Now))).Packages);
+        _packageContentSha256 = package.PackageContentSha256;
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        var currentSid = identity.User?.Value
+            ?? throw new InvalidOperationException("The Windows test identity has no SID.");
+        var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
+            WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var installer = new SignedStationPackageInstaller(new StationPackageTrustOptions(
+            _cacheRoot,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["python-station-release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
+            },
+            ImmutableReaderSid: contentCapabilitySid,
+            ImmutableHostReaderSid: currentSid));
+        _resourceFenceValidator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        _runtimeHost = new ProcessStationRuntimeHost(
+            new ProcessStationRuntimeHostOptions(
+                StationRuntimeExecutablePath(),
+                PluginHostExecutablePath(),
+                _runtimeWorkRoot,
+                _artifactRoot,
+                TimeSpan.FromMinutes(1),
+                MaximumStandardOutputBytes: 2 * 1024 * 1024,
+                MaximumProcessCount: 16,
+                MaximumProcessMemoryBytes: 1024L * 1024 * 1024,
+                MaximumJobMemoryBytes: 2L * 1024 * 1024 * 1024,
+                MaximumCpuTime: TimeSpan.FromMinutes(1),
+                RequireImmutableExternalProgramContent: true,
+                PythonScript: PythonScriptOptions()),
+            _resourceFenceValidator,
+            clock: new FixedClock(Now));
+        _executor = new PackageStationOperationExecutor(
+            new PackageStationOperationExecutorOptions(distribution),
+            installer,
+            _runtimeHost);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private async ValueTask InitializePluginAsync()
+    {
+        Directory.CreateDirectory(_root);
+        var scope = CreateApplication();
+        var packageDependency = CreateSamplePluginPackageDependency();
+        var flow = CreatePluginFlow();
+        var metadata = CreatePluginMetadata(flow, packageDependency);
+        var release = await new FileSystemProjectReleaseArtifactStore().PublishAsync(
+            scope,
+            "snapshot.main",
+            Now,
+            metadata);
+
+        using var signingKey = RSA.Create(3072);
+        var privateKeyPath = Path.Combine(_root, "plugin-station-signing-key.pem");
+        await File.WriteAllTextAsync(privateKeyPath, signingKey.ExportRSAPrivateKeyPem());
+        var distribution = Path.Combine(_root, "package-distribution");
+        var publisher = new FileSystemProjectReleaseStationPackagePublisher(
+            new StationPackagePublicationOptions(
+                distribution,
+                Path.Combine(_root, "deployment-catalog"),
+                "plugin-station-release-signing",
+                privateKeyPath));
+        var package = Assert.Single((await publisher.PublishAsync(
+            new ProjectReleaseStationPackageRequest(release, metadata, Now))).Packages);
+        _packageContentSha256 = package.PackageContentSha256;
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        var currentSid = identity.User?.Value
+            ?? throw new InvalidOperationException("The Windows test identity has no SID.");
+        var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
+            WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var installer = new SignedStationPackageInstaller(new StationPackageTrustOptions(
+            _cacheRoot,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["plugin-station-release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
+            },
+            ImmutableReaderSid: contentCapabilitySid,
+            ImmutableHostReaderSid: currentSid));
+        _resourceFenceValidator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        _runtimeHost = new ProcessStationRuntimeHost(
+            new ProcessStationRuntimeHostOptions(
+                StationRuntimeExecutablePath(),
+                PluginHostExecutablePath(),
+                _runtimeWorkRoot,
+                _artifactRoot,
+                TimeSpan.FromMinutes(1),
+                MaximumStandardOutputBytes: 2 * 1024 * 1024,
+                MaximumProcessCount: 16,
+                MaximumProcessMemoryBytes: 1024L * 1024 * 1024,
+                MaximumJobMemoryBytes: 2L * 1024 * 1024 * 1024,
+                MaximumCpuTime: TimeSpan.FromMinutes(1),
+                RequireImmutableExternalProgramContent: true,
+                PythonScript: PythonScriptOptions()),
             _resourceFenceValidator,
             clock: new FixedClock(Now));
         _executor = new PackageStationOperationExecutor(
@@ -553,13 +814,13 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             scope,
             $"configuration/projects/{ResourceFileName("project", "engineering.main")}",
             """
-            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"application.main","resourceKind":"project","resourceId":"engineering.main","snapshot":{"projectId":"engineering.main","workspaceId":"workspace.main","displayName":"Main","createdAtUtc":"2026-07-11T12:00:00+00:00","activeSnapshotId":"configuration.main","snapshots":[{"snapshotId":"configuration.main","projectId":"engineering.main","processDefinitionId":"process.main","processVersionId":"process.main@1","recipeId":"recipe.main","recipeVersionId":"recipe.main@1","stationProfileId":"station.profile.main","status":"Published","publishedAtUtc":"2026-07-11T12:00:00+00:00","deviceBindings":[]}]}}
+            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"application.main","resourceKind":"project","resourceId":"engineering.main","snapshot":{"projectId":"engineering.main","workspaceId":"workspace.main","displayName":"Main","createdAtUtc":"2026-07-11T12:00:00+00:00","activeSnapshotId":"configuration.main","snapshots":[{"snapshotId":"configuration.main","projectId":"engineering.main","processDefinitionId":"process.main","processVersionId":"process.main@1","recipeId":"recipe.main","recipeVersionId":"recipe.main@1","stationProfileId":"station.profile.main","status":"Published","publishedAtUtc":"2026-07-11T12:00:00+00:00","deviceBindings":[{"deviceBindingId":"binding.loopback","ownerSystemId":"station.main","capabilityId":"device.loopback","deviceKey":"loopback-device-01"}]}]}}
             """);
         Write(
             scope,
             $"configuration/station-profiles/{ResourceFileName("station-profile", "station.profile.main")}",
             """
-            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"application.main","resourceKind":"station-profile","resourceId":"station.profile.main","snapshot":{"stationProfileId":"station.profile.main","stationSystemId":"station.main","displayName":"Main Station","deviceBindings":[]}}
+            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"application.main","resourceKind":"station-profile","resourceId":"station.profile.main","snapshot":{"stationProfileId":"station.profile.main","stationSystemId":"station.main","displayName":"Main Station","deviceBindings":[{"deviceBindingId":"binding.loopback","ownerSystemId":"station.main","capabilityId":"device.loopback","deviceKey":"loopback-device-01"}]}}
             """);
         return scope;
     }
@@ -658,6 +919,90 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         }
     }
 
+    private ProjectReleasePackageDependencyLock CreateSamplePluginPackageDependency()
+    {
+        var packagePath = Path.Combine(_root, "sample-plugin-package");
+        Directory.CreateDirectory(packagePath);
+        var stagedSamplePluginRoot = OptionalStagedArtifactRoot(
+            StagedSamplePluginRootEnvironmentVariable);
+        File.Copy(
+            stagedSamplePluginRoot is null
+                ? Path.Combine(
+                    RepositoryRoot(),
+                    "samples",
+                    "plugins",
+                    "OpenLineOps.SamplePlugins.LoopbackDevice",
+                    "manifest.json")
+                : RequiredDirectStagedFile(stagedSamplePluginRoot, "manifest.json"),
+            Path.Combine(packagePath, "manifest.json"));
+        File.Copy(
+            stagedSamplePluginRoot is null
+                ? Path.Combine(
+                    RepositoryRoot(),
+                    "samples",
+                    "plugins",
+                    "OpenLineOps.SamplePlugins.LoopbackDevice",
+                    "bin",
+                    BuildConfiguration(),
+                    "net10.0",
+                    "OpenLineOps.SamplePlugins.LoopbackDevice.dll")
+                : RequiredDirectStagedFile(
+                    stagedSamplePluginRoot,
+                    "OpenLineOps.SamplePlugins.LoopbackDevice.dll"),
+            Path.Combine(packagePath, "OpenLineOps.SamplePlugins.LoopbackDevice.dll"));
+
+        var files = Directory.EnumerateFiles(packagePath, "*", SearchOption.AllDirectories)
+            .Select(path =>
+            {
+                var bytes = File.ReadAllBytes(path);
+                return new ProjectReleasePackageFile(
+                    Path.GetRelativePath(packagePath, path).Replace('\\', '/'),
+                    bytes.LongLength,
+                    Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            })
+            .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        var canonical = new StringBuilder();
+        foreach (var file in files)
+        {
+            canonical.Append(file.RelativePath)
+                .Append('\0')
+                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append('\0')
+                .Append(file.Sha256)
+                .Append('\n');
+        }
+
+        var contentSha256 = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
+        return new ProjectReleasePackageDependencyLock(
+            "device.loopback",
+            "binding.loopback",
+            ProjectReleaseRuntimeProviderKinds.PluginCommand,
+            "openlineops.samples.loopback-device",
+            StationSystemId,
+            StationSystemId,
+            "openlineops.samples.loopback-device",
+            "openlineops.samples.loopback-device",
+            "0.1.0",
+            contentSha256,
+            files.Single(file => file.RelativePath == "manifest.json").Sha256,
+            files.Single(file => file.RelativePath == "OpenLineOps.SamplePlugins.LoopbackDevice.dll").Sha256,
+            "1.0.0",
+            "any",
+            "openlineops.plugin-abi/1",
+            $"packages/{contentSha256}",
+            "manifest.json",
+            "OpenLineOps.SamplePlugins.LoopbackDevice.dll",
+            [new ProjectReleasePackageCommandLock(
+                "Device",
+                "loopback.echo",
+                "device.loopback",
+                "Echo")],
+            files,
+            packagePath);
+    }
+
     private static FlowIrCanonicalArtifact CreateFlow()
     {
         var source = new FlowIrSourceTrace(
@@ -751,6 +1096,364 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             : throw new InvalidOperationException(result.Error.Message);
     }
 
+    private static FlowIrCanonicalArtifact CreatePythonFlow()
+    {
+        const string sourceCode = """
+            import os
+            import ctypes
+            from ctypes import wintypes
+
+            TOKEN_QUERY = 0x0008
+            TOKEN_INTEGRITY_LEVEL = 25
+
+            class SID_AND_ATTRIBUTES(ctypes.Structure):
+                _fields_ = [('Sid', ctypes.c_void_p), ('Attributes', wintypes.DWORD)]
+
+            class TOKEN_MANDATORY_LABEL(ctypes.Structure):
+                _fields_ = [('Label', SID_AND_ATTRIBUTES)]
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+            kernel32.GetCurrentProcess.argtypes = []
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            advapi32.OpenProcessToken.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+            advapi32.OpenProcessToken.restype = wintypes.BOOL
+            advapi32.GetTokenInformation.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD)]
+            advapi32.GetTokenInformation.restype = wintypes.BOOL
+            advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+            advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+            advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+            advapi32.IsTokenRestricted.argtypes = [wintypes.HANDLE]
+            advapi32.IsTokenRestricted.restype = wintypes.BOOL
+
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(
+                    kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                required = wintypes.DWORD()
+                advapi32.GetTokenInformation(
+                    token, TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(required))
+                buffer = ctypes.create_string_buffer(required.value)
+                if not advapi32.GetTokenInformation(
+                        token, TOKEN_INTEGRITY_LEVEL, buffer, required, ctypes.byref(required)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                label = ctypes.cast(
+                    buffer, ctypes.POINTER(TOKEN_MANDATORY_LABEL)).contents
+                count = advapi32.GetSidSubAuthorityCount(label.Label.Sid).contents.value
+                integrity_rid = advapi32.GetSidSubAuthority(
+                    label.Label.Sid, count - 1).contents.value
+                token_restricted = bool(advapi32.IsTokenRestricted(token))
+            finally:
+                kernel32.CloseHandle(token)
+
+            result = {
+                'python.input': {'kind': 'Text', 'value': input_payload},
+                'python.isolation': {
+                    'kind': 'Text',
+                    'value': os.environ['OPENLINEOPS_SCRIPT_WORKER_SANDBOX_ISOLATION_MODE']
+                },
+                'python.station': {'kind': 'Text', 'value': station_system_id},
+                'python.tokenRestricted': {
+                    'kind': 'Boolean', 'value': str(token_restricted).lower()
+                },
+                'python.integrityRid': {
+                    'kind': 'WholeNumber', 'value': str(integrity_rid)
+                }
+            }
+            """;
+        var sourceHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sourceCode)));
+        var source = new FlowIrSourceTrace(
+            FlowDefinitionId,
+            FlowVersionId,
+            FlowIrSourceElementKind.ProcessNode,
+            OperationId,
+            sourceHash);
+        var action = new FlowIrAction(
+            $"{OperationId}:action:1",
+            FlowIrActionKind.PythonScript,
+            "Run Python worker",
+            RuntimeScriptCommand.PythonCapability,
+            RuntimeScriptCommand.PythonCommandName,
+            new FlowIrTargetReference(
+                FlowIrTargetReferenceKind.Capability,
+                RuntimeScriptCommand.PythonCapability),
+            "signed-package-input",
+            new FlowIrExecutionPolicy(30_000, 0, FlowIrCancellationMode.Cooperative),
+            new FlowIrPythonScript("Python", sourceCode, sourceHash, "1"),
+            source);
+        var document = new FlowIrDocument(
+            FlowIrSchema.Current,
+            FlowDefinitionId,
+            FlowVersionId,
+            "Python operation",
+            "start",
+            [
+                new FlowIrNode(
+                    "start",
+                    FlowIrNodeKind.Start,
+                    "Start",
+                    [],
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessNode,
+                        "start",
+                        null)),
+                new FlowIrNode(
+                    OperationId,
+                    FlowIrNodeKind.PythonScript,
+                    "Run Python worker",
+                    [action],
+                    source),
+                new FlowIrNode(
+                    "end",
+                    FlowIrNodeKind.End,
+                    "End",
+                    [],
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessNode,
+                        "end",
+                        null))
+            ],
+            [
+                new FlowIrTransition(
+                    "start-to-python",
+                    "start",
+                    OperationId,
+                    null,
+                    FlowIrLoopPolicy.None,
+                    null,
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessTransition,
+                        "start-to-python",
+                        null)),
+                new FlowIrTransition(
+                    "python-to-end",
+                    OperationId,
+                    "end",
+                    null,
+                    FlowIrLoopPolicy.None,
+                    null,
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessTransition,
+                        "python-to-end",
+                        null))
+            ],
+            ImmutableArray<FlowIrBlockDependency>.Empty);
+        var result = new FlowIrCanonicalSerializer().Serialize(document);
+        return result.IsSuccess
+            ? result.Value
+            : throw new InvalidOperationException(result.Error.Message);
+    }
+
+    private static FlowIrCanonicalArtifact CreatePluginFlow()
+    {
+        var source = new FlowIrSourceTrace(
+            FlowDefinitionId,
+            FlowVersionId,
+            FlowIrSourceElementKind.ProcessNode,
+            OperationId,
+            null);
+        var action = new FlowIrAction(
+            $"{OperationId}:action:1",
+            FlowIrActionKind.DeviceCommand,
+            "Invoke frozen loopback plugin",
+            "device.loopback",
+            "Echo",
+            new FlowIrTargetReference(FlowIrTargetReferenceKind.System, StationSystemId),
+            "frozen-plugin-payload",
+            new FlowIrExecutionPolicy(5_000, 0, FlowIrCancellationMode.Cooperative),
+            null,
+            source);
+        var document = new FlowIrDocument(
+            FlowIrSchema.Current,
+            FlowDefinitionId,
+            FlowVersionId,
+            "Plugin operation",
+            "start",
+            [
+                new FlowIrNode(
+                    "start",
+                    FlowIrNodeKind.Start,
+                    "Start",
+                    [],
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessNode,
+                        "start",
+                        null)),
+                new FlowIrNode(
+                    OperationId,
+                    FlowIrNodeKind.Command,
+                    "Invoke frozen loopback plugin",
+                    [action],
+                    source),
+                new FlowIrNode(
+                    "end",
+                    FlowIrNodeKind.End,
+                    "End",
+                    [],
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessNode,
+                        "end",
+                        null))
+            ],
+            [
+                new FlowIrTransition(
+                    "start-to-plugin",
+                    "start",
+                    OperationId,
+                    null,
+                    FlowIrLoopPolicy.None,
+                    null,
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessTransition,
+                        "start-to-plugin",
+                        null)),
+                new FlowIrTransition(
+                    "plugin-to-end",
+                    OperationId,
+                    "end",
+                    null,
+                    FlowIrLoopPolicy.None,
+                    null,
+                    new FlowIrSourceTrace(
+                        FlowDefinitionId,
+                        FlowVersionId,
+                        FlowIrSourceElementKind.ProcessTransition,
+                        "plugin-to-end",
+                        null))
+            ],
+            ImmutableArray<FlowIrBlockDependency>.Empty);
+        var result = new FlowIrCanonicalSerializer().Serialize(document);
+        return result.IsSuccess
+            ? result.Value
+            : throw new InvalidOperationException(result.Error.Message);
+    }
+
+    private static ProjectReleaseSourceMetadata CreatePluginMetadata(
+        FlowIrCanonicalArtifact flow,
+        ProjectReleasePackageDependencyLock packageDependency) => new(
+        TopologyId,
+        ["layout.main"],
+        new ProjectReleaseProductionLine(
+            LineDefinitionId,
+            "Main Line",
+            TopologyId,
+            new ProjectReleaseProductModel("product.main", "MAIN", "serialNumber"),
+            OperationId,
+            [new ProjectReleaseOperation(
+                OperationId,
+                "Plugin Operation",
+                StationSystemId,
+                FlowDefinitionId,
+                "configuration.main",
+                FlowVersionId,
+                flow.SchemaVersion,
+                flow.Sha256,
+                flow.CanonicalJson,
+                [],
+                [new ProjectReleaseOperationResource(
+                    "resource.station-main",
+                    "Station",
+                    StationSystemId,
+                    "Fixed",
+                    [])],
+                [new ProjectReleaseAuthorizedAction(
+                    $"{OperationId}:action:1",
+                    OperationId,
+                    "DeviceCommand",
+                    "device.loopback",
+                    "Echo",
+                    "System",
+                    StationSystemId,
+                    5_000,
+                    null)])],
+            CompletedTerminalRoute(),
+            []),
+        [],
+        [new ProjectReleaseCapabilityBinding(
+            "device.loopback",
+            "binding.loopback",
+            ProjectReleaseRuntimeProviderKinds.PluginCommand,
+            "openlineops.samples.loopback-device",
+            StationSystemId,
+            StationSystemId)],
+        [new ProjectReleaseTargetReference("System", StationSystemId)],
+        [],
+        [packageDependency]);
+
+    private static ProjectReleaseSourceMetadata CreatePythonMetadata(
+        FlowIrCanonicalArtifact flow) => new(
+        TopologyId,
+        ["layout.main"],
+        new ProjectReleaseProductionLine(
+            LineDefinitionId,
+            "Main Line",
+            TopologyId,
+            new ProjectReleaseProductModel("product.main", "MAIN", "serialNumber"),
+            OperationId,
+            [new ProjectReleaseOperation(
+                OperationId,
+                "Python Operation",
+                StationSystemId,
+                FlowDefinitionId,
+                "configuration.main",
+                FlowVersionId,
+                flow.SchemaVersion,
+                flow.Sha256,
+                flow.CanonicalJson,
+                [],
+                [new ProjectReleaseOperationResource(
+                    "resource.station-main",
+                    "Station",
+                    StationSystemId,
+                    "Fixed",
+                    [])],
+                [new ProjectReleaseAuthorizedAction(
+                    $"{OperationId}:action:1",
+                    OperationId,
+                    "PythonScript",
+                    RuntimeScriptCommand.PythonCapability,
+                    RuntimeScriptCommand.PythonCommandName,
+                    "Capability",
+                    RuntimeScriptCommand.PythonCapability,
+                    30_000,
+                    null)])],
+            CompletedTerminalRoute(),
+            []),
+        [],
+        [],
+        [
+            new ProjectReleaseTargetReference("System", StationSystemId),
+            new ProjectReleaseTargetReference(
+                "Capability",
+                RuntimeScriptCommand.PythonCapability)
+        ],
+        [],
+        []);
+
     private static ProjectReleaseSourceMetadata CreateMetadata(
         FlowIrCanonicalArtifact flow,
         ExternalProgramResource resource)
@@ -834,7 +1537,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                         StationSystemId,
                         VendorTimeoutMilliseconds,
                         null)])],
-                [],
+                CompletedTerminalRoute(),
                 []),
             [frozenResource],
             [new ProjectReleaseCapabilityBinding(
@@ -848,6 +1551,22 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             [],
             []);
     }
+
+    private static ProjectReleaseRouteTransition[] CompletedTerminalRoute() =>
+    [
+        new ProjectReleaseRouteTransition(
+            "operation-main-to-completed",
+            OperationId,
+            null,
+            "Completed",
+            "Sequence",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null)
+    ];
 
     private async Task<int> WaitForProcessEvidenceAsync(
         string fileName,
@@ -968,14 +1687,96 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         Assert.Equal(expectedValue, output.GetProperty("value").GetString());
     }
 
-    private static string StationRuntimeExecutablePath() => Path.Combine(
-        RepositoryRoot(),
-        "src",
-        "OpenLineOps.StationRuntime",
-        "bin",
-        BuildConfiguration(),
-        "net10.0",
-        "OpenLineOps.StationRuntime.exe");
+    private static string TypedOutputValue(JsonElement outputs, string outputName) =>
+        outputs.GetProperty(outputName).GetProperty("value").GetString()
+        ?? throw new InvalidDataException($"Typed output '{outputName}' has no value.");
+
+    private static string StationRuntimeExecutablePath() => StagedAgentExecutablePath(
+        "OpenLineOps.StationRuntime.exe",
+        Path.Combine(
+            RepositoryRoot(),
+            "src",
+            "OpenLineOps.StationRuntime",
+            "bin",
+            BuildConfiguration(),
+            "net10.0",
+            "OpenLineOps.StationRuntime.exe"));
+
+    private static string PluginHostExecutablePath() => StagedAgentExecutablePath(
+        "OpenLineOps.PluginHost.exe",
+        Path.Combine(
+            RepositoryRoot(),
+            "src",
+            "OpenLineOps.PluginHost",
+            "bin",
+            BuildConfiguration(),
+            "net10.0",
+            "OpenLineOps.PluginHost.exe"));
+
+    private static StationRuntimePythonScriptOptions PythonScriptOptions()
+    {
+        var stagedBundleRoot = OptionalStagedArtifactRoot(
+            StagedAgentBundleRootEnvironmentVariable);
+        var workerPath = StagedAgentExecutablePath(
+            "OpenLineOps.ScriptWorker.exe",
+            Path.Combine(
+                RepositoryRoot(),
+                "src",
+                "OpenLineOps.ScriptWorker",
+                "bin",
+                BuildConfiguration(),
+                "net10.0",
+                "OpenLineOps.ScriptWorker.exe"));
+        return stagedBundleRoot is null
+            ? new StationRuntimePythonScriptOptions(
+                workerPath,
+                RequiredHostPythonRuntimeDllPath(),
+                new StationRuntimePythonScriptSandboxOptions(
+                    RequireLeastPrivilegeExecution: false,
+                    IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess))
+            : new StationRuntimePythonScriptOptions(
+                workerPath,
+                RequiredHostPythonRuntimeDllPath(),
+                new StationRuntimePythonScriptSandboxOptions(
+                    RequireLeastPrivilegeExecution: true,
+                    IsolationMode:
+                        StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                    LeastPrivilegeIdentity: "RestrictedCurrentLowIntegrity",
+                    LeastPrivilegeLauncherExecutable: RequiredDirectStagedFile(
+                        stagedBundleRoot,
+                        "OpenLineOps.LeastPrivilegeLauncher.exe"),
+                    LeastPrivilegeNoInteractivePrompt: true));
+    }
+
+    private static string RequiredHostPythonRuntimeDllPath()
+    {
+        var path = Environment.GetEnvironmentVariable("PYTHONNET_PYDLL");
+        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+        {
+            return Path.GetFullPath(path);
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "python",
+            Arguments = "-c \"import pathlib,sysconfig; print(pathlib.Path(sysconfig.get_config_var('BINDIR')).joinpath(sysconfig.get_config_var('LDLIBRARY')).resolve())\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Python runtime discovery process did not start.");
+        if (!process.WaitForExit(2_000) || process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                "Signed Station E2E could not discover the Python runtime DLL.");
+        }
+
+        path = process.StandardOutput.ReadLine();
+        return !string.IsNullOrWhiteSpace(path) && File.Exists(path)
+            ? Path.GetFullPath(path)
+            : throw new InvalidOperationException(
+                "Signed Station E2E requires an installed Python runtime DLL.");
+    }
 
     private static string VendorHelperOutputDirectory() => Path.Combine(
         RepositoryRoot(),
@@ -989,7 +1790,68 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         $"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}",
         StringComparison.OrdinalIgnoreCase)
         ? "Release"
-        : "Debug";
+            : "Debug";
+
+    private static string StagedAgentExecutablePath(
+        string fileName,
+        string buildOutputFallback)
+    {
+        var stagedRoot = OptionalStagedArtifactRoot(
+            StagedAgentBundleRootEnvironmentVariable);
+        return stagedRoot is null
+            ? buildOutputFallback
+            : RequiredDirectStagedFile(stagedRoot, fileName);
+    }
+
+    private static string? OptionalStagedArtifactRoot(string environmentVariable)
+    {
+        var configured = Environment.GetEnvironmentVariable(environmentVariable);
+        if (configured is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(configured)
+            || char.IsWhiteSpace(configured[0])
+            || char.IsWhiteSpace(configured[^1])
+            || !Path.IsPathFullyQualified(configured))
+        {
+            throw new InvalidDataException(
+                $"{environmentVariable} must be a canonical absolute directory path.");
+        }
+
+        var fullPath = Path.GetFullPath(configured);
+        return Directory.Exists(fullPath)
+            ? fullPath
+            : throw new DirectoryNotFoundException(
+                $"Staged artifact root does not exist: {fullPath}");
+    }
+
+    private static string RequiredDirectStagedFile(string stagedRoot, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)
+            || !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "A staged E2E file must be one canonical direct-child file name.");
+        }
+
+        var path = Path.GetFullPath(fileName, stagedRoot);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (!string.Equals(Path.GetDirectoryName(path), stagedRoot, comparison))
+        {
+            throw new InvalidDataException(
+                $"Staged E2E file '{fileName}' resolves outside '{stagedRoot}'.");
+        }
+
+        return File.Exists(path)
+            ? path
+            : throw new FileNotFoundException(
+                $"Required staged E2E file does not exist: {path}",
+                path);
+    }
 
     private static string RepositoryRoot()
     {
@@ -1050,6 +1912,8 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     protector.DeleteProtectedInstallation(_cacheRoot, contentDirectory);
                 }
             }
+
+            Directory.Delete(_cacheRoot);
         }
 
         foreach (var path in Directory.EnumerateFileSystemEntries(

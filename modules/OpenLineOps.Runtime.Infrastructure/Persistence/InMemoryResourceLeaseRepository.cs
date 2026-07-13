@@ -1,11 +1,13 @@
+using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
-public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
+public sealed class InMemoryResourceLeaseRepository(IClock clock) : IResourceLeaseRepository
 {
+    private readonly IClock _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private readonly object _gate = new();
     private readonly Dictionary<ResourceRequirement, ResourceLease> _leases = [];
     private readonly Dictionary<ResourceRequirement, long> _fencingTokens = [];
@@ -27,7 +29,6 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceRequirement> resources,
-        DateTimeOffset acquiredAtUtc,
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
@@ -41,40 +42,17 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
 
         lock (_gate)
         {
+            var acquiredAtUtc = ReadStoreUtcNow();
             var requested = resources.Distinct().ToArray();
             if (requested.Length != resources.Count)
             {
                 throw new ArgumentException("Resource lease requests must be unique.", nameof(resources));
             }
 
-            var activeOwned = _leases.Values
-                .Where(lease => lease.ProductionRunId == runId
-                    && string.Equals(
-                        lease.OperationRunId,
-                        operationRunId,
-                        StringComparison.Ordinal)
-                    && lease.ExpiresAtUtc > acquiredAtUtc)
-                .OrderBy(static lease => lease.Resource.CanonicalKey, StringComparer.Ordinal)
-                .ToArray();
-            if (activeOwned.Length > 0)
-            {
-                var exactResources = activeOwned
-                    .Select(static lease => lease.Resource)
-                    .ToHashSet()
-                    .SetEquals(requested);
-                return ValueTask.FromResult<IReadOnlyCollection<ResourceLease>?>(
-                    exactResources ? activeOwned : null);
-            }
-
             foreach (var resource in requested)
             {
                 if (_leases.TryGetValue(resource, out var lease)
-                    && lease.ExpiresAtUtc > acquiredAtUtc
-                    && (lease.ProductionRunId != runId
-                        || !string.Equals(
-                            lease.OperationRunId,
-                            operationRunId,
-                            StringComparison.Ordinal)))
+                    && lease.ExpiresAtUtc > acquiredAtUtc)
                 {
                     return ValueTask.FromResult<IReadOnlyCollection<ResourceLease>?>(null);
                 }
@@ -104,17 +82,11 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
         ArgumentNullException.ThrowIfNull(evidence);
         cancellationToken.ThrowIfCancellationRequested();
-        if (validatedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new ArgumentException("Resource lease validation time must be UTC.", nameof(validatedAtUtc));
-        }
-
         var supplied = evidence.ToArray();
         if (supplied.Length == 0
             || supplied.Any(static item => item is null)
@@ -127,6 +99,7 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
 
         lock (_gate)
         {
+            var validatedAtUtc = ReadStoreUtcNow();
             foreach (var item in supplied)
             {
                 if (!_fencingTokens.TryGetValue(item.Resource, out var currentToken)
@@ -150,21 +123,35 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
     public ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
+        ArgumentNullException.ThrowIfNull(claims);
         cancellationToken.ThrowIfCancellationRequested();
+        var supplied = claims.ToArray();
+        if (supplied.Any(static claim => claim is null)
+            || supplied.Select(static claim => claim.Resource).Distinct().Count() != supplied.Length)
+        {
+            throw new ArgumentException(
+                "Resource lease release claims must be unique.",
+                nameof(claims));
+        }
+
         lock (_gate)
         {
-            foreach (var resource in _leases
-                         .Where(pair => pair.Value.ProductionRunId == runId
-                             && string.Equals(
-                                 pair.Value.OperationRunId,
-                                 operationRunId,
-                                 StringComparison.Ordinal))
-                         .Select(static pair => pair.Key)
-                         .ToArray())
+            foreach (var claim in supplied)
             {
-                _leases.Remove(resource);
+                if (_leases.TryGetValue(claim.Resource, out var lease)
+                    && lease.ProductionRunId == runId
+                    && string.Equals(
+                        lease.OperationRunId,
+                        operationRunId,
+                        StringComparison.Ordinal)
+                    && lease.FencingToken == claim.FencingToken)
+                {
+                    _leases.Remove(claim.Resource);
+                }
             }
         }
 
@@ -198,5 +185,14 @@ public sealed class InMemoryResourceLeaseRepository : IResourceLeaseRepository
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    private DateTimeOffset ReadStoreUtcNow()
+    {
+        var utcNow = _clock.UtcNow;
+        return utcNow == default || utcNow.Offset != TimeSpan.Zero
+            ? throw new InvalidOperationException(
+                "Resource lease store clock must return non-default UTC.")
+            : utcNow;
     }
 }

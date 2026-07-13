@@ -588,7 +588,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 .Select(transition => new ProjectReleaseRouteTransition(
                     transition.Id.Value,
                     transition.SourceOperationId.Value,
-                    transition.TargetOperationId.Value,
+                    transition.TargetOperationId?.Value,
+                    transition.TerminalDisposition?.ToString(),
                     transition.Kind.ToString(),
                     transition.RequiredJudgement?.ToString(),
                     transition.MaxTraversals,

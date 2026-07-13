@@ -55,6 +55,7 @@ public sealed record RouteTransitionRequest(
     string? TransitionId,
     string? SourceOperationId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? Kind,
     string? RequiredJudgement,
     int? MaxTraversals,
@@ -120,7 +121,8 @@ public sealed record LineControllerAuthorizationResponse(
 public sealed record RouteTransitionResponse(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

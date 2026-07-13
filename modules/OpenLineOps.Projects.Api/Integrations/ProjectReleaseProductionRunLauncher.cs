@@ -404,7 +404,12 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                         ParseExact<ProductionContextValueKind>(
                             transition.ExpectedOutputKind!,
                             "Production Context value kind"),
-                        transition.ExpectedOutputValue!)));
+                        transition.ExpectedOutputValue!)),
+            transition.TerminalDisposition is null
+                ? null
+                : ParseExact<ProductDisposition>(
+                    transition.TerminalDisposition,
+                    "terminal disposition"));
     }
 
     private static T ParseExact<T>(string value, string description)

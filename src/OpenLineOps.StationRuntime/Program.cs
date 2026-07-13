@@ -7,4 +7,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
     cancellation.Cancel();
 };
 
-return await StationRuntimeEntrypoint.RunAsync(args, cancellation.Token);
+return await StationRuntimeEntrypoint.RunAsync(
+    args,
+    StationRuntimeHostOptions.LoadFromEnvironment(),
+    cancellation.Token);

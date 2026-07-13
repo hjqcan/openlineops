@@ -326,9 +326,12 @@ public sealed class RabbitMqStationSafetyGateway :
             .ConfigureAwait(false);
         foreach (var route in new[]
                  {
-                     "station.*.emergency-stop-acknowledged",
-                     "station.*.safe-stop-acknowledged",
-                     "station.*.job-cancel-acknowledged"
+                     StationTransportRoute.EventPattern(
+                         "emergency-stop-acknowledged"),
+                     StationTransportRoute.EventPattern(
+                         "safe-stop-acknowledged"),
+                     StationTransportRoute.EventPattern(
+                         "job-cancel-acknowledged")
                  })
         {
             await channel.QueueBindAsync(

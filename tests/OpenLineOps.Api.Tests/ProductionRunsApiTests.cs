@@ -93,7 +93,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operationPlan.Definition.OperationId,
             createdAtUtc,
             [operationPlan.Definition],
-            []);
+            TerminalRoutes(operationPlan.Definition.OperationId));
         var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
         var materials = _factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
@@ -181,7 +181,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operationPlan.Definition.OperationId,
             now,
             [operationPlan.Definition],
-            []);
+            TerminalRoutes(operationPlan.Definition.OperationId));
         var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
         var materials = _factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
@@ -309,6 +309,23 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             new ProcessDefinitionId("process.main"),
             new ProcessVersionId("process-version.main"),
             []));
+
+    private static RouteTransitionDefinition[] TerminalRoutes(string operationId) =>
+    [
+        new RouteTransitionDefinition(
+            $"{operationId}.failed",
+            operationId,
+            null,
+            RuntimeRouteTransitionKind.Judgement,
+            ResultJudgement.Failed,
+            terminalDisposition: ProductDisposition.Nonconforming),
+        new RouteTransitionDefinition(
+            $"{operationId}.default",
+            operationId,
+            null,
+            RuntimeRouteTransitionKind.Sequence,
+            terminalDisposition: ProductDisposition.Completed)
+    ];
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
         await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());

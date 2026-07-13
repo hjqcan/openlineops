@@ -16,6 +16,7 @@ namespace OpenLineOps.Agent.Infrastructure.Execution;
 
 public sealed record ProcessStationRuntimeHostOptions(
     string ExecutablePath,
+    string PluginHostExecutablePath,
     string WorkingDirectoryRoot,
     string ArtifactRoot,
     TimeSpan Timeout,
@@ -29,7 +30,8 @@ public sealed record ProcessStationRuntimeHostOptions(
     IReadOnlyCollection<string>? AllowedRestrictedExternalProgramHostSids = null,
     bool RequireExternalProgramAppContainerIsolation = false,
     string? ExternalProgramAppContainerProfileNamespace = null,
-    bool RequireImmutableExternalProgramContent = false);
+    bool RequireImmutableExternalProgramContent = false,
+    StationRuntimePythonScriptOptions? PythonScript = null);
 
 public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRuntimeIsolationCleaner
 {
@@ -37,6 +39,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         StationOperationDocumentJson.CreateOptions();
 
     private readonly string _executablePath;
+    private readonly string _pluginHostExecutablePath;
     private readonly string _workingDirectoryRoot;
     private readonly string _artifactRoot;
     private readonly TimeSpan _timeout;
@@ -50,6 +53,9 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly bool _requireExternalProgramAppContainerIsolation;
     private readonly string? _externalProgramAppContainerProfileNamespace;
     private readonly bool _requireImmutableExternalProgramContent;
+    private readonly string _pythonScriptWorkerExecutablePath;
+    private readonly string _hostPythonRuntimeDllPath;
+    private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
 
     public ProcessStationRuntimeHost(
@@ -62,6 +68,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _resourceFenceValidator = resourceFenceValidator
             ?? throw new ArgumentNullException(nameof(resourceFenceValidator));
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginHostExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.WorkingDirectoryRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ArtifactRoot);
         if (options.Timeout <= TimeSpan.Zero)
@@ -73,7 +80,16 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumProcessCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumProcessMemoryBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumJobMemoryBytes);
+        if (!Path.IsPathFullyQualified(options.ExecutablePath)
+            || !Path.IsPathFullyQualified(options.PluginHostExecutablePath))
+        {
+            throw new ArgumentException(
+                "Station Runtime and bundled Plugin Host executable paths must be absolute.",
+                nameof(options));
+        }
+
         _executablePath = Path.GetFullPath(options.ExecutablePath);
+        _pluginHostExecutablePath = Path.GetFullPath(options.PluginHostExecutablePath);
         _workingDirectoryRoot = Path.GetFullPath(options.WorkingDirectoryRoot);
         _artifactRoot = Path.GetFullPath(options.ArtifactRoot);
         _timeout = options.Timeout;
@@ -97,6 +113,25 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _externalProgramAppContainerProfileNamespace =
             options.ExternalProgramAppContainerProfileNamespace;
         _requireImmutableExternalProgramContent = options.RequireImmutableExternalProgramContent;
+        var pythonScript = options.PythonScript
+            ?? throw new ArgumentException(
+                "Station Runtime Python script execution requires an explicit worker and sandbox policy.",
+                nameof(options));
+        ArgumentException.ThrowIfNullOrWhiteSpace(pythonScript.WorkerExecutablePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(pythonScript.HostPythonRuntimeDllPath);
+        ArgumentNullException.ThrowIfNull(pythonScript.Sandbox);
+        if (!Path.IsPathFullyQualified(pythonScript.WorkerExecutablePath)
+            || !Path.IsPathFullyQualified(pythonScript.HostPythonRuntimeDllPath))
+        {
+            throw new ArgumentException(
+                "Station Runtime Python worker and host Python runtime DLL paths must be absolute.",
+                nameof(options));
+        }
+
+        _pythonScriptWorkerExecutablePath = Path.GetFullPath(pythonScript.WorkerExecutablePath);
+        _hostPythonRuntimeDllPath = Path.GetFullPath(pythonScript.HostPythonRuntimeDllPath);
+        _pythonScriptSandbox = pythonScript.Sandbox;
+        ValidatePythonScriptSandbox(_pythonScriptSandbox, options);
         if (_requireRestrictedExternalProgramHostIdentity
             && _allowedRestrictedExternalProgramHostAccounts.Length == 0
             && _allowedRestrictedExternalProgramHostSids.Length == 0)
@@ -128,6 +163,24 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         if (!File.Exists(_executablePath))
         {
             throw new FileNotFoundException("Station runtime executable does not exist.", _executablePath);
+        }
+        if (!File.Exists(_pluginHostExecutablePath))
+        {
+            throw new FileNotFoundException(
+                "Co-packaged OpenLineOps Plugin Host executable does not exist.",
+                _pluginHostExecutablePath);
+        }
+        if (!File.Exists(_pythonScriptWorkerExecutablePath))
+        {
+            throw new FileNotFoundException(
+                "Co-packaged Python script worker executable does not exist.",
+                _pythonScriptWorkerExecutablePath);
+        }
+        if (!File.Exists(_hostPythonRuntimeDllPath))
+        {
+            throw new FileNotFoundException(
+                "Configured host Python runtime DLL does not exist.",
+                _hostPythonRuntimeDllPath);
         }
 
         Directory.CreateDirectory(_workingDirectoryRoot);
@@ -517,6 +570,9 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             _requireImmutableExternalProgramContent ? "true" : "false";
         environment["OpenLineOps__Devices__ExternalProgramHost__RequireAppContainerIsolation"] =
             _requireExternalProgramAppContainerIsolation ? "true" : "false";
+        environment["OpenLineOps__Plugins__ExternalHost__ExecutablePath"] =
+            _pluginHostExecutablePath;
+        AddPythonScriptEnvironment(environment);
         if (appContainerProfileName is not null)
         {
             environment["OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName"] =
@@ -549,6 +605,157 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             workDirectory,
             environment,
             _processLimits);
+    }
+
+    private void AddPythonScriptEnvironment(Dictionary<string, string> environment)
+    {
+        const string prefix = "OpenLineOps__Runtime__Scripting__Python";
+        var sandbox = _pythonScriptSandbox;
+        environment[$"{prefix}__ExecutionMode"] = "ProcessIsolated";
+        environment[$"{prefix}__WorkerFileName"] = _pythonScriptWorkerExecutablePath;
+        environment[$"{prefix}__WorkerWorkingDirectory"] =
+            Path.GetDirectoryName(_pythonScriptWorkerExecutablePath)
+            ?? throw new InvalidOperationException("Python script worker has no parent directory.");
+        environment[$"{prefix}__Sandbox__RequireLeastPrivilegeExecution"] =
+            sandbox.RequireLeastPrivilegeExecution ? "true" : "false";
+        environment[$"{prefix}__Sandbox__IsolationMode"] = sandbox.IsolationMode;
+        environment[$"{prefix}__Sandbox__LeastPrivilegeNoInteractivePrompt"] =
+            sandbox.LeastPrivilegeNoInteractivePrompt ? "true" : "false";
+        environment["PYTHONNET_PYDLL"] = _hostPythonRuntimeDllPath;
+        AddOptionalEnvironment(
+            environment,
+            $"{prefix}__Sandbox__LeastPrivilegeIdentity",
+            sandbox.LeastPrivilegeIdentity);
+        AddOptionalEnvironment(
+            environment,
+            $"{prefix}__Sandbox__LeastPrivilegeLauncherExecutable",
+            sandbox.LeastPrivilegeLauncherExecutable);
+        AddOptionalEnvironment(
+            environment,
+            $"{prefix}__Sandbox__LeastPrivilegeArgumentsTemplate",
+            sandbox.LeastPrivilegeArgumentsTemplate);
+    }
+
+    private static void AddOptionalEnvironment(
+        Dictionary<string, string> environment,
+        string key,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            environment[key] = value;
+        }
+    }
+
+    private static void ValidatePythonScriptSandbox(
+        StationRuntimePythonScriptSandboxOptions sandbox,
+        ProcessStationRuntimeHostOptions options)
+    {
+        var mode = sandbox.IsolationMode switch
+        {
+            StationRuntimePythonScriptIsolationModes.ExternalProcess =>
+                StationRuntimePythonScriptIsolationModes.ExternalProcess,
+            StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity =>
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            _ => throw new ArgumentException(
+                $"Unsupported Station Agent Python isolation mode '{sandbox.IsolationMode}'. "
+                + "Use LeastPrivilegeIdentity for production or ExternalProcess only when "
+                + "least-privilege execution is explicitly disabled for development or testing.",
+                nameof(options))
+        };
+        if (sandbox.RequireLeastPrivilegeExecution
+            && string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.ExternalProcess,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Required least-privilege Python execution cannot use ExternalProcess isolation.",
+                nameof(options));
+        }
+
+        if (string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                StringComparison.Ordinal)
+            && string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeIdentity))
+        {
+            throw new ArgumentException(
+                "Least-privilege Python isolation requires an identity.",
+                nameof(options));
+        }
+
+        if (string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                StringComparison.Ordinal))
+        {
+            ValidateSandboxExecutable(
+                sandbox.LeastPrivilegeLauncherExecutable,
+                "least-privilege launcher",
+                sandbox.RequireLeastPrivilegeExecution || OperatingSystem.IsWindows(),
+                options);
+            if (sandbox.RequireLeastPrivilegeExecution
+                && !sandbox.LeastPrivilegeNoInteractivePrompt)
+            {
+                throw new ArgumentException(
+                    "Required least-privilege Python isolation must disable interactive launcher prompts.",
+                    nameof(options));
+            }
+
+            if (sandbox.RequireLeastPrivilegeExecution
+                && !string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeArgumentsTemplate))
+            {
+                throw new ArgumentException(
+                    "Required least-privilege Python isolation does not permit a custom launcher arguments template.",
+                    nameof(options));
+            }
+        }
+
+        if (sandbox.LeastPrivilegeIdentity is not null
+            && (string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeIdentity)
+                || char.IsWhiteSpace(sandbox.LeastPrivilegeIdentity[0])
+                || char.IsWhiteSpace(sandbox.LeastPrivilegeIdentity[^1])
+                || sandbox.LeastPrivilegeIdentity.Any(char.IsControl)))
+        {
+            throw new ArgumentException(
+                "Station Agent Python least-privilege identity must be canonical text.",
+                nameof(options));
+        }
+    }
+
+    private static void ValidateSandboxExecutable(
+        string? executablePath,
+        string displayName,
+        bool required,
+        ProcessStationRuntimeHostOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            if (required)
+            {
+                throw new ArgumentException(
+                    $"Station Runtime Python {displayName} executable is required.",
+                    nameof(options));
+            }
+
+            return;
+        }
+
+        if (!Path.IsPathFullyQualified(executablePath))
+        {
+            throw new ArgumentException(
+                $"Station Runtime Python {displayName} executable path must be absolute.",
+                nameof(options));
+        }
+
+        var canonicalPath = Path.GetFullPath(executablePath);
+        if (!File.Exists(canonicalPath))
+        {
+            throw new FileNotFoundException(
+                $"Station Runtime Python {displayName} executable does not exist.",
+                canonicalPath);
+        }
     }
 
     private string? ResolveAppContainerProfileName(StationJobSnapshot job) =>

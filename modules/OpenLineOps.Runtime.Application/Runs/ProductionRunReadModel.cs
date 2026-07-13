@@ -77,7 +77,8 @@ public sealed record ProductionRunOutputReadModel(
 public sealed record ProductionRunRouteDecisionReadModel(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);
@@ -170,6 +171,7 @@ public static class ProductionRunReadModelMapper
                 decision.SourceOperationRunId,
                 decision.TransitionId,
                 decision.TargetOperationId,
+                decision.TerminalDisposition?.ToString(),
                 decision.SourceJudgement.ToString(),
                 decision.Traversal,
                 decision.DecidedAtUtc)).ToArray(),

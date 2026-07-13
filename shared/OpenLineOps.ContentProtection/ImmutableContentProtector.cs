@@ -15,48 +15,89 @@ public sealed record ImmutableContentProtectionPolicy(
     string? HostReaderSid = null)
 {
     [SupportedOSPlatform("windows")]
-    public IReadOnlyCollection<SecurityIdentifier> ResolveReaderSids()
+    internal WindowsContentProtectionIdentities ResolveWindowsIdentities()
     {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("Windows content protection identities require Windows.");
         }
 
-        var values = HostReaderSid is null
-            ? new[] { ReaderSid }
-            : new[] { ReaderSid, HostReaderSid };
-        var readers = new List<SecurityIdentifier>(values.Length);
-        foreach (var value in values)
+        var externalReader = ParseSid(ReaderSid, "external reader");
+        if (!externalReader.Value.StartsWith("S-1-15-3-", StringComparison.OrdinalIgnoreCase))
         {
-            SecurityIdentifier reader;
-            try
-            {
-                reader = new SecurityIdentifier(value);
-            }
-            catch (ArgumentException exception)
-            {
-                throw new InvalidDataException("Immutable content reader SID is invalid.", exception);
-            }
-
-            if (reader.IsWellKnown(WellKnownSidType.LocalSystemSid)
-                || reader.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid))
-            {
-                throw new InvalidDataException(
-                    "Immutable content reader must be a dedicated non-administrative identity.");
-            }
-
-            if (!readers.Contains(reader))
-            {
-                readers.Add(reader);
-            }
+            throw new InvalidDataException(
+                "Immutable content external reader must be a Windows capability SID.");
         }
 
-        return readers;
+        if (string.IsNullOrWhiteSpace(HostReaderSid))
+        {
+            throw new InvalidDataException(
+                "Immutable content HostReaderSid is required on Windows.");
+        }
+
+        var hostReader = ParseSid(HostReaderSid, "host reader");
+        if (externalReader.Equals(hostReader))
+        {
+            throw new InvalidDataException(
+                "Immutable content external and host readers must be different identities.");
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        var current = identity.User
+                      ?? throw new InvalidOperationException(
+                          "Current Windows identity has no SID for immutable content protection.");
+        if (!hostReader.Equals(current))
+        {
+            throw new InvalidDataException(
+                "Immutable content HostReaderSid must be the current trusted control-plane identity.");
+        }
+
+        return new WindowsContentProtectionIdentities(externalReader, hostReader);
     }
+
+    [SupportedOSPlatform("windows")]
+    private static SecurityIdentifier ParseSid(string value, string role)
+    {
+        SecurityIdentifier sid;
+        try
+        {
+            sid = new SecurityIdentifier(value);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                $"Immutable content {role} SID is invalid.",
+                exception);
+        }
+
+        if (sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
+            || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid))
+        {
+            throw new InvalidDataException(
+                $"Immutable content {role} must be a dedicated non-administrative identity.");
+        }
+
+        return sid;
+    }
+}
+
+internal sealed record WindowsContentProtectionIdentities(
+    SecurityIdentifier ExternalReader,
+    SecurityIdentifier HostReader)
+{
+    public IReadOnlyCollection<SecurityIdentifier> Readers => [ExternalReader, HostReader];
 }
 
 public interface IImmutableContentProtector
 {
+    void ProtectCacheBoundary(
+        string cacheRootDirectory,
+        ImmutableContentProtectionPolicy policy);
+
+    void VerifyCacheBoundary(
+        string cacheRootDirectory,
+        ImmutableContentProtectionPolicy policy);
+
     ValueTask ProtectAsync(
         string rootDirectory,
         IReadOnlyCollection<ImmutableContentFile> files,
@@ -80,6 +121,75 @@ public interface IImmutableContentProtector
 public sealed class ImmutableContentProtector : IImmutableContentProtector
 {
     private const int BufferSize = 64 * 1024;
+    [SupportedOSPlatform("windows")]
+    private static FileSystemRights ReaderMutationRights =>
+        FileSystemRights.Write
+        | FileSystemRights.Delete
+        | FileSystemRights.DeleteSubdirectoriesAndFiles;
+
+    [SupportedOSPlatform("windows")]
+    private static FileSystemRights ExternalReaderMutationRights =>
+        ReaderMutationRights
+        | FileSystemRights.ChangePermissions
+        | FileSystemRights.TakeOwnership;
+
+    [SupportedOSPlatform("windows")]
+    private static FileSystemRights CacheBoundaryDeletionRights =>
+        FileSystemRights.Delete
+        | FileSystemRights.DeleteSubdirectoriesAndFiles;
+
+    public void ProtectCacheBoundary(
+        string cacheRootDirectory,
+        ImmutableContentProtectionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        var cacheRoot = ResolveRoot(cacheRootDirectory);
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var identities = policy.ResolveWindowsIdentities();
+        var security = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(cacheRoot));
+        if (security.AreAccessRulesProtected)
+        {
+            VerifyWindowsCacheBoundaryProtection(security, identities);
+            return;
+        }
+
+        if (RequiresHostOwnerCanonicalization(
+                security,
+                identities.HostReader,
+                "cache boundary"))
+        {
+            security.SetOwner(identities.HostReader);
+            FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(cacheRoot), security);
+            RequireHostOwner(
+                FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(cacheRoot)),
+                identities.HostReader,
+                "cache boundary");
+        }
+
+        ApplyWindowsCacheBoundaryProtection(cacheRoot, identities);
+        VerifyCacheBoundary(cacheRoot, policy);
+    }
+
+    public void VerifyCacheBoundary(
+        string cacheRootDirectory,
+        ImmutableContentProtectionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        var cacheRoot = ResolveRoot(cacheRootDirectory);
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var identities = policy.ResolveWindowsIdentities();
+        VerifyWindowsCacheBoundaryProtection(
+            FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(cacheRoot)),
+            identities);
+    }
 
     public async ValueTask ProtectAsync(
         string rootDirectory,
@@ -94,7 +204,11 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
 
         if (OperatingSystem.IsWindows())
         {
-            ProtectWindows(root, inventory, policy.ResolveReaderSids());
+            ProtectCacheBoundary(
+                Path.GetDirectoryName(root)
+                ?? throw new InvalidDataException("Immutable content root has no cache boundary."),
+                policy);
+            ProtectWindows(root, inventory, policy.ResolveWindowsIdentities());
         }
         else
         {
@@ -117,7 +231,7 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
 
         if (OperatingSystem.IsWindows())
         {
-            VerifyWindowsProtection(root, inventory, policy.ResolveReaderSids());
+            VerifyWindowsProtection(root, inventory, policy.ResolveWindowsIdentities());
         }
         else
         {
@@ -312,10 +426,162 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
     }
 
     [SupportedOSPlatform("windows")]
+    private static void ApplyWindowsCacheBoundaryProtection(
+        string cacheRoot,
+        WindowsContentProtectionIdentities identities)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(
+            system,
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            administrators,
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            identities.ExternalReader,
+            ExternalReaderMutationRights,
+            AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            identities.ExternalReader,
+            FileSystemRights.ReadAndExecute,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            identities.HostReader,
+            CacheBoundaryDeletionRights,
+            AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            identities.HostReader,
+            FileSystemRights.ReadAndExecute | FileSystemRights.CreateDirectories,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            identities.HostReader,
+            FileSystemRights.Modify,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.InheritOnly,
+            AccessControlType.Allow));
+
+        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(cacheRoot), security);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyWindowsCacheBoundaryProtection(
+        DirectorySecurity security,
+        WindowsContentProtectionIdentities identities)
+    {
+        if (!security.AreAccessRulesProtected)
+        {
+            throw new InvalidDataException(
+                "Immutable content cache boundary ACL inheritance must be disabled.");
+        }
+
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var rules = security
+            .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToArray();
+        if (!HasHostOwner(security, identities.HostReader)
+            || rules.Length != 7
+            || rules.Any(rule => rule.IsInherited)
+            || !HasCacheBoundaryAllowRule(rules, system, FileSystemRights.FullControl, inheritedByChildren: true)
+            || !HasCacheBoundaryAllowRule(
+                rules,
+                administrators,
+                FileSystemRights.FullControl,
+                inheritedByChildren: true)
+            || !HasCacheBoundaryAllowRule(
+                rules,
+                identities.ExternalReader,
+                FileSystemRights.ReadAndExecute,
+                inheritedByChildren: false)
+            || !HasCacheBoundaryAllowRule(
+                rules,
+                identities.HostReader,
+                FileSystemRights.ReadAndExecute | FileSystemRights.CreateDirectories,
+                inheritedByChildren: false)
+            || !HasCacheWriterInheritanceRule(rules, identities.HostReader)
+            || !HasDeniedCacheBoundaryMutationRights(
+                rules,
+                identities.ExternalReader,
+                ExternalReaderMutationRights)
+            || !HasDeniedCacheBoundaryMutationRights(
+                rules,
+                identities.HostReader,
+                CacheBoundaryDeletionRights))
+        {
+            throw new InvalidDataException(
+                "Immutable content cache boundary owner and ACL do not match the trusted host "
+                + "and external capability policy.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasCacheWriterInheritanceRule(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier cacheWriter) => HasCacheBoundaryAllowRule(
+        rules,
+        cacheWriter,
+        FileSystemRights.Modify,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.InheritOnly);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasCacheBoundaryAllowRule(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier identity,
+        FileSystemRights rights,
+        bool inheritedByChildren) => HasCacheBoundaryAllowRule(
+        rules,
+        identity,
+        rights,
+        inheritedByChildren
+            ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+            : InheritanceFlags.None,
+        PropagationFlags.None);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasCacheBoundaryAllowRule(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier identity,
+        FileSystemRights rights,
+        InheritanceFlags inheritanceFlags,
+        PropagationFlags propagationFlags) => rules.Any(rule =>
+        identity.Equals(rule.IdentityReference)
+        && rule.AccessControlType == AccessControlType.Allow
+        && rule.FileSystemRights == (rights | FileSystemRights.Synchronize)
+        && rule.InheritanceFlags == inheritanceFlags
+        && rule.PropagationFlags == propagationFlags);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasDeniedCacheBoundaryMutationRights(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier identity,
+        FileSystemRights rights) => rules.Any(rule =>
+        identity.Equals(rule.IdentityReference)
+        && rule.AccessControlType == AccessControlType.Deny
+        && rule.FileSystemRights == rights
+        && rule.InheritanceFlags == InheritanceFlags.None
+        && rule.PropagationFlags == PropagationFlags.None);
+
+    [SupportedOSPlatform("windows")]
     private static void ProtectWindows(
         string root,
         IReadOnlyCollection<ImmutableContentFile> inventory,
-        IReadOnlyCollection<SecurityIdentifier> readers)
+        WindowsContentProtectionIdentities identities)
     {
         var files = inventory.Select(file => ResolveFile(root, file.RelativePath)).ToArray();
         var directories = files
@@ -328,29 +594,32 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
         foreach (var file in files)
         {
             File.SetAttributes(file, File.GetAttributes(file) | FileAttributes.ReadOnly);
-            ApplyFileProtection(file, readers);
+            ApplyFileProtection(file, identities);
         }
 
         foreach (var directory in directories)
         {
             File.SetAttributes(directory, File.GetAttributes(directory) | FileAttributes.ReadOnly);
-            ApplyDirectoryProtection(directory, readers);
+            ApplyDirectoryProtection(directory, identities);
         }
 
         File.SetAttributes(root, File.GetAttributes(root) | FileAttributes.ReadOnly);
-        ApplyDirectoryProtection(root, readers);
+        ApplyDirectoryProtection(root, identities);
     }
 
     [SupportedOSPlatform("windows")]
     private static void VerifyWindowsProtection(
         string root,
         IReadOnlyCollection<ImmutableContentFile> inventory,
-        IReadOnlyCollection<SecurityIdentifier> readers)
+        WindowsContentProtectionIdentities identities)
     {
         foreach (var file in inventory)
         {
             var path = ResolveFile(root, file.RelativePath);
-            VerifyFileSystemSecurity(FileSystemAclExtensions.GetAccessControl(new FileInfo(path)), readers);
+            VerifyFileSystemSecurity(
+                FileSystemAclExtensions.GetAccessControl(new FileInfo(path)),
+                identities,
+                InheritanceFlags.None);
             if ((File.GetAttributes(path) & FileAttributes.ReadOnly) == 0)
             {
                 throw new InvalidDataException(
@@ -367,7 +636,8 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
         {
             VerifyFileSystemSecurity(
                 FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(directory)),
-                readers);
+                identities,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
             if ((File.GetAttributes(directory) & FileAttributes.ReadOnly) == 0)
             {
                 throw new InvalidDataException(
@@ -379,32 +649,62 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
     [SupportedOSPlatform("windows")]
     private static void ApplyFileProtection(
         string path,
-        IReadOnlyCollection<SecurityIdentifier> readers)
+        WindowsContentProtectionIdentities identities)
     {
+        var fileInfo = new FileInfo(path);
+        var existingSecurity = FileSystemAclExtensions.GetAccessControl(fileInfo);
+        if (RequiresHostOwnerCanonicalization(
+                existingSecurity,
+                identities.HostReader,
+                "file"))
+        {
+            existingSecurity.SetOwner(identities.HostReader);
+            FileSystemAclExtensions.SetAccessControl(fileInfo, existingSecurity);
+            RequireHostOwner(
+                FileSystemAclExtensions.GetAccessControl(fileInfo),
+                identities.HostReader,
+                "file");
+        }
+
         var security = new FileSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        AddRules(security, readers, InheritanceFlags.None);
-        FileSystemAclExtensions.SetAccessControl(new FileInfo(path), security);
+        AddRules(security, identities, InheritanceFlags.None);
+        FileSystemAclExtensions.SetAccessControl(fileInfo, security);
     }
 
     [SupportedOSPlatform("windows")]
     private static void ApplyDirectoryProtection(
         string path,
-        IReadOnlyCollection<SecurityIdentifier> readers)
+        WindowsContentProtectionIdentities identities)
     {
+        var directoryInfo = new DirectoryInfo(path);
+        var existingSecurity = FileSystemAclExtensions.GetAccessControl(directoryInfo);
+        if (RequiresHostOwnerCanonicalization(
+                existingSecurity,
+                identities.HostReader,
+                "directory"))
+        {
+            existingSecurity.SetOwner(identities.HostReader);
+            FileSystemAclExtensions.SetAccessControl(directoryInfo, existingSecurity);
+            RequireHostOwner(
+                FileSystemAclExtensions.GetAccessControl(directoryInfo),
+                identities.HostReader,
+                "directory");
+        }
+
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         AddRules(
             security,
-            readers,
+            identities,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
-        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), security);
+        FileSystemAclExtensions.SetAccessControl(directoryInfo, security);
     }
 
     [SupportedOSPlatform("windows")]
     private static void AddRules(
         FileSystemSecurity security,
-        IReadOnlyCollection<SecurityIdentifier> readers,
+        WindowsContentProtectionIdentities identities,
         InheritanceFlags inheritanceFlags)
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
@@ -421,21 +721,44 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
             inheritanceFlags,
             PropagationFlags.None,
             AccessControlType.Allow));
-        foreach (var reader in readers)
-        {
-            security.AddAccessRule(new FileSystemAccessRule(
-                reader,
-                FileSystemRights.ReadAndExecute,
-                inheritanceFlags,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-        }
+        AddReaderRules(
+            security,
+            identities.ExternalReader,
+            ExternalReaderMutationRights,
+            inheritanceFlags);
+        AddReaderRules(
+            security,
+            identities.HostReader,
+            ReaderMutationRights,
+            inheritanceFlags);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AddReaderRules(
+        FileSystemSecurity security,
+        SecurityIdentifier reader,
+        FileSystemRights deniedRights,
+        InheritanceFlags inheritanceFlags)
+    {
+        security.AddAccessRule(new FileSystemAccessRule(
+            reader,
+            deniedRights,
+            inheritanceFlags,
+            PropagationFlags.None,
+            AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            reader,
+            FileSystemRights.ReadAndExecute,
+            inheritanceFlags,
+            PropagationFlags.None,
+            AccessControlType.Allow));
     }
 
     [SupportedOSPlatform("windows")]
     private static void VerifyFileSystemSecurity(
         FileSystemSecurity security,
-        IReadOnlyCollection<SecurityIdentifier> readers)
+        WindowsContentProtectionIdentities identities,
+        InheritanceFlags inheritanceFlags)
     {
         if (!security.AreAccessRulesProtected)
         {
@@ -448,41 +771,119 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
             .GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
             .Cast<FileSystemAccessRule>()
             .ToArray();
-        if (rules.Length != 2 + readers.Count
-            || rules.Any(rule => rule.IsInherited || rule.AccessControlType != AccessControlType.Allow)
-            || !HasRights(rules, system, FileSystemRights.FullControl)
-            || !HasRights(rules, administrators, FileSystemRights.FullControl)
-            || readers.Any(reader => !HasReaderRights(rules, reader)))
+        if (!HasHostOwner(security, identities.HostReader)
+            || rules.Length != 6
+            || rules.Any(rule => rule.IsInherited)
+            || !HasAllowRule(
+                rules,
+                system,
+                FileSystemRights.FullControl,
+                inheritanceFlags)
+            || !HasAllowRule(
+                rules,
+                administrators,
+                FileSystemRights.FullControl,
+                inheritanceFlags)
+            || !HasReaderRules(
+                rules,
+                identities.ExternalReader,
+                ExternalReaderMutationRights,
+                inheritanceFlags)
+            || !HasReaderRules(
+                rules,
+                identities.HostReader,
+                ReaderMutationRights,
+                inheritanceFlags))
         {
             throw new InvalidDataException(
-                "Immutable content ACL must grant only SYSTEM and Administrators full control and the declared readers read/execute.");
+                "Immutable content owner and ACL must match the trusted host and external "
+                + "capability policy exactly.");
         }
     }
 
     [SupportedOSPlatform("windows")]
-    private static bool HasRights(
-        IEnumerable<FileSystemAccessRule> rules,
-        SecurityIdentifier identity,
-        FileSystemRights rights) => rules.Any(rule =>
-        identity.Equals(rule.IdentityReference)
-        && (rule.FileSystemRights & rights) == rights);
+    private static bool RequiresHostOwnerCanonicalization(
+        FileSystemSecurity security,
+        SecurityIdentifier hostReader,
+        string boundary)
+    {
+        var actualOwner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier
+                          ?? throw new InvalidDataException(
+                              $"Immutable content {boundary} owner SID is unavailable.");
+        if (hostReader.Equals(actualOwner))
+        {
+            return false;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        var tokenDefaultOwner = identity.Owner
+                                ?? identity.User
+                                ?? throw new InvalidOperationException(
+                                    "Current Windows identity has no default owner SID.");
+        if (!tokenDefaultOwner.Equals(actualOwner))
+        {
+            throw new InvalidDataException(
+                $"Immutable content {boundary} must be owned by the trusted HostReaderSid "
+                + "or the current trusted token's default owner before protection.");
+        }
+
+        return true;
+    }
 
     [SupportedOSPlatform("windows")]
-    private static bool HasReaderRights(
-        IEnumerable<FileSystemAccessRule> rules,
-        SecurityIdentifier reader)
+    private static void RequireHostOwner(
+        FileSystemSecurity security,
+        SecurityIdentifier hostReader,
+        string boundary)
     {
-        const FileSystemRights forbidden = FileSystemRights.Write
-                                           | FileSystemRights.Delete
-                                           | FileSystemRights.DeleteSubdirectoriesAndFiles
-                                           | FileSystemRights.ChangePermissions
-                                           | FileSystemRights.TakeOwnership;
-        return rules.Any(rule =>
-            reader.Equals(rule.IdentityReference)
-            && (rule.FileSystemRights & FileSystemRights.ReadAndExecute)
-            == FileSystemRights.ReadAndExecute
-            && (rule.FileSystemRights & forbidden) == 0);
+        if (!HasHostOwner(security, hostReader))
+        {
+            throw new InvalidDataException(
+                $"Immutable content {boundary} must be owned by the trusted HostReaderSid.");
+        }
     }
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasHostOwner(
+        FileSystemSecurity security,
+        SecurityIdentifier hostReader) => hostReader.Equals(
+        security.GetOwner(typeof(SecurityIdentifier)));
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasReaderRules(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier reader,
+        FileSystemRights deniedRights,
+        InheritanceFlags inheritanceFlags) => HasAllowRule(
+        rules,
+        reader,
+        FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+        inheritanceFlags)
+        && HasDeniedMutationRights(rules, reader, deniedRights, inheritanceFlags);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasAllowRule(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier identity,
+        FileSystemRights rights,
+        InheritanceFlags inheritanceFlags) => rules.Any(rule =>
+        identity.Equals(rule.IdentityReference)
+        && rule.AccessControlType == AccessControlType.Allow
+        && rule.FileSystemRights == rights
+        && rule.InheritanceFlags == inheritanceFlags
+        && rule.PropagationFlags == PropagationFlags.None);
+
+    [SupportedOSPlatform("windows")]
+    private static bool HasDeniedMutationRights(
+        IEnumerable<FileSystemAccessRule> rules,
+        SecurityIdentifier reader,
+        FileSystemRights deniedRights,
+        InheritanceFlags inheritanceFlags) => rules.Any(rule =>
+        reader.Equals(rule.IdentityReference)
+        && rule.AccessControlType == AccessControlType.Deny
+        && rule.FileSystemRights == deniedRights
+        && rule.InheritanceFlags == inheritanceFlags
+        && rule.PropagationFlags == PropagationFlags.None);
 
     [UnsupportedOSPlatform("windows")]
     private static void ProtectUnix(
@@ -565,9 +966,19 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
         using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
         var current = identity.User
                       ?? throw new InvalidOperationException("Current Windows identity has no SID.");
+        var rootSecurity = new DirectorySecurity();
+        rootSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        rootSecurity.AddAccessRule(new FileSystemAccessRule(
+            current,
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(root), rootSecurity);
+
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
-            var security = FileSystemAclExtensions.GetAccessControl(new FileInfo(file));
+            var security = new FileSecurity();
             security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
             security.AddAccessRule(new FileSystemAccessRule(
                 current,
@@ -578,10 +989,9 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
 
         foreach (var directory in Directory
                      .EnumerateDirectories(root, "*", SearchOption.AllDirectories)
-                     .Prepend(root)
                      .OrderBy(path => path.Length))
         {
-            var security = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(directory));
+            var security = new DirectorySecurity();
             security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
             security.AddAccessRule(new FileSystemAccessRule(
                 current,

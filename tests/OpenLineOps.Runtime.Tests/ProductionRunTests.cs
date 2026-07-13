@@ -24,7 +24,74 @@ public sealed class ProductionRunTests
         Assert.Equal(ResultJudgement.Passed, run.Judgement);
         Assert.Equal(ProductDisposition.Completed, run.Disposition);
         Assert.Equal(2, run.Operations.Count);
-        Assert.Single(run.RouteDecisions);
+        Assert.Collection(
+            run.RouteDecisions,
+            decision => Assert.Equal("test", decision.TargetOperationId),
+            decision => Assert.Equal(ProductDisposition.Completed, decision.TerminalDisposition));
+    }
+
+    [Fact]
+    public void ExplicitTerminalDispositionIsIndependentFromResultJudgement()
+    {
+        var run = CreateRun(
+            [Operation("inspect")],
+            [TerminalTransition("inspect-held", "inspect", ProductDisposition.Held)]);
+
+        StartAndComplete(run, "inspect@0001", ResultJudgement.Passed, Now.AddMinutes(1));
+
+        Assert.Equal(ExecutionStatus.Completed, run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, run.Judgement);
+        Assert.Equal(ProductDisposition.Held, run.Disposition);
+        var decision = Assert.Single(run.RouteDecisions);
+        Assert.Null(decision.TargetOperationId);
+        Assert.Equal(ProductDisposition.Held, decision.TerminalDisposition);
+    }
+
+    [Fact]
+    public void MissingExplicitRouteFailsClosedWithoutInferringDisposition()
+    {
+        var operation = Operation("inspect");
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            "topology.main",
+            "line.main",
+            ProductionUnitId.New(),
+            new ProductionUnitIdentity("product.board", "serialNumber", "SN-ROUTE-FAIL"),
+            null,
+            null,
+            "operator-001",
+            operation.OperationId,
+            Now,
+            [operation],
+            []);
+        Assert.True(run.Start(Now).Succeeded);
+
+        StartAndComplete(run, "inspect@0001", ResultJudgement.Passed, Now.AddMinutes(1));
+
+        Assert.Equal(ExecutionStatus.Failed, run.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, run.Judgement);
+        Assert.Equal(ProductDisposition.Held, run.Disposition);
+        Assert.Equal("Runtime.RouteResolutionFailed", run.FailureCode);
+        Assert.Empty(run.RouteDecisions);
+    }
+
+    [Fact]
+    public void TransitionTargetRequiresExactlyOneOperationOrTerminalDisposition()
+    {
+        Assert.Throws<ArgumentException>(() => new RouteTransitionDefinition(
+            "invalid.none",
+            "inspect",
+            null,
+            RuntimeRouteTransitionKind.Sequence));
+        Assert.Throws<ArgumentException>(() => new RouteTransitionDefinition(
+            "invalid.both",
+            "inspect",
+            "next",
+            RuntimeRouteTransitionKind.Sequence,
+            terminalDisposition: ProductDisposition.Completed));
     }
 
     [Fact]
@@ -40,7 +107,17 @@ public sealed class ProductionRunTests
                     "assemble",
                     RuntimeRouteTransitionKind.Rework,
                     ResultJudgement.Failed,
-                    maxTraversals: 1)
+                    maxTraversals: 1),
+                TerminalTransition(
+                    "test-failed-terminal",
+                    "test",
+                    ProductDisposition.Nonconforming,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed),
+                TerminalTransition(
+                    "test-default-terminal",
+                    "test",
+                    ProductDisposition.Held)
             ]);
 
         StartAndComplete(run, "assemble@0001", ResultJudgement.Passed, Now.AddMinutes(1));
@@ -100,7 +177,11 @@ public sealed class ProductionRunTests
                     RuntimeRouteTransitionKind.Condition,
                     outputCondition: new RouteOutputCondition(
                         "grade",
-                        new ProductionContextValue(ProductionContextValueKind.Text, "B")))
+                        new ProductionContextValue(ProductionContextValueKind.Text, "B"))),
+                TerminalTransition(
+                    "inspect-default-terminal",
+                    "inspect",
+                    ProductDisposition.Held)
             ]);
         StartOperation(run, "inspect@0001", Now.AddSeconds(1));
 
@@ -331,11 +412,99 @@ public sealed class ProductionRunTests
         Assert.Equal("Runtime.RightCanceled", right.FailureCode);
     }
 
+    [Fact]
+    public void SafeStopBarrierCannotClaimSuccessBeforeIndependentAcknowledgement()
+    {
+        var run = CreateRun([Operation("test")], []);
+        StartOperation(run, "test@0001", Now.AddSeconds(1));
+
+        Assert.True(run.RequestSafeStop(
+            "operator.safety",
+            "Guard opened.",
+            Now.AddSeconds(2)).Succeeded);
+        Assert.Equal(ProductionRunControlState.StopRequested, run.ControlState);
+        Assert.Null(run.SafeStopAcknowledgedAtUtc);
+        Assert.True(run.CompleteOperation(
+            "test@0001",
+            ResultJudgement.Passed,
+            null,
+            1,
+            1,
+            0,
+            Now.AddSeconds(3)).Succeeded);
+
+        Assert.Equal(ExecutionStatus.Running, run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.StopRequested, run.ControlState);
+        Assert.True(run.AcknowledgeSafeStop(Now.AddSeconds(4)).Succeeded);
+        Assert.Equal(ExecutionStatus.Canceled, run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.SafeStopped, run.ControlState);
+        Assert.Equal("Runtime.ProductionRunSafeStopped", run.FailureCode);
+    }
+
+    [Fact]
+    public void SafeStopAcknowledgementThenExecutionCancellationPreservesSafetyEvidence()
+    {
+        var run = CreateRun([Operation("test")], []);
+        StartOperation(run, "test@0001", Now.AddSeconds(1));
+        Assert.True(run.RequestSafeStop(
+            "operator.safety",
+            "Guard opened.",
+            Now.AddSeconds(2)).Succeeded);
+        Assert.True(run.AcknowledgeSafeStop(Now.AddSeconds(3)).Succeeded);
+
+        Assert.True(run.CancelOperation(
+            "test@0001",
+            "Runtime.OperationCanceled",
+            "Station runtime process tree terminated.",
+            0,
+            1,
+            0,
+            Now.AddSeconds(4)).Succeeded);
+
+        Assert.Equal(ExecutionStatus.Canceled, run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.SafeStopped, run.ControlState);
+        Assert.Equal("operator.safety", run.SafeStopRequestedBy);
+        Assert.Equal("Guard opened.", run.SafeStopReason);
+        Assert.Equal(Now.AddSeconds(2), run.SafeStopRequestedAtUtc);
+        Assert.Equal(Now.AddSeconds(3), run.SafeStopAcknowledgedAtUtc);
+        Assert.Equal("Runtime.ProductionRunSafeStopped", run.FailureCode);
+    }
+
+    [Fact]
+    public void SafeStopBeforeHardwareDispatchIsAConfirmedNoOp()
+    {
+        var run = CreateRun([Operation("test")], []);
+
+        Assert.True(run.RequestSafeStop(
+            "operator.safety",
+            "Stop before dispatch.",
+            Now.AddSeconds(1)).Succeeded);
+
+        Assert.Equal(ExecutionStatus.Canceled, run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.SafeStopped, run.ControlState);
+        Assert.Equal(run.SafeStopRequestedAtUtc, run.SafeStopAcknowledgedAtUtc);
+        Assert.Equal(ExecutionStatus.Canceled, Assert.Single(run.Operations).ExecutionStatus);
+    }
+
     private static ProductionRun CreateRun(
         IReadOnlyCollection<OperationRunDefinition> operations,
         IReadOnlyCollection<RouteTransitionDefinition> transitions)
     {
         var first = operations.First();
+        var explicitTransitions = transitions.ToList();
+        foreach (var operation in operations.Where(operation => !explicitTransitions.Any(transition =>
+                     transition.Kind != RuntimeRouteTransitionKind.Rework
+                     && string.Equals(
+                         transition.SourceOperationId,
+                         operation.OperationId,
+                         StringComparison.Ordinal))))
+        {
+            explicitTransitions.Add(TerminalTransition(
+                $"{operation.OperationId}.completed",
+                operation.OperationId,
+                ProductDisposition.Completed));
+        }
+
         var run = ProductionRun.Create(
             ProductionRunId.New(),
             "project.main",
@@ -351,7 +520,7 @@ public sealed class ProductionRunTests
             first.OperationId,
             Now,
             operations,
-            transitions);
+            explicitTransitions);
         Assert.True(run.Start(Now).Succeeded);
         return run;
     }
@@ -417,4 +586,17 @@ public sealed class ProductionRunTests
         judgement,
         maxTraversals,
         group);
+
+    private static RouteTransitionDefinition TerminalTransition(
+        string id,
+        string source,
+        ProductDisposition disposition,
+        RuntimeRouteTransitionKind kind = RuntimeRouteTransitionKind.Sequence,
+        ResultJudgement? judgement = null) => new(
+        id,
+        source,
+        null,
+        kind,
+        requiredJudgement: judgement,
+        terminalDisposition: disposition);
 }

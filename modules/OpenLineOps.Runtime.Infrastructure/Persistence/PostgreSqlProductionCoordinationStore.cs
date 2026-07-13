@@ -55,6 +55,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 "A new Production Run must be Pending and own its frozen execution plan.");
         }
 
+        var createdOutboxItem = ProductionRunCreatedOutboxItem.FromAdmission(run);
+
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
@@ -91,7 +93,24 @@ public sealed class PostgreSqlProductionCoordinationStore :
         var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
         if (added)
         {
+            await using var outbox = connection.CreateCommand();
+            outbox.Transaction = transaction;
+            outbox.CommandText = """
+                INSERT INTO olo_production_created_outbox (
+                    run_id, event_id, occurred_at_utc, attempt_count, last_error)
+                VALUES (@run_id, @event_id, @occurred_at_utc, 0, NULL);
+                """;
+            outbox.Parameters.AddWithValue("run_id", createdOutboxItem.RunId.Value);
+            outbox.Parameters.AddWithValue("event_id", createdOutboxItem.EventId);
+            outbox.Parameters.AddWithValue("occurred_at_utc", createdOutboxItem.OccurredAtUtc);
+            if (await outbox.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Production Run Created-event outbox item {run.Id} was not stored atomically.");
+            }
+
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            run.ClearDomainEvents();
         }
         else
         {
@@ -246,6 +265,83 @@ public sealed class PostgreSqlProductionCoordinationStore :
         CancellationToken cancellationToken = default) =>
         ListRunsAsync(productionLineDefinitionId, stationSystemId, slotId, cancellationToken);
 
+    public async ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+        ListPendingCreatedOutboxAsync(
+            int maximumCount,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT run_id, event_id, occurred_at_utc, attempt_count, last_error
+            FROM olo_production_created_outbox
+            ORDER BY occurred_at_utc, run_id
+            LIMIT @maximum_count;
+            """;
+        command.Parameters.AddWithValue("maximum_count", maximumCount);
+        var items = new List<ProductionRunCreatedOutboxItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            items.Add(new ProductionRunCreatedOutboxItem(
+                new ProductionRunId(reader.GetGuid(0)),
+                reader.GetGuid(1),
+                reader.GetFieldValue<DateTimeOffset>(2),
+                reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+
+        return items;
+    }
+
+    public ValueTask MarkCreatedOutboxProcessedAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteRequiredAsync(
+            "DELETE FROM olo_production_created_outbox WHERE run_id = @id;",
+            runId.Value,
+            "Production Run Created-event outbox item",
+            cancellationToken);
+
+    public async ValueTask RecordCreatedOutboxFailureAsync(
+        ProductionRunId runId,
+        string failureDescription,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(failureDescription);
+        if (char.IsWhiteSpace(failureDescription[0])
+            || char.IsWhiteSpace(failureDescription[^1]))
+        {
+            throw new ArgumentException(
+                "Created-event failure description must be canonical.",
+                nameof(failureDescription));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE olo_production_created_outbox
+            SET attempt_count = attempt_count + 1,
+                last_error = @last_error
+            WHERE run_id = @run_id;
+            """;
+        command.Parameters.AddWithValue("run_id", runId.Value);
+        command.Parameters.AddWithValue(
+            "last_error",
+            failureDescription.Length <= 4096
+                ? failureDescription
+                : failureDescription[..4096]);
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Production Run Created-event outbox item {runId} does not exist.");
+        }
+    }
+
     public async ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
         ListPendingTerminalOutboxAsync(
             int maximumCount,
@@ -347,7 +443,6 @@ public sealed class PostgreSqlProductionCoordinationStore :
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceRequirement> resources,
-        DateTimeOffset acquiredAtUtc,
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
@@ -374,6 +469,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
             _ = await ownerLock.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        var currentExpiries = new List<DateTimeOffset>(requested.Length);
         foreach (var resource in requested)
         {
             // The fencing row is the permanent serialization point for a physical resource.
@@ -409,7 +505,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
             await using var lockCommand = connection.CreateCommand();
             lockCommand.Transaction = transaction;
             lockCommand.CommandText = """
-                SELECT run_id, operation_run_id, expires_at_utc
+                SELECT expires_at_utc
                 FROM olo_resource_leases
                 WHERE resource_kind = @kind AND resource_id = @resource_id
                 FOR UPDATE;
@@ -417,38 +513,22 @@ public sealed class PostgreSqlProductionCoordinationStore :
             AddResourceParameters(lockCommand, resource);
             await using var reader = await lockCommand.ExecuteReaderAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-                && reader.GetFieldValue<DateTimeOffset>(2) > acquiredAtUtc
-                && (reader.GetGuid(0) != runId.Value
-                    || !string.Equals(reader.GetString(1), operationRunId, StringComparison.Ordinal)))
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
-                return null;
+                currentExpiries.Add(reader.GetFieldValue<DateTimeOffset>(0));
             }
         }
 
-        var activeOwned = await ListActiveOwnerLeasesAsync(
+        var databaseNowUtc = await ReadDatabaseClockAsync(
                 connection,
                 transaction,
-                runId,
-                operationRunId,
-                acquiredAtUtc,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (activeOwned.Count > 0)
-        {
-            var exactResources = activeOwned
-                .Select(static lease => lease.Resource)
-                .ToHashSet()
-                .SetEquals(requested);
-            if (!exactResources)
-            {
-                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
-                return null;
-            }
 
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return activeOwned;
+        if (currentExpiries.Any(expiresAtUtc => expiresAtUtc > databaseNowUtc))
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return null;
         }
 
         var leases = new List<ResourceLease>(requested.Length);
@@ -470,13 +550,6 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     CultureInfo.InvariantCulture);
             }
 
-            var lease = new ResourceLease(
-                resource,
-                runId,
-                operationRunId,
-                token,
-                acquiredAtUtc,
-                acquiredAtUtc.Add(duration));
             await using var leaseCommand = connection.CreateCommand();
             leaseCommand.Transaction = transaction;
             leaseCommand.CommandText = """
@@ -485,66 +558,39 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     fencing_token, acquired_at_utc, expires_at_utc)
                 VALUES (
                     @kind, @resource_id, @run_id, @operation_run_id,
-                    @fencing_token, @acquired_at_utc, @expires_at_utc)
+                    @fencing_token, @database_now_utc, @database_now_utc + @duration)
                 ON CONFLICT (resource_kind, resource_id)
                 DO UPDATE SET
                     run_id = EXCLUDED.run_id,
                     operation_run_id = EXCLUDED.operation_run_id,
                     fencing_token = EXCLUDED.fencing_token,
                     acquired_at_utc = EXCLUDED.acquired_at_utc,
-                    expires_at_utc = EXCLUDED.expires_at_utc;
+                    expires_at_utc = EXCLUDED.expires_at_utc
+                RETURNING acquired_at_utc, expires_at_utc;
                 """;
             AddResourceParameters(leaseCommand, resource);
             leaseCommand.Parameters.AddWithValue("run_id", runId.Value);
             leaseCommand.Parameters.AddWithValue("operation_run_id", operationRunId);
             leaseCommand.Parameters.AddWithValue("fencing_token", token);
-            leaseCommand.Parameters.AddWithValue("acquired_at_utc", acquiredAtUtc);
-            leaseCommand.Parameters.AddWithValue("expires_at_utc", lease.ExpiresAtUtc);
-            await leaseCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            leases.Add(lease);
+            leaseCommand.Parameters.AddWithValue("database_now_utc", databaseNowUtc);
+            leaseCommand.Parameters.AddWithValue("duration", duration);
+            await using var reader = await leaseCommand.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new InvalidDataException("PostgreSQL did not return the acquired resource lease.");
+            }
+
+            leases.Add(new ResourceLease(
+                resource,
+                runId,
+                operationRunId,
+                token,
+                reader.GetFieldValue<DateTimeOffset>(0),
+                reader.GetFieldValue<DateTimeOffset>(1)));
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return leases;
-    }
-
-    private static async ValueTask<IReadOnlyCollection<ResourceLease>> ListActiveOwnerLeasesAsync(
-        NpgsqlConnection connection,
-        NpgsqlTransaction transaction,
-        ProductionRunId runId,
-        string operationRunId,
-        DateTimeOffset acquiredAtUtc,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT resource_kind, resource_id, fencing_token, acquired_at_utc, expires_at_utc
-            FROM olo_resource_leases
-            WHERE run_id = @run_id
-              AND operation_run_id = @operation_run_id
-              AND expires_at_utc > @acquired_at_utc
-            ORDER BY resource_kind, resource_id
-            FOR UPDATE;
-            """;
-        command.Parameters.AddWithValue("run_id", runId.Value);
-        command.Parameters.AddWithValue("operation_run_id", operationRunId);
-        command.Parameters.AddWithValue("acquired_at_utc", acquiredAtUtc);
-        var leases = new List<ResourceLease>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            leases.Add(new ResourceLease(
-                new ResourceRequirement(
-                    ParseResourceKind(reader.GetString(0)),
-                    reader.GetString(1)),
-                runId,
-                operationRunId,
-                reader.GetInt64(2),
-                reader.GetFieldValue<DateTimeOffset>(3),
-                reader.GetFieldValue<DateTimeOffset>(4)));
-        }
-
         return leases;
     }
 
@@ -552,19 +598,11 @@ public sealed class PostgreSqlProductionCoordinationStore :
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
         ArgumentNullException.ThrowIfNull(evidence);
-        if (validatedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new ArgumentException("Resource lease validation time must be UTC.", nameof(validatedAtUtc));
-        }
-
-        var supplied = evidence
-            .OrderBy(static item => item.Resource.CanonicalKey, StringComparer.Ordinal)
-            .ToArray();
+        var supplied = evidence.ToArray();
         if (supplied.Length == 0
             || supplied.Any(static item => item is null)
             || supplied.Select(static item => item.Resource).Distinct().Count() != supplied.Length)
@@ -573,6 +611,12 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 "Resource lease validation requires non-empty unique evidence.",
                 nameof(evidence));
         }
+
+        Array.Sort(
+            supplied,
+            static (left, right) => StringComparer.Ordinal.Compare(
+                left.Resource.CanonicalKey,
+                right.Resource.CanonicalKey));
 
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -616,29 +660,81 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 && reader.GetGuid(0) == runId.Value
                 && string.Equals(reader.GetString(1), operationRunId, StringComparison.Ordinal)
                 && reader.GetInt64(2) == item.FencingToken
-                && reader.GetFieldValue<DateTimeOffset>(3) == item.ExpiresAtUtc
-                && item.ExpiresAtUtc > validatedAtUtc;
+                && reader.GetFieldValue<DateTimeOffset>(3) == item.ExpiresAtUtc;
             if (!valid)
             {
                 await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
                 return ResourceLeaseFenceValidationResult.Reject(
-                    $"Resource lease fence {item.Resource.CanonicalKey}/{item.FencingToken} is missing, expired, or owned by another Operation Run.");
+                    $"Resource lease fence {item.Resource.CanonicalKey}/{item.FencingToken} is missing or owned by another Operation Run.");
             }
+        }
+
+        var databaseNowUtc = await ReadDatabaseClockAsync(
+                connection,
+                transaction,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var expired = supplied.FirstOrDefault(item => item.ExpiresAtUtc <= databaseNowUtc);
+        if (expired is not null)
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            return ResourceLeaseFenceValidationResult.Reject(
+                $"Resource lease fence {expired.Resource.CanonicalKey}/{expired.FencingToken} is expired.");
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return ResourceLeaseFenceValidationResult.Accept();
     }
 
-    public ValueTask ReleaseAsync(
+    public async ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
-        CancellationToken cancellationToken = default) =>
-        ExecuteOwnerLeaseAsync(
-            "DELETE FROM olo_resource_leases WHERE run_id = @run_id AND operation_run_id = @operation_run_id;",
-            runId,
-            operationRunId,
-            cancellationToken);
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
+        ArgumentNullException.ThrowIfNull(claims);
+        var supplied = claims.ToArray();
+        if (supplied.Any(static claim => claim is null)
+            || supplied.Select(static claim => claim.Resource).Distinct().Count() != supplied.Length)
+        {
+            throw new ArgumentException(
+                "Resource lease release claims must be unique.",
+                nameof(claims));
+        }
+
+        if (supplied.Length == 0)
+        {
+            return;
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var claim in supplied.OrderBy(
+                     static claim => claim.Resource.CanonicalKey,
+                     StringComparer.Ordinal))
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                DELETE FROM olo_resource_leases
+                WHERE resource_kind = @kind
+                  AND resource_id = @resource_id
+                  AND run_id = @run_id
+                  AND operation_run_id = @operation_run_id
+                  AND fencing_token = @fencing_token;
+                """;
+            AddResourceParameters(command, claim.Resource);
+            command.Parameters.AddWithValue("run_id", runId.Value);
+            command.Parameters.AddWithValue("operation_run_id", operationRunId);
+            command.Parameters.AddWithValue("fencing_token", claim.FencingToken);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     public ValueTask HoldForRecoveryAsync(
         ProductionRunId runId,
@@ -1183,7 +1279,15 @@ public sealed class PostgreSqlProductionCoordinationStore :
             }
 
             await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await PostgreSqlSchemaInitialization.AcquireLockAsync(
+                    connection,
+                    transaction,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = PostgreSqlProductionMaterialRepository.SchemaSql + """
                 CREATE TABLE IF NOT EXISTS olo_production_runs (
                     run_id uuid PRIMARY KEY,
@@ -1208,6 +1312,22 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     attempt_count integer NOT NULL,
                     last_error text NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS olo_production_created_outbox (
+                    run_id uuid PRIMARY KEY REFERENCES olo_production_runs(run_id) ON DELETE CASCADE,
+                    event_id uuid NOT NULL UNIQUE,
+                    occurred_at_utc timestamptz NOT NULL,
+                    attempt_count integer NOT NULL,
+                    last_error text NULL,
+                    CHECK (
+                        (attempt_count = 0 AND last_error IS NULL)
+                        OR (attempt_count > 0
+                            AND last_error IS NOT NULL
+                            AND length(last_error) > 0
+                            AND last_error = btrim(last_error)))
+                );
+                CREATE INDEX IF NOT EXISTS ix_olo_production_created_outbox_order
+                    ON olo_production_created_outbox(occurred_at_utc, run_id);
 
                 CREATE TABLE IF NOT EXISTS olo_resource_fencing_tokens (
                     resource_kind text NOT NULL,
@@ -1261,7 +1381,8 @@ public sealed class PostgreSqlProductionCoordinationStore :
                     ON olo_station_job_event_inbox(job_id, occurred_at_utc, message_id);
                 """;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            await ValidateSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ValidateSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
         }
         finally
@@ -1272,12 +1393,14 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
     private static async ValueTask ValidateSchemaAsync(
         NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
         CancellationToken cancellationToken)
     {
         var expected = new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
             ["olo_production_runs"] = ["run_id", "production_unit_id", "document_json", "execution_plan_json", "revision", "execution_status", "production_line_definition_id", "last_transition_at_utc"],
             ["olo_production_terminal_outbox"] = ["run_id", "document_json", "occurred_at_utc", "attempt_count", "last_error"],
+            ["olo_production_created_outbox"] = ["run_id", "event_id", "occurred_at_utc", "attempt_count", "last_error"],
             ["olo_resource_fencing_tokens"] = ["resource_kind", "resource_id", "fencing_token"],
             ["olo_resource_leases"] = ["resource_kind", "resource_id", "run_id", "operation_run_id", "fencing_token", "acquired_at_utc", "expires_at_utc"],
             ["olo_station_job_outbox"] = ["message_id", "job_id", "idempotency_key", "kind", "sequence", "payload_json", "created_at_utc", "attempt_count", "last_error", "quarantine_reason", "quarantined_at_utc", "published_at_utc"],
@@ -1287,6 +1410,7 @@ public sealed class PostgreSqlProductionCoordinationStore :
         foreach (var table in expected)
         {
             await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = """
                 SELECT column_name
                 FROM information_schema.columns
@@ -1316,6 +1440,24 @@ public sealed class PostgreSqlProductionCoordinationStore :
         var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    private static async ValueTask<DateTimeOffset> ReadDatabaseClockAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT clock_timestamp();";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException("PostgreSQL did not return its lease clock.");
+        }
+
+        return reader.GetFieldValue<DateTimeOffset>(0);
     }
 
     private static async ValueTask<bool> TryReserveProductionUnitAsync(

@@ -321,14 +321,30 @@ public sealed record TraceRouteDecision
     public TraceRouteDecision(
         string sourceOperationRunId,
         string transitionId,
-        string targetOperationId,
+        string? targetOperationId,
+        ProductDisposition? terminalDisposition,
         ResultJudgement sourceJudgement,
         int traversal,
         DateTimeOffset decidedAtUtc)
     {
         SourceOperationRunId = TraceabilityIdGuard.NotBlank(sourceOperationRunId, nameof(sourceOperationRunId));
         TransitionId = TraceabilityIdGuard.NotBlank(transitionId, nameof(transitionId));
-        TargetOperationId = TraceabilityIdGuard.NotBlank(targetOperationId, nameof(targetOperationId));
+        if ((targetOperationId is null) == (terminalDisposition is null))
+        {
+            throw new ArgumentException(
+                "A Trace route decision requires exactly one target Operation or terminal disposition.");
+        }
+
+        TargetOperationId = targetOperationId is null
+            ? null
+            : TraceabilityIdGuard.NotBlank(targetOperationId, nameof(targetOperationId));
+        if (terminalDisposition is ProductDisposition.InProcess
+            || terminalDisposition is not null && !Enum.IsDefined(terminalDisposition.Value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(terminalDisposition));
+        }
+
+        TerminalDisposition = terminalDisposition;
         SourceJudgement = Enum.IsDefined(sourceJudgement)
             ? sourceJudgement
             : throw new ArgumentOutOfRangeException(nameof(sourceJudgement));
@@ -341,7 +357,8 @@ public sealed record TraceRouteDecision
 
     public string SourceOperationRunId { get; }
     public string TransitionId { get; }
-    public string TargetOperationId { get; }
+    public string? TargetOperationId { get; }
+    public ProductDisposition? TerminalDisposition { get; }
     public ResultJudgement SourceJudgement { get; }
     public int Traversal { get; }
     public DateTimeOffset DecidedAtUtc { get; }

@@ -45,7 +45,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             ResultJudgement.Failed).Succeeded);
         Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
         Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
-        await runtimeRepository.SaveAsync(session);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
         Assert.True(run.CompleteOperation(
             operation.OperationRunId,
             ResultJudgement.Failed,
@@ -66,6 +66,9 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Equal(ExecutionStatus.Completed, trace.ExecutionStatus);
         Assert.Equal(ResultJudgement.Failed, trace.Judgement);
         Assert.Equal(ProductDisposition.Nonconforming, trace.Disposition);
+        var routeDecision = Assert.Single(trace.RouteDecisions);
+        Assert.Null(routeDecision.TargetOperationId);
+        Assert.Equal(ProductDisposition.Nonconforming, routeDecision.TerminalDisposition);
         var storedOperation = Assert.Single(trace.Operations);
         Assert.Equal(ExecutionStatus.Completed, storedOperation.ExecutionStatus);
         Assert.Equal(ResultJudgement.Failed, storedOperation.Judgement);
@@ -76,6 +79,51 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Equal(ResultJudgement.Failed, storedCommand.ResultJudgement);
         Assert.False(Assert.Single(storedOperation.Measurements).Passed);
         Assert.Equal(1, traceRepository.AddCount);
+    }
+
+    [Fact]
+    public async Task MissingRouteFailsClosedAndPersistsTraceFailureEvidence()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun(includeTerminalRoutes: false);
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        var command = StartCommand(session);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            "{\"outcome\":\"Passed\"}",
+            BaseTimeUtc.AddSeconds(4),
+            ResultJudgement.Passed).Succeeded);
+        Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
+        Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
+            },
+            1,
+            1,
+            0,
+            BaseTimeUtc.AddSeconds(7)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Failed, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, trace.Judgement);
+        Assert.Equal(ProductDisposition.Held, trace.Disposition);
+        Assert.Equal("Runtime.RouteResolutionFailed", trace.FailureCode);
+        Assert.Contains("Route resolution failed after Operation Run", trace.FailureReason, StringComparison.Ordinal);
+        Assert.Empty(trace.RouteDecisions);
+        var storedOperation = Assert.Single(trace.Operations);
+        Assert.Equal(ExecutionStatus.Completed, storedOperation.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Passed, storedOperation.Judgement);
     }
 
     [Fact]
@@ -96,7 +144,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             BaseTimeUtc.AddSeconds(5),
             "Vendor.ProcessCrashed",
             "Vendor process exited with code 7.").Succeeded);
-        await runtimeRepository.SaveAsync(session);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
         Assert.True(run.FailOperation(
             operation.OperationRunId,
             ExecutionStatus.Failed,
@@ -151,7 +199,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             ResultJudgement.Passed).Succeeded);
         Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
         Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
-        await runtimeRepository.SaveAsync(session);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
         Assert.True(run.CompleteOperation(
             operation.OperationRunId,
             ResultJudgement.Passed,
@@ -215,7 +263,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             reason).Succeeded);
         Assert.True(session.CancelStep(command.StepId, canceledAtUtc).Succeeded);
         Assert.True(session.Cancel(canceledAtUtc, reason).Succeeded);
-        await runtimeRepository.SaveAsync(session);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
         Assert.True(run.CancelOperation(
             operation.OperationRunId,
             "Runtime.OperationCanceled",
@@ -243,6 +291,47 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var storedCommand = Assert.Single(storedOperation.Commands);
         Assert.Equal(TraceCommandStatus.Canceled, storedCommand.Status);
         Assert.Equal(ResultJudgement.Unknown, storedCommand.ResultJudgement);
+    }
+
+    [Fact]
+    public async Task SafeStopTracePreservesDurableRequestAndStationAcknowledgementEvidence()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        const string reason = "Guard opened during vendor execution.";
+        Assert.True(run.RequestSafeStop(
+            "operator.safety",
+            reason,
+            BaseTimeUtc.AddSeconds(3)).Succeeded);
+        Assert.True(run.AcknowledgeSafeStop(BaseTimeUtc.AddSeconds(4)).Succeeded);
+        Assert.True(session.Cancel(BaseTimeUtc.AddSeconds(5), reason).Succeeded);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
+        Assert.True(run.CancelOperation(
+            operation.OperationRunId,
+            "Runtime.OperationCanceled",
+            reason,
+            completedStepCount: 0,
+            commandCount: 0,
+            incidentCount: 0,
+            canceledAtUtc: BaseTimeUtc.AddSeconds(5)).Succeeded);
+
+        await subscriber.HandleAsync(run.ToSnapshot());
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        var requested = Assert.Single(trace.AuditEntries, entry =>
+            entry.Action == "ProductionRun.SafeStop.Requested");
+        Assert.Equal("operator.safety", requested.ActorId.Value);
+        Assert.Contains(reason, requested.Detail, StringComparison.Ordinal);
+        Assert.Equal(BaseTimeUtc.AddSeconds(3), requested.OccurredAtUtc);
+        var acknowledged = Assert.Single(trace.AuditEntries, entry =>
+            entry.Action == "ProductionRun.SafeStop.Acknowledged");
+        Assert.Equal("system.station-safety", acknowledged.ActorId.Value);
+        Assert.Equal(BaseTimeUtc.AddSeconds(4), acknowledged.OccurredAtUtc);
     }
 
     [Fact]
@@ -503,10 +592,11 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
     {
         var runtimeRepository = new InMemoryRuntimeSessionRepository();
         var stationJobs = new InMemoryStationJobCoordinationStore();
-        var materials = new InMemoryProductionMaterialRepository();
+        var materialStorage = new InMemoryProductionMaterialRepository();
+        var materials = new RecordingProductionMaterialRepository(materialStorage);
         var materialService = new ProductionMaterialService(
             materials,
-            new InMemoryProductionRunRepository(materials));
+            new InMemoryProductionRunRepository(materialStorage));
         var traceRepository = new InMemoryTraceRecordRepository();
         var subscriber = new ProductionRunTraceDomainEventSubscriber(
             runtimeRepository,
@@ -594,7 +684,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             ResultJudgement.Passed).Succeeded);
         Assert.True(session.CompleteStep(command.StepId, BaseTimeUtc.AddSeconds(5)).Succeeded);
         Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
-        await runtimeRepository.SaveAsync(session);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
         Assert.True(run.CompleteOperation(
             operation.OperationRunId,
             ResultJudgement.Passed,
@@ -604,6 +694,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             0,
             BaseTimeUtc.AddSeconds(7)).Succeeded);
 
+        materials.ResetTimelineQueries();
         await subscriber.HandleAsync(run.ToSnapshot());
 
         var trace = Assert.IsType<TraceRecord>(
@@ -615,6 +706,13 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Contains(trace.MaterialLocationTransitions, transition =>
             transition.MaterialKind == "Carrier" && transition.MaterialId == carrierId.Value);
         Assert.Equal("Reserved", Assert.Single(trace.SlotOccupancyTransitions).CurrentStatus);
+        Assert.Equal(1, materials.TimelineQueryCount);
+        var query = Assert.IsType<ProductionMaterialTimelineQuery>(materials.LastTimelineQuery);
+        Assert.Equal(ProductionMaterialTimelineQueryMode.UnionScope, query.Mode);
+        Assert.Equal(run.ProductionUnitId, query.ProductionUnitId);
+        Assert.Equal(run.Id, query.ProductionRunId);
+        Assert.Equal(carrierId, query.CarrierId);
+        Assert.Equal(run.CompletedAtUtc, query.ThroughUtc);
     }
 
     private static JsonElement TypedOutputs(string? outcome = null)
@@ -699,7 +797,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             service);
     }
 
-    private static ProductionRun CreateRun()
+    private static ProductionRun CreateRun(bool includeTerminalRoutes = true)
     {
         var operation = new OperationRunDefinition(
             "operation.board-test",
@@ -714,6 +812,24 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                 new ResourceRequirement(ResourceKind.Fixture, "fixture.board-test"),
                 new ResourceRequirement(ResourceKind.Device, "tester.board-test")
             ]);
+        var routeTransitions = includeTerminalRoutes
+            ? new RouteTransitionDefinition[]
+            {
+                new(
+                    "operation.board-test.failed",
+                    operation.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed,
+                    terminalDisposition: ProductDisposition.Nonconforming),
+                new(
+                    "operation.board-test.default",
+                    operation.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            }
+            : [];
         return ProductionRun.Create(
             ProductionRunId.New(),
             "project-board",
@@ -729,7 +845,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             operation.OperationId,
             BaseTimeUtc,
             [operation],
-            []);
+            routeTransitions);
     }
 
     private static OperationRun StartOperation(
@@ -814,5 +930,103 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.True(session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(2)).Succeeded);
         Assert.True(session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(3)).Succeeded);
         return command;
+    }
+
+    private sealed class RecordingProductionMaterialRepository(
+        IProductionMaterialRepository inner) : IProductionMaterialRepository
+    {
+        public int TimelineQueryCount { get; private set; }
+
+        public ProductionMaterialTimelineQuery? LastTimelineQuery { get; private set; }
+
+        public void ResetTimelineQueries()
+        {
+            TimelineQueryCount = 0;
+            LastTimelineQuery = null;
+        }
+
+        public ValueTask<bool> TryAddAsync(
+            ProductionUnit productionUnit,
+            CancellationToken cancellationToken = default) =>
+            inner.TryAddAsync(productionUnit, cancellationToken);
+
+        public ValueTask<bool> TryAddAsync(
+            ProductionLot productionLot,
+            CancellationToken cancellationToken = default) =>
+            inner.TryAddAsync(productionLot, cancellationToken);
+
+        public ValueTask<bool> TryAddAsync(
+            Carrier carrier,
+            CancellationToken cancellationToken = default) =>
+            inner.TryAddAsync(carrier, cancellationToken);
+
+        public ValueTask<bool> TryAddAsync(
+            SlotOccupancy slot,
+            CancellationToken cancellationToken = default) =>
+            inner.TryAddAsync(slot, cancellationToken);
+
+        public ValueTask<bool> TryAddAsync(
+            MaterialGenealogyLink link,
+            CancellationToken cancellationToken = default) =>
+            inner.TryAddAsync(link, cancellationToken);
+
+        public ValueTask<ProductionMaterialPersistenceEntry<ProductionUnit>?>
+            GetProductionUnitAsync(
+                ProductionUnitId productionUnitId,
+                CancellationToken cancellationToken = default) =>
+            inner.GetProductionUnitAsync(productionUnitId, cancellationToken);
+
+        public ValueTask<ProductionMaterialPersistenceEntry<ProductionLot>?> GetProductionLotAsync(
+            ProductionLotId productionLotId,
+            CancellationToken cancellationToken = default) =>
+            inner.GetProductionLotAsync(productionLotId, cancellationToken);
+
+        public ValueTask<ProductionMaterialPersistenceEntry<Carrier>?> GetCarrierAsync(
+            CarrierId carrierId,
+            CancellationToken cancellationToken = default) =>
+            inner.GetCarrierAsync(carrierId, cancellationToken);
+
+        public ValueTask<ProductionMaterialPersistenceEntry<SlotOccupancy>?> GetSlotAsync(
+            SlotAddress slot,
+            CancellationToken cancellationToken = default) =>
+            inner.GetSlotAsync(slot, cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<ProductionUnit>>>
+            ListProductionUnitsAsync(CancellationToken cancellationToken = default) =>
+            inner.ListProductionUnitsAsync(cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<Carrier>>>
+            ListCarriersAsync(CancellationToken cancellationToken = default) =>
+            inner.ListCarriersAsync(cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionMaterialPersistenceEntry<SlotOccupancy>>>
+            ListSlotsAsync(
+                string? lineId = null,
+                string? stationSystemId = null,
+                CancellationToken cancellationToken = default) =>
+            inner.ListSlotsAsync(lineId, stationSystemId, cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<MaterialGenealogyLink>> ListGenealogyLinksAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.ListGenealogyLinksAsync(cancellationToken);
+
+        public async ValueTask<IReadOnlyCollection<ProductionMaterialTimelineEntry>>
+            ListTimelineAsync(
+                ProductionMaterialTimelineQuery query,
+                CancellationToken cancellationToken = default)
+        {
+            TimelineQueryCount++;
+            LastTimelineQuery = query;
+            var timeline = await inner.ListTimelineAsync(query, cancellationToken);
+            return query.Mode == ProductionMaterialTimelineQueryMode.UnionScope
+                && timeline.FirstOrDefault() is { } duplicate
+                ? [.. timeline, duplicate]
+                : timeline;
+        }
+
+        public ValueTask CommitAsync(
+            ProductionMaterialCommit commit,
+            CancellationToken cancellationToken = default) =>
+            inner.CommitAsync(commit, cancellationToken);
     }
 }

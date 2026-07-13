@@ -130,7 +130,6 @@ public sealed class ProductionRunRunner(
                     run.Id,
                     readyOperation.Operation.OperationRunId,
                     requiredResources,
-                    clock.UtcNow,
                     CalculateLeaseDuration(executionPlan),
                     cancellationToken).ConfigureAwait(false);
                 if (leases is null)
@@ -138,112 +137,148 @@ public sealed class ProductionRunRunner(
                     continue;
                 }
 
-                var confirmedReadiness = await operationReadiness.EvaluateAsync(
-                        run.ToSnapshot(),
-                        readyOperation.Operation,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                var sameMaterialResources = confirmedReadiness.MaterialResources.ToHashSet()
-                    .SetEquals(readyOperation.MaterialResources);
-                if (confirmedReadiness.Kind != ProductionOperationReadinessKind.Ready
-                    || !sameMaterialResources
-                    || !string.Equals(
-                        confirmedReadiness.EvidenceKey,
-                        readyOperation.EvidenceKey,
-                        StringComparison.Ordinal))
+                var releaseAcquiredLeaseSet = true;
+                try
                 {
-                    await resourceLeases.ReleaseAsync(
-                            run.Id,
-                            readyOperation.Operation.OperationRunId,
-                            CancellationToken.None)
+                    var confirmedReadiness = await operationReadiness.EvaluateAsync(
+                            run.ToSnapshot(),
+                            readyOperation.Operation,
+                            cancellationToken)
                         .ConfigureAwait(false);
-                    if (confirmedReadiness.Kind == ProductionOperationReadinessKind.RecoveryRequired)
+                    var sameMaterialResources = confirmedReadiness.MaterialResources.ToHashSet()
+                        .SetEquals(readyOperation.MaterialResources);
+                    if (confirmedReadiness.Kind != ProductionOperationReadinessKind.Ready
+                        || !sameMaterialResources
+                        || !string.Equals(
+                            confirmedReadiness.EvidenceKey,
+                            readyOperation.EvidenceKey,
+                            StringComparison.Ordinal))
                     {
-                        var latestForRecovery = await runRepository.GetByIdAsync(
-                                run.Id,
-                                CancellationToken.None)
-                            .ConfigureAwait(false)
-                            ?? throw new InvalidDataException(
-                                $"Production Run {run.Id} disappeared during material readiness recovery.");
-                        var recovery = latestForRecovery.Run.MarkRecoveryRequired(
-                            confirmedReadiness.Reason,
-                            clock.UtcNow);
-                        if (recovery.Succeeded)
+                        if (confirmedReadiness.Kind == ProductionOperationReadinessKind.RecoveryRequired)
                         {
-                            await PersistAndPublishAsync(
-                                    latestForRecovery.Run,
-                                    latestForRecovery.Revision,
+                            var latestForRecovery = await runRepository.GetByIdAsync(
+                                    run.Id,
                                     CancellationToken.None)
-                                .ConfigureAwait(false);
+                                .ConfigureAwait(false)
+                                ?? throw new InvalidDataException(
+                                    $"Production Run {run.Id} disappeared during material readiness recovery.");
+                            var recovery = latestForRecovery.Run.MarkRecoveryRequired(
+                                confirmedReadiness.Reason,
+                                clock.UtcNow);
+                            if (recovery.Succeeded)
+                            {
+                                await PersistAndPublishAsync(
+                                        latestForRecovery.Run,
+                                        latestForRecovery.Revision,
+                                        CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+
+                            return Result.Success(new ProductionRunRunResult(
+                                latestForRecovery.Run.ToSnapshot()));
                         }
 
-                        return Result.Success(new ProductionRunRunResult(
-                            latestForRecovery.Run.ToSnapshot()));
+                        continue;
                     }
 
-                    continue;
-                }
+                    var latest = await runRepository.GetByIdAsync(run.Id, cancellationToken)
+                        .ConfigureAwait(false)
+                        ?? throw new InvalidDataException(
+                            $"Production Run {run.Id} disappeared while acquiring Station resources.");
+                    if (latest.Revision != revision)
+                    {
+                        run = latest.Run;
+                        revision = latest.Revision;
+                    }
 
-                var latest = await runRepository.GetByIdAsync(run.Id, cancellationToken)
-                    .ConfigureAwait(false)
-                    ?? throw new InvalidDataException(
-                        $"Production Run {run.Id} disappeared while acquiring Station resources.");
-                if (latest.Revision != revision)
-                {
-                    run = latest.Run;
-                    revision = latest.Revision;
-                }
-
-                var operation = run.Operations.Single(candidate => string.Equals(
-                    candidate.OperationRunId,
-                    readyOperation.Operation.OperationRunId,
-                    StringComparison.Ordinal));
-                if (run.IsTerminal
-                    || run.ControlState != ProductionRunControlState.Active
-                    || operation.ExecutionStatus != ExecutionStatus.Pending)
-                {
-                    await resourceLeases.ReleaseAsync(
-                            run.Id,
-                            readyOperation.Operation.OperationRunId,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    continue;
-                }
-
-                var sessionId = idProvider.NewSessionId();
-                var started = run.StartOperation(
-                    operation.OperationRunId,
-                    sessionId,
-                    leases,
-                    clock.UtcNow);
-                if (!started.Succeeded)
-                {
-                    await resourceLeases.ReleaseAsync(
-                        run.Id,
-                        operation.OperationRunId,
-                        CancellationToken.None).ConfigureAwait(false);
-                    return Failure(started);
-                }
-
-                // Persist the session link and fencing tokens before publishing a station job.
-                revision = await PersistAndPublishAsync(run, revision, cancellationToken)
-                    .ConfigureAwait(false);
-
-                var runSnapshot = run.ToSnapshot();
-                var request = new StationOperationDispatchRequest(
-                    runSnapshot,
-                    runSnapshot.Operations.Single(candidate => string.Equals(
+                    var operation = run.Operations.Single(candidate => string.Equals(
                         candidate.OperationRunId,
+                        readyOperation.Operation.OperationRunId,
+                        StringComparison.Ordinal));
+                    if (run.IsTerminal
+                        || run.ControlState != ProductionRunControlState.Active
+                        || operation.ExecutionStatus != ExecutionStatus.Pending)
+                    {
+                        if (LeaseSetBelongsToOperation(operation, leases))
+                        {
+                            // A competing coordinator persisted this exact lease set and now owns
+                            // its lifecycle. Neither the creator nor an observer may release it.
+                            releaseAcquiredLeaseSet = false;
+                        }
+
+                        continue;
+                    }
+
+                    var sessionId = idProvider.NewSessionId();
+                    var started = run.StartOperation(
                         operation.OperationRunId,
-                        StringComparison.Ordinal)),
-                    executionPlan,
-                    sessionId,
-                    leases);
-                // Start every ready Station operation before awaiting any one of them. Route
-                // results are still folded back into the aggregate serially below.
-                dispatches.Add(new PendingStationDispatch(
-                    operation.OperationRunId,
-                    DispatchCapturingAsync(request, cancellationToken)));
+                        sessionId,
+                        leases,
+                        clock.UtcNow);
+                    if (!started.Succeeded)
+                    {
+                        return Failure(started);
+                    }
+
+                    // Persist the session link and fencing tokens before publishing a station job.
+                    try
+                    {
+                        revision = await PersistAndPublishAsync(run, revision, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (ProductionRunConcurrencyException)
+                    {
+                        var winningEntry = await runRepository.GetByIdAsync(
+                                run.Id,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        var winningOperation = winningEntry?.Run.Operations.SingleOrDefault(candidate =>
+                            string.Equals(
+                                candidate.OperationRunId,
+                                operation.OperationRunId,
+                                StringComparison.Ordinal));
+                        if (winningOperation is not null
+                            && winningOperation.ExecutionStatus != ExecutionStatus.Pending
+                            && LeaseSetBelongsToOperation(winningOperation, leases))
+                        {
+                            releaseAcquiredLeaseSet = false;
+                        }
+
+                        throw;
+                    }
+
+                    // The durable aggregate is now the lease owner. Cleanup must use its exact
+                    // fencing claims after dispatch completion or recovery reconciliation.
+                    releaseAcquiredLeaseSet = false;
+                    var runSnapshot = run.ToSnapshot();
+                    var request = new StationOperationDispatchRequest(
+                        runSnapshot,
+                        runSnapshot.Operations.Single(candidate => string.Equals(
+                            candidate.OperationRunId,
+                            operation.OperationRunId,
+                            StringComparison.Ordinal)),
+                        executionPlan,
+                        sessionId,
+                        leases);
+                    // Start every ready Station operation before awaiting any one of them. Route
+                    // results are still folded back into the aggregate serially below.
+                    dispatches.Add(new PendingStationDispatch(
+                        operation.OperationRunId,
+                        leases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray(),
+                        DispatchCapturingAsync(request, cancellationToken)));
+                }
+                finally
+                {
+                    if (releaseAcquiredLeaseSet)
+                    {
+                        await resourceLeases.ReleaseAsync(
+                                run.Id,
+                                readyOperation.Operation.OperationRunId,
+                                leases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray(),
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                }
             }
 
             if (dispatches.Count == 0)
@@ -351,6 +386,7 @@ public sealed class ProductionRunRunner(
                     await resourceLeases.ReleaseAsync(
                         run.Id,
                         dispatch.OperationRunId,
+                        dispatch.ReleaseClaims,
                         CancellationToken.None).ConfigureAwait(false);
                 }
             }
@@ -471,8 +507,17 @@ public sealed class ProductionRunRunner(
     private static Result<ProductionRunRunResult> Failure(ApplicationError error) =>
         Result.Failure<ProductionRunRunResult>(error);
 
+    private static bool LeaseSetBelongsToOperation(
+        OperationRun operation,
+        IReadOnlyCollection<ResourceLease> leases) =>
+        operation.FencingTokens.Count == leases.Count
+        && leases.All(lease =>
+            operation.FencingTokens.TryGetValue(lease.Resource, out var fencingToken)
+            && fencingToken == lease.FencingToken);
+
     private sealed record PendingStationDispatch(
         string OperationRunId,
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> ReleaseClaims,
         Task<StationDispatchOutcome> Outcome);
 
     private sealed record ReadyOperation(

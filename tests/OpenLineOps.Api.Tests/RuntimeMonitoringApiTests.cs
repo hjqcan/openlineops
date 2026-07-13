@@ -387,7 +387,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             "Target status test session failed.");
 
         var events = session.DomainEvents.ToArray();
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, events);
         await publisher.PublishAsync(events);
         session.ClearDomainEvents();
 
@@ -427,7 +427,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         session.StartCommand(command.Id, transitionAtUtc.AddMilliseconds(1));
 
         var events = session.DomainEvents.ToArray();
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, events);
         await publisher.PublishAsync(events);
         session.ClearDomainEvents();
 

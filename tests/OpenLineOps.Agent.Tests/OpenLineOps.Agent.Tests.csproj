@@ -33,6 +33,13 @@
     <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.LoopbackDevice\OpenLineOps.SamplePlugins.LoopbackDevice.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.LeastPrivilegeLauncher\OpenLineOps.LeastPrivilegeLauncher.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Agent\OpenLineOps.Agent.csproj" />
     <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj"
                       ReferenceOutputAssembly="false" />

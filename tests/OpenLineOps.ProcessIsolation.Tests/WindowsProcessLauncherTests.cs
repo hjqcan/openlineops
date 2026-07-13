@@ -248,6 +248,19 @@ public sealed class WindowsProcessLauncherTests
                 Convert.ToHexStringLower(SHA256.HashData(bytes))));
         }
 
+        var probeFiles = Enumerable.Range(1, 5)
+            .Select(index => Path.Combine(contentDirectory, $"mutation-probe-{index}.txt"))
+            .ToArray();
+        foreach (var probeFile in probeFiles)
+        {
+            var bytes = Encoding.UTF8.GetBytes(Path.GetFileName(probeFile));
+            await File.WriteAllBytesAsync(probeFile, bytes);
+            inventory.Add(new ImmutableContentFile(
+                Path.GetFileName(probeFile),
+                bytes.LongLength,
+                Convert.ToHexStringLower(SHA256.HashData(bytes))));
+        }
+
         var protector = new ImmutableContentProtector();
         await protector.ProtectAsync(
             contentDirectory,
@@ -263,7 +276,11 @@ public sealed class WindowsProcessLauncherTests
             using var launched = new WindowsProcessLauncher().Launch(
                 new IsolatedProcessStartRequest(
                     Path.Combine(contentDirectory, "OpenLineOps.VendorTestHelper.exe"),
-                    ["sandbox-observe"],
+                    [
+                        "sandbox-probe-immutable-content",
+                        contentCapabilitySid,
+                        .. probeFiles
+                    ],
                     workspace,
                     environment,
                     new WindowsProcessLimits(
@@ -280,13 +297,19 @@ public sealed class WindowsProcessLauncherTests
             var stdout = ReadUtf8Async(launched.StandardOutput, timeout.Token);
             var stderr = ReadUtf8Async(launched.StandardError, timeout.Token);
             await launched.WaitForExitAsync(timeout.Token);
-            var observation = JsonSerializer.Deserialize<AppContainerObservation>(
+            var observation = JsonSerializer.Deserialize<ImmutableContentMutationObservation>(
                 await stdout,
                 JsonOptions())!;
 
             Assert.Equal(0, launched.ExitCode);
             Assert.Equal(string.Empty, await stderr);
             Assert.True(observation.IsAppContainer);
+            Assert.True(observation.HasExpectedContentCapability);
+            Assert.False(observation.WriteSucceeded);
+            Assert.False(observation.RenameSucceeded);
+            Assert.False(observation.DeleteSucceeded);
+            Assert.False(observation.ChangePermissionsSucceeded);
+            Assert.False(observation.TakeOwnershipSucceeded);
         }
         finally
         {
@@ -806,6 +829,15 @@ public sealed class WindowsProcessLauncherTests
         IReadOnlyDictionary<string, string> Environment,
         bool IsAppContainer,
         bool HasInternetClientCapability);
+
+    private sealed record ImmutableContentMutationObservation(
+        bool IsAppContainer,
+        bool HasExpectedContentCapability,
+        bool WriteSucceeded,
+        bool RenameSucceeded,
+        bool DeleteSucceeded,
+        bool ChangePermissionsSucceeded,
+        bool TakeOwnershipSucceeded);
 
     private sealed class LaunchCheckpointException : Exception;
 

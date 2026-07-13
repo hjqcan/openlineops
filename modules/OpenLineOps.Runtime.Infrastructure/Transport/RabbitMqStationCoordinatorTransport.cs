@@ -231,7 +231,7 @@ public sealed class RabbitMqStationCoordinatorTransport :
             await _inboxChannel.QueueBindAsync(
                     ResultQueueName(),
                     _options.EventExchange,
-                    $"station.*.{kind}",
+                    StationTransportRoute.EventPattern(kind),
                     arguments: null,
                     noWait: false,
                     cancellationToken)

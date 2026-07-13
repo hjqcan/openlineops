@@ -196,7 +196,12 @@ public sealed class TraceRecordService : ITraceRecordService
     private static TraceRouteDecision ToRouteDecision(CreateTraceRouteDecisionRequest request) => new(
         request.SourceOperationRunId!,
         request.TransitionId!,
-        request.TargetOperationId!,
+        request.TargetOperationId,
+        request.TerminalDisposition is null
+            ? null
+            : ParseEnum<ProductDisposition>(
+                request.TerminalDisposition,
+                "Traceability.InvalidRouteTerminalDisposition"),
         ParseEnum<ResultJudgement>(
             request.SourceJudgement!,
             "Traceability.InvalidRouteSourceJudgement"),

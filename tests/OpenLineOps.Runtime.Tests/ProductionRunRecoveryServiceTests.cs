@@ -155,11 +155,12 @@ public sealed class ProductionRunRecoveryServiceTests
             run,
             plan,
             await ProductionRunTestMaterials.RegisterAsync(materials, run)));
+        var clock = new FixedClock(Now);
         var service = new ProductionRunRecoveryService(
             repository,
-            new InMemoryResourceLeaseRepository(),
+            new InMemoryResourceLeaseRepository(clock),
             new InMemoryRuntimeDomainEventPublisher(),
-            new FixedClock(Now));
+            clock);
 
         var result = await service.RecoverAsync();
 
@@ -268,8 +269,7 @@ public sealed class ProductionRunRecoveryServiceTests
         var authorization = await new StationDispatchPublicationAuthorizer(
                 fixture.Repository,
                 fixture.Leases,
-                new FixedDeploymentResolver(request),
-                fixture.Clock)
+                new FixedDeploymentResolver(request))
             .AuthorizeAsync(request);
         Assert.False(authorization.Allowed);
         await dispatchStore.QuarantineJobAsync(
@@ -383,9 +383,9 @@ public sealed class ProductionRunRecoveryServiceTests
         {
             var materials = new InMemoryProductionMaterialRepository();
             var repository = new InMemoryProductionRunRepository(materials);
-            var leases = new InMemoryResourceLeaseRepository();
             var publisher = new InMemoryRuntimeDomainEventPublisher();
             var clock = new FixedClock(Now.AddMinutes(1));
+            var leases = new InMemoryResourceLeaseRepository(clock);
             var runId = ProductionRunId.New();
             var entry = Operation("operation.entry", "station.entry");
             var left = Operation("operation.left", "station.left");
@@ -459,7 +459,6 @@ public sealed class ProductionRunRecoveryServiceTests
                     run.Id,
                     operation.OperationRunId,
                     operation.ResourceRequirements,
-                    Now.AddSeconds(3),
                     TimeSpan.FromHours(1));
                 Assert.NotNull(acquired);
                 Assert.True(run.StartOperation(
@@ -536,14 +535,12 @@ public sealed class ProductionRunRecoveryServiceTests
             ProductionRunId runId,
             string operationRunId,
             IReadOnlyCollection<ResourceRequirement> resources,
-            DateTimeOffset acquiredAtUtc,
             TimeSpan duration,
             CancellationToken cancellationToken = default) =>
             Inner.TryAcquireAsync(
                 runId,
                 operationRunId,
                 resources,
-                acquiredAtUtc,
                 duration,
                 cancellationToken);
 
@@ -551,20 +548,19 @@ public sealed class ProductionRunRecoveryServiceTests
             ProductionRunId runId,
             string operationRunId,
             IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-            DateTimeOffset validatedAtUtc,
             CancellationToken cancellationToken = default) =>
             Inner.ValidateCurrentAsync(
                 runId,
                 operationRunId,
                 evidence,
-                validatedAtUtc,
                 cancellationToken);
 
         public ValueTask ReleaseAsync(
             ProductionRunId runId,
             string operationRunId,
+            IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
             CancellationToken cancellationToken = default) =>
-            Inner.ReleaseAsync(runId, operationRunId, cancellationToken);
+            Inner.ReleaseAsync(runId, operationRunId, claims, cancellationToken);
 
         public virtual ValueTask HoldForRecoveryAsync(
             ProductionRunId runId,
@@ -637,6 +633,23 @@ public sealed class ProductionRunRecoveryServiceTests
                 stationSystemId,
                 slotId,
                 cancellationToken);
+
+        public virtual ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+            ListPendingCreatedOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) =>
+            Inner.ListPendingCreatedOutboxAsync(maximumCount, cancellationToken);
+
+        public virtual ValueTask MarkCreatedOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            Inner.MarkCreatedOutboxProcessedAsync(runId, cancellationToken);
+
+        public virtual ValueTask RecordCreatedOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) =>
+            Inner.RecordCreatedOutboxFailureAsync(runId, failureDescription, cancellationToken);
 
         public virtual ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
             ListPendingTerminalOutboxAsync(

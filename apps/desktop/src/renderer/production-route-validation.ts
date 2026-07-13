@@ -27,6 +27,8 @@ interface ValidationContext {
   stationProfiles: StationProfileResponse[];
 }
 
+const routeJudgements = ['Passed', 'Failed', 'Aborted', 'Unknown', 'NotApplicable'] as const;
+
 export function validateProductionLine(
   line: SaveProductionLineRequest,
   context: ValidationContext
@@ -368,7 +370,13 @@ function validateTransition(
   if (!operationById.has(transition.sourceOperationId)) {
     add('Transition', entityId, `Source Operation '${transition.sourceOperationId}' does not exist.`);
   }
-  if (!operationById.has(transition.targetOperationId)) {
+  const hasOperationTarget = transition.targetOperationId !== null;
+  const hasTerminalTarget = transition.terminalDisposition !== null;
+  if (hasOperationTarget === hasTerminalTarget) {
+    add('Transition', entityId, 'A Route Transition requires exactly one target Operation or terminal disposition.');
+  }
+  if (transition.targetOperationId !== null
+      && !operationById.has(transition.targetOperationId)) {
     add('Transition', entityId, `Target Operation '${transition.targetOperationId}' does not exist.`);
   }
   if (transition.sourceOperationId === transition.targetOperationId) {
@@ -417,6 +425,9 @@ function validateTransition(
   }
 
   const parallel = transition.kind === 'ParallelFork' || transition.kind === 'ParallelJoin';
+  if ((transition.kind === 'Rework' || parallel) && transition.terminalDisposition !== null) {
+    add('Transition', entityId, `${transition.kind} must target an Operation.`);
+  }
   if (parallel) {
     validatePortableId(
       transition.parallelGroupId ?? '',
@@ -435,7 +446,8 @@ function validateDuplicateSemanticTransitions(
 ): void {
   const semanticKeys = new Map<string, string>();
   for (const transition of transitions) {
-    const key = `${transition.sourceOperationId}\u0000${transition.targetOperationId}\u0000${transition.kind}`;
+    const target = transition.targetOperationId ?? `terminal:${transition.terminalDisposition ?? ''}`;
+    const key = `${transition.sourceOperationId}\u0000${target}\u0000${transition.kind}`;
     const existing = semanticKeys.get(key);
     if (existing) {
       add(
@@ -457,14 +469,20 @@ function validateOutgoingShapes(
   for (const operation of operations) {
     const outgoing = outgoingByOperation.get(operation.operationId) ?? [];
     if (outgoing.length === 0) {
+      add('Operation', operation.operationId, 'Operation requires an explicit route to an Operation or terminal disposition.');
       continue;
     }
 
     const singleForward = outgoing.length === 1
       && (outgoing[0].kind === 'Sequence' || outgoing[0].kind === 'ParallelJoin');
-    const conditional = outgoing.every(transition => (
+    const judgementRoutes = outgoing.filter(transition => (
       transition.kind === 'Judgement' || transition.kind === 'Rework'));
-    const outputConditions = outgoing.every(transition => transition.kind === 'Condition');
+    const sequenceFallbacks = outgoing.filter(transition => transition.kind === 'Sequence');
+    const conditional = judgementRoutes.length > 0
+      && judgementRoutes.length + sequenceFallbacks.length === outgoing.length;
+    const conditions = outgoing.filter(transition => transition.kind === 'Condition');
+    const outputConditions = conditions.length > 0
+      && conditions.length + sequenceFallbacks.length === outgoing.length;
     const fork = outgoing.length >= 2
       && outgoing.every(transition => transition.kind === 'ParallelFork')
       && new Set(outgoing.map(transition => transition.parallelGroupId)).size === 1;
@@ -472,25 +490,41 @@ function validateOutgoingShapes(
       add(
         'Operation',
         operation.operationId,
-        'Outgoing routes must be one Sequence/Parallel Join, unique Judgement/Rework branches, one typed Condition branch set, or one Parallel Fork group.');
+        'Outgoing routes must be one Sequence/Parallel Join, deterministic Judgement/Rework routes, typed Conditions with fallback, or one Parallel Fork group.');
       continue;
     }
 
     if (conditional) {
-      const judgements = outgoing.map(transition => transition.requiredJudgement);
-      if (new Set(judgements).size !== judgements.length) {
-        add('Operation', operation.operationId, 'Outgoing Result Judgements must be unique.');
+      const judgements = judgementRoutes.filter(transition => transition.kind === 'Judgement');
+      const reworks = judgementRoutes.filter(transition => transition.kind === 'Rework');
+      const judgementValues = judgements.map(transition => transition.requiredJudgement);
+      const reworkValues = reworks.map(transition => transition.requiredJudgement);
+      if (new Set(judgementValues).size !== judgementValues.length
+          || new Set(reworkValues).size !== reworkValues.length
+          || sequenceFallbacks.length > 1) {
+        add('Operation', operation.operationId, 'Judgement and bounded Rework routes must be deterministic.');
+      }
+      const judgementFallbacks = new Set(judgementValues);
+      if (reworks.some(transition => !judgementFallbacks.has(transition.requiredJudgement))) {
+        add('Operation', operation.operationId, 'Every bounded Rework route requires a same-judgement fallback.');
+      }
+      if (sequenceFallbacks.length === 0
+          && routeJudgements.some(judgement => !judgementFallbacks.has(judgement))) {
+        add('Operation', operation.operationId, 'Judgement routes require a Sequence fallback or one branch for every judgement.');
       }
     }
     if (outputConditions) {
-      const outputKeys = new Set(outgoing.map(transition => transition.outputKey));
-      const typedValues = outgoing.map(transition => (
+      const outputKeys = new Set(conditions.map(transition => transition.outputKey));
+      const typedValues = conditions.map(transition => (
         `${transition.expectedOutputKind ?? ''}\u0000${transition.expectedOutputValue ?? ''}`));
       if (outputKeys.size !== 1) {
         add('Operation', operation.operationId, 'Condition branches from one Operation must use one Output Key.');
       }
       if (new Set(typedValues).size !== typedValues.length) {
         add('Operation', operation.operationId, 'Condition branches must use unique typed expected values.');
+      }
+      if (sequenceFallbacks.length !== 1) {
+        add('Operation', operation.operationId, 'Condition branches require exactly one explicit Sequence fallback.');
       }
     }
   }
@@ -502,7 +536,8 @@ function validateRouteGraph(
   add: AddProblem
 ): void {
   const forward = line.transitions.filter(transition => transition.kind !== 'Rework');
-  if (forward.some(transition => transition.targetOperationId === line.entryOperationId)) {
+  const forwardOperations = forward.filter(transition => transition.targetOperationId !== null);
+  if (forwardOperations.some(transition => transition.targetOperationId === line.entryOperationId)) {
     add('Line', line.lineDefinitionId, 'The Entry Operation cannot have an incoming forward Route Transition.');
   }
 
@@ -519,9 +554,11 @@ function validateRouteGraph(
   }
 
   const indegrees = new Map(line.operations.map(operation => [operation.operationId, 0]));
-  for (const transition of forward) {
-    if (indegrees.has(transition.targetOperationId)) {
-      indegrees.set(transition.targetOperationId, (indegrees.get(transition.targetOperationId) ?? 0) + 1);
+  for (const transition of forwardOperations) {
+    if (indegrees.has(transition.targetOperationId!)) {
+      indegrees.set(
+        transition.targetOperationId!,
+        (indegrees.get(transition.targetOperationId!) ?? 0) + 1);
     }
   }
   const queue = [...indegrees.entries()].filter(([, degree]) => degree === 0).map(([id]) => id);
@@ -532,11 +569,11 @@ function validateRouteGraph(
       continue;
     }
     visited += 1;
-    for (const transition of forward.filter(candidate => candidate.sourceOperationId === operationId)) {
-      const nextDegree = (indegrees.get(transition.targetOperationId) ?? 0) - 1;
-      indegrees.set(transition.targetOperationId, nextDegree);
+    for (const transition of forwardOperations.filter(candidate => candidate.sourceOperationId === operationId)) {
+      const nextDegree = (indegrees.get(transition.targetOperationId!) ?? 0) - 1;
+      indegrees.set(transition.targetOperationId!, nextDegree);
       if (nextDegree === 0) {
-        queue.push(transition.targetOperationId);
+        queue.push(transition.targetOperationId!);
       }
     }
   }
@@ -547,16 +584,15 @@ function validateRouteGraph(
       'The forward route contains a cycle. Every loop must be an explicitly bounded Rework transition.');
   }
 
-  const forwardSources = new Set(forward.map(transition => transition.sourceOperationId));
-  const terminals = line.operations
-    .map(operation => operation.operationId)
-    .filter(operationId => !forwardSources.has(operationId));
+  const terminals = [...new Set(forward
+    .filter(transition => transition.terminalDisposition !== null)
+    .map(transition => transition.sourceOperationId))];
   if (terminals.length === 0) {
-    add('Line', line.lineDefinitionId, 'The route requires at least one terminal Operation.');
+    add('Line', line.lineDefinitionId, 'The route requires at least one explicit terminal disposition.');
   } else {
-    const reverse = forward.map(transition => ({
+    const reverse = forwardOperations.map(transition => ({
       ...transition,
-      sourceOperationId: transition.targetOperationId,
+      sourceOperationId: transition.targetOperationId!,
       targetOperationId: transition.sourceOperationId
     }));
     const completable = new Set<string>();
@@ -573,7 +609,8 @@ function validateRouteGraph(
   }
 
   for (const rework of line.transitions.filter(transition => transition.kind === 'Rework')) {
-    if (!traverse(rework.targetOperationId, forward).has(rework.sourceOperationId)) {
+    if (rework.targetOperationId !== null
+        && !traverse(rework.targetOperationId, forwardOperations).has(rework.sourceOperationId)) {
       add(
         'Transition',
         rework.transitionId,
@@ -586,6 +623,8 @@ function validateParallelGroups(
   transitions: RouteTransitionRequest[],
   add: AddProblem
 ): void {
+  const forwardOperations = transitions.filter(transition => (
+    transition.kind !== 'Rework' && transition.targetOperationId !== null));
   const groups = groupBy(
     transitions.filter(transition => transition.parallelGroupId !== null),
     transition => transition.parallelGroupId ?? '');
@@ -611,6 +650,27 @@ function validateParallelGroups(
         'Transition',
         group[0].transitionId,
         `Parallel Group '${groupId}' must use distinct fork and join Operations.`);
+    }
+    const joinTarget = joins[0].targetOperationId;
+    if (joinTarget !== null) {
+      for (const fork of forks) {
+        if (fork.targetOperationId === null) {
+          continue;
+        }
+        const branch = traverseUntil(
+          fork.targetOperationId,
+          joinTarget,
+          forwardOperations);
+        const terminalSource = [...branch].find(operationId => transitions.some(transition => (
+          transition.sourceOperationId === operationId
+          && transition.terminalDisposition !== null)));
+        if (terminalSource) {
+          add(
+            'Transition',
+            fork.transitionId,
+            `Parallel Group '${groupId}' branch can reach a terminal disposition before its join.`);
+        }
+      }
     }
   }
 }
@@ -724,7 +784,32 @@ function traverse(
     }
     reachable.add(operationId);
     for (const transition of outgoing.get(operationId) ?? []) {
-      pending.push(transition.targetOperationId);
+      if (transition.targetOperationId !== null) {
+        pending.push(transition.targetOperationId);
+      }
+    }
+  }
+  return reachable;
+}
+
+function traverseUntil(
+  start: string,
+  stop: string,
+  transitions: Array<Pick<RouteTransitionRequest, 'sourceOperationId' | 'targetOperationId'>>
+): Set<string> {
+  const outgoing = groupBy(transitions, transition => transition.sourceOperationId);
+  const reachable = new Set<string>();
+  const pending = [start];
+  while (pending.length > 0) {
+    const operationId = pending.pop();
+    if (!operationId || operationId === stop || reachable.has(operationId)) {
+      continue;
+    }
+    reachable.add(operationId);
+    for (const transition of outgoing.get(operationId) ?? []) {
+      if (transition.targetOperationId !== null) {
+        pending.push(transition.targetOperationId);
+      }
     }
   }
   return reachable;

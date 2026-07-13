@@ -100,6 +100,14 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
 
     public ProductionRunControlState ControlState { get; private set; }
 
+    public string? SafeStopRequestedBy { get; private set; }
+
+    public string? SafeStopReason { get; private set; }
+
+    public DateTimeOffset? SafeStopRequestedAtUtc { get; private set; }
+
+    public DateTimeOffset? SafeStopAcknowledgedAtUtc { get; private set; }
+
     public DateTimeOffset CreatedAtUtc { get; }
 
     public DateTimeOffset LastTransitionAtUtc { get; private set; }
@@ -164,7 +172,10 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             operationDefinitions,
             routeTransitions,
             createdAtUtc);
-        run.RaiseDomainEvent(new ProductionRunCreatedDomainEvent(run.Id));
+        run.RaiseDomainEvent(new ProductionRunCreatedDomainEvent(run.Id)
+        {
+            OccurredAtUtc = createdAtUtc
+        });
         return run;
     }
 
@@ -192,6 +203,14 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             Judgement = snapshot.Judgement,
             Disposition = snapshot.Disposition,
             ControlState = snapshot.ControlState,
+            SafeStopRequestedBy = ProductionRunText.Optional(
+                snapshot.SafeStopRequestedBy,
+                nameof(snapshot.SafeStopRequestedBy)),
+            SafeStopReason = ProductionRunText.Optional(
+                snapshot.SafeStopReason,
+                nameof(snapshot.SafeStopReason)),
+            SafeStopRequestedAtUtc = snapshot.SafeStopRequestedAtUtc,
+            SafeStopAcknowledgedAtUtc = snapshot.SafeStopAcknowledgedAtUtc,
             LastTransitionAtUtc = snapshot.LastTransitionAtUtc,
             StartedAtUtc = snapshot.StartedAtUtc,
             CompletedAtUtc = snapshot.CompletedAtUtc,
@@ -391,9 +410,19 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             ? canceledAtUtc
             : LastTransitionAtUtc;
         RaiseOperationStatusChanged(operation, from, reason);
-        FailureCode = "Runtime.ProductionRunCancelRequested";
-        FailureReason = ProductionRunText.Required(reason, nameof(reason));
-        ControlState = ProductionRunControlState.StopRequested;
+        var safeStopIsInFlight = ControlState == ProductionRunControlState.StopRequested
+            && SafeStopRequestedAtUtc is not null
+            && string.Equals(
+                FailureCode,
+                "Runtime.ProductionRunSafeStopRequested",
+                StringComparison.Ordinal);
+        if (!safeStopIsInFlight)
+        {
+            FailureCode = "Runtime.ProductionRunCancelRequested";
+            FailureReason = ProductionRunText.Required(reason, nameof(reason));
+            ControlState = ProductionRunControlState.StopRequested;
+        }
+
         Disposition = ProductDisposition.Held;
         foreach (var pending in _operations.Where(candidate =>
                      candidate.ExecutionStatus == ExecutionStatus.Pending))
@@ -730,6 +759,68 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         return RuntimeOperationResult.Accepted();
     }
 
+    public RuntimeOperationResult RequestSafeStop(
+        string actorId,
+        string reason,
+        DateTimeOffset requestedAtUtc)
+    {
+        if (IsTerminal)
+        {
+            return Reject("Runtime.ProductionRunSafeStopRejected", "request safe-stop");
+        }
+
+        if (ControlState == ProductionRunControlState.RecoveryRequired)
+        {
+            return Reject(
+                "Runtime.ProductionRunSafeStopRejected",
+                "request safe-stop during recovery");
+        }
+
+        actorId = ProductionRunText.Required(actorId, nameof(actorId));
+        _ = ProductionRunText.Required(reason, nameof(reason));
+        RequireUtc(requestedAtUtc, nameof(requestedAtUtc));
+        if (SafeStopRequestedAtUtc is not null)
+        {
+            return ControlState == ProductionRunControlState.StopRequested
+                && string.Equals(
+                    FailureCode,
+                    "Runtime.ProductionRunSafeStopRequested",
+                    StringComparison.Ordinal)
+                && string.Equals(SafeStopRequestedBy, actorId, StringComparison.Ordinal)
+                && string.Equals(SafeStopReason, reason, StringComparison.Ordinal)
+                    ? RuntimeOperationResult.Accepted()
+                    : RuntimeOperationResult.Rejected(
+                        "Runtime.ProductionRunSafeStopEvidenceMismatch",
+                        $"Production Run {Id} already has different Safe Stop evidence.");
+        }
+
+        FailureCode = "Runtime.ProductionRunSafeStopRequested";
+        FailureReason = reason;
+        ControlState = ProductionRunControlState.StopRequested;
+        Disposition = ProductDisposition.Held;
+        SafeStopRequestedBy = actorId;
+        SafeStopReason = reason;
+        SafeStopRequestedAtUtc = requestedAtUtc;
+        LastTransitionAtUtc = requestedAtUtc;
+        foreach (var operation in _operations.Where(operation =>
+                     operation.ExecutionStatus == ExecutionStatus.Pending))
+        {
+            var from = operation.ExecutionStatus;
+            operation.Cancel(reason, requestedAtUtc);
+            RaiseOperationStatusChanged(operation, from, reason);
+        }
+
+        if (_operations.All(operation => operation.StartedAtUtc is null))
+        {
+            // No hardware command has crossed the dispatch boundary. The durable barrier is
+            // itself a complete no-op Safe Stop and must not invoke a physical actuator.
+            SafeStopAcknowledgedAtUtc = requestedAtUtc;
+        }
+
+        TryFinishRequestedStop(requestedAtUtc);
+        return RuntimeOperationResult.Accepted();
+    }
+
     public RuntimeOperationResult Cancel(string reason, DateTimeOffset canceledAtUtc)
     {
         if (IsTerminal)
@@ -748,23 +839,41 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         return RuntimeOperationResult.Accepted();
     }
 
-    public RuntimeOperationResult SafeStop(string reason, DateTimeOffset stoppedAtUtc)
+    public RuntimeOperationResult AcknowledgeSafeStop(DateTimeOffset acknowledgedAtUtc)
     {
-        if (IsTerminal)
+        if (IsTerminal
+            || ControlState != ProductionRunControlState.StopRequested
+            || SafeStopRequestedAtUtc is null
+            || !string.Equals(
+                FailureCode,
+                "Runtime.ProductionRunSafeStopRequested",
+                StringComparison.Ordinal))
         {
-            return Reject("Runtime.ProductionRunSafeStopRejected", "safe-stop");
+            return Reject("Runtime.ProductionRunSafeStopAcknowledgementRejected", "acknowledge safe-stop");
         }
 
-        CancelOpenOperations(reason, stoppedAtUtc);
-        ControlState = ProductionRunControlState.SafeStopped;
-        TransitionToTerminal(
-            ExecutionStatus.Canceled,
-            ResultJudgement.Aborted,
-            ProductDisposition.Held,
-            stoppedAtUtc,
-            "Runtime.ProductionRunSafeStopped",
-            reason,
-            preserveControlState: true);
+        RequireUtc(acknowledgedAtUtc, nameof(acknowledgedAtUtc));
+        if (acknowledgedAtUtc < SafeStopRequestedAtUtc)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.ProductionRunSafeStopAcknowledgementPredatesRequest",
+                $"Production Run {Id} cannot acknowledge Safe Stop before it was requested.");
+        }
+
+        if (SafeStopAcknowledgedAtUtc is not null)
+        {
+            return SafeStopAcknowledgedAtUtc == acknowledgedAtUtc
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.ProductionRunSafeStopAcknowledgementMismatch",
+                    $"Production Run {Id} already has different Safe Stop acknowledgement evidence.");
+        }
+
+        SafeStopAcknowledgedAtUtc = acknowledgedAtUtc;
+        LastTransitionAtUtc = acknowledgedAtUtc > LastTransitionAtUtc
+            ? acknowledgedAtUtc
+            : LastTransitionAtUtc;
+        TryFinishRequestedStop(LastTransitionAtUtc);
         return RuntimeOperationResult.Accepted();
     }
 
@@ -802,6 +911,10 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         Judgement,
         Disposition,
         ControlState,
+        SafeStopRequestedBy,
+        SafeStopReason,
+        SafeStopRequestedAtUtc,
+        SafeStopAcknowledgedAtUtc,
         CreatedAtUtc,
         LastTransitionAtUtc,
         StartedAtUtc,
@@ -826,6 +939,10 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             .ToArray();
         if (outgoing.Length == 0)
         {
+            FailClosedRoute(
+                source,
+                decidedAtUtc,
+                $"Operation {source.OperationId} has no explicit outgoing route.");
             return;
         }
 
@@ -856,14 +973,22 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             return;
         }
 
-        var conditional = outgoing
-            .Where(transition => transition.Kind is RuntimeRouteTransitionKind.Judgement
-                or RuntimeRouteTransitionKind.Rework)
-            .FirstOrDefault(transition => transition.RequiredJudgement == source.Judgement
-                && CanTraverse(transition));
-        if (conditional is not null)
+        var rework = outgoing.SingleOrDefault(transition =>
+            transition.Kind == RuntimeRouteTransitionKind.Rework
+            && transition.RequiredJudgement == source.Judgement
+            && CanTraverse(transition));
+        if (rework is not null)
         {
-            TakeTransition(source, conditional, decidedAtUtc, activateTarget: true);
+            TakeTransition(source, rework, decidedAtUtc, activateTarget: true);
+            return;
+        }
+
+        var judgement = outgoing.SingleOrDefault(transition =>
+            transition.Kind == RuntimeRouteTransitionKind.Judgement
+            && transition.RequiredJudgement == source.Judgement);
+        if (judgement is not null)
+        {
+            TakeTransition(source, judgement, decidedAtUtc, activateTarget: true);
             return;
         }
 
@@ -888,7 +1013,13 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         if (sequence is not null)
         {
             TakeTransition(source, sequence, decidedAtUtc, activateTarget: true);
+            return;
         }
+
+        FailClosedRoute(
+            source,
+            decidedAtUtc,
+            $"Operation {source.OperationId} has no route matching judgement {source.Judgement} and its typed outputs.");
     }
 
     private void ProcessParallelJoin(
@@ -911,7 +1042,7 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
                 string.Equals(operation.OperationId, join.SourceOperationId, StringComparison.Ordinal)
                 && operation.ExecutionStatus == ExecutionStatus.Completed))
             .Min();
-        var targetOperationId = sourceJoin.TargetOperationId;
+        var targetOperationId = sourceJoin.TargetOperationId!;
         var targetActivationCount = _operations.Count(operation => string.Equals(
             operation.OperationId,
             targetOperationId,
@@ -941,10 +1072,11 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             source.OperationRunId,
             transition.TransitionId,
             transition.TargetOperationId,
+            transition.TerminalDisposition,
             source.Judgement,
             traversal,
             decidedAtUtc));
-        if (activateTarget)
+        if (activateTarget && transition.TargetOperationId is not null)
         {
             ActivateOperation(transition.TargetOperationId);
         }
@@ -977,21 +1109,50 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             return;
         }
 
-        var judgement = AggregateJudgement();
-        var disposition = judgement switch
+        var terminals = _routeDecisions
+            .Where(decision => decision.TerminalDisposition is not null)
+            .ToArray();
+        if (terminals.Length != 1)
         {
-            ResultJudgement.Passed or ResultJudgement.NotApplicable => ProductDisposition.Completed,
-            ResultJudgement.Failed => ProductDisposition.Nonconforming,
-            ResultJudgement.Aborted or ResultJudgement.Unknown => ProductDisposition.Held,
-            _ => throw new InvalidOperationException($"Unsupported result judgement {judgement}.")
-        };
+            FailClosedRoute(
+                null,
+                completedAtUtc,
+                terminals.Length == 0
+                    ? "Production Run completed its Operations without selecting an explicit terminal disposition."
+                    : "Production Run selected more than one terminal disposition.");
+            return;
+        }
+
+        var judgement = AggregateJudgement();
         TransitionToTerminal(
             ExecutionStatus.Completed,
             judgement,
-            disposition,
+            terminals[0].TerminalDisposition!.Value,
             completedAtUtc,
             null,
             null);
+    }
+
+    private void FailClosedRoute(
+        OperationRun? source,
+        DateTimeOffset failedAtUtc,
+        string reason)
+    {
+        if (IsTerminal)
+        {
+            return;
+        }
+
+        CancelOpenOperations(reason, failedAtUtc);
+        TransitionToTerminal(
+            ExecutionStatus.Failed,
+            ResultJudgement.Unknown,
+            ProductDisposition.Held,
+            failedAtUtc,
+            "Runtime.RouteResolutionFailed",
+            source is null
+                ? reason
+                : $"Route resolution failed after Operation Run {source.OperationRunId}: {reason}");
     }
 
     private void TryFinishRequestedStop(DateTimeOffset stoppedAtUtc)
@@ -1002,18 +1163,35 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             return;
         }
 
+        var isSafeStop = string.Equals(
+            FailureCode,
+            "Runtime.ProductionRunSafeStopRequested",
+            StringComparison.Ordinal);
+        if (isSafeStop && SafeStopAcknowledgedAtUtc is null)
+        {
+            return;
+        }
+
+        if (isSafeStop)
+        {
+            ControlState = ProductionRunControlState.SafeStopped;
+        }
+
         TransitionToTerminal(
             ExecutionStatus.Canceled,
             ResultJudgement.Aborted,
             ProductDisposition.Held,
             stoppedAtUtc,
-            string.Equals(
-                FailureCode,
-                "Runtime.ProductionRunCancelRequested",
-                StringComparison.Ordinal)
-                ? "Runtime.ProductionRunCanceled"
-                : "Runtime.ProductionRunStopped",
-            FailureReason ?? "Production Run stopped at an operation boundary.");
+            isSafeStop
+                ? "Runtime.ProductionRunSafeStopped"
+                : string.Equals(
+                    FailureCode,
+                    "Runtime.ProductionRunCancelRequested",
+                    StringComparison.Ordinal)
+                    ? "Runtime.ProductionRunCanceled"
+                    : "Runtime.ProductionRunStopped",
+            FailureReason ?? "Production Run stopped at an operation boundary.",
+            preserveControlState: isSafeStop);
     }
 
     private ResultJudgement AggregateJudgement()
@@ -1098,7 +1276,8 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         foreach (var transition in _routeTransitions)
         {
             if (!operationIds.Contains(transition.SourceOperationId)
-                || !operationIds.Contains(transition.TargetOperationId))
+                || transition.TargetOperationId is not null
+                    && !operationIds.Contains(transition.TargetOperationId))
             {
                 throw new ArgumentException(
                     $"Route transition {transition.TransitionId} references an unknown operation.");
@@ -1112,10 +1291,26 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
             var conditional = source.Where(transition =>
                 transition.Kind is RuntimeRouteTransitionKind.Judgement
                     or RuntimeRouteTransitionKind.Rework).ToArray();
-            if (conditional.GroupBy(static transition => transition.RequiredJudgement).Any(group => group.Count() > 1))
+            if (conditional.Where(transition => transition.Kind == RuntimeRouteTransitionKind.Judgement)
+                    .GroupBy(static transition => transition.RequiredJudgement)
+                    .Any(group => group.Count() > 1)
+                || conditional.Where(transition => transition.Kind == RuntimeRouteTransitionKind.Rework)
+                    .GroupBy(static transition => transition.RequiredJudgement)
+                    .Any(group => group.Count() > 1))
             {
                 throw new ArgumentException(
                     $"Operation {source.Key} has ambiguous transitions for one result judgement.");
+            }
+
+            var judgementFallbacks = conditional
+                .Where(transition => transition.Kind == RuntimeRouteTransitionKind.Judgement)
+                .Select(transition => transition.RequiredJudgement!.Value)
+                .ToHashSet();
+            if (conditional.Any(transition => transition.Kind == RuntimeRouteTransitionKind.Rework
+                && !judgementFallbacks.Contains(transition.RequiredJudgement!.Value)))
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} bounded rework requires an explicit judgement fallback.");
             }
 
             var outputConditions = source
@@ -1148,6 +1343,21 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
                     $"Operation {source.Key} has multiple sequence transitions; use an explicit parallel fork.");
             }
 
+            if (outputConditions.Length > 0 && sequences != 1)
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} typed output routes require exactly one sequence fallback.");
+            }
+
+            if (conditional.Length > 0
+                && sequences == 0
+                && Enum.GetValues<ResultJudgement>().Any(candidate =>
+                    !judgementFallbacks.Contains(candidate)))
+            {
+                throw new ArgumentException(
+                    $"Operation {source.Key} judgement routes require a sequence fallback or one branch for every judgement.");
+            }
+
             if (source.Any(transition => transition.Kind == RuntimeRouteTransitionKind.ParallelFork)
                 && source.Any(transition => transition.Kind is not RuntimeRouteTransitionKind.ParallelFork))
             {
@@ -1166,7 +1376,8 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
                              transition.SourceOperationId,
                              operationId,
                              StringComparison.Ordinal))
-                         .Select(static transition => transition.TargetOperationId))
+                         .Where(transition => transition.TargetOperationId is not null)
+                         .Select(static transition => transition.TargetOperationId!))
             {
                 if (reachable.Add(target))
                 {
@@ -1227,12 +1438,34 @@ public sealed class ProductionRun : AggregateRoot<ProductionRunId>
         {
             Require(ExecutionStatus == ExecutionStatus.Running
                 && Disposition == ProductDisposition.Held
-                && string.Equals(
-                    FailureCode,
-                    "Runtime.ProductionRunStopRequested",
-                    StringComparison.Ordinal)
+                && FailureCode is "Runtime.ProductionRunStopRequested"
+                    or "Runtime.ProductionRunSafeStopRequested"
                 && FailureReason is not null,
                 "Stop-requested Production Run must be running, held, and explain the request.");
+        }
+
+
+        if (SafeStopRequestedAtUtc is not null)
+        {
+            Require(SafeStopRequestedAtUtc >= CreatedAtUtc
+                && SafeStopRequestedAtUtc <= LastTransitionAtUtc
+                && SafeStopRequestedBy is not null
+                && SafeStopReason is not null,
+                "Safe Stop evidence must be within the Production Run timeline.");
+        }
+        else
+        {
+            Require(SafeStopRequestedBy is null && SafeStopReason is null,
+                "Safe Stop actor and reason cannot exist without a request timestamp.");
+        }
+
+
+        if (SafeStopAcknowledgedAtUtc is not null)
+        {
+            Require(SafeStopRequestedAtUtc is not null
+                && SafeStopAcknowledgedAtUtc >= SafeStopRequestedAtUtc
+                && SafeStopAcknowledgedAtUtc <= LastTransitionAtUtc,
+                "Safe Stop acknowledgement must follow its request within the Production Run timeline.");
         }
 
         foreach (var traversal in _transitionTraversals)

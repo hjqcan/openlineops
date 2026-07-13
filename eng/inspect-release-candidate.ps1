@@ -479,6 +479,56 @@ function Test-WindowsBundle {
                     if ($configuration.OpenLineOps.Agent.RuntimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
                         Add-Failure "$ArchiveName RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe'."
                     }
+                    if ($configuration.OpenLineOps.Agent.PluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe") {
+                        Add-Failure "$ArchiveName PluginHostExecutablePath must be exactly 'OpenLineOps.PluginHost.exe'."
+                    }
+                    $agentConfigurationProperties = @(
+                        $configuration.OpenLineOps.Agent.PSObject.Properties.Name)
+                    if (-not ($agentConfigurationProperties -ccontains "SafetyExecutablePath")) {
+                        Add-Failure "$ArchiveName must declare SafetyExecutablePath."
+                    }
+                    elseif ($configuration.OpenLineOps.Agent.SafetyExecutablePath -isnot [string] `
+                        -or $configuration.OpenLineOps.Agent.SafetyExecutablePath -cne "") {
+                        Add-Failure "$ArchiveName SafetyExecutablePath release template must be empty."
+                    }
+                    $pythonScript = $configuration.OpenLineOps.Agent.PythonScript
+                    if ($null -eq $pythonScript) {
+                        Add-Failure "$ArchiveName must declare the typed Station Agent PythonScript configuration."
+                    }
+                    else {
+                        if ($pythonScript.WorkerExecutablePath -cne "OpenLineOps.ScriptWorker.exe") {
+                            Add-Failure "$ArchiveName PythonScript WorkerExecutablePath must be exactly 'OpenLineOps.ScriptWorker.exe'."
+                        }
+
+                        $pythonScriptProperties = @($pythonScript.PSObject.Properties.Name)
+                        if (-not ($pythonScriptProperties -ccontains "HostPythonRuntimeDllPath") `
+                            -or $pythonScriptProperties -ccontains "PythonRuntimeDllPath") {
+                            Add-Failure "$ArchiveName must declare HostPythonRuntimeDllPath and must not contain the removed PythonRuntimeDllPath setting."
+                        }
+
+                        $pythonSandbox = $pythonScript.Sandbox
+                        if ($null -eq $pythonSandbox) {
+                            Add-Failure "$ArchiveName must declare the typed Station Agent Python sandbox configuration."
+                        }
+                        else {
+                            if ($pythonSandbox.RequireLeastPrivilegeExecution -ne $true `
+                                -or $pythonSandbox.IsolationMode -cne "LeastPrivilegeIdentity") {
+                                Add-Failure "$ArchiveName must default Python execution to required LeastPrivilegeIdentity isolation."
+                            }
+                            if ($pythonSandbox.LeastPrivilegeIdentity -cne "RestrictedCurrentLowIntegrity" `
+                                -or $pythonSandbox.LeastPrivilegeLauncherExecutable -cne "OpenLineOps.LeastPrivilegeLauncher.exe" `
+                                -or -not [string]::IsNullOrWhiteSpace($pythonSandbox.LeastPrivilegeArgumentsTemplate)) {
+                                Add-Failure "$ArchiveName must use the fixed bundled RestrictedCurrentLowIntegrity launcher policy."
+                            }
+
+                            $removedContainerProperties = @($pythonSandbox.PSObject.Properties.Name | Where-Object {
+                                $_ -clike "Container*" -or $_ -ceq "AdditionalContainerRunArguments"
+                            })
+                            if ($removedContainerProperties.Count -ne 0) {
+                                Add-Failure "$ArchiveName must not expose removed Station Agent Python Container settings."
+                            }
+                        }
+                    }
                 }
                 catch {
                     Add-Failure "$ArchiveName appsettings.json is not valid JSON: $($_.Exception.Message)"
@@ -1116,8 +1166,9 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "OpenLineOps.Agent.deps.json",
             "OpenLineOps.Agent.runtimeconfig.json",
             "OpenLineOps.StationRuntime.exe",
-            "OpenLineOps.StationRuntime.deps.json",
-            "OpenLineOps.StationRuntime.runtimeconfig.json",
+            "OpenLineOps.PluginHost.exe",
+            "OpenLineOps.ScriptWorker.exe",
+            "OpenLineOps.LeastPrivilegeLauncher.exe",
             "appsettings.json",
             "coreclr.dll",
             "hostfxr.dll",
@@ -1160,6 +1211,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
+            "eng/verify-staged-agent-bundle-e2e.ps1",
             "eng/verify-solution-project-coverage.ps1",
             "eng/inspect-ci-release-artifact.ps1",
             "eng/inspect-release-candidate.ps1",
@@ -1219,7 +1271,9 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -ArtifactKind "agent" `
                     -ExpectedEntryPoints @(
                         [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-                        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+                        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+                        [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+                        [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }
                     )
             }
 
@@ -1236,7 +1290,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             if ($RequireSignedWindowsArtifacts) {
                 $signedEntries = switch ($kind) {
                     "desktop" { @("package/win-unpacked/OpenLineOps.exe") }
-                    "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe") }
+                    "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe", "OpenLineOps.PluginHost.exe", "OpenLineOps.ScriptWorker.exe", "OpenLineOps.LeastPrivilegeLauncher.exe") }
                     "runner" { @("OpenLineOps.Runner.exe") }
                     default { @() }
                 }

@@ -5,7 +5,7 @@ using OpenLineOps.Projects.Application.Projects;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Runner;
 using OpenLineOps.Runtime.Application.Events;
-using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -20,6 +20,149 @@ public sealed class RunnerCommandTests
         Guid.Parse("00000000-0000-0000-0000-000000000042");
 
     [Fact]
+    public async Task CompletionWaiterReadsTheCoordinatorOwnedTerminalRun()
+    {
+        var completed = CreateProductionRun(ExecutionStatus.Completed, ResultJudgement.Passed);
+        var waiter = new ProductionRunCompletionWaiter(
+            new StubProductionRunRepository(completed));
+
+        var result = await waiter.WaitForTerminalAsync(new ProductionRunId(RunId));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(ExecutionStatus.Completed, result.Value.ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task CompletionWaiterFailsClosedWhenAcceptedRunDisappears()
+    {
+        var waiter = new ProductionRunCompletionWaiter(
+            new StubProductionRunRepository(snapshot: null));
+
+        var result = await waiter.WaitForTerminalAsync(new ProductionRunId(RunId));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("NotFound.Runner.ProductionRunNotFound", result.Error.Code);
+    }
+
+    [Fact]
+    public async Task CompletionWaiterReturnsDurableRecoveryRequiredOutcome()
+    {
+        var recoveryRequired = CreateRecoveryRequiredProductionRun();
+        var waiter = new ProductionRunCompletionWaiter(
+            new StubProductionRunRepository(recoveryRequired));
+
+        var result = await waiter.WaitForTerminalAsync(new ProductionRunId(RunId));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(ExecutionStatus.Running, result.Value.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.RecoveryRequired, result.Value.ControlState);
+        Assert.Equal("Runtime.RecoveryRequired", result.Value.FailureCode);
+    }
+
+    [Fact]
+    public async Task CancellationRequestsSafeStopAndReturnsAfterDurableCanceledState()
+    {
+        var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
+        var workspace = CreateWorkspace(
+            RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
+            snapshot);
+        var submitted = CreateProductionRun(ExecutionStatus.Pending, ResultJudgement.Unknown);
+        var canceled = CreateProductionRun(ExecutionStatus.Canceled, ResultJudgement.Aborted);
+        using var cancellation = new CancellationTokenSource();
+        var coordinator = new CapturingProductionRunCoordinator(Result.Success(canceled));
+        var command = CreateCommand(
+            workspace,
+            new CapturingProductionRunLauncher(Result.Success(submitted)),
+            new CancelingProductionRunCompletionWaiter(cancellation),
+            coordinator);
+        var writer = new StringWriter();
+
+        var exitCode = await command.RunAsync(
+            Options(),
+            "C:/automation",
+            writer,
+            cancellation.Token);
+
+        Assert.Equal(RunnerExitCodes.Canceled, exitCode);
+        Assert.Equal(new ProductionRunId(RunId), coordinator.RunId);
+        Assert.Equal(ProductionRunCommand.SafeStop, coordinator.Command?.Command);
+        Assert.Equal("actor-a", coordinator.Command?.ActorId);
+        using var document = JsonDocument.Parse(writer.ToString());
+        Assert.Equal(
+            "Canceled",
+            document.RootElement.GetProperty("productionRun").GetProperty("executionStatus").GetString());
+    }
+
+    [Fact]
+    public async Task ControlledStopRaceReportsDurableNaturalCompletion()
+    {
+        var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
+        var workspace = CreateWorkspace(
+            RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
+            snapshot);
+        var submitted = CreateProductionRun(ExecutionStatus.Pending, ResultJudgement.Unknown);
+        var completed = CreateProductionRun(ExecutionStatus.Completed, ResultJudgement.Passed);
+        using var cancellation = new CancellationTokenSource();
+        var command = CreateCommand(
+            workspace,
+            new CapturingProductionRunLauncher(Result.Success(submitted)),
+            new CancelingProductionRunCompletionWaiter(cancellation),
+            new CapturingProductionRunCoordinator(
+                Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunSafeStopRejected",
+                    "The run completed while Safe Stop was being acknowledged."))),
+            new StubProductionRunRepository(completed));
+        var writer = new StringWriter();
+
+        var exitCode = await command.RunAsync(
+            Options(),
+            "C:/automation",
+            writer,
+            cancellation.Token);
+
+        Assert.Equal(RunnerExitCodes.Success, exitCode);
+        using var document = JsonDocument.Parse(writer.ToString());
+        Assert.True(document.RootElement.GetProperty("success").GetBoolean());
+        Assert.Equal(
+            "Completed",
+            document.RootElement.GetProperty("productionRun").GetProperty("executionStatus").GetString());
+    }
+
+    [Fact]
+    public async Task ControlledStopFailsClosedWhenAcceptedRunDisappears()
+    {
+        var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
+        var workspace = CreateWorkspace(
+            RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
+            snapshot);
+        var submitted = CreateProductionRun(ExecutionStatus.Pending, ResultJudgement.Unknown);
+        using var cancellation = new CancellationTokenSource();
+        var command = CreateCommand(
+            workspace,
+            new CapturingProductionRunLauncher(Result.Success(submitted)),
+            new CancelingProductionRunCompletionWaiter(cancellation),
+            new CapturingProductionRunCoordinator(
+                Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunSafeStopRejected",
+                    "The accepted run could no longer be loaded."))),
+            new StubProductionRunRepository(snapshot: null));
+        var writer = new StringWriter();
+
+        var exitCode = await command.RunAsync(
+            Options(),
+            "C:/automation",
+            writer,
+            cancellation.Token);
+
+        Assert.Equal(RunnerExitCodes.ProductionRunExecutionFailed, exitCode);
+        using var document = JsonDocument.Parse(writer.ToString());
+        Assert.Equal(
+            "NotFound.Runner.ProductionRunNotFound",
+            document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(document.RootElement.TryGetProperty("productionRun", out _));
+    }
+
+    [Fact]
     public async Task RunSubmitsActiveImmutableGraphAndReportsDoubleAxisResult()
     {
         var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
@@ -29,8 +172,8 @@ public sealed class RunnerCommandTests
         var submitted = CreateProductionRun(ExecutionStatus.Pending, ResultJudgement.Unknown);
         var completed = CreateProductionRun(ExecutionStatus.Completed, ResultJudgement.Passed);
         var launcher = new CapturingProductionRunLauncher(Result.Success(submitted));
-        var runner = new StubProductionRunRunner(Result.Success(new ProductionRunRunResult(completed)));
-        var command = CreateCommand(workspace, launcher, runner);
+        var waiter = new StubProductionRunCompletionWaiter(Result.Success(completed));
+        var command = CreateCommand(workspace, launcher, waiter);
         var writer = new StringWriter();
 
         var exitCode = await command.RunAsync(
@@ -44,7 +187,7 @@ public sealed class RunnerCommandTests
         Assert.Equal(RunId, launcher.Request.ProductionRunId);
         Assert.Equal(Guid.Parse("00000000-0000-0000-0000-000000000043"), launcher.Request.ProductionUnitId);
         Assert.Equal("actor-a", launcher.Request.ActorId);
-        Assert.Equal(new ProductionRunId(RunId), runner.RunId);
+        Assert.Equal(new ProductionRunId(RunId), waiter.RunId);
 
         using var document = JsonDocument.Parse(writer.ToString());
         var root = document.RootElement;
@@ -75,8 +218,7 @@ public sealed class RunnerCommandTests
         var command = CreateCommand(
             workspace,
             new CapturingProductionRunLauncher(Result.Success(completedNonconforming)),
-            new StubProductionRunRunner(Result.Success(
-                new ProductionRunRunResult(completedNonconforming))));
+            new StubProductionRunCompletionWaiter(Result.Success(completedNonconforming)));
         var writer = new StringWriter();
 
         var exitCode = await command.RunAsync(Options(), "C:/automation", writer);
@@ -102,7 +244,7 @@ public sealed class RunnerCommandTests
         var command = CreateCommand(
             workspace,
             new CapturingProductionRunLauncher(Result.Success(failed)),
-            new StubProductionRunRunner(Result.Success(new ProductionRunRunResult(failed))));
+            new StubProductionRunCompletionWaiter(Result.Success(failed)));
         var writer = new StringWriter();
 
         var exitCode = await command.RunAsync(Options(), "C:/automation", writer);
@@ -116,6 +258,33 @@ public sealed class RunnerCommandTests
         Assert.Equal(
             "Runtime.OperationFailed",
             document.RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task RecoveryRequiredReturnsProductionRunFailureWithoutWaitingForTerminalStatus()
+    {
+        var snapshot = RunnerSnapshotSelectorTests.CreateSnapshot("snapshot.active");
+        var workspace = CreateWorkspace(
+            RunnerSnapshotSelectorTests.CreateProject("snapshot.active", [snapshot]),
+            snapshot);
+        var recoveryRequired = CreateRecoveryRequiredProductionRun();
+        var command = CreateCommand(
+            workspace,
+            new CapturingProductionRunLauncher(Result.Success(recoveryRequired)),
+            new ProductionRunCompletionWaiter(
+                new StubProductionRunRepository(recoveryRequired)));
+        var writer = new StringWriter();
+
+        var exitCode = await command.RunAsync(Options(), "C:/automation", writer);
+
+        Assert.Equal(RunnerExitCodes.ProductionRunExecutionFailed, exitCode);
+        using var document = JsonDocument.Parse(writer.ToString());
+        Assert.Equal(
+            "Runtime.RecoveryRequired",
+            document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        var productionRun = document.RootElement.GetProperty("productionRun");
+        Assert.Equal("Running", productionRun.GetProperty("executionStatus").GetString());
+        Assert.Equal("RecoveryRequired", productionRun.GetProperty("controlState").GetString());
     }
 
     private static RunnerRunOptions Options() => new(
@@ -165,15 +334,21 @@ public sealed class RunnerCommandTests
             terminal ? createdAt.AddSeconds(2) : null,
             failureCode,
             failureReason,
-            CompletedStepCount: executionStatus == ExecutionStatus.Completed ? 3 : 1,
-            CommandCount: executionStatus == ExecutionStatus.Completed ? 3 : 2,
-            IncidentCount: executionStatus == ExecutionStatus.Failed ? 1 : 0,
+            CompletedStepCount: terminal
+                ? executionStatus == ExecutionStatus.Completed ? 3 : 1
+                : 0,
+            CommandCount: terminal
+                ? executionStatus == ExecutionStatus.Completed ? 3 : 2
+                : 0,
+            IncidentCount: terminal && executionStatus == ExecutionStatus.Failed ? 1 : 0,
             Outputs: new Dictionary<string, ProductionContextValue>(StringComparer.Ordinal),
-            FencingTokens: new Dictionary<ResourceRequirement, long>
-            {
-                [definition.ResourceRequirements[0]] = 10,
-                [definition.ResourceRequirements[1]] = 11
-            });
+            FencingTokens: executionStatus == ExecutionStatus.Pending
+                ? new Dictionary<ResourceRequirement, long>()
+                : new Dictionary<ResourceRequirement, long>
+                {
+                    [definition.ResourceRequirements[0]] = 10,
+                    [definition.ResourceRequirements[1]] = 11
+                });
 
         return new ProductionRunSnapshot(
             new ProductionRunId(RunId),
@@ -195,6 +370,10 @@ public sealed class RunnerCommandTests
                     ? ProductDisposition.Completed
                     : ProductDisposition.Held,
             ProductionRunControlState.Active,
+            SafeStopRequestedBy: null,
+            SafeStopReason: null,
+            SafeStopRequestedAtUtc: null,
+            SafeStopAcknowledgedAtUtc: null,
             createdAt,
             terminal ? createdAt.AddSeconds(2) : createdAt,
             terminal ? createdAt.AddSeconds(1) : null,
@@ -210,17 +389,68 @@ public sealed class RunnerCommandTests
             []);
     }
 
+    private static ProductionRunSnapshot CreateRecoveryRequiredProductionRun()
+    {
+        var template = CreateProductionRun(ExecutionStatus.Pending, ResultJudgement.Unknown);
+        var definition = Assert.Single(template.OperationDefinitions);
+        var run = ProductionRun.Create(
+            template.RunId,
+            template.ProjectId,
+            template.ApplicationId,
+            template.ProjectSnapshotId,
+            template.TopologyId,
+            template.ProductionLineDefinitionId,
+            template.ProductionUnitId,
+            template.ProductionUnitIdentity,
+            template.LotId,
+            template.CarrierId,
+            template.ActorId,
+            template.EntryOperationId,
+            template.CreatedAtUtc,
+            [definition],
+            [new RouteTransitionDefinition(
+                "route.main.terminal",
+                definition.OperationId,
+                targetOperationId: null,
+                RuntimeRouteTransitionKind.Sequence,
+                terminalDisposition: ProductDisposition.Completed)]);
+        var startedAtUtc = run.CreatedAtUtc.AddSeconds(1);
+        Assert.True(run.Start(startedAtUtc).Succeeded);
+        var operation = Assert.Single(run.Operations);
+        var leases = operation.ResourceRequirements
+            .Select((resource, index) => new ResourceLease(
+                resource,
+                run.Id,
+                operation.OperationRunId,
+                index + 1,
+                startedAtUtc,
+                startedAtUtc.AddMinutes(10)))
+            .ToArray();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000099")),
+            leases,
+            startedAtUtc.AddSeconds(1)).Succeeded);
+        Assert.True(run.MarkRecoveryRequired(
+            "The hardware command outcome is uncertain.",
+            startedAtUtc.AddSeconds(2)).Succeeded);
+        return run.ToSnapshot();
+    }
+
     private static RunnerCommand CreateCommand(
         AutomationProjectWorkspaceDetails workspace,
         IProjectReleaseProductionRunLauncher launcher,
-        IProductionRunRunner runner)
+        IProductionRunCompletionWaiter completionWaiter,
+        IProductionRunCoordinator? coordinator = null,
+        IProductionRunRepository? repository = null)
     {
         return new RunnerCommand(
             new StubWorkspaceService(workspace),
             new StubProductionUnitPreparer(),
             launcher,
-            runner,
-            new StubProductionRunRecoveryService(),
+            completionWaiter,
+            coordinator ?? new StubProductionRunCoordinator(),
+            repository ?? new StubProductionRunRepository(snapshot: null),
             new StubTerminalOutboxDispatcher());
     }
 
@@ -333,12 +563,12 @@ public sealed class RunnerCommandTests
         }
     }
 
-    private sealed class StubProductionRunRunner(Result<ProductionRunRunResult> result)
-        : IProductionRunRunner
+    private sealed class StubProductionRunCompletionWaiter(Result<ProductionRunSnapshot> result)
+        : IProductionRunCompletionWaiter
     {
         public ProductionRunId? RunId { get; private set; }
 
-        public ValueTask<Result<ProductionRunRunResult>> ExecuteAsync(
+        public ValueTask<Result<ProductionRunSnapshot>> WaitForTerminalAsync(
             ProductionRunId runId,
             CancellationToken cancellationToken = default)
         {
@@ -348,13 +578,15 @@ public sealed class RunnerCommandTests
         }
     }
 
-    private sealed class StubProductionRunRecoveryService : IProductionRunRecoveryService
+    private sealed class CancelingProductionRunCompletionWaiter(
+        CancellationTokenSource cancellation) : IProductionRunCompletionWaiter
     {
-        public ValueTask<ProductionRunRecoveryResult> RecoverAsync(
+        public ValueTask<Result<ProductionRunSnapshot>> WaitForTerminalAsync(
+            ProductionRunId runId,
             CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(new ProductionRunRecoveryResult(0, 0, 0));
+            cancellation.Cancel();
+            return ValueTask.FromCanceled<Result<ProductionRunSnapshot>>(cancellationToken);
         }
     }
 
@@ -365,5 +597,115 @@ public sealed class RunnerCommandTests
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(0);
         }
+    }
+
+    private sealed class StubProductionRunCoordinator : IProductionRunCoordinator
+    {
+        public ValueTask<Result<ProductionRunSnapshot>> SubmitAsync(
+            SubmitProductionRunRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runner.TestUnexpectedSubmit",
+                "RunnerCommand uses the immutable release launcher for submission.")));
+
+        public ValueTask<Result<ProductionRunSnapshot>> CommandAsync(
+            ProductionRunId runId,
+            ProductionRunCommandRequest command,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runner.TestUnexpectedCommand",
+                "This test did not request cancellation.")));
+    }
+
+    private sealed class CapturingProductionRunCoordinator(Result<ProductionRunSnapshot> result)
+        : IProductionRunCoordinator
+    {
+        public ProductionRunId? RunId { get; private set; }
+
+        public ProductionRunCommandRequest? Command { get; private set; }
+
+        public ValueTask<Result<ProductionRunSnapshot>> SubmitAsync(
+            SubmitProductionRunRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runner.TestUnexpectedSubmit",
+                "RunnerCommand uses the immutable release launcher for submission.")));
+
+        public ValueTask<Result<ProductionRunSnapshot>> CommandAsync(
+            ProductionRunId runId,
+            ProductionRunCommandRequest command,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RunId = runId;
+            Command = command;
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class StubProductionRunRepository(ProductionRunSnapshot? snapshot)
+        : IProductionRunRepository
+    {
+        public ValueTask<ProductionRunPersistenceEntry?> GetByIdAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Equal(new ProductionRunId(RunId), runId);
+            return ValueTask.FromResult(snapshot is null
+                ? null
+                : new ProductionRunPersistenceEntry(ProductionRun.Restore(snapshot), revision: 1));
+        }
+
+        public ValueTask<bool> TryAddAsync(
+            ProductionRun run,
+            ProductionRunExecutionPlan executionPlan,
+            ProductionRunAdmission admission,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult(false);
+
+        public ValueTask<long> SaveAsync(
+            ProductionRun run,
+            long expectedRevision,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult(0L);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRecoverableAsync(
+            CancellationToken cancellationToken = default) => ValueTask.FromResult<
+                IReadOnlyCollection<ProductionRunPersistenceEntry>>([]);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+            string? productionLineDefinitionId = null,
+            string? stationSystemId = null,
+            string? slotId = null,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult<
+                IReadOnlyCollection<ProductionRunPersistenceEntry>>([]);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+            ListPendingCreatedOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) => ValueTask.FromResult<
+                    IReadOnlyCollection<ProductionRunCreatedOutboxItem>>([]);
+
+        public ValueTask MarkCreatedOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+
+        public ValueTask RecordCreatedOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+
+        public ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>> ListPendingTerminalOutboxAsync(
+            int maximumCount,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult<
+                IReadOnlyCollection<ProductionRunTerminalOutboxItem>>([]);
+
+        public ValueTask MarkTerminalOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
+
+        public ValueTask RecordTerminalOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
     }
 }

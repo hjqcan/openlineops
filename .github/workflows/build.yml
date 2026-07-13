@@ -23,6 +23,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-ci-workflow-actions.ps1
 
+      - name: Test CI workflow verifier
+        shell: powershell
+        run: ./eng/verify-ci-workflow-actions.tests.ps1
+
       - name: Reject version-suffixed implementations
         shell: powershell
         run: ./eng/verify-no-version-suffix-implementations.ps1
@@ -87,13 +91,13 @@ jobs:
         run: dotnet format OpenLineOps.sln style --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --severity warn --verbosity minimal
 
       - name: Build .NET
-        run: dotnet build OpenLineOps.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
+        run: dotnet build OpenLineOps.sln --configuration Release --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Build PythonScript component
-        run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
+        run: dotnet build lib/pythonscript/PythonScript.sln --configuration Release --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Test .NET with isolated Windows process hosts
-        run: dotnet test OpenLineOps.sln --no-build -v minimal -m:1
+        run: dotnet test OpenLineOps.sln --configuration Release --no-build -v minimal -m:1
 
       - name: Check .NET package vulnerabilities
         run: dotnet list OpenLineOps.sln package --vulnerable --include-transitive
@@ -107,10 +111,10 @@ jobs:
         run: ./eng/verify-third-party-license-metadata.ps1
 
       - name: Smoke test release manifest tool
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --help
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --help
 
       - name: Build sample plugin
-        run: dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj -v minimal
+        run: dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj --configuration Release --no-restore -v minimal
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -140,6 +144,9 @@ jobs:
         run: |
           dotnet restore src/OpenLineOps.Agent/OpenLineOps.Agent.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.LeastPrivilegeLauncher/OpenLineOps.LeastPrivilegeLauncher.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.Runner/OpenLineOps.Runner.csproj --runtime win-x64
 
       - name: Stage release artifacts
@@ -147,11 +154,99 @@ jobs:
         run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
 
       - name: Verify staged release manifest
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 
       - name: Inspect release candidate
         shell: powershell
         run: ./eng/inspect-release-candidate.ps1
+
+      - name: Setup RabbitMQ for staged Agent E2E
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $erlangVersion = "27.3.4.8"
+          $rabbitMqVersion = "4.3.1"
+
+          choco install erlang --version=$erlangVersion --yes --no-progress --limit-output --allow-downgrade
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install Erlang $erlangVersion (exit code $LASTEXITCODE)."
+          }
+
+          choco install rabbitmq --version=$rabbitMqVersion --yes --no-progress --limit-output --allow-downgrade
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install RabbitMQ $rabbitMqVersion (exit code $LASTEXITCODE)."
+          }
+
+          $rabbitMqService = Get-Service -Name RabbitMQ -ErrorAction Stop
+          if ($rabbitMqService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Start-Service -Name RabbitMQ
+          }
+
+          $rabbitMqServerRoot = Join-Path $env:ProgramFiles "RabbitMQ Server"
+          $rabbitMqCtlCandidates = @(
+            Get-ChildItem `
+              -LiteralPath $rabbitMqServerRoot `
+              -Filter "rabbitmqctl.bat" `
+              -File `
+              -Recurse `
+              -ErrorAction Stop
+          )
+          if ($rabbitMqCtlCandidates.Count -ne 1) {
+            throw "Expected exactly one RabbitMQ control tool under '$rabbitMqServerRoot'; found $($rabbitMqCtlCandidates.Count)."
+          }
+          $rabbitMqCtl = $rabbitMqCtlCandidates[0].FullName
+
+          $serviceCookie = @(
+            (Join-Path $env:SystemRoot "system32\config\systemprofile\.erlang.cookie"),
+            (Join-Path $env:SystemRoot ".erlang.cookie")
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($serviceCookie)) {
+            throw "RabbitMQ Windows service Erlang cookie was not found."
+          }
+          Copy-Item -LiteralPath $serviceCookie -Destination (Join-Path $env:USERPROFILE ".erlang.cookie") -Force
+
+          & $rabbitMqCtl await_startup --timeout 120
+          if ($LASTEXITCODE -ne 0) {
+            throw "rabbitmqctl await_startup failed for RabbitMQ $rabbitMqVersion (exit code $LASTEXITCODE)."
+          }
+
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(2)
+          $ready = $false
+          do {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $connectTask = $client.ConnectAsync("127.0.0.1", 5672)
+              $ready = $connectTask.Wait([TimeSpan]::FromSeconds(2)) -and $client.Connected
+            }
+            catch {
+              $ready = $false
+            }
+            finally {
+              $client.Dispose()
+            }
+
+            if (-not $ready) {
+              Start-Sleep -Seconds 2
+            }
+          } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+          if (-not $ready) {
+            $rabbitMqService = Get-Service -Name RabbitMQ -ErrorAction SilentlyContinue
+            throw "RabbitMQ $rabbitMqVersion did not become ready on 127.0.0.1:5672. Service status: $($rabbitMqService.Status)."
+          }
+
+          $rabbitMqUri = "amqp://guest:guest@127.0.0.1:5672/%2f"
+          "OPENLINEOPS_RABBITMQ_URI=$rabbitMqUri" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "RabbitMQ $rabbitMqVersion is ready for the staged Agent gate on 127.0.0.1:5672."
+
+      - name: Run staged Agent bundle E2E
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
 
       - name: Verify release candidate inspection
         shell: powershell
@@ -190,7 +285,7 @@ jobs:
         run: npm run e2e:production-closure:packaged
 
       - name: Upload packaged production closure evidence
-        if: always()
+        if: ${{ always() && hashFiles('artifacts/production-closure-e2e/**') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: openlineops-production-closure-${{ github.run_number }}
@@ -207,7 +302,7 @@ jobs:
         run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
       - name: Upload release artifacts
-        if: always()
+        if: ${{ always() && hashFiles('artifacts/release/**') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: openlineops-release-${{ github.run_number }}
@@ -217,6 +312,7 @@ jobs:
             output/publication-evidence-verification
             output/final-publication-preflight
             output/ci-release-artifact-inspection
+            output/staged-agent-bundle-e2e
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

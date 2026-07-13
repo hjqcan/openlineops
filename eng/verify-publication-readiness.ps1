@@ -214,10 +214,13 @@ function Test-ReleaseArtifacts {
         -RequiredEntries @(
             "OpenLineOps.Agent.exe",
             "OpenLineOps.StationRuntime.exe",
+            "OpenLineOps.PluginHost.exe",
+            "OpenLineOps.ScriptWorker.exe",
+            "OpenLineOps.LeastPrivilegeLauncher.exe",
             "appsettings.json",
             "bundle-manifest.json",
             "bundle-checksums.sha256") `
-        -SignedEntries @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe")
+        -SignedEntries @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe", "OpenLineOps.PluginHost.exe", "OpenLineOps.ScriptWorker.exe", "OpenLineOps.LeastPrivilegeLauncher.exe")
     Test-WindowsReleasePackage `
         -ResolvedArtifactsRoot $resolvedArtifactsRoot `
         -ArtifactKind "runner" `
@@ -332,6 +335,7 @@ $requiredFiles = @(
     ".github/ISSUE_TEMPLATE/plugin_request.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
     "eng/verify-ci-workflow-actions.ps1",
+    "eng/verify-staged-agent-bundle-e2e.ps1",
     "eng/verify-solution-project-coverage.ps1",
     "eng/inspect-ci-release-artifact.ps1",
     "eng/inspect-release-candidate.ps1",
@@ -375,6 +379,7 @@ Test-FileContains ".github/workflows/build.yml" "Verify third-party license meta
 Test-FileContains ".github/workflows/build.yml" "Stage release artifacts" "CI must stage release artifacts."
 Test-FileContains ".github/workflows/build.yml" "Verify staged release manifest" "CI must verify staged release metadata."
 Test-FileContains ".github/workflows/build.yml" "Inspect release candidate" "CI must inspect the staged release candidate."
+Test-FileContains ".github/workflows/build.yml" "Run staged Agent bundle E2E" "CI must execute the extracted staged Agent process chain."
 Test-FileContains ".github/workflows/build.yml" "Verify release candidate inspection" "CI must verify release candidate inspection behavior."
 Test-FileContains ".github/workflows/build.yml" "Write publication evidence" "CI must write publication evidence."
 Test-FileContains ".github/workflows/build.yml" "Verify publication evidence" "CI must verify publication evidence behavior."
@@ -387,6 +392,7 @@ Test-FileContains "eng/verify-ci-workflow-actions.ps1" "Unexpected GitHub Action
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "actions/upload-artifact@v7" "CI workflow action verification must require upload-artifact v7."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "if-no-files-found:\\s\*error" "CI workflow action verification must require missing artifact failures."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "output/final-publication-preflight" "CI workflow action verification must require uploaded final publication preflight diagnostics."
+Test-FileContains "eng/verify-ci-workflow-actions.ps1" "verify-staged-agent-bundle-e2e.ps1" "CI workflow action verification must preserve the staged Agent bundle E2E gate."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "publication-evidence-verification" "CI release artifact inspection must verify publication evidence verification diagnostics."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "publication-preflight.json" "CI release artifact inspection must verify final publication preflight diagnostics."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "release-dependency-inventory.json" "CI release artifact inspection must verify dependency inventory metadata."
@@ -405,6 +411,10 @@ Test-FileContains "eng/stage-release-artifacts.ps1" "release-metadata-checksums.
 Test-FileContains "eng/inspect-release-candidate.ps1" "RequireSignedWindowsArtifacts" "Release candidate inspection must enforce every shipped Windows executable signature."
 Test-FileContains "eng/inspect-release-candidate.ps1" "bundle-manifest.json" "Release candidate inspection must verify the Agent and Runner bundle manifests."
 Test-FileContains "eng/inspect-release-candidate.ps1" "OpenLineOps.StationRuntime.exe" "Release candidate inspection must require Station Runtime in the Agent bundle."
+Test-FileContains "eng/inspect-release-candidate.ps1" "OpenLineOps.PluginHost.exe" "Release candidate inspection must require Plugin Host in the Agent bundle."
+Test-FileContains "eng/inspect-release-candidate.ps1" "OpenLineOps.ScriptWorker.exe" "Release candidate inspection must require the Python Script Worker in the Agent bundle."
+Test-FileContains "eng/inspect-release-candidate.ps1" "OpenLineOps.LeastPrivilegeLauncher.exe" "Release candidate inspection must require the Least Privilege Launcher in the Agent bundle."
+Test-FileContains "eng/inspect-release-candidate.ps1" "SafetyExecutablePath release template must be empty" "Release candidate inspection must require a machine-specific empty safety actuator template."
 Test-FileContains "eng/inspect-release-candidate.ps1" "path traversal zip entry" "Release candidate inspection must reject unsafe zip entry paths."
 Test-FileContains "eng/inspect-release-candidate.ps1" "sensitive source archive entry" "Release candidate inspection must reject sensitive source archive entries."
 Test-FileContains "eng/inspect-release-candidate.ps1" "release-provenance.json" "Release candidate inspection must verify release provenance metadata."
@@ -412,6 +422,7 @@ Test-FileContains "eng/inspect-release-candidate.ps1" "release-dependency-invent
 Test-FileContains "eng/inspect-release-candidate.ps1" "dependencyInventory" "Release candidate inspection must verify dependency inventory provenance hash."
 Test-FileContains "eng/inspect-release-candidate.ps1" "release-metadata-checksums.sha256" "Release candidate inspection must verify metadata checksums."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-ci-workflow-actions.ps1" "Release candidate inspection must require CI workflow action verification in the source archive."
+Test-FileContains "eng/inspect-release-candidate.ps1" "verify-staged-agent-bundle-e2e.ps1" "Release candidate inspection must require the staged Agent bundle E2E gate in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "inspect-ci-release-artifact.ps1" "Release candidate inspection must require CI artifact bundle inspection in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "prepare-final-publication.ps1" "Release candidate inspection must require the final publication preparation script in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-final-publication-preflight.ps1" "Release candidate inspection must require the final publication preflight verification script in the source archive."
@@ -442,9 +453,19 @@ Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-dependency-
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-metadata-checksums" "Release candidate inspection verification must cover missing metadata checksums."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-metadata-checksums" "Release candidate inspection verification must cover bad metadata checksums."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "tampered-agent-bundle" "Release candidate inspection verification must reject tampered Agent payloads."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-agent-safety-executable-path" "Release candidate inspection verification must reject a missing safety actuator template field."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "configured-agent-safety-executable-path" "Release candidate inspection verification must reject a preconfigured release safety actuator path."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-provenance.json" "Release staging must generate release provenance metadata."
 Test-FileContains "eng/stage-release-artifacts.ps1" "Publish-WindowsSelfContainedProject" "Release staging must publish self-contained Windows Agent and Runner hosts."
 Test-FileContains "eng/stage-release-artifacts.ps1" "OpenLineOps.StationRuntime.exe" "Release staging must bind Agent configuration to the co-packaged Station Runtime."
+Test-FileContains "eng/stage-release-artifacts.ps1" "plugin-host" "Release staging must record the co-packaged Plugin Host entry point."
+Test-FileContains "eng/stage-release-artifacts.ps1" "python-script-worker" "Release staging must record the co-packaged Python Script Worker entry point."
+Test-FileContains "eng/stage-release-artifacts.ps1" "OpenLineOps.LeastPrivilegeLauncher.exe" "Release staging must bind the fixed co-packaged Least Privilege Launcher."
+Test-FileContains "eng/stage-release-artifacts.ps1" "SafetyExecutablePath must be empty in the release template" "Release staging must preserve a machine-specific empty safety actuator template."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT" "Staged Agent E2E must force signed package execution through extracted release executables."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "Agent application layer -> staged StationRuntime -> staged PluginHost" "Staged Agent E2E must prove the signed plugin process chain."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childTokenRestricted" "Staged Agent E2E evidence must prove the Python child uses a restricted token."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childIntegrityRid" "Staged Agent E2E evidence must prove the Python child uses Low Integrity."
 Test-FileContains "eng/stage-release-artifacts.ps1" "ZipArchive\]::new" "Release staging must create ZIP archives with explicit canonical entry names."
 Test-FileContains "eng/stage-release-artifacts.ps1" "non-canonical or out-of-order entry" "Release staging must verify every emitted ZIP entry path and order."
 Test-FileContains "eng/verify-publication-readiness.ps1" "Get-AuthenticodeSignature" "Publication readiness must enforce shipped Windows executable signatures."

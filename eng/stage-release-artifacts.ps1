@@ -190,7 +190,8 @@ function Publish-DotNetProject {
 function Publish-WindowsSelfContainedProject {
     param(
         [Parameter(Mandatory = $true)][string] $ProjectPath,
-        [Parameter(Mandatory = $true)][string] $OutputDirectory
+        [Parameter(Mandatory = $true)][string] $OutputDirectory,
+        [switch] $SingleFile
     )
 
     $arguments = @(
@@ -206,6 +207,14 @@ function Publish-WindowsSelfContainedProject {
         $OutputDirectory,
         "/p:UseAppHost=true"
     )
+
+    if ($SingleFile) {
+        $arguments += @(
+            "/p:PublishSingleFile=true",
+            "/p:IncludeNativeLibrariesForSelfExtract=true",
+            "/p:EnableCompressionInSingleFile=true"
+        )
+    }
 
     if ($NoRestore) {
         $arguments += "--no-restore"
@@ -342,13 +351,92 @@ function Assert-AgentBundleConfiguration {
         throw "The configured Station Runtime executable is missing from the Agent bundle."
     }
 
-    $agentExecutablePath = Join-Path $Root "OpenLineOps.Agent.exe"
-    $runtimeExecutableFullPath = Join-Path $Root $runtimeExecutablePath
-    if (-not (Test-Path -LiteralPath $agentExecutablePath -PathType Leaf)) {
-        throw "The Station Agent executable is missing from its release bundle."
+    $pluginHostExecutablePath = $configuration.OpenLineOps.Agent.PluginHostExecutablePath
+    if ($pluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe") {
+        throw "OpenLineOps:Agent:PluginHostExecutablePath must be exactly 'OpenLineOps.PluginHost.exe' in the release bundle."
     }
-    if ((Get-FileSha256 $agentExecutablePath) -ceq (Get-FileSha256 $runtimeExecutableFullPath)) {
-        throw "The Station Agent and Station Runtime executable payloads must be distinct."
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $pluginHostExecutablePath) -PathType Leaf)) {
+        throw "The configured Plugin Host executable is missing from the Agent bundle."
+    }
+
+    $pythonScript = $configuration.OpenLineOps.Agent.PythonScript
+    if ($null -eq $pythonScript) {
+        throw "The Station Agent bundle is missing its typed PythonScript configuration."
+    }
+
+    $pythonScriptProperties = @($pythonScript.PSObject.Properties.Name)
+    if (-not ($pythonScriptProperties -ccontains "HostPythonRuntimeDllPath") `
+        -or $pythonScriptProperties -ccontains "PythonRuntimeDllPath") {
+        throw "The Station Agent bundle must declare HostPythonRuntimeDllPath and must not contain the removed PythonRuntimeDllPath setting."
+    }
+
+    $scriptWorkerExecutablePath = $pythonScript.WorkerExecutablePath
+    if ($scriptWorkerExecutablePath -cne "OpenLineOps.ScriptWorker.exe") {
+        throw "OpenLineOps:Agent:PythonScript:WorkerExecutablePath must be exactly 'OpenLineOps.ScriptWorker.exe' in the release bundle."
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $scriptWorkerExecutablePath) -PathType Leaf)) {
+        throw "The configured Python Script Worker executable is missing from the Agent bundle."
+    }
+
+    if ($pythonScript.Sandbox.LeastPrivilegeIdentity -cne "RestrictedCurrentLowIntegrity") {
+        throw "The Station Agent release bundle must use the fixed RestrictedCurrentLowIntegrity Python identity."
+    }
+    $leastPrivilegeLauncherPath = $pythonScript.Sandbox.LeastPrivilegeLauncherExecutable
+    if ($leastPrivilegeLauncherPath -cne "OpenLineOps.LeastPrivilegeLauncher.exe") {
+        throw "OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeLauncherExecutable must be exactly 'OpenLineOps.LeastPrivilegeLauncher.exe' in the release bundle."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $leastPrivilegeLauncherPath) -PathType Leaf)) {
+        throw "The configured Least Privilege Launcher executable is missing from the Agent bundle."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pythonScript.Sandbox.LeastPrivilegeArgumentsTemplate)) {
+        throw "The Station Agent release bundle must not configure a custom Python least-privilege launcher template."
+    }
+    if ($pythonScript.Sandbox.LeastPrivilegeNoInteractivePrompt -ne $true) {
+        throw "The Station Agent release bundle must require a non-interactive Python least-privilege launch."
+    }
+
+    $agentConfigurationProperties = @($configuration.OpenLineOps.Agent.PSObject.Properties.Name)
+    if (-not ($agentConfigurationProperties -ccontains "SafetyExecutablePath")) {
+        throw "The Station Agent release template must declare SafetyExecutablePath."
+    }
+    if ($configuration.OpenLineOps.Agent.SafetyExecutablePath -isnot [string] `
+        -or $configuration.OpenLineOps.Agent.SafetyExecutablePath -cne "") {
+        throw "OpenLineOps:Agent:SafetyExecutablePath must be empty in the release template and configured to the independently reviewed machine safety actuator during deployment."
+    }
+
+    $pythonSandbox = $pythonScript.Sandbox
+    if ($null -eq $pythonSandbox `
+        -or $pythonSandbox.RequireLeastPrivilegeExecution -ne $true `
+        -or $pythonSandbox.IsolationMode -cne "LeastPrivilegeIdentity") {
+        throw "The Station Agent release bundle must default Python execution to required LeastPrivilegeIdentity isolation."
+    }
+
+    $removedContainerProperties = @($pythonSandbox.PSObject.Properties.Name | Where-Object {
+        $_ -clike "Container*" -or $_ -ceq "AdditionalContainerRunArguments"
+    })
+    if ($removedContainerProperties.Count -ne 0) {
+        throw "The Station Agent release bundle must not expose removed Python Container settings."
+    }
+
+    $executablePaths = @(
+        "OpenLineOps.Agent.exe",
+        $runtimeExecutablePath,
+        $pluginHostExecutablePath,
+        $scriptWorkerExecutablePath,
+        $leastPrivilegeLauncherPath
+    )
+    $executableHashes = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($executablePath in $executablePaths) {
+        $fullPath = Join-Path $Root $executablePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "The Station Agent executable is missing from its release bundle: $executablePath"
+        }
+        if (-not $executableHashes.Add((Get-FileSha256 $fullPath))) {
+            throw "Every Station Agent executable payload must have a distinct SHA-256: $executablePath"
+        }
     }
 }
 
@@ -755,6 +843,9 @@ $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 $apiPublish = Join-Path $resolvedWorkRoot "api"
 $agentPublish = Join-Path $resolvedWorkRoot "agent"
 $stationRuntimePublish = Join-Path $resolvedWorkRoot "station-runtime"
+$stationScriptWorkerPublish = Join-Path $resolvedWorkRoot "station-script-worker"
+$stationPluginHostPublish = Join-Path $resolvedWorkRoot "station-plugin-host"
+$stationLeastPrivilegeLauncherPublish = Join-Path $resolvedWorkRoot "station-least-privilege-launcher"
 $runnerPublish = Join-Path $resolvedWorkRoot "runner"
 $pluginHostPublish = Join-Path $resolvedWorkRoot "plugin-host"
 $scriptWorkerPublish = Join-Path $resolvedWorkRoot "script-worker"
@@ -770,9 +861,31 @@ Publish-WindowsSelfContainedProject `
     -OutputDirectory $agentPublish
 Publish-WindowsSelfContainedProject `
     -ProjectPath "src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj" `
-    -OutputDirectory $stationRuntimePublish
+    -OutputDirectory $stationRuntimePublish `
+    -SingleFile
 Merge-DirectoryContents `
     -SourceDirectory $stationRuntimePublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj" `
+    -OutputDirectory $stationScriptWorkerPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationScriptWorkerPublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" `
+    -OutputDirectory $stationPluginHostPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationPluginHostPublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.LeastPrivilegeLauncher/OpenLineOps.LeastPrivilegeLauncher.csproj" `
+    -OutputDirectory $stationLeastPrivilegeLauncherPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationLeastPrivilegeLauncherPublish `
     -DestinationDirectory $agentPublish
 Publish-WindowsSelfContainedProject `
     -ProjectPath "src/OpenLineOps.Runner/OpenLineOps.Runner.csproj" `
@@ -816,7 +929,6 @@ Invoke-ExpectedExitCode `
     -FilePath (Join-Path $agentPublish "OpenLineOps.StationRuntime.exe") `
     -ExpectedExitCode 64 `
     -WorkingDirectory $agentPublish
-
 if (-not $SkipDesktopBuild) {
     Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "build") -WorkingDirectory (Resolve-RepoPath "apps/desktop")
 }
@@ -881,7 +993,9 @@ Write-WindowsBundleMetadata `
     -ArtifactKind "agent" `
     -EntryPoints @(
         [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+        [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+        [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }
     )
 Write-WindowsBundleMetadata `
     -Root $runnerPublish `
@@ -961,6 +1075,8 @@ $manifestArguments = @(
     "run",
     "--project",
     $manifestProject,
+    "--configuration",
+    $Configuration,
     "--",
     "--version",
     $Version,

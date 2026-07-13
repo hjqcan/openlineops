@@ -3,6 +3,8 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -41,6 +43,24 @@ public static class Program
         if (args.Length > 0 && string.Equals(args[0], "sandbox-observe", StringComparison.Ordinal))
         {
             return await ObserveSandboxProcessAsync(args[1..]).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0
+            && string.Equals(
+                args[0],
+                "sandbox-probe-immutable-content",
+                StringComparison.Ordinal))
+        {
+            return OperatingSystem.IsWindows()
+                ? await ProbeImmutableContentAsync(args[1..]).ConfigureAwait(false)
+                : UsageExitCode;
+        }
+
+        if (args.Length > 0
+            && (string.Equals(args[0], "emergency-stop", StringComparison.Ordinal)
+                || string.Equals(args[0], "safe-stop", StringComparison.Ordinal)))
+        {
+            return 0;
         }
 
         if (args.Length > 0 && string.Equals(args[0], "sandbox-check-handles", StringComparison.Ordinal))
@@ -647,6 +667,68 @@ public static class Program
         return 0;
     }
 
+    [SupportedOSPlatform("windows")]
+    private static async Task<int> ProbeImmutableContentAsync(string[] arguments)
+    {
+        if (arguments.Length != 6
+            || !arguments.Skip(1).All(File.Exists))
+        {
+            return UsageExitCode;
+        }
+
+        var writeSucceeded = TryMutation(() =>
+            File.WriteAllText(arguments[1], "mutated", Utf8WithoutBom));
+        var renameSucceeded = TryMutation(() =>
+            File.Move(arguments[2], arguments[2] + ".moved"));
+        var deleteSucceeded = TryMutation(() => File.Delete(arguments[3]));
+        var changePermissionsSucceeded = TryMutation(() =>
+        {
+            var file = new FileInfo(arguments[4]);
+            var security = FileSystemAclExtensions.GetAccessControl(file);
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            FileSystemAclExtensions.SetAccessControl(file, security);
+        });
+        var takeOwnershipSucceeded = TryMutation(() =>
+        {
+            var file = new FileInfo(arguments[5]);
+            var security = FileSystemAclExtensions.GetAccessControl(file);
+            security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
+            FileSystemAclExtensions.SetAccessControl(file, security);
+        });
+
+        await Console.Out.WriteAsync(JsonSerializer.Serialize(
+                new ImmutableContentMutationObservation(
+                    IsAppContainerProcess(),
+                    HasTokenCapability(arguments[0]),
+                    writeSucceeded,
+                    renameSucceeded,
+                    deleteSucceeded,
+                    changePermissionsSucceeded,
+                    takeOwnershipSucceeded),
+                ResultJsonOptions))
+            .ConfigureAwait(false);
+        return 0;
+    }
+
+    private static bool TryMutation(Action mutation)
+    {
+        try
+        {
+            mutation();
+            return true;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+                                          or IOException
+                                          or System.Security.SecurityException
+                                          or PrivilegeNotHeldException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<int> CheckSandboxHandlesAsync(string[] arguments)
     {
         if (!OperatingSystem.IsWindows() || arguments.Length == 0)
@@ -849,6 +931,15 @@ public static class Program
         IReadOnlyDictionary<string, string> Environment,
         bool IsAppContainer,
         bool HasInternetClientCapability);
+
+    private sealed record ImmutableContentMutationObservation(
+        bool IsAppContainer,
+        bool HasExpectedContentCapability,
+        bool WriteSucceeded,
+        bool RenameSucceeded,
+        bool DeleteSucceeded,
+        bool ChangePermissionsSucceeded,
+        bool TakeOwnershipSucceeded);
 
     private static bool IsAppContainerProcess()
     {

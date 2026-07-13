@@ -43,7 +43,8 @@ internal static class ProductionLineResourceMapper
                 .Select(transition => new RouteTransitionDocument(
                     transition.Id.Value,
                     transition.SourceOperationId.Value,
-                    transition.TargetOperationId.Value,
+                    transition.TargetOperationId?.Value,
+                    transition.TerminalDisposition?.ToString(),
                     transition.Kind.ToString(),
                     transition.RequiredJudgement?.ToString(),
                     transition.MaxTraversals,
@@ -102,7 +103,14 @@ internal static class ProductionLineResourceMapper
             document.Transitions.Select(transition => RouteTransition.Create(
                 new RouteTransitionId(transition.TransitionId),
                 new OperationDefinitionId(transition.SourceOperationId),
-                new OperationDefinitionId(transition.TargetOperationId),
+                transition.TargetOperationId is null
+                    ? null
+                    : new OperationDefinitionId(transition.TargetOperationId),
+                transition.TerminalDisposition is null
+                    ? null
+                    : ParseExact<TerminalDisposition>(
+                        transition.TerminalDisposition,
+                        "terminal disposition"),
                 ParseExact<RouteTransitionKind>(transition.Kind, "route transition kind"),
                 transition.RequiredJudgement is null
                     ? null
@@ -176,6 +184,8 @@ internal static class ProductionLineResourceMapper
                     || string.IsNullOrWhiteSpace(resource.Resolution)))
             || document.Transitions.Any(static transition => transition is null
                 || string.IsNullOrWhiteSpace(transition.Kind)
+                || (string.IsNullOrWhiteSpace(transition.TargetOperationId)
+                    == string.IsNullOrWhiteSpace(transition.TerminalDisposition))
                 || (string.Equals(
                         transition.Kind,
                         RouteTransitionKind.Condition.ToString(),

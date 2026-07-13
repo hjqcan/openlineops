@@ -373,7 +373,10 @@ function TraceDetails({
         {details.routeDecisions.map(decision => (
           <article key={`${decision.sourceOperationRunId}-${decision.transitionId}-${decision.traversal}`}>
             <span>{decision.transitionId}</span>
-            <strong>{decision.sourceJudgement} → {decision.targetOperationId}</strong>
+            <strong>
+              {decision.sourceJudgement} → {decision.targetOperationId
+                ?? `Terminal: ${decision.terminalDisposition}`}
+            </strong>
             <small>traversal {decision.traversal} · {formatDateTime(decision.decidedAtUtc)}</small>
           </article>
         ))}

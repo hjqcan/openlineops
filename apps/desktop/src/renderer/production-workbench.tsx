@@ -27,6 +27,7 @@ import type {
   ProductionLineResponse,
   ProductionLineSummaryResponse,
   ProductionOperationRequest,
+  ProductionTerminalDisposition,
   RouteJudgement,
   RouteTransitionKind,
   RouteTransitionRequest,
@@ -99,6 +100,12 @@ const productionContextValueKinds: ProductionContextValueKind[] = [
   'WholeNumber',
   'FixedPoint',
   'DateTimeUtc'
+];
+const terminalDispositions: ProductionTerminalDisposition[] = [
+  'Completed',
+  'Nonconforming',
+  'Held',
+  'Scrapped'
 ];
 
 export function ProductionWorkbench({
@@ -419,7 +426,10 @@ export function ProductionWorkbench({
     };
     const candidateSource = selectedOperation ?? draft.operations[draft.operations.length - 1];
     const canAutoConnect = candidateSource
-      && !draft.transitions.some(transition => transition.sourceOperationId === candidateSource.operationId);
+      && !draft.transitions.some(transition => (
+        transition.sourceOperationId === candidateSource.operationId
+        && transition.kind !== 'Rework'
+        && transition.terminalDisposition === null));
     const transition: RouteTransitionRequest | null = canAutoConnect
       ? {
         transitionId: nextPortableId(
@@ -427,6 +437,7 @@ export function ProductionWorkbench({
           draft.transitions.map(candidate => candidate.transitionId)),
         sourceOperationId: candidateSource.operationId,
         targetOperationId: operationId,
+        terminalDisposition: null,
         kind: 'Sequence',
         requiredJudgement: null,
         maxTraversals: null,
@@ -436,8 +447,33 @@ export function ProductionWorkbench({
         expectedOutputValue: null
       }
       : null;
+    const terminalTransition: RouteTransitionRequest = {
+      transitionId: nextPortableId(
+        'route-terminal',
+        [...draft.transitions, ...(transition ? [transition] : [])]
+          .map(candidate => candidate.transitionId)),
+      sourceOperationId: operationId,
+      targetOperationId: null,
+      terminalDisposition: 'Completed',
+      kind: 'Sequence',
+      requiredJudgement: null,
+      maxTraversals: null,
+      parallelGroupId: null,
+      outputKey: null,
+      expectedOutputKind: null,
+      expectedOutputValue: null
+    };
     const nextOperations = [...draft.operations, operation];
-    const nextTransitions = transition ? [...draft.transitions, transition] : draft.transitions;
+    const priorTransitions = canAutoConnect && candidateSource
+      ? draft.transitions.filter(candidate => !(
+        candidate.sourceOperationId === candidateSource.operationId
+        && candidate.terminalDisposition !== null))
+      : draft.transitions;
+    const nextTransitions = [
+      ...priorTransitions,
+      ...(transition ? [transition] : []),
+      terminalTransition
+    ];
     mutateDraft(current => ({
       ...current,
       entryOperationId: current.operations.length === 0 ? operationId : current.entryOperationId,
@@ -463,6 +499,7 @@ export function ProductionWorkbench({
       transitionId: nextPortableId('route', draft.transitions.map(candidate => candidate.transitionId)),
       sourceOperationId,
       targetOperationId,
+      terminalDisposition: null,
       kind: 'Sequence',
       requiredJudgement: null,
       maxTraversals: null,
@@ -819,11 +856,27 @@ export function ProductionWorkbench({
                       ...current,
                       entryOperationId: selectedOperation.operationId
                     }))}
-                    onMarkTerminal={() => mutateDraft(current => ({
+                    onMarkTerminal={terminalDisposition => mutateDraft(current => ({
                       ...current,
-                      transitions: current.transitions.filter(transition => !(
-                        transition.sourceOperationId === selectedOperation.operationId
-                        && transition.kind !== 'Rework'))
+                      transitions: [
+                        ...current.transitions.filter(transition =>
+                          transition.sourceOperationId !== selectedOperation.operationId),
+                        {
+                          transitionId: nextPortableId(
+                            'route-terminal',
+                            current.transitions.map(transition => transition.transitionId)),
+                          sourceOperationId: selectedOperation.operationId,
+                          targetOperationId: null,
+                          terminalDisposition,
+                          kind: 'Sequence',
+                          requiredJudgement: null,
+                          maxTraversals: null,
+                          parallelGroupId: null,
+                          outputKey: null,
+                          expectedOutputKind: null,
+                          expectedOutputValue: null
+                        }
+                      ]
                     }))}
                     onRemove={() => removeOperation(selectedOperation.operationId)}
                   />
@@ -883,7 +936,7 @@ function OperationInspector({
   onLineControllerAuthorizationsChange(authorizations: LineControllerAuthorization[]): void;
   onChange(next: ProductionOperationRequest): void;
   onMakeEntry(): void;
-  onMarkTerminal(): void;
+  onMarkTerminal(disposition: ProductionTerminalDisposition): void;
   onRemove(): void;
 }): React.ReactElement {
   const matchingConfigurations = findMatchingConfigurationSnapshots(
@@ -894,6 +947,12 @@ function OperationInspector({
     stationProfiles);
   const forwardTransitions = transitions.filter(transition => (
     transition.sourceOperationId === operation.operationId && transition.kind !== 'Rework'));
+  const explicitTerminals = forwardTransitions.filter(transition => transition.terminalDisposition !== null);
+  const explicitTerminalDispositions = terminalDispositions.filter(disposition =>
+    explicitTerminals.some(transition => transition.terminalDisposition === disposition));
+  const terminalReplacement = explicitTerminalDispositions.length === 1
+    ? explicitTerminalDispositions[0]
+    : 'Completed';
   const updateBinding = (changes: Partial<Pick<ProductionOperationRequest, 'stationSystemId' | 'flowDefinitionId'>>): void => {
     const next = { ...operation, ...changes };
     if (changes.stationSystemId !== undefined
@@ -978,14 +1037,35 @@ function OperationInspector({
       />
       <div className="production-disposition-card">
         <span>ROUTE DISPOSITION</span>
-        <strong>{forwardTransitions.length === 0 ? 'Completed (terminal)' : 'In process'}</strong>
+        <strong>
+          {explicitTerminalDispositions.length === 0
+            ? 'In process'
+            : explicitTerminalDispositions.length === 1
+              ? `${explicitTerminalDispositions[0]} (terminal)`
+              : `${explicitTerminalDispositions.join(' / ')} (conditional terminals)`}
+        </strong>
         <small>
-          {forwardTransitions.length === 0
-            ? 'No forward route leaves this Operation; the product completes here.'
+          {explicitTerminalDispositions.length > 0
+            ? `${explicitTerminals.length} explicit conditional route edge${explicitTerminals.length === 1 ? '' : 's'} determine the product disposition.`
             : `${forwardTransitions.length} forward Route Transition${forwardTransitions.length === 1 ? '' : 's'} continue execution.`}
         </small>
-        <button type="button" className="button ghost" onClick={onMarkTerminal} disabled={forwardTransitions.length === 0}>
-          Mark terminal
+        <label>
+          <span>Replace all outgoing routes with terminal</span>
+          <select
+            value={terminalReplacement}
+            onChange={event => onMarkTerminal(event.target.value as ProductionTerminalDisposition)}
+          >
+            {terminalDispositions.map(disposition => (
+              <option key={disposition} value={disposition}>{disposition}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="button ghost"
+          onClick={() => onMarkTerminal(terminalReplacement)}
+        >
+          {forwardTransitions.length > 0 ? 'Replace routes with terminal' : 'Mark terminal'}
         </button>
       </div>
       <div className="production-reference-note">
@@ -1492,30 +1572,95 @@ function TransitionInspector({
         <Field label="Source Operation">
           <select
             value={transition.sourceOperationId}
-            onChange={event => onChange({ ...transition, sourceOperationId: event.target.value })}
+            onChange={event => {
+              const sourceOperationId = event.target.value;
+              onChange({
+                ...transition,
+                sourceOperationId,
+                targetOperationId: transition.targetOperationId === sourceOperationId
+                  ? operations.find(operation => operation.operationId !== sourceOperationId)?.operationId ?? null
+                  : transition.targetOperationId
+              });
+            }}
           >
             {operations.map(operation => (
               <option key={operation.operationId} value={operation.operationId}>{operation.displayName}</option>
             ))}
           </select>
         </Field>
+        <Field label="Target type">
+          <select
+            value={transition.terminalDisposition === null ? 'Operation' : 'Terminal'}
+            disabled={transition.kind === 'Rework'
+              || transition.kind === 'ParallelFork'
+              || transition.kind === 'ParallelJoin'}
+            onChange={event => onChange(event.target.value === 'Terminal'
+              ? {
+                ...transition,
+                targetOperationId: null,
+                terminalDisposition: 'Completed'
+              }
+              : {
+                ...transition,
+                targetOperationId: operations.find(operation => (
+                  operation.operationId !== transition.sourceOperationId))?.operationId ?? null,
+                terminalDisposition: null
+              })}
+          >
+            <option value="Operation">Operation</option>
+            <option value="Terminal">Terminal disposition</option>
+          </select>
+        </Field>
+        {transition.terminalDisposition === null ? (
         <Field label="Target Operation">
           <select
-            value={transition.targetOperationId}
-            onChange={event => onChange({ ...transition, targetOperationId: event.target.value })}
+            value={transition.targetOperationId ?? ''}
+            onChange={event => onChange({
+              ...transition,
+              targetOperationId: event.target.value,
+              terminalDisposition: null
+            })}
           >
-            {operations.map(operation => (
+            {operations.filter(operation => (
+              operation.operationId !== transition.sourceOperationId)).map(operation => (
               <option key={operation.operationId} value={operation.operationId}>{operation.displayName}</option>
             ))}
           </select>
         </Field>
+        ) : (
+        <Field label="Terminal disposition">
+          <select
+            value={transition.terminalDisposition}
+            onChange={event => onChange({
+              ...transition,
+              targetOperationId: null,
+              terminalDisposition: event.target.value as ProductionTerminalDisposition
+            })}
+          >
+            {terminalDispositions.map(disposition => (
+              <option key={disposition} value={disposition}>{disposition}</option>
+            ))}
+          </select>
+        </Field>
+        )}
         <Field label="Transition Kind">
           <select
             value={transition.kind}
             data-testid="route-transition-kind"
-            onChange={event => onChange(normalizeTransitionKind(
-              transition,
-              event.target.value as RouteTransitionKind))}
+            onChange={event => {
+              const kind = event.target.value as RouteTransitionKind;
+              const normalized = normalizeTransitionKind(transition, kind);
+              onChange(kind === 'Rework' || kind === 'ParallelFork' || kind === 'ParallelJoin'
+                ? {
+                  ...normalized,
+                  targetOperationId: normalized.targetOperationId
+                    ?? operations.find(operation => (
+                      operation.operationId !== normalized.sourceOperationId))?.operationId
+                    ?? null,
+                  terminalDisposition: null
+                }
+                : normalized);
+            }}
           >
             {transitionKinds.map(kind => <option key={kind} value={kind}>{transitionKindLabel(kind)}</option>)}
           </select>
@@ -1789,6 +1934,8 @@ function normalizeTransitionKind(
     return {
       ...transition,
       kind,
+      targetOperationId: transition.targetOperationId,
+      terminalDisposition: null,
       requiredJudgement: transition.requiredJudgement ?? 'Failed',
       maxTraversals: transition.maxTraversals ?? 1,
       parallelGroupId: null,
@@ -1801,6 +1948,8 @@ function normalizeTransitionKind(
     return {
       ...transition,
       kind,
+      targetOperationId: transition.targetOperationId,
+      terminalDisposition: null,
       requiredJudgement: null,
       maxTraversals: null,
       parallelGroupId: transition.parallelGroupId ?? 'parallel-1',

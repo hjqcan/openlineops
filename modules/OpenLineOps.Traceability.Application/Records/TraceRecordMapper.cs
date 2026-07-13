@@ -105,6 +105,7 @@ internal static class TraceRecordMapper
         decision.SourceOperationRunId,
         decision.TransitionId,
         decision.TargetOperationId,
+        decision.TerminalDisposition?.ToString(),
         decision.SourceJudgement.ToString(),
         decision.Traversal,
         decision.DecidedAtUtc);

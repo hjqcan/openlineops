@@ -51,8 +51,11 @@ public static class RuntimeModuleServiceCollectionExtensions
         {
             case RuntimeSessionPersistenceProvider.Sqlite:
                 var sqliteConnectionString = persistenceOptions.ResolveSqliteConnectionString();
-                services.AddSingleton<IRuntimeSessionRepository>(_ =>
-                    new SqliteRuntimeSessionRepository(sqliteConnectionString));
+                services.AddSingleton(_ => new SqliteRuntimeSessionRepository(sqliteConnectionString));
+                services.AddSingleton<IRuntimeSessionRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteRuntimeSessionRepository>());
+                services.AddSingleton<IRuntimeMonitoringStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteRuntimeSessionRepository>());
                 services.AddSingleton(new SqliteRuntimeStoreExclusiveLease(sqliteConnectionString));
                 services.AddHostedService<SqliteRuntimeStoreLeaseHostedService>();
                 break;
@@ -60,8 +63,19 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<InMemoryRuntimeSessionRepository>();
                 services.AddSingleton<IRuntimeSessionRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryRuntimeSessionRepository>());
+                services.AddSingleton<IRuntimeMonitoringStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryRuntimeSessionRepository>());
                 break;
         }
+
+        services.AddSingleton<RuntimeMonitoringProjection>();
+        services.AddSingleton<IRuntimeMonitoringProjectionInitializer>(serviceProvider =>
+            serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
+        services.AddSingleton<IRuntimeMonitoringService>(serviceProvider =>
+            serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
+        services.AddSingleton<IRuntimeDomainEventSubscriber>(serviceProvider =>
+            serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
+        services.AddHostedService<RuntimeMonitoringProjectionStartupHostedService>();
 
         var coordinationProvider = ProductionCoordinationPersistenceProviders.Parse(
             coordinationOptions.Provider);
@@ -98,8 +112,10 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
                 services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
-                services.AddSingleton<IResourceLeaseRepository>(_ =>
-                    new SqliteResourceLeaseRepository(productionSqliteConnectionString));
+                services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
+                    new SqliteResourceLeaseRepository(
+                        productionSqliteConnectionString,
+                        serviceProvider.GetRequiredService<IClock>()));
                 services.AddSingleton<InMemoryStationJobCoordinationStore>();
                 services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
@@ -204,19 +220,17 @@ public static class RuntimeModuleServiceCollectionExtensions
         }
 
         services.AddSingleton<IRuntimeDomainEventPublisher, RuntimeDomainEventPublisher>();
+        services.AddSingleton<IProductionRunCreatedOutboxDispatcher,
+            ProductionRunCreatedOutboxDispatcher>();
         services.AddSingleton<IProductionRunTerminalOutboxDispatcher,
             ProductionRunTerminalOutboxDispatcher>();
+        services.AddHostedService<ProductionRunCreatedOutboxHostedService>();
 
         services.TryAddSingleton<RuntimeFlowCommandExecutor>();
         services.TryAddSingleton<PluginRuntimeCommandExecutor>();
         services.TryAddSingleton<ProcessIsolatedPythonScriptRuntimeScriptExecutor>();
         services.TryAddSingleton<IRuntimeScriptExecutor>(serviceProvider =>
             serviceProvider.GetRequiredService<ProcessIsolatedPythonScriptRuntimeScriptExecutor>());
-        services.AddSingleton<RuntimeMonitoringProjection>();
-        services.AddSingleton<IRuntimeMonitoringService>(serviceProvider =>
-            serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
-        services.AddSingleton<IRuntimeDomainEventSubscriber>(serviceProvider =>
-            serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
         services.AddScoped<IRuntimeSessionRunner, RuntimeSessionRunner>();
         // The in-process dispatcher is available only for explicit test composition.
         // Production composition must provide an Agent gateway and deployment resolver.

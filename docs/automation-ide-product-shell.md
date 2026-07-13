@@ -158,8 +158,9 @@ Edit mode exposes:
 - Trace navigation that never mutates production evidence.
 
 Moving a Station shape moves its complete visual subtree because child geometry
-is parent-local. A future 3D renderer must use the same semantic topology,
-published identities, and runtime projection rather than introduce another line
+is parent-local. The editable semantic 3D view uses the same topology,
+parent-local geometry, published identities, and runtime projection; a 3D drag
+therefore persists directly into the shared layout rather than another line
 model.
 
 ### Run and monitor mode

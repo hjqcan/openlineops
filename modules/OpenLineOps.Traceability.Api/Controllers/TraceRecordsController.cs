@@ -223,6 +223,7 @@ public sealed class TraceRecordsController : ControllerBase
             request.SourceOperationRunId,
             request.TransitionId,
             request.TargetOperationId,
+            request.TerminalDisposition,
             request.SourceJudgement,
             request.Traversal,
             request.DecidedAtUtc);
@@ -446,6 +447,7 @@ public sealed class TraceRecordsController : ControllerBase
             decision.SourceOperationRunId,
             decision.TransitionId,
             decision.TargetOperationId,
+            decision.TerminalDisposition,
             decision.SourceJudgement,
             decision.Traversal,
             decision.DecidedAtUtc);

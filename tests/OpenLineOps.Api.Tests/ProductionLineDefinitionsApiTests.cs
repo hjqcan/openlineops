@@ -87,7 +87,22 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                 {
                     transitionId = "load-test",
                     sourceOperationId = "operation.load",
-                    targetOperationId = "operation.test",
+                    targetOperationId = (string?)"operation.test",
+                    terminalDisposition = (string?)null,
+                    kind = "Sequence",
+                    requiredJudgement = (string?)null,
+                    maxTraversals = (int?)null,
+                    parallelGroupId = (string?)null,
+                    outputKey = (string?)null,
+                    expectedOutputKind = (string?)null,
+                    expectedOutputValue = (string?)null
+                },
+                new
+                {
+                    transitionId = "test-completed",
+                    sourceOperationId = "operation.test",
+                    targetOperationId = (string?)null,
+                    terminalDisposition = (string?)"Completed",
                     kind = "Sequence",
                     requiredJudgement = (string?)null,
                     maxTraversals = (int?)null,

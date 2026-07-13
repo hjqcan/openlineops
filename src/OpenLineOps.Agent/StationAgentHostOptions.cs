@@ -1,4 +1,8 @@
+using System.ComponentModel;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+using OpenLineOps.Agent.Infrastructure.Execution;
 
 namespace OpenLineOps.Agent;
 
@@ -16,6 +20,8 @@ internal sealed record StationAgentHostOptions(
     string MaterialArrivalPipeName,
     IReadOnlyDictionary<string, string> TrustedPackagePublicKeys,
     string RuntimeExecutablePath,
+    string PluginHostExecutablePath,
+    StationRuntimePythonScriptOptions PythonScript,
     string RuntimeWorkingDirectory,
     string ArtifactDirectory,
     string ArtifactExchangeDirectory,
@@ -28,6 +34,14 @@ internal sealed record StationAgentHostOptions(
     string SafetyWorkingDirectory,
     TimeSpan SafetyTimeout)
 {
+    internal const string AgentExecutableFileName = "OpenLineOps.Agent.exe";
+    internal const string RuntimeExecutableFileName = "OpenLineOps.StationRuntime.exe";
+    internal const string PluginHostExecutableFileName = "OpenLineOps.PluginHost.exe";
+    internal const string PythonScriptWorkerExecutableFileName = "OpenLineOps.ScriptWorker.exe";
+    internal const string LeastPrivilegeLauncherExecutableFileName =
+        "OpenLineOps.LeastPrivilegeLauncher.exe";
+    internal const string LeastPrivilegeIdentity = "RestrictedCurrentLowIntegrity";
+
     public static StationAgentHostOptions Load(IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
@@ -59,9 +73,40 @@ internal sealed record StationAgentHostOptions(
                 "At least one OpenLineOps:Agent:TrustedPackagePublicKeyFiles entry is required.");
         }
 
-        var runtimeExecutablePath = ResolvePath(Required(
+        var runtimeExecutablePath = ResolveBundledExecutable(
             section["RuntimeExecutablePath"],
-            "OpenLineOps:Agent:RuntimeExecutablePath"));
+            "OpenLineOps:Agent:RuntimeExecutablePath",
+            RuntimeExecutableFileName);
+        var pluginHostExecutablePath = ResolveBundledExecutable(
+            section["PluginHostExecutablePath"],
+            "OpenLineOps:Agent:PluginHostExecutablePath",
+            PluginHostExecutableFileName);
+        var pythonScript = LoadPythonScriptOptions(section.GetSection("PythonScript"));
+        var agentExecutablePath = ResolveBundledExecutable(
+            AgentExecutableFileName,
+            "OpenLineOps Agent executable",
+            AgentExecutableFileName);
+        EnsureDistinctFileIdentities(
+            (agentExecutablePath, "Station Agent"),
+            (runtimeExecutablePath, "Station Runtime"),
+            (pluginHostExecutablePath, "Plugin Host"),
+            (pythonScript.WorkerExecutablePath, "Python Script Worker"),
+            (pythonScript.Sandbox.LeastPrivilegeLauncherExecutable!,
+                "Least Privilege Launcher"));
+        var safetyExecutablePath = ResolvePath(Required(
+            section["SafetyExecutablePath"],
+            "OpenLineOps:Agent:SafetyExecutablePath"));
+        EnsureExistingRegularFile(
+            safetyExecutablePath,
+            "OpenLineOps:Agent:SafetyExecutablePath");
+        EnsureNoReparsePointInPath(
+            safetyExecutablePath,
+            "OpenLineOps:Agent:SafetyExecutablePath");
+        EnsureDifferentFileIdentity(
+            runtimeExecutablePath,
+            safetyExecutablePath,
+            "OpenLineOps:Agent:SafetyExecutablePath must be an independently reviewed "
+            + "safety actuator, not OpenLineOps.StationRuntime.");
         var allowedExternalProgramAccounts = CanonicalCollection(
             section.GetSection("AllowedRestrictedExternalProgramHostAccounts").Get<string[]>() ?? [],
             "OpenLineOps:Agent:AllowedRestrictedExternalProgramHostAccounts");
@@ -94,6 +139,8 @@ internal sealed record StationAgentHostOptions(
                 "OpenLineOps:Agent:MaterialArrivalPipeName"),
             trustedKeys,
             runtimeExecutablePath,
+            pluginHostExecutablePath,
+            pythonScript,
             ResolvePath(section["RuntimeWorkingDirectory"], Path.Combine(dataDirectory, "work")),
             ResolvePath(section["ArtifactDirectory"], Path.Combine(dataDirectory, "artifacts")),
             ResolvePath(Required(
@@ -112,12 +159,62 @@ internal sealed record StationAgentHostOptions(
             Required(
                 section["ExternalProgramAppContainerProfileNamespace"],
                 "OpenLineOps:Agent:ExternalProgramAppContainerProfileNamespace"),
-            ResolvePath(section["SafetyExecutablePath"], runtimeExecutablePath),
+            safetyExecutablePath,
             ResolvePath(section["SafetyWorkingDirectory"], Path.Combine(dataDirectory, "safety")),
             Duration(
                 section["SafetyTimeout"],
                 TimeSpan.FromSeconds(5),
                 "OpenLineOps:Agent:SafetyTimeout"));
+    }
+
+    private static StationRuntimePythonScriptOptions LoadPythonScriptOptions(
+        IConfigurationSection section)
+    {
+        var sandbox = section.GetSection("Sandbox");
+        var requireLeastPrivilege = Boolean(
+            sandbox["RequireLeastPrivilegeExecution"],
+            defaultValue: true);
+        var isolationMode = Required(
+            sandbox["IsolationMode"],
+            "OpenLineOps:Agent:PythonScript:Sandbox:IsolationMode");
+        var identity = Required(
+            sandbox["LeastPrivilegeIdentity"],
+            "OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeIdentity");
+        var noInteractivePrompt = Boolean(
+            sandbox["LeastPrivilegeNoInteractivePrompt"],
+            defaultValue: true);
+        if (!requireLeastPrivilege
+            || !string.Equals(
+                isolationMode,
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                StringComparison.Ordinal)
+            || !string.Equals(identity, LeastPrivilegeIdentity, StringComparison.Ordinal)
+            || !noInteractivePrompt
+            || !string.IsNullOrWhiteSpace(sandbox["LeastPrivilegeArgumentsTemplate"]))
+        {
+            throw new InvalidDataException(
+                "OpenLineOps Agent Python execution requires the fixed non-interactive "
+                + "RestrictedCurrentLowIntegrity policy without a custom arguments template.");
+        }
+
+        return new StationRuntimePythonScriptOptions(
+            ResolveBundledExecutable(
+                section["WorkerExecutablePath"],
+                "OpenLineOps:Agent:PythonScript:WorkerExecutablePath",
+                PythonScriptWorkerExecutableFileName),
+            ResolvePath(Required(
+                section["HostPythonRuntimeDllPath"],
+                "OpenLineOps:Agent:PythonScript:HostPythonRuntimeDllPath")),
+            new StationRuntimePythonScriptSandboxOptions(
+                requireLeastPrivilege,
+                isolationMode,
+                identity,
+                ResolveBundledExecutable(
+                    sandbox["LeastPrivilegeLauncherExecutable"],
+                    "OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeLauncherExecutable",
+                    LeastPrivilegeLauncherExecutableFileName),
+                LeastPrivilegeArgumentsTemplate: null,
+                LeastPrivilegeNoInteractivePrompt: noInteractivePrompt));
     }
 
     private static string Required(string? value, string name) =>
@@ -133,6 +230,182 @@ internal sealed record StationAgentHostOptions(
             ?? throw new InvalidDataException("A required Agent path is missing.");
         return Path.GetFullPath(value, AppContext.BaseDirectory);
     }
+
+    private static string ResolveBundledExecutable(
+        string? configured,
+        string settingName,
+        string requiredFileName)
+    {
+        var value = Required(configured, settingName);
+        if (!string.Equals(value, requiredFileName, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{settingName} must be exactly '{requiredFileName}' and cannot redirect the Agent outside its release bundle.");
+        }
+
+        var bundleRoot = Path.GetFullPath(AppContext.BaseDirectory);
+        var fullPath = Path.GetFullPath(requiredFileName, bundleRoot);
+        if (!string.Equals(
+                Path.GetDirectoryName(fullPath)?.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                bundleRoot.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{settingName} must resolve directly under the Agent release bundle root.");
+        }
+
+        EnsureExistingRegularFile(fullPath, settingName);
+        EnsureNoReparsePointInPath(fullPath, settingName, stopAtDirectory: bundleRoot);
+        return fullPath;
+    }
+
+    private static void EnsureExistingRegularFile(string path, string settingName)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException(
+                $"{settingName} executable does not exist.",
+                path);
+        }
+
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.Directory) != 0)
+        {
+            throw new InvalidDataException($"{settingName} must identify a regular file.");
+        }
+    }
+
+    private static void EnsureNoReparsePointInPath(
+        string path,
+        string settingName,
+        string? stopAtDirectory = null)
+    {
+        var stopAt = stopAtDirectory is null
+            ? null
+            : Path.GetFullPath(stopAtDirectory).TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+        FileSystemInfo? current = new FileInfo(path);
+        while (current is not null)
+        {
+            if ((current.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"{settingName} cannot traverse a symbolic link, junction, or other reparse point.");
+            }
+
+            if (stopAt is not null
+                && string.Equals(
+                    current.FullName.TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar),
+                    stopAt,
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            current = current switch
+            {
+                FileInfo file => file.Directory,
+                DirectoryInfo directory => directory.Parent,
+                _ => null
+            };
+        }
+    }
+
+    private static void EnsureDistinctFileIdentities(
+        params (string Path, string Role)[] executables)
+    {
+        for (var left = 0; left < executables.Length; left++)
+        {
+            for (var right = left + 1; right < executables.Length; right++)
+            {
+                EnsureDifferentFileIdentity(
+                    executables[left].Path,
+                    executables[right].Path,
+                    $"Bundled {executables[left].Role} and {executables[right].Role} executables must be distinct files.");
+            }
+        }
+    }
+
+    private static void EnsureDifferentFileIdentity(
+        string leftPath,
+        string rightPath,
+        string errorMessage)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(leftPath, rightPath, comparison))
+        {
+            throw new InvalidDataException(errorMessage);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var leftIdentity = ReadWindowsFileIdentity(leftPath);
+        var rightIdentity = ReadWindowsFileIdentity(rightPath);
+        if (leftIdentity == rightIdentity)
+        {
+            throw new InvalidDataException(errorMessage);
+        }
+    }
+
+    private static WindowsFileIdentity ReadWindowsFileIdentity(string path)
+    {
+        using SafeFileHandle handle = File.OpenHandle(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw new IOException(
+                $"Could not read the file identity for '{path}'.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+        }
+
+        return new WindowsFileIdentity(
+            information.VolumeSerialNumber,
+            ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle fileHandle,
+        out ByHandleFileInformation fileInformation);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    private readonly record struct WindowsFileIdentity(
+        uint VolumeSerialNumber,
+        ulong FileIndex);
 
     private static bool Boolean(string? value, bool defaultValue) =>
         value is null

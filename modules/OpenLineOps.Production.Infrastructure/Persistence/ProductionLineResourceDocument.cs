@@ -58,7 +58,8 @@ internal sealed record LineControllerAuthorizationDocument(
 internal sealed record RouteTransitionDocument(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

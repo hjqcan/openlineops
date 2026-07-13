@@ -25,7 +25,10 @@ unit ID, external identity, and actor are required. `--run-id` may supply the
 non-empty canonical GUID used for an idempotent caller-owned run request.
 
 The process writes machine-readable JSON status and returns stable process exit
-codes. Cancellation through Ctrl+C requests a controlled stop. Use a service,
-scheduler, MES adapter, or operator launcher to invoke the executable under an
-identity that has only the Project, runtime state, device, and artifact access
-required by that automation line.
+codes. Runner starts the same Coordinator, Station-job Outbox, result Inbox,
+and transport hosted services as the API host, submits the run asynchronously,
+and waits on its durable terminal state; it does not execute the route through
+a private synchronous path. Cancellation through Ctrl+C requests a controlled
+stop. Use a service, scheduler, MES adapter, or operator launcher to invoke the
+executable under an identity that has only the Project, runtime state, device,
+and artifact access required by that automation line.

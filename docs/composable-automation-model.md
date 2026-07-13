@@ -150,9 +150,10 @@ Containment rules are enforced by the backend:
 Coordinates are local to the parent element. Moving a Station therefore moves
 its entire visual subtree without a multi-write compensation protocol.
 
-The future 3D view is another projection of the same topology and runtime state.
-It may add 3D-specific presentation metadata, but it may not create alternative
-System, Group, or Slot identities.
+The 3D editor and live view are another projection of the same topology,
+parent-local geometry, and runtime state. They support orbit, zoom, selection,
+and block dragging while persisting the same layout coordinates as 2D. They do
+not create alternative System, Group, or Slot identities.
 
 ## ProductionLineDefinition
 

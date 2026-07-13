@@ -162,7 +162,9 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 "station.secondary",
                 "configuration.secondary"));
 
-        var transition = Assert.Single(request.RouteTransitions);
+        Assert.Equal(3, request.RouteTransitions.Count);
+        var transition = Assert.Single(request.RouteTransitions, candidate =>
+            candidate.Kind == RuntimeRouteTransitionKind.Condition);
         Assert.Equal(RuntimeRouteTransitionKind.Condition, transition.Kind);
         Assert.Equal("inspection.accepted", transition.OutputCondition?.OutputKey);
         Assert.Equal(
@@ -438,22 +440,25 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 flowIr));
         }
 
-        var transitions = includeCondition
-            ? new ProjectReleaseRouteTransition[]
-            {
+        ProjectReleaseRouteTransition[] transitions = includeCondition
+            ?
+            [
                 new(
                     "transition.accepted",
                     "operation.main",
                     "operation.secondary",
+                    null,
                     "Condition",
                     RequiredJudgement: null,
                     MaxTraversals: null,
                     ParallelGroupId: null,
                     OutputKey: "inspection.accepted",
                     ExpectedOutputKind: "Boolean",
-                    ExpectedOutputValue: "true")
-            }
-            : [];
+                    ExpectedOutputValue: "true"),
+                TerminalReleaseTransition("transition.main-fallback", "operation.main", "Held"),
+                TerminalReleaseTransition("transition.secondary-completed", "operation.secondary", "Completed")
+            ]
+            : [TerminalReleaseTransition("transition.main-completed", "operation.main", "Completed")];
 
         return new OpenedProjectReleaseArtifact(
             "snapshot.main",
@@ -493,6 +498,22 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 []),
             []);
     }
+
+    private static ProjectReleaseRouteTransition TerminalReleaseTransition(
+        string transitionId,
+        string sourceOperationId,
+        string disposition) => new(
+            transitionId,
+            sourceOperationId,
+            null,
+            disposition,
+            "Sequence",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
 
     private static ProjectReleaseOperation Operation(
         string operationId,

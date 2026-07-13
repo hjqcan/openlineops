@@ -18,7 +18,11 @@ public sealed class ProjectReleaseStationDeploymentSetTests
                 Operation("operation.second", "station.a"),
                 Operation("operation.third", "station.z")
             ],
-            [],
+            [
+                Transition("transition.first-second", "operation.first", "operation.second"),
+                Transition("transition.second-third", "operation.second", "operation.third"),
+                Transition("transition.third-completed", "operation.third", null)
+            ],
             [
                 Authorization("authorization.remote", "station.b"),
                 Authorization("authorization.local-target", "station.a")
@@ -42,6 +46,22 @@ public sealed class ProjectReleaseStationDeploymentSetTests
         [],
         [],
         []);
+
+    private static ProjectReleaseRouteTransition Transition(
+        string transitionId,
+        string sourceOperationId,
+        string? targetOperationId) => new(
+        transitionId,
+        sourceOperationId,
+        targetOperationId,
+        targetOperationId is null ? "Completed" : null,
+        "Sequence",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 
     private static ProjectReleaseLineControllerAuthorization Authorization(
         string authorizationId,

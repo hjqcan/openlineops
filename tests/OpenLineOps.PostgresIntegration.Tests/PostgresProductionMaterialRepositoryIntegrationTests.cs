@@ -136,7 +136,7 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
             await restarted.ListGenealogyLinksAsync(),
             link => link.Id == genealogy.Id);
         var completionEvidence = Assert.Single(await restarted.ListTimelineAsync(
-            new ProductionMaterialTimelineQuery(
+            ProductionMaterialTimelineQuery.StrictIntersection(
                 productionUnitId: child.Id,
                 productionRunId: completionRunId)));
 
@@ -164,6 +164,142 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
         Assert.Equal(1, restoredChild.Revision);
         Assert.Equal(1, restoredCarrier.Revision);
         Assert.Equal(1, restoredSlot.Revision);
+    }
+
+    [PostgresIntegrationFact]
+    public async Task TimelineQueryModesPreserveMaterialRunAndTimeScopeSemantics()
+    {
+        await using var schema = await PostgresIsolatedSchema.CreateAsync(
+            fixture.ConnectionString,
+            "timeline");
+        await using var repository =
+            new PostgreSqlProductionMaterialRepository(schema.ConnectionString);
+        var unique = Guid.NewGuid().ToString("N");
+        var parent = CreateUnit($"TIMELINE-PARENT-{unique}");
+        var child = CreateUnit($"TIMELINE-CHILD-{unique}");
+        var unrelated = CreateUnit($"TIMELINE-UNRELATED-{unique}");
+        var carrier = Carrier.Register(
+            new CarrierId($"timeline-carrier-{unique}"),
+            "timeline-tray",
+            1,
+            "integration-test",
+            BaseTimeUtc);
+        var runId = ProductionRunId.New();
+        var otherRunId = ProductionRunId.New();
+        var firstStation = MaterialLocation.AtStation($"timeline-line-{unique}", "station-a");
+        var secondStation = MaterialLocation.AtStation($"timeline-line-{unique}", "station-b");
+        var childRunEvidenceId = Guid.NewGuid();
+        var carrierRunEvidenceId = Guid.NewGuid();
+        var unrelatedRunEvidenceId = Guid.NewGuid();
+        var genealogy = new MaterialGenealogyLink(
+            MaterialGenealogyLinkId.New(),
+            parent.Id,
+            child.Id,
+            "ComponentOf",
+            "assemble-board",
+            "integration-test",
+            BaseTimeUtc.AddSeconds(4));
+        var childOtherRunEvidenceId = Guid.NewGuid();
+
+        Assert.True(await repository.TryAddAsync(parent));
+        Assert.True(await repository.TryAddAsync(child));
+        Assert.True(await repository.TryAddAsync(unrelated));
+        Assert.True(await repository.TryAddAsync(carrier));
+        Assert.True(child.Arrive(firstStation, BaseTimeUtc.AddSeconds(1)).Succeeded);
+        Assert.True(carrier.Arrive(firstStation, BaseTimeUtc.AddSeconds(2)).Succeeded);
+        Assert.True(unrelated.Arrive(firstStation, BaseTimeUtc.AddSeconds(3)).Succeeded);
+        await repository.CommitAsync(new ProductionMaterialCommit(
+            productionUnits:
+            [
+                new ProductionUnitUpdate(child, 0),
+                new ProductionUnitUpdate(unrelated, 0)
+            ],
+            carriers: [new CarrierUpdate(carrier, 0)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.Location(
+                    childRunEvidenceId,
+                    MaterialReference.ForProductionUnit(child.Id),
+                    runId,
+                    null,
+                    firstStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(1)),
+                ProductionMaterialTimelineEntry.Location(
+                    carrierRunEvidenceId,
+                    MaterialReference.ForCarrier(carrier.Id),
+                    runId,
+                    null,
+                    firstStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(2)),
+                ProductionMaterialTimelineEntry.Location(
+                    unrelatedRunEvidenceId,
+                    MaterialReference.ForProductionUnit(unrelated.Id),
+                    runId,
+                    null,
+                    firstStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(3))
+            ]));
+        Assert.True(await repository.TryAddAsync(genealogy));
+
+        Assert.True(child.Transfer(
+            firstStation,
+            secondStation,
+            BaseTimeUtc.AddSeconds(5)).Succeeded);
+        Assert.True(carrier.Transfer(
+            firstStation,
+            secondStation,
+            BaseTimeUtc.AddSeconds(6)).Succeeded);
+        await repository.CommitAsync(new ProductionMaterialCommit(
+            productionUnits: [new ProductionUnitUpdate(child, 1)],
+            carriers: [new CarrierUpdate(carrier, 1)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.Location(
+                    childOtherRunEvidenceId,
+                    MaterialReference.ForProductionUnit(child.Id),
+                    otherRunId,
+                    firstStation,
+                    secondStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(5)),
+                ProductionMaterialTimelineEntry.Location(
+                    Guid.NewGuid(),
+                    MaterialReference.ForCarrier(carrier.Id),
+                    runId,
+                    firstStation,
+                    secondStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(6))
+            ]));
+
+        var strict = await repository.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.StrictIntersection(
+                child.Id,
+                runId,
+                carrier.Id,
+                BaseTimeUtc.AddSeconds(5)));
+        var union = await repository.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.UnionScope(
+                child.Id,
+                runId,
+                carrier.Id,
+                BaseTimeUtc.AddSeconds(5)));
+
+        Assert.Equal(
+            [childRunEvidenceId, carrierRunEvidenceId],
+            strict.Select(entry => entry.EvidenceId).ToArray());
+        Assert.Equal(
+            [
+                childRunEvidenceId,
+                carrierRunEvidenceId,
+                unrelatedRunEvidenceId,
+                genealogy.Id.Value,
+                childOtherRunEvidenceId
+            ],
+            union.Select(entry => entry.EvidenceId).ToArray());
     }
 
     [PostgresIntegrationFact]

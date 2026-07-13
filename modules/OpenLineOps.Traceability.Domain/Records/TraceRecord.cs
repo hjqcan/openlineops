@@ -316,11 +316,14 @@ public sealed class TraceRecord
             StringComparer.Ordinal);
         foreach (var decision in _routeDecisions)
         {
-            if (!operationsByRunId.TryGetValue(decision.SourceOperationRunId, out var source)
-                || !_operations.Any(operation => string.Equals(
+            var targetMatchesEvidence = decision.TargetOperationId is not null
+                ? _operations.Any(operation => string.Equals(
                     operation.OperationId,
                     decision.TargetOperationId,
                     StringComparison.Ordinal))
+                : decision.TerminalDisposition == Disposition;
+            if (!operationsByRunId.TryGetValue(decision.SourceOperationRunId, out var source)
+                || !targetMatchesEvidence
                 || source.ExecutionStatus != ExecutionStatus.Completed
                 || source.Judgement != decision.SourceJudgement
                 || decision.DecidedAtUtc < source.CompletedAtUtc)

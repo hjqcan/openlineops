@@ -680,6 +680,43 @@
   color: #8f5b36;
 }
 
+.production-terminal-node {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  box-sizing: border-box;
+  width: 190px;
+  height: 78px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px 16px;
+  border: 1px solid #b9966f;
+  border-left: 5px solid #9b6438;
+  border-radius: 2px 18px 18px 2px;
+  background: #fff8ec;
+  box-shadow: 0 3px 8px rgb(70 50 30 / 13%);
+  color: #614329;
+}
+
+.production-terminal-node small {
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.production-terminal-node strong {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.production-terminal-node span {
+  margin-top: 2px;
+  color: #8b725e;
+  font-size: 8px;
+}
+
 .production-route-empty {
   display: flex;
   min-height: 100%;

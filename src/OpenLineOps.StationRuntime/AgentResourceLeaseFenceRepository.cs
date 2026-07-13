@@ -29,7 +29,6 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceRequirement> resources,
-        DateTimeOffset acquiredAtUtc,
         TimeSpan duration,
         CancellationToken cancellationToken = default) =>
         ValueTask.FromException<IReadOnlyCollection<ResourceLease>?>(ImmutableOperation());
@@ -38,13 +37,11 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(evidence);
         if (runId.Value != _request.ProductionRunId
             || !string.Equals(operationRunId, _request.OperationRunId, StringComparison.Ordinal)
-            || validatedAtUtc.Offset != TimeSpan.Zero
             || evidence.Count != _expected.Count
             || evidence.Any(item => !_expected.TryGetValue(item.Resource, out var expected)
                 || expected.FencingToken != item.FencingToken
@@ -103,6 +100,7 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
     public ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
         CancellationToken cancellationToken = default) =>
         ValueTask.FromException(ImmutableOperation());
 

@@ -436,21 +436,31 @@ async function verifySavedRouteAuthoring() {
       `new Promise(resolve => requestAnimationFrame(() => {
         const model = document.querySelector('[data-testid="production-product-model-id"]');
         const nodes = document.querySelectorAll('[data-testid^="production-operation-node-"]');
+        const terminals = document.querySelectorAll('[data-testid^="production-terminal-node-"]');
         const edges = document.querySelectorAll('[data-testid^="production-transition-edge-"]');
+        const completed = document.querySelector('[data-testid="production-terminal-node-Completed"]');
+        const nonconforming = document.querySelector('[data-testid="production-terminal-node-Nonconforming"]');
+        const vendorOperation = document.querySelector('[data-testid="production-operation-node-operation.vendor-test"]');
         const publish = document.querySelector('[data-testid="publish-production-line-snapshot"]');
         const ready = model?.value === ${JSON.stringify(fixture.productModelId)}
           && nodes.length === 2
-          && edges.length === 2
+          && terminals.length === 2
+          && edges.length === 4
+          && completed?.textContent?.includes('Completed') === true
+          && nonconforming?.textContent?.includes('Nonconforming') === true
+          && vendorOperation?.textContent?.includes('2 CONDITIONAL TERMINALS') === true
           && publish?.disabled === false;
         resolve(ready ? {
           productModelId: model.value,
           operationCount: nodes.length,
+          terminalCount: terminals.length,
+          terminalDispositions: [completed.textContent, nonconforming.textContent],
           transitionCount: edges.length,
           publishEnabled: true
         } : false);
       }))`,
       15_000,
-      'the saved Sequence and bounded Rework route to remain responsive');
+      'the saved Sequence, bounded Rework, and explicit terminal routes to remain responsive');
   } catch (error) {
     const rendererStack = await harness.captureJavaScriptStack().catch(stackError => ([{
       captureError: stackError instanceof Error ? stackError.message : String(stackError)
@@ -464,7 +474,9 @@ async function verifySavedRouteAuthoring() {
   await harness.click('production-operation-node-operation.vendor-test');
   await harness.waitFor(
     'document.querySelector("[data-testid=\\"production-operation-inspector\\"]")'
-      + '?.textContent?.includes("Run Vendor Test") === true',
+      + '?.textContent?.includes("Run Vendor Test") === true'
+      + ' && document.querySelector("[data-testid=\\"production-operation-inspector\\"]")'
+      + '?.textContent?.includes("Completed / Nonconforming (conditional terminals)") === true',
     15_000,
     'the saved Vendor Test Operation inspector to respond');
   const screenshot = await recordScreenshot('studio-saved-route-authoring');
@@ -845,6 +857,7 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             transitionId: 'route.preparation-to-vendor-test',
             sourceOperationId: ids.operationPrep,
             targetOperationId: ids.operationTest,
+            terminalDisposition: null,
             kind: 'Sequence',
             requiredJudgement: null,
             maxTraversals: null,
@@ -857,9 +870,36 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             transitionId: 'route.vendor-failed-rework',
             sourceOperationId: ids.operationTest,
             targetOperationId: ids.operationPrep,
+            terminalDisposition: null,
             kind: 'Rework',
             requiredJudgement: 'Failed',
             maxTraversals: 1,
+            parallelGroupId: null,
+            outputKey: null,
+            expectedOutputKind: null,
+            expectedOutputValue: null
+          },
+          {
+            transitionId: 'route.vendor-failed-terminal',
+            sourceOperationId: ids.operationTest,
+            targetOperationId: null,
+            terminalDisposition: 'Nonconforming',
+            kind: 'Judgement',
+            requiredJudgement: 'Failed',
+            maxTraversals: null,
+            parallelGroupId: null,
+            outputKey: null,
+            expectedOutputKind: null,
+            expectedOutputValue: null
+          },
+          {
+            transitionId: 'route.vendor-default-terminal',
+            sourceOperationId: ids.operationTest,
+            targetOperationId: null,
+            terminalDisposition: 'Completed',
+            kind: 'Sequence',
+            requiredJudgement: null,
+            maxTraversals: null,
             parallelGroupId: null,
             outputKey: null,
             expectedOutputKind: null,
@@ -1025,6 +1065,18 @@ async function runConcurrentAndPassedScenario() {
     'Passed vendor run');
   await completeSlotAndUnload(unitB, fixture.station2, fixture.slot2, fixture.station2);
   const passedTrace = await waitForTrace(unitB.runId);
+  assert(passedRun.disposition === 'Completed', 'Passed run did not select the Completed disposition.');
+  assert(passedTrace.disposition === 'Completed', 'Passed trace did not freeze the Completed disposition.');
+  assert(passedRun.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-default-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Completed')),
+  'Passed run did not select the explicit Completed terminal route.');
+  assert(passedTrace.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-default-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Completed')),
+  'Passed trace did not freeze the explicit Completed terminal route decision.');
   const artifacts = assertVendorArtifacts(passedTrace);
   assert(passedTrace.operations.every(operation => operation.incidentCount === 0), 'Passed run contains an Incident.');
   const passedScreenshot = await openTraceAndScreenshot(unitB.runId, 'scenario-vendor-passed-trace');
@@ -1071,12 +1123,24 @@ async function runFailedReworkScenario() {
     unit.runId,
     run => run.isTerminal && run.executionStatus === 'Completed' && run.judgement === 'Failed',
     'bounded Failed rework terminal');
+  assert(terminal.disposition === 'Nonconforming', 'Bounded Failed run did not select the Nonconforming disposition.');
+  assert(terminal.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-failed-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Nonconforming')),
+  'Bounded Failed run did not select the explicit Nonconforming terminal route.');
   await completeSlotAndUnload(unit, fixture.station2, fixture.slot2, fixture.station2);
   const trace = await waitForTrace(unit.runId);
+  assert(trace.disposition === 'Nonconforming', 'Bounded Failed trace did not freeze the Nonconforming disposition.');
   assert(trace.routeDecisions.some(decision => (
     decision.transitionId === 'route.vendor-failed-rework'
       && decision.sourceJudgement === 'Failed')),
   'Trace did not freeze the Failed Rework route decision.');
+  assert(trace.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-failed-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Nonconforming')),
+  'Trace did not freeze the explicit Nonconforming terminal route decision.');
   assert(trace.operations.reduce((count, operation) => count + operation.incidentCount, 0) === 0, 'Failed trace contains a system Incident.');
   const screenshot = await openTraceAndScreenshot(unit.runId, 'scenario-vendor-failed-rework-trace');
   summary.scenarios.vendorFailedRework = {
@@ -1084,7 +1148,7 @@ async function runFailedReworkScenario() {
     unit,
     run: compactRun(terminal),
     trace: compactTrace(trace),
-    assertion: 'Vendor Failed remained Completed + Failed, traversed the bounded Rework edge, and created no system Incident.',
+    assertion: 'Vendor Failed remained Completed + Failed, traversed bounded Rework, selected Nonconforming, and created no system Incident.',
     screenshots: [screenshot]
   };
   await persistSummary();

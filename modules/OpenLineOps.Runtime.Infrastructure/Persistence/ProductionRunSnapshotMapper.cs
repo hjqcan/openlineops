@@ -36,6 +36,10 @@ internal static class ProductionRunSnapshotMapper
             snapshot.Judgement.ToString(),
             snapshot.Disposition.ToString(),
             snapshot.ControlState.ToString(),
+            snapshot.SafeStopRequestedBy,
+            snapshot.SafeStopReason,
+            snapshot.SafeStopRequestedAtUtc,
+            snapshot.SafeStopAcknowledgedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -50,6 +54,7 @@ internal static class ProductionRunSnapshotMapper
                 decision.SourceOperationRunId,
                 decision.TransitionId,
                 decision.TargetOperationId,
+                decision.TerminalDisposition?.ToString(),
                 decision.SourceJudgement.ToString(),
                 decision.Traversal,
                 decision.DecidedAtUtc)).ToArray(),
@@ -82,13 +87,7 @@ internal static class ProductionRunSnapshotMapper
         var operations = Required(snapshot.Operations, "operation runs")
             .Select(operation => ToAggregate(operation, definitionById)).ToArray();
         var decisions = Required(snapshot.RouteDecisions, "route decisions")
-            .Select(decision => new RouteDecisionSnapshot(
-                Text(decision.SourceOperationRunId, "route source Operation Run id"),
-                Text(decision.TransitionId, "route transition id"),
-                Text(decision.TargetOperationId, "route target operation id"),
-                Enum<ResultJudgement>(decision.SourceJudgement, "route source judgement"),
-                Positive(decision.Traversal, "route traversal"),
-                decision.DecidedAtUtc)).ToArray();
+            .Select(ToAggregate).ToArray();
         var traversalItems = Required(snapshot.TransitionTraversals, "transition traversals");
         var traversalCounts = traversalItems.ToDictionary(
             item => Text(item.TransitionId, "transition traversal id"),
@@ -122,6 +121,10 @@ internal static class ProductionRunSnapshotMapper
             Enum<ResultJudgement>(snapshot.Judgement, "result judgement"),
             Enum<ProductDisposition>(snapshot.Disposition, "product disposition"),
             Enum<ProductionRunControlState>(snapshot.ControlState, "control state"),
+            Optional(snapshot.SafeStopRequestedBy, "Safe Stop actor"),
+            Optional(snapshot.SafeStopReason, "Safe Stop reason"),
+            snapshot.SafeStopRequestedAtUtc,
+            snapshot.SafeStopAcknowledgedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -186,6 +189,7 @@ internal static class ProductionRunSnapshotMapper
         transition.TransitionId,
         transition.SourceOperationId,
         transition.TargetOperationId,
+        transition.TerminalDisposition?.ToString(),
         transition.Kind.ToString(),
         transition.RequiredJudgement?.ToString(),
         transition.MaxTraversals,
@@ -197,7 +201,7 @@ internal static class ProductionRunSnapshotMapper
     private static RouteTransitionDefinition ToAggregate(PersistedRouteTransition transition) => new(
         Text(transition.TransitionId, "transition id"),
         Text(transition.SourceOperationId, "source operation id"),
-        Text(transition.TargetOperationId, "target operation id"),
+        Optional(transition.TargetOperationId, "target operation id"),
         Enum<RuntimeRouteTransitionKind>(transition.Kind, "transition kind"),
         transition.RequiredJudgement is null
             ? null
@@ -214,7 +218,32 @@ internal static class ProductionRunSnapshotMapper
                         Enum<ProductionContextValueKind>(
                             transition.ExpectedOutputKind,
                             "expected output kind"),
-                        Text(transition.ExpectedOutputValue, "expected output value"))));
+                        Text(transition.ExpectedOutputValue, "expected output value"))),
+        transition.TerminalDisposition is null
+            ? null
+            : Enum<ProductDisposition>(transition.TerminalDisposition, "terminal disposition"));
+
+    private static RouteDecisionSnapshot ToAggregate(PersistedRouteDecision decision)
+    {
+        var targetOperationId = Optional(decision.TargetOperationId, "route target operation id");
+        ProductDisposition? terminalDisposition = decision.TerminalDisposition is null
+            ? null
+            : Enum<ProductDisposition>(decision.TerminalDisposition, "route terminal disposition");
+        if ((targetOperationId is null) == (terminalDisposition is null))
+        {
+            throw new InvalidDataException(
+                "Persisted route decision requires exactly one target Operation or terminal disposition.");
+        }
+
+        return new RouteDecisionSnapshot(
+            Text(decision.SourceOperationRunId, "route source Operation Run id"),
+            Text(decision.TransitionId, "route transition id"),
+            targetOperationId,
+            terminalDisposition,
+            Enum<ResultJudgement>(decision.SourceJudgement, "route source judgement"),
+            Positive(decision.Traversal, "route traversal"),
+            decision.DecidedAtUtc);
+    }
 
     private static PersistedOperationRun ToSnapshot(OperationRunSnapshot operation) => new(
         operation.Definition.OperationId,
@@ -417,6 +446,10 @@ internal sealed record PersistedProductionRun(
     string? Judgement,
     string? Disposition,
     string? ControlState,
+    string? SafeStopRequestedBy,
+    string? SafeStopReason,
+    DateTimeOffset? SafeStopRequestedAtUtc,
+    DateTimeOffset? SafeStopAcknowledgedAtUtc,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset LastTransitionAtUtc,
     DateTimeOffset? StartedAtUtc,
@@ -453,6 +486,7 @@ internal sealed record PersistedRouteTransition(
     string? TransitionId,
     string? SourceOperationId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? Kind,
     string? RequiredJudgement,
     int? MaxTraversals,
@@ -489,6 +523,7 @@ internal sealed record PersistedRouteDecision(
     string? SourceOperationRunId,
     string? TransitionId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);

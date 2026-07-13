@@ -882,7 +882,17 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                         }
                     }
                 },
-                transitions = Array.Empty<object>(),
+                transitions = new[]
+                {
+                    new
+                    {
+                        transitionId = "operation.main-completed",
+                        sourceOperationId = "operation.main",
+                        targetOperationId = (string?)null,
+                        terminalDisposition = "Completed",
+                        kind = "Sequence"
+                    }
+                },
                 lineControllerAuthorizations = Array.Empty<object>()
             });
         var body = await response.Content.ReadAsStringAsync();
@@ -1185,17 +1195,33 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         {
             base.ConfigureWebHost(builder);
             var repositoryRoot = FindRepositoryRoot();
-            var workerProjectPath = Path.Combine(
+            var workerProjectDirectory = Path.Combine(
                 repositoryRoot,
                 "src",
-                "OpenLineOps.ScriptWorker",
-                "OpenLineOps.ScriptWorker.csproj");
+                "OpenLineOps.ScriptWorker");
+            var testFrameworkDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+            var buildConfiguration = testFrameworkDirectory.Parent?.Name
+                ?? throw new InvalidOperationException(
+                    "Could not resolve the test build configuration from the output directory.");
+            var workerAssemblyPath = Path.Combine(
+                workerProjectDirectory,
+                "bin",
+                buildConfiguration,
+                testFrameworkDirectory.Name,
+                "OpenLineOps.ScriptWorker.dll");
+            if (!File.Exists(workerAssemblyPath))
+            {
+                throw new FileNotFoundException(
+                    "The ScriptWorker must be built in the same configuration as the API tests.",
+                    workerAssemblyPath);
+            }
+
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerFileName",
                 "dotnet");
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerArguments",
-                $"run --project \"{workerProjectPath}\" --no-launch-profile --no-build");
+                $"\"{workerAssemblyPath}\"");
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerWorkingDirectory",
                 repositoryRoot);

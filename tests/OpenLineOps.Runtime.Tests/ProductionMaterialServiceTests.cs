@@ -118,7 +118,7 @@ public sealed class ProductionMaterialServiceTests
         Assert.Equal(5, persistedSlot.Revision);
 
         var timeline = await repository.ListTimelineAsync(
-            new ProductionMaterialTimelineQuery(productionUnitId: unitId));
+            ProductionMaterialTimelineQuery.StrictIntersection(productionUnitId: unitId));
         var locations = timeline
             .Where(entry => entry.Kind == ProductionMaterialEvidenceKind.LocationTransition)
             .ToArray();

@@ -56,22 +56,55 @@ ACL inheritance and grants:
 
 - SYSTEM and Administrators: full control for installation and controlled
   removal;
-- the dedicated Agent service identity: read and execute;
-- the OpenLineOps external-program content capability SID: read and execute.
+- the dedicated Agent service identity: owner and trusted install/cleanup
+  control plane, with normal file mutation denied by the frozen ACL;
+- the OpenLineOps external-program content capability SID: read and execute,
+  with write, rename, delete, permission changes, and ownership changes
+  explicitly denied.
 
 The service-account and capability read grants are both required by the
 AppContainer dual-principal access check. Every Job profile receives the content
 capability while each vendor invocation retains its own writable workspace.
-Files and directories are marked read-only. Runtime verification rejects
-an extra file, a missing file, a changed size or hash, ACL drift, inherited
-permissions, or writable content. Cache deletion is performed only by the
-installer's bounded content-addressed cleanup operation.
+The cache boundary and every frozen object must be owned by the exact Agent
+service SID. Files and directories are marked read-only. Before every Station
+operation dispatch, the Agent revalidates the signed package and its complete
+cached inventory, hashes, owner, ACLs, and read-only attributes. Verification
+rejects an extra file, a missing file, a changed size or hash, ACL drift,
+inherited permissions, or writable content. Cache deletion is performed only
+by the installer's bounded content-addressed cleanup operation.
+
+The Agent service identity is intentionally trusted: as Windows owner it can
+rewrite an ACL for bounded installation cleanup, and Station Runtime currently
+runs under the same host identity. Package immutability protects the Station
+vendor capability and its AppContainer process; it does not claim to survive a
+compromised Agent or Station Runtime. The mandatory per-dispatch verification
+prevents host-identity drift or tampering from reaching the next vendor
+execution, but the service account and Agent binaries remain part of the
+trusted computing base.
 
 Grant the service account modify access to the configured Agent data,
 runtime-work, artifact, and SQLite directories. Do not grant the AppContainer
 access to those roots. For each invocation, the host creates a unique work
 directory and grants only that directory to the AppContainer. The frozen
 package remains read-only.
+
+The release bundle also contains the self-contained Python Script Worker.
+Agent configuration binds Station Runtime to its absolute co-packaged path and
+to one explicit sandbox policy. The production default requires least-privilege
+execution through the signed co-packaged
+`OpenLineOps.LeastPrivilegeLauncher.exe` and the fixed
+`RestrictedCurrentLowIntegrity` identity. The launcher derives a restricted
+primary token from the current Agent token, sets mandatory Low integrity (RID
+4096), and starts only its sibling Script Worker. Agent startup fails closed if
+the launcher is missing, redirected, a reparse point, file-identity aliased, or
+configured with another identity or argument layout. It never uses `runas`, a
+password, or an interactive prompt.
+Container isolation is not an Agent option: the Windows worker and host Python
+DLL are never represented as if they were files inside an unverified image.
+`ExternalProcess` is limited to development or test configuration with required
+least privilege explicitly disabled. The configured host Python runtime DLL
+path is passed explicitly through the cleared Station Runtime environment;
+ambient worker commands are ignored.
 
 On Windows, the native launcher supports a frozen executable whose absolute
 path exceeds `MAX_PATH` by passing an extended-length application name directly
@@ -114,8 +147,8 @@ Before enabling production work on a Station:
    account and that its profile is loaded.
 2. Confirm Broker TLS is required and the Agent trusts only the intended RSA
    public keys.
-3. Install a signed package and verify that direct write, rename, and delete
-   attempts against its cache fail.
+3. Install a signed package and verify from a real vendor AppContainer that
+   write, rename, delete, ACL-change, and ownership-change attempts all fail.
 4. Run the imported vendor-program trial with network denied, then explicitly
    opt into `internetClient` only when the protocol requires it.
 5. Exercise operator cancel, timeout, Agent termination, and Safe Stop, and

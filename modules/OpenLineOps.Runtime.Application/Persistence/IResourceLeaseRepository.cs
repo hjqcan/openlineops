@@ -8,11 +8,12 @@ public interface IResourceLeaseRepository
     ValueTask<IReadOnlyCollection<ResourceLease>> ListAsync(
         CancellationToken cancellationToken = default);
 
+    // Lease time is repository-authoritative. Callers declare only the duration and must
+    // never supply a wall-clock value used for expiry or fencing decisions.
     ValueTask<IReadOnlyCollection<ResourceLease>?> TryAcquireAsync(
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceRequirement> resources,
-        DateTimeOffset acquiredAtUtc,
         TimeSpan duration,
         CancellationToken cancellationToken = default);
 
@@ -20,12 +21,12 @@ public interface IResourceLeaseRepository
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default);
 
     ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
         CancellationToken cancellationToken = default);
 
     ValueTask HoldForRecoveryAsync(

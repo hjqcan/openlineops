@@ -76,7 +76,6 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
                         run.Id,
                         operation.OperationRunId,
                         operation.ResourceRequirements,
-                        Now.AddSeconds(2),
                         TimeSpan.FromMinutes(5)))
                 .ToArray();
             Assert.True(run.StartOperation(
@@ -131,16 +130,11 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             Assert.False(await restarted.TryEnqueueAsync(request, [change]));
             var pendingLease = Assert.Single(await restarted.ListPendingAsync(10));
             Assert.Equal(nameof(ResourceLeaseChanged), pendingLease.Kind);
-            var retriedLease = Assert.Single(
-                Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
-                    await restarted.TryAcquireAsync(
-                        run.Id,
-                        request.OperationRunId,
-                        acquired.Select(static lease => lease.Resource).ToArray(),
-                        Now.AddSeconds(5),
-                        TimeSpan.FromHours(1))));
-            Assert.Equal(Assert.Single(acquired).FencingToken, retriedLease.FencingToken);
-            Assert.Equal(Assert.Single(acquired).ExpiresAtUtc, retriedLease.ExpiresAtUtc);
+            Assert.Null(await restarted.TryAcquireAsync(
+                run.Id,
+                request.OperationRunId,
+                acquired.Select(static lease => lease.Resource).ToArray(),
+                TimeSpan.FromHours(1)));
 
             var events = await restarted.ListEventsAsync(request.JobId);
             Assert.Equal(2, events.Count);
@@ -167,7 +161,10 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             Assert.Equal(nameof(StationJobRequested), pendingJob.Kind);
             await restarted.MarkPublishedAsync(pendingJob.MessageId);
 
-            await restarted.ReleaseAsync(run.Id, request.OperationRunId);
+            await restarted.ReleaseAsync(
+                run.Id,
+                request.OperationRunId,
+                acquired.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
         }
 
         using var secondRestart = new PostgreSqlProductionCoordinationStore(

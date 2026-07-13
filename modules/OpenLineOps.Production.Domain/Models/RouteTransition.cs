@@ -14,6 +14,14 @@ public enum RouteTransitionKind
     ParallelJoin = 6
 }
 
+public enum TerminalDisposition
+{
+    Completed = 1,
+    Nonconforming = 2,
+    Held = 3,
+    Scrapped = 4
+}
+
 public sealed record RouteOutputCondition
 {
     public RouteOutputCondition(string outputKey, ProductionContextValue expectedValue)
@@ -41,7 +49,8 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
     private RouteTransition(
         RouteTransitionId id,
         OperationDefinitionId sourceOperationId,
-        OperationDefinitionId targetOperationId,
+        OperationDefinitionId? targetOperationId,
+        TerminalDisposition? terminalDisposition,
         RouteTransitionKind kind,
         RouteJudgement? requiredJudgement,
         int? maxTraversals,
@@ -51,8 +60,22 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
     {
         SourceOperationId = sourceOperationId
             ?? throw new ArgumentNullException(nameof(sourceOperationId));
-        TargetOperationId = targetOperationId
-            ?? throw new ArgumentNullException(nameof(targetOperationId));
+        if ((targetOperationId is null) == (terminalDisposition is null))
+        {
+            throw new ArgumentException(
+                "Route transitions require exactly one target Operation or terminal disposition.");
+        }
+
+        if (terminalDisposition is not null && !Enum.IsDefined(terminalDisposition.Value))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(terminalDisposition),
+                terminalDisposition,
+                "Unsupported terminal disposition.");
+        }
+
+        TargetOperationId = targetOperationId;
+        TerminalDisposition = terminalDisposition;
         if (SourceOperationId == TargetOperationId)
         {
             throw new ArgumentException("Route transitions cannot target their source operation.");
@@ -104,6 +127,15 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
                 "Parallel fork and join transitions require a group id; other transition kinds cannot define one.");
         }
 
+        if (terminalDisposition is not null
+            && kind is RouteTransitionKind.Rework
+                or RouteTransitionKind.ParallelFork
+                or RouteTransitionKind.ParallelJoin)
+        {
+            throw new ArgumentException(
+                "Rework and parallel transitions must target an Operation.");
+        }
+
         Kind = kind;
         RequiredJudgement = requiredJudgement;
         MaxTraversals = maxTraversals;
@@ -115,7 +147,9 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
 
     public OperationDefinitionId SourceOperationId { get; }
 
-    public OperationDefinitionId TargetOperationId { get; }
+    public OperationDefinitionId? TargetOperationId { get; }
+
+    public TerminalDisposition? TerminalDisposition { get; }
 
     public RouteTransitionKind Kind { get; }
 
@@ -130,7 +164,8 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
     public static RouteTransition Create(
         RouteTransitionId id,
         OperationDefinitionId sourceOperationId,
-        OperationDefinitionId targetOperationId,
+        OperationDefinitionId? targetOperationId,
+        TerminalDisposition? terminalDisposition,
         RouteTransitionKind kind,
         RouteJudgement? requiredJudgement = null,
         int? maxTraversals = null,
@@ -141,6 +176,7 @@ public sealed class RouteTransition : Entity<RouteTransitionId>
             id,
             sourceOperationId,
             targetOperationId,
+            terminalDisposition,
             kind,
             requiredJudgement,
             maxTraversals,

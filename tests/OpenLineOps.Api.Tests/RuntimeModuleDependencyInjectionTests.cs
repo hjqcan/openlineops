@@ -45,11 +45,23 @@ public sealed class RuntimeModuleDependencyInjectionTests
         Assert.IsType<ProductionLineRuntimeStateReader>(
             scope.ServiceProvider.GetRequiredService<IProductionLineRuntimeStateReader>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<IProductionRunRecoveryService>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeSessionRepository>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
+        Assert.IsType<InMemoryRuntimeSessionRepository>(
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeMonitoringService>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringProjectionInitializer>());
         var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
+        var monitoringIndex = Array.FindIndex(
+            hostedServices,
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
         var recoveryIndex = Array.FindIndex(
             hostedServices,
             service => service.GetType().Name == "ProductionRunStartupRecoveryHostedService");
-        Assert.True(recoveryIndex >= 0);
+        Assert.True(monitoringIndex >= 0);
+        Assert.True(recoveryIndex > monitoringIndex);
         Assert.Contains(
             hostedServices,
             service => service is ProductionRunCoordinatorHostedService);
@@ -98,8 +110,49 @@ public sealed class RuntimeModuleDependencyInjectionTests
         using var serviceProvider = services.BuildServiceProvider();
         Assert.IsType<SqliteRuntimeSessionRepository>(
             serviceProvider.GetRequiredService<IRuntimeSessionRepository>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeSessionRepository>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
         Assert.IsType<SqliteProductionRunRepository>(
             serviceProvider.GetRequiredService<IProductionRunRepository>());
+        var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
+        var leaseIndex = Array.FindIndex(
+            hostedServices,
+            service => service is SqliteRuntimeStoreLeaseHostedService);
+        var monitoringIndex = Array.FindIndex(
+            hostedServices,
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
+        var recoveryIndex = Array.FindIndex(
+            hostedServices,
+            service => service is ProductionRunStartupRecoveryHostedService);
+        Assert.True(leaseIndex >= 0);
+        Assert.True(monitoringIndex > leaseIndex);
+        Assert.True(recoveryIndex > monitoringIndex);
+    }
+
+    [Fact]
+    public async Task RuntimeMonitoringHostedServiceFailsClosedUntilDurableRebuildCompletes()
+    {
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
+        using var serviceProvider = services.BuildServiceProvider();
+        var monitoring = serviceProvider.GetRequiredService<IRuntimeMonitoringService>();
+        var scope = new RuntimeMonitoringScope(
+            "project-hosted",
+            "application-hosted",
+            "snapshot-hosted",
+            "topology-hosted");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await monitoring.GetStationStatusesAsync(scope));
+
+        var hosted = Assert.Single(
+            serviceProvider.GetServices<IHostedService>(),
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
+        await hosted.StartAsync(CancellationToken.None);
+
+        Assert.Empty(await monitoring.GetStationStatusesAsync(scope));
+        await hosted.StopAsync(CancellationToken.None);
     }
 
     [Fact]

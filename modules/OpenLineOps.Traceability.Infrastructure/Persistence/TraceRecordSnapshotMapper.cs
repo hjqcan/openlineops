@@ -148,6 +148,7 @@ internal static class TraceRecordSnapshotMapper
             decision.SourceOperationRunId,
             decision.TransitionId,
             decision.TargetOperationId,
+            decision.TerminalDisposition?.ToString(),
             decision.SourceJudgement.ToString(),
             decision.Traversal,
             decision.DecidedAtUtc);
@@ -159,6 +160,11 @@ internal static class TraceRecordSnapshotMapper
             decision.SourceOperationRunId,
             decision.TransitionId,
             decision.TargetOperationId,
+            decision.TerminalDisposition is null
+                ? null
+                : ParseEnum<ProductDisposition>(
+                    decision.TerminalDisposition,
+                    nameof(decision.TerminalDisposition)),
             ParseEnum<ResultJudgement>(decision.SourceJudgement, nameof(decision.SourceJudgement)),
             decision.Traversal,
             decision.DecidedAtUtc);
@@ -556,7 +562,8 @@ internal sealed record PersistedTraceOperationExecution(
 internal sealed record PersistedTraceRouteDecision(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);

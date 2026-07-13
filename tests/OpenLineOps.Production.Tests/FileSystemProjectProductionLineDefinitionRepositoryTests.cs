@@ -50,7 +50,13 @@ public sealed class FileSystemProjectProductionLineDefinitionRepositoryTests : I
         Assert.Equal(
             ["operation.load", "operation.test"],
             restored.Operations.Select(operation => operation.Id.Value));
-        Assert.Equal(RouteTransitionKind.Sequence.ToString(), restored.Transitions.Single().Kind.ToString());
+        var operationTransition = Assert.Single(restored.Transitions, transition =>
+            transition.TargetOperationId is not null);
+        Assert.Equal(RouteTransitionKind.Sequence, operationTransition.Kind);
+        Assert.Equal(
+            TerminalDisposition.Completed,
+            Assert.Single(restored.Transitions, transition =>
+                transition.TerminalDisposition is not null).TerminalDisposition);
         await repository.SaveAsync(targetScope, restored);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(targetPath));
         Assert.Equal(copiedTimestamp, File.GetLastWriteTimeUtc(targetPath));

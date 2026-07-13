@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-11
+Last updated: 2026-07-13
 
 ## Product Contract
 
@@ -134,6 +134,9 @@ The repository gate is the combination of:
 ```powershell
 dotnet build OpenLineOps.sln --configuration Release --property:TreatWarningsAsErrors=true
 dotnet test OpenLineOps.sln --configuration Release --no-build -m:1
+$env:OPENLINEOPS_RUN_POSTGRES_INTEGRATION = "1"
+$env:OPENLINEOPS_RUN_RABBITMQ_INTEGRATION = "1"
+dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true
 powershell -NoProfile -File eng/verify-no-version-suffix-implementations.ps1
 powershell -NoProfile -File eng/verify-no-legacy-production-contracts.ps1
 powershell -NoProfile -File eng/verify-no-technical-debt-markers.ps1

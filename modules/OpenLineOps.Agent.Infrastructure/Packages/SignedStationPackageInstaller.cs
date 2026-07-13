@@ -4,6 +4,7 @@ using System.Security.Principal;
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.ContentProtection;
+using OpenLineOps.ProcessIsolation;
 
 namespace OpenLineOps.Agent.Infrastructure.Packages;
 
@@ -81,6 +82,9 @@ public sealed class SignedStationPackageInstaller
             ResolveImmutableReaderSid(options.ImmutableReaderSid),
             ResolveImmutableHostReaderSid(options.ImmutableHostReaderSid));
         Directory.CreateDirectory(_cacheDirectory);
+        _contentProtector.ProtectCacheBoundary(
+            _cacheDirectory,
+            _contentProtectionPolicy);
     }
 
     public async ValueTask<InstalledStationPackage> InstallAsync(
@@ -88,6 +92,9 @@ public sealed class SignedStationPackageInstaller
         string expectedContentSha256,
         CancellationToken cancellationToken = default)
     {
+        _contentProtector.VerifyCacheBoundary(
+            _cacheDirectory,
+            _contentProtectionPolicy);
         ArgumentException.ThrowIfNullOrWhiteSpace(packagePath);
         var fullPackagePath = Path.GetFullPath(packagePath);
         if (!File.Exists(fullPackagePath))
@@ -516,10 +523,8 @@ public sealed class SignedStationPackageInstaller
             return configuredSid;
         }
 
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        return identity.User?.Value
-               ?? throw new InvalidOperationException(
-                   "Current Windows identity has no SID for immutable Station package content.");
+        return WindowsAppContainerIdentity.EnsureCapabilitySid(
+            WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
     }
 
     private static string? ResolveImmutableHostReaderSid(string? configuredSid)

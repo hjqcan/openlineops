@@ -61,6 +61,7 @@ builder.Services.AddSingleton<StationMaterialArrivalReporter>();
 builder.Services.AddSingleton(serviceProvider => new ProcessStationRuntimeHost(
     new ProcessStationRuntimeHostOptions(
         options.RuntimeExecutablePath,
+        options.PluginHostExecutablePath,
         options.RuntimeWorkingDirectory,
         options.ArtifactDirectory,
         options.RuntimeTimeout,
@@ -73,7 +74,8 @@ builder.Services.AddSingleton(serviceProvider => new ProcessStationRuntimeHost(
         RequireExternalProgramAppContainerIsolation: true,
         ExternalProgramAppContainerProfileNamespace:
             options.ExternalProgramAppContainerProfileNamespace,
-        RequireImmutableExternalProgramContent: true),
+        RequireImmutableExternalProgramContent: true,
+        PythonScript: options.PythonScript),
     serviceProvider.GetRequiredService<IStationResourceFenceValidator>(),
     clock: serviceProvider.GetRequiredService<IClock>()));
 builder.Services.AddSingleton<IStationRuntimeHost>(serviceProvider =>

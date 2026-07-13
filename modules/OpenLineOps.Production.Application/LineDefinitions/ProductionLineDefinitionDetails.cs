@@ -56,7 +56,8 @@ public sealed record LineControllerAuthorizationDetails(
 public sealed record RouteTransitionDetails(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

@@ -57,9 +57,14 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             Assert.Equal("Fixed", station.Resolution);
             Assert.Equal(operation.StationSystemId, station.TopologyTargetId);
         });
-        var transition = Assert.Single(result.Value.Transitions);
+        var transition = Assert.Single(result.Value.Transitions, candidate =>
+            candidate.TargetOperationId is not null);
         Assert.Equal("Sequence", transition.Kind);
         Assert.Equal("operation.test", transition.TargetOperationId);
+        Assert.Equal(
+            "Completed",
+            Assert.Single(result.Value.Transitions, candidate =>
+                candidate.TerminalDisposition is not null).TerminalDisposition);
         Assert.True(File.Exists(Path.Combine(
             fixture.Scope.ApplicationRootPath,
             "production",
@@ -251,17 +256,32 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     "configuration.test",
                     StationResources("test"))
             ],
-            [new RouteTransitionRequest(
-                "load-test",
-                "operation.load",
-                "operation.test",
-                RouteTransitionKind.Sequence,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null)],
+            [
+                new RouteTransitionRequest(
+                    "load-test",
+                    "operation.load",
+                    "operation.test",
+                    null,
+                    RouteTransitionKind.Sequence,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null),
+                new RouteTransitionRequest(
+                    "test-completed",
+                    "operation.test",
+                    null,
+                    TerminalDisposition.Completed,
+                    RouteTransitionKind.Sequence,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)
+            ],
             []);
     }
 

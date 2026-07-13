@@ -180,7 +180,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 30_000,
                                 null)])
                     ],
-                    Transitions: [],
+                    Transitions: [TerminalTransition("operation.eol")],
                     LineControllerAuthorizations: []),
                 ExternalProgramResources: [],
                 [new ProjectReleaseCapabilityBinding(
@@ -455,7 +455,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                             "binding.remote-inspector",
                             30_000,
                             authorization.AuthorizationId)])],
-                    [],
+                    [TerminalTransition("operation.controller")],
                     [authorization]),
                 [],
                 releaseBindings,
@@ -752,7 +752,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 30_000,
                                 null)])
                     ],
-                    Transitions: [],
+                    Transitions: [TerminalTransition("operation.external")],
                     LineControllerAuthorizations: []),
                 [frozenResource],
                 [new ProjectReleaseCapabilityBinding(
@@ -870,6 +870,19 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         await File.WriteAllTextAsync(frozenExecutable, "tampered-external-program");
         Assert.Null(await resolver.ResolveAsync(request));
     }
+
+    private static ProjectReleaseRouteTransition TerminalTransition(string operationId) => new(
+        $"{operationId}.completed",
+        operationId,
+        null,
+        "Completed",
+        "Sequence",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 
     private static void WriteReleaseTopologyResources(
         ProjectApplicationWorkspaceScope scope,

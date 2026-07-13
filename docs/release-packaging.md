@@ -7,7 +7,8 @@ This document describes the first open-source release direction for OpenLineOps.
 - A contributor can clone, restore, build, test, and run the API.
 - A desktop user can install a signed Electron package.
 - A Station operator can install a signed self-contained Windows Agent bundle
-  containing the exact Station Runtime without installing Studio or .NET.
+  containing the exact Station Runtime and Python Script Worker without
+  installing Studio or .NET.
 - An integrator can run a completed Project through the signed self-contained
   headless Runner without opening Studio.
 - A plugin author can build a plugin against stable abstractions.
@@ -29,7 +30,7 @@ Initial release artifacts should include:
 
 - Source archive.
 - API build output.
-- Windows Station Agent bundle with the co-packaged Station Runtime.
+- Windows Station Agent bundle with the co-packaged Station Runtime and Python Script Worker.
 - Windows headless Runner bundle.
 - Electron desktop installer or portable package.
 - Plugin host build output.
@@ -141,18 +142,53 @@ compile projects and fails if the expected build outputs are missing.
 The `agent` and `runner` artifacts are `win-x64` self-contained bundles. Each
 contains `bundle-manifest.json` and `bundle-checksums.sha256`, which inventory
 every payload file by canonical path, size, and SHA-256. The Agent manifest has
-two distinct entry points at the archive root:
-`OpenLineOps.Agent.exe` and `OpenLineOps.StationRuntime.exe`. The bundled
-`appsettings.json` keeps `RuntimeExecutablePath` exactly
-`OpenLineOps.StationRuntime.exe`, so the service cannot silently select an
-unverified runtime elsewhere. See `docs/station-agent-deployment.md` and
+four distinct entry points at the archive root: `OpenLineOps.Agent.exe`,
+`OpenLineOps.StationRuntime.exe`, `OpenLineOps.PluginHost.exe`, and
+`OpenLineOps.ScriptWorker.exe`. The archive also contains the signed internal
+`OpenLineOps.LeastPrivilegeLauncher.exe`. The bundled `appsettings.json` keeps
+`RuntimeExecutablePath`, `PluginHostExecutablePath`, and Python
+`WorkerExecutablePath` bound exactly to those co-packaged executables, and
+binds the Python sandbox to that exact co-packaged launcher and the fixed
+`RestrictedCurrentLowIntegrity` identity. The service therefore cannot select
+an unverified runtime, plugin host, worker, launcher, or identity elsewhere.
+See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.
+
+After staging and candidate inspection, run the extracted-bundle execution
+gate against the exact ZIP recorded in `artifacts/release/release-manifest.json`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+```
+
+The gate verifies the Agent archive hash, inner manifest, checksums, exact
+four-entry contract, and production security template before executing every
+entry from the extracted ZIP. It then builds a signed `.olopkg` with the staged
+sample-plugin artifact and runs the Agent application stack through the staged
+Station Runtime and Plugin Host. A second signed package runs through the
+staged Station Runtime and Python Script Worker. No Runtime, Plugin Host,
+Script Worker, or sample-plugin binary is selected from a source `bin`
+directory in this gate. Machine-readable evidence is written to
+`output/staged-agent-bundle-e2e/evidence.json`.
+
+The staged Python process chain uses the exact launcher shipped in the archive.
+That launcher derives a restricted primary token from the current Agent token,
+sets mandatory Low integrity, and starts only the sibling Script Worker under
+the fixed `RestrictedCurrentLowIntegrity` identity. The signed Python package
+queries its own token; the gate accepts it only when `IsTokenRestricted` is
+true and the integrity RID is `4096`. No site-provisioned identity, custom
+launcher, argument template, `runas`, password prompt, or test-only
+`ExternalProcess` exception is part of this production proof. A full
+`OpenLineOps.Agent.exe` message-delivery run also requires RabbitMQ; the real
+RabbitMQ protocol and redelivery behavior run in the separate
+production-integration CI job.
 
 The GitHub Actions workflow runs the full release staging script after the
 desktop production build, using `-SkipDesktopBuild` so the already-built
 Electron renderer and main-process outputs are packaged and validated. After
 the manifest/checksum verification and staged candidate inspection, CI runs the
-release candidate inspection behavior verification and the publication
+extracted Agent bundle E2E, release candidate inspection behavior verification,
+and the publication
 readiness gate with `-AllowPendingExternal` so non-external release
 requirements are continuously checked while final external release inputs are
 still pending. After desktop smoke test and desktop audit pass, CI uploads the

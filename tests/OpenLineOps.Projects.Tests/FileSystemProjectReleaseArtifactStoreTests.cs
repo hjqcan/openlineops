@@ -177,6 +177,19 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         "transition.inspect-eol",
                         entry.OperationId,
                         terminal.OperationId,
+                        null,
+                        "Sequence",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null),
+                    new ProjectReleaseRouteTransition(
+                        "transition.eol-completed",
+                        terminal.OperationId,
+                        null,
+                        "Completed",
                         "Sequence",
                         null,
                         null,
@@ -202,7 +215,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             ["operation.eol", "operation.inspect"],
             opened.Metadata.ProductionLine.Operations.Select(operation => operation.OperationId));
-        var transition = Assert.Single(opened.Metadata.ProductionLine.Transitions);
+        var transition = Assert.Single(opened.Metadata.ProductionLine.Transitions, candidate =>
+            candidate.TargetOperationId is not null);
         Assert.Equal("transition.inspect-eol", transition.TransitionId);
         Assert.Equal("Sequence", transition.Kind);
     }
@@ -244,7 +258,11 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ProductionLine = metadata.ProductionLine with
             {
                 Operations = [entry, unreachable],
-                Transitions = []
+                Transitions =
+                [
+                    TerminalTransition("transition.entry-completed", entry.OperationId),
+                    TerminalTransition("transition.unreachable-completed", unreachable.OperationId)
+                ]
             }
         };
         var store = new FileSystemProjectReleaseArtifactStore();
@@ -257,6 +275,27 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 metadata));
 
         Assert.Contains("not reachable", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishRejectsImplicitTerminalOperation()
+    {
+        var scope = CreateScope("project.implicit-terminal", "application.main");
+        var metadata = CreateMetadata();
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with { Transitions = [] }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.PublishAsync(
+                scope,
+                "snapshot.implicit-terminal",
+                PublishedAtUtc,
+                metadata));
+
+        Assert.Contains("explicit terminal disposition", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -278,13 +317,15 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         "transition.entry-eol",
                         entry.OperationId,
                         terminal.OperationId,
+                        null,
                         "sequence",
                         null,
                         null,
                         null,
                         null,
                         null,
-                        null)
+                        null),
+                    TerminalTransition("transition.eol-completed", terminal.OperationId)
                 ]
             }
         };
@@ -1070,9 +1111,22 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         [])],
                     [])
             ],
-            Transitions: [],
+            Transitions: [TerminalTransition("transition.eol-completed", "operation.eol")],
             LineControllerAuthorizations: []);
     }
+
+    private static ProjectReleaseRouteTransition TerminalTransition(string id, string source) => new(
+        id,
+        source,
+        null,
+        "Completed",
+        "Sequence",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 
     private static string WriteSourceFile(
         ProjectApplicationWorkspaceScope scope,

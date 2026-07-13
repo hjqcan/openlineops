@@ -418,7 +418,7 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             || !string.Equals(delivery.AppId, agentId, StringComparison.Ordinal)
             || !string.Equals(
                 delivery.RoutingKey,
-                $"station.{stationId}.{type}",
+                StationTransportRoute.Event(stationId, type),
                 StringComparison.Ordinal)
             || !Guid.TryParseExact(delivery.MessageId, "D", out var envelopeMessageId)
             || envelopeMessageId != messageId
@@ -449,7 +449,9 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             || !string.Equals(delivery.AppId, message.ProducerId, StringComparison.Ordinal)
             || !string.Equals(
                 delivery.RoutingKey,
-                $"station.{message.StationId}.{nameof(MaterialArrived)}",
+                StationTransportRoute.Event(
+                    message.StationId,
+                    nameof(MaterialArrived)),
                 StringComparison.Ordinal)
             || !string.Equals(
                 delivery.MessageId,

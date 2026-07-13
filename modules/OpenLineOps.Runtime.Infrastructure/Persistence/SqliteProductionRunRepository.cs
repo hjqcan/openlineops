@@ -45,6 +45,8 @@ public sealed class SqliteProductionRunRepository :
                 nameof(run));
         }
 
+        var createdOutboxItem = ProductionRunCreatedOutboxItem.FromAdmission(run);
+
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
 
         var documentJson = JsonSerializer.Serialize(
@@ -106,7 +108,14 @@ public sealed class SqliteProductionRunRepository :
         var added = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
         if (added)
         {
+            await InsertCreatedOutboxAsync(
+                    connection,
+                    transaction,
+                    createdOutboxItem,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            run.ClearDomainEvents();
         }
         else
         {
@@ -342,6 +351,97 @@ public sealed class SqliteProductionRunRepository :
         return ProductionRunExecutionPlanSnapshotMapper.ToAggregate(snapshot);
     }
 
+    public async ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+        ListPendingCreatedOutboxAsync(
+            int maximumCount,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT run_id, event_id, occurred_at_utc, attempt_count, last_error
+            FROM production_run_created_outbox
+            ORDER BY occurred_at_utc, run_id
+            LIMIT $maximum_count;
+            """;
+        command.Parameters.AddWithValue("$maximum_count", maximumCount);
+        var items = new List<ProductionRunCreatedOutboxItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            items.Add(new ProductionRunCreatedOutboxItem(
+                new ProductionRunId(Guid.Parse(reader.GetString(0))),
+                Guid.Parse(reader.GetString(1)),
+                DateTimeOffset.Parse(
+                    reader.GetString(2),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+
+        return items;
+    }
+
+    public async ValueTask MarkCreatedOutboxProcessedAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "DELETE FROM production_run_created_outbox WHERE run_id = $run_id;";
+        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Production Run Created-event outbox item {runId} does not exist.");
+        }
+    }
+
+    public async ValueTask RecordCreatedOutboxFailureAsync(
+        ProductionRunId runId,
+        string failureDescription,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(failureDescription);
+        if (char.IsWhiteSpace(failureDescription[0])
+            || char.IsWhiteSpace(failureDescription[^1]))
+        {
+            throw new ArgumentException(
+                "Created-event failure description must be canonical.",
+                nameof(failureDescription));
+        }
+
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE production_run_created_outbox
+            SET attempt_count = attempt_count + 1,
+                last_error = $last_error
+            WHERE run_id = $run_id;
+            """;
+        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$last_error",
+            failureDescription.Length <= 4096
+                ? failureDescription
+                : failureDescription[..4096]);
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Production Run Created-event outbox item {runId} does not exist.");
+        }
+    }
+
     public async ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
         ListPendingTerminalOutboxAsync(
             int maximumCount,
@@ -486,6 +586,24 @@ public sealed class SqliteProductionRunRepository :
 
                 CREATE INDEX IF NOT EXISTS ix_production_run_terminal_outbox_order
                     ON production_run_terminal_outbox(occurred_at_utc, run_id);
+
+                CREATE TABLE IF NOT EXISTS production_run_created_outbox (
+                    run_id TEXT NOT NULL PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    occurred_at_utc TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL,
+                    last_error TEXT NULL,
+                    CHECK (
+                        (attempt_count = 0 AND last_error IS NULL)
+                        OR (attempt_count > 0
+                            AND last_error IS NOT NULL
+                            AND length(last_error) > 0
+                            AND last_error = trim(last_error))),
+                    FOREIGN KEY (run_id) REFERENCES production_runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_production_run_created_outbox_order
+                    ON production_run_created_outbox(occurred_at_utc, run_id);
 
                 CREATE TABLE IF NOT EXISTS production_material_timeline (
                     evidence_id TEXT NOT NULL PRIMARY KEY,
@@ -982,6 +1100,38 @@ public sealed class SqliteProductionRunRepository :
         command.Parameters.AddWithValue("$document_json", documentJson);
         command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(completedAtUtc));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask InsertCreatedOutboxAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRunCreatedOutboxItem item,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO production_run_created_outbox (
+                run_id,
+                event_id,
+                occurred_at_utc,
+                attempt_count,
+                last_error)
+            VALUES (
+                $run_id,
+                $event_id,
+                $occurred_at_utc,
+                0,
+                NULL);
+            """;
+        command.Parameters.AddWithValue("$run_id", item.RunId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$event_id", item.EventId.ToString("D"));
+        command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(item.OccurredAtUtc));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+        {
+            throw new InvalidOperationException(
+                $"Production Run Created-event outbox item {item.RunId} was not stored atomically.");
+        }
     }
 
     private static void AddParameters(

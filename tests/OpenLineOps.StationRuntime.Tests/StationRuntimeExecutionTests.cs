@@ -88,7 +88,8 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         try
         {
             exitCode = await StationRuntimeEntrypoint.RunAsync(
-                ["execute-operation", "--request-file", requestPath, "--result-file", resultPath]);
+                ["execute-operation", "--request-file", requestPath, "--result-file", resultPath],
+                TestHostOptions());
         }
         finally
         {
@@ -124,10 +125,21 @@ public sealed class StationRuntimeExecutionTests : IDisposable
     {
         var resultPath = Path.Combine(_root, "scattered-options-result.json");
         var exitCode = await StationRuntimeEntrypoint.RunAsync(
-            ["execute-operation", "--package", _root, "--result-file", resultPath]);
+            ["execute-operation", "--package", _root, "--result-file", resultPath],
+            TestHostOptions());
 
         Assert.Equal(64, exitCode);
         Assert.False(File.Exists(resultPath));
+    }
+
+    [Fact]
+    public async Task UsageErrorDoesNotRequirePluginHostConfiguration()
+    {
+        var exitCode = await StationRuntimeEntrypoint.RunAsync(
+            [],
+            new StationRuntimeHostOptions(string.Empty));
+
+        Assert.Equal(64, exitCode);
     }
 
     public void Dispose()
@@ -307,7 +319,18 @@ public sealed class StationRuntimeExecutionTests : IDisposable
                     "runtime.flow",
                     30_000,
                     null)])],
-            [],
+            [new ProjectReleaseRouteTransition(
+                "transition.complete",
+                "operation.main",
+                null,
+                "Completed",
+                "Sequence",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null)],
             []),
         [],
         [new ProjectReleaseCapabilityBinding(
@@ -376,5 +399,12 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         var hash = Convert.ToHexStringLower(
             SHA256.HashData(Encoding.UTF8.GetBytes(resourceId)))[..12];
         return $"{kind}-{resourceId}--{hash}.json";
+    }
+
+    private static StationRuntimeHostOptions TestHostOptions()
+    {
+        return new StationRuntimeHostOptions(
+            Environment.ProcessPath
+            ?? throw new InvalidOperationException("The test process executable path is unavailable."));
     }
 }

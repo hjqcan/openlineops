@@ -18,6 +18,7 @@ public static class OpenLineOpsReadinessHealthChecks
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddOptions();
+        services.AddLogging();
         var builder = services.AddHealthChecks();
 
         AddOperationsPostgreSqlCheck(builder, configuration);

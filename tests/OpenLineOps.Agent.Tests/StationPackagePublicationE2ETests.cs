@@ -1,4 +1,6 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
@@ -149,6 +151,34 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 (_, _) => ValueTask.CompletedTask));
         Assert.Contains("identity", identityError.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, runtime.ExecutionCount);
+
+        if (OperatingSystem.IsWindows())
+        {
+            using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+            var current = identity.User
+                          ?? throw new InvalidOperationException(
+                              "Current Windows identity has no SID.");
+            var frozenApplication = Path.Combine(
+                runtime.Request.PackageContentDirectory,
+                "source",
+                "applications",
+                "portable",
+                "application.oloapp");
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(
+                current,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            FileSystemAclExtensions.SetAccessControl(new FileInfo(frozenApplication), security);
+
+            var driftError = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await executor.ExecuteAsync(
+                    Job(release, route.PackageContentSha256, "station.test"),
+                    (_, _) => ValueTask.CompletedTask));
+            Assert.Contains("owner and ACL", driftError.Message, StringComparison.Ordinal);
+            Assert.Equal(1, runtime.ExecutionCount);
+        }
     }
 
     [Fact]
@@ -276,6 +306,8 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 protector.DeleteProtectedInstallation(cacheRoot, contentDirectory);
             }
         }
+
+        Directory.Delete(cacheRoot);
     }
 
     private static FileSystemProjectReleaseStationPackagePublisher CreatePublisher(
@@ -340,6 +372,19 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 "Fixed",
                 [])],
             [])).ToArray();
+        var transitions = operations.Select((operation, index) =>
+            new ProjectReleaseRouteTransition(
+                $"transition.{index}",
+                operation.OperationId,
+                index + 1 < operations.Length ? operations[index + 1].OperationId : null,
+                index + 1 < operations.Length ? null : "Completed",
+                "Sequence",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null)).ToArray();
         return new ProjectReleaseSourceMetadata(
             "topology.portable",
             ["layout.portable"],
@@ -350,7 +395,7 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 new ProjectReleaseProductModel("product.portable", "PORTABLE", "serialNumber"),
                 operations[0].OperationId,
                 operations,
-                [],
+                transitions,
                 []),
             [],
             [],

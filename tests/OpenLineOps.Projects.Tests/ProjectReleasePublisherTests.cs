@@ -559,7 +559,21 @@ public sealed class ProjectReleasePublisherTests
                         [])],
                     [])
             ],
-            Transitions: [],
+            Transitions:
+            [
+                new ProjectReleaseRouteTransition(
+                    "operation.eol.completed",
+                    "operation.eol",
+                    null,
+                    "Completed",
+                    "Sequence",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)
+            ],
             LineControllerAuthorizations: []);
     }
 

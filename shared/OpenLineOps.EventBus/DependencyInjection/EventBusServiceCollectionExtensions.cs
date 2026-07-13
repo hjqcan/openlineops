@@ -23,6 +23,7 @@ public static class EventBusServiceCollectionExtensions
         var options = LoadOptions(configuration);
         var publicationMode = IntegrationEventPublicationModes.Parse(options.PublicationMode);
         ValidateOptions(options, publicationMode, configuration);
+        services.AddLogging();
         services.AddSingleton(options);
         services.AddSingleton(new IntegrationEventPublicationPolicy(publicationMode));
         services.TryAddSingleton<IntegrationDtoConverterRegistry>();

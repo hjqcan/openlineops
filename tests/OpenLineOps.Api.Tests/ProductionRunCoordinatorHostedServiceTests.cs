@@ -169,6 +169,23 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+            ListPendingCreatedOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask MarkCreatedOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask RecordCreatedOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
         public ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
             ListPendingTerminalOutboxAsync(
                 int maximumCount,

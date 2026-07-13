@@ -38,9 +38,23 @@ const workerSource = `
     transitionId: id,
     sourceOperationId: source,
     targetOperationId: target,
+    terminalDisposition: null,
     kind,
     requiredJudgement: judgement,
     maxTraversals,
+    parallelGroupId: null,
+    outputKey: null,
+    expectedOutputKind: null,
+    expectedOutputValue: null
+  });
+  const terminal = (id, source, disposition, kind = 'Sequence', judgement = null) => ({
+    transitionId: id,
+    sourceOperationId: source,
+    targetOperationId: null,
+    terminalDisposition: disposition,
+    kind,
+    requiredJudgement: judgement,
+    maxTraversals: null,
     parallelGroupId: null,
     outputKey: null,
     expectedOutputKind: null,
@@ -74,7 +88,17 @@ const workerSource = `
         'operation.preparation',
         'Rework',
         'Failed',
-        1)
+        1),
+      terminal(
+        'route.vendor-failed-terminal',
+        'operation.vendor-test',
+        'Nonconforming',
+        'Judgement',
+        'Failed'),
+      terminal(
+        'route.vendor-default-terminal',
+        'operation.vendor-test',
+        'Completed')
     ],
     lineControllerAuthorizations: []
   }, {

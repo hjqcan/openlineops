@@ -9,6 +9,7 @@ using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Execution;
@@ -20,6 +21,7 @@ public sealed class ProductionRunCoordinator(
     IStationSafetyController stationSafety,
     IStationOperationCanceler stationOperationCanceler,
     IRuntimeDomainEventPublisher domainEventPublisher,
+    IProductionRunCreatedOutboxDispatcher createdOutboxDispatcher,
     IClock clock) : IProductionRunCoordinator
 {
     public async ValueTask<Result<ProductionRunSnapshot>> SubmitAsync(
@@ -37,7 +39,8 @@ public sealed class ProductionRunCoordinator(
             .ConfigureAwait(false);
         if (existing is not null)
         {
-            return ResolveExistingSubmission(existing.Run, request);
+            return await ResolveExistingSubmissionAsync(existing.Run, request)
+                .ConfigureAwait(false);
         }
 
         var unitEntry = await materials.GetProductionUnitAsync(
@@ -73,7 +76,8 @@ public sealed class ProductionRunCoordinator(
                 .ConfigureAwait(false);
             if (existing is not null)
             {
-                return ResolveExistingSubmission(existing.Run, request);
+                return await ResolveExistingSubmissionAsync(existing.Run, request)
+                    .ConfigureAwait(false);
             }
 
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
@@ -88,7 +92,8 @@ public sealed class ProductionRunCoordinator(
                 .ConfigureAwait(false);
             if (existing is not null)
             {
-                return ResolveExistingSubmission(existing.Run, request);
+                return await ResolveExistingSubmissionAsync(existing.Run, request)
+                    .ConfigureAwait(false);
             }
 
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
@@ -151,24 +156,29 @@ public sealed class ProductionRunCoordinator(
             request.Operations.Select(static operation => operation.Definition),
             request.RouteTransitions);
         var plan = new ProductionRunExecutionPlan(request.RunId, request.Operations);
-        var events = run.DomainEvents.ToArray();
+        // Admission is the submission commit point. Once it begins, a disconnected HTTP
+        // client or a canceled headless Runner must not leave an ambiguously accepted run.
+        // Store the run, frozen plan, Unit reservation, and Created event outbox atomically;
+        // publication after this point is retryable and cannot turn acceptance into a failure.
+        cancellationToken.ThrowIfCancellationRequested();
         if (!await repository.TryAddAsync(
                 run,
                 plan,
                 new ProductionRunAdmission(unit.ToSnapshot(), unitEntry.Revision),
-                cancellationToken)
+                CancellationToken.None)
             .ConfigureAwait(false))
         {
-            existing = await repository.GetByIdAsync(request.RunId, cancellationToken)
+            existing = await repository.GetByIdAsync(request.RunId, CancellationToken.None)
                 .ConfigureAwait(false);
             if (existing is not null)
             {
-                return ResolveExistingSubmission(existing.Run, request);
+                return await ResolveExistingSubmissionAsync(existing.Run, request)
+                    .ConfigureAwait(false);
             }
 
             var currentUnit = await materials.GetProductionUnitAsync(
                     request.ProductionUnitId,
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
                 "Runtime.ProductionUnitAdmissionConflict",
@@ -177,7 +187,8 @@ public sealed class ProductionRunCoordinator(
                     : $"Production Unit {request.ProductionUnitId} changed during atomic run admission; reload it before submitting."));
         }
 
-        await PublishAsync(run, events, cancellationToken).ConfigureAwait(false);
+        run.ClearDomainEvents();
+        await TryDrainCreatedOutboxAsync().ConfigureAwait(false);
         return Result.Success(run.ToSnapshot());
     }
 
@@ -218,89 +229,21 @@ public sealed class ProductionRunCoordinator(
 
         if (command.Command == ProductionRunCommand.SafeStop)
         {
-            var safety = await stationSafety.RequestSafeStopAsync(
-                    new StationSafetyRequest(run.ToSnapshot(), command.ActorId, reason),
+            return await SafeStopAsync(
+                    entry,
+                    command.ActorId,
+                    reason,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!safety.Accepted)
-            {
-                if (run.ExecutionStatus == OpenLineOps.Runtime.Contracts.ExecutionStatus.Running)
-                {
-                    var recovery = run.MarkRecoveryRequired(
-                        safety.FailureReason ?? "Station safety channel did not confirm Safe Stop.",
-                        clock.UtcNow);
-                    if (recovery.Succeeded)
-                    {
-                        var safetyEvents = run.DomainEvents.ToArray();
-                        await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
-                            .ConfigureAwait(false);
-                        await PublishAsync(run, safetyEvents, CancellationToken.None)
-                            .ConfigureAwait(false);
-                    }
-                }
+        }
 
-                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                    safety.FailureCode ?? "Runtime.SafeStopRejected",
-                    safety.FailureReason ?? "Station safety channel rejected Safe Stop."));
-            }
-
-            var snapshot = run.ToSnapshot();
-            var activeOperations = snapshot.Operations
-                .Where(operation => operation.ExecutionStatus == ExecutionStatus.Running)
-                .ToArray();
-            if (activeOperations.Length > 0)
-            {
-                var requestedAtUtc = clock.UtcNow;
-                var cancellationResults = await Task.WhenAll(activeOperations.Select(operation =>
-                        stationOperationCanceler.CancelAsync(
-                                new StationOperationCancellationRequest(
-                                    snapshot,
-                                    operation,
-                                    command.ActorId,
-                                    reason,
-                                    requestedAtUtc),
-                                cancellationToken)
-                            .AsTask()))
-                    .ConfigureAwait(false);
-                var rejected = cancellationResults.FirstOrDefault(result => !result.Accepted);
-                if (rejected is not null)
-                {
-                    var recoveryEntry = await repository.GetByIdAsync(runId, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    if (recoveryEntry is not null && !recoveryEntry.Run.IsTerminal)
-                    {
-                        var recovery = recoveryEntry.Run.MarkRecoveryRequired(
-                            rejected.FailureReason
-                            ?? "Safe Stop reached the station actuator, but active execution cancellation was not acknowledged.",
-                            clock.UtcNow);
-                        if (recovery.Succeeded)
-                        {
-                            var recoveryEvents = recoveryEntry.Run.DomainEvents.ToArray();
-                            await repository.SaveAsync(
-                                    recoveryEntry.Run,
-                                    recoveryEntry.Revision,
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                            await PublishAsync(
-                                    recoveryEntry.Run,
-                                    recoveryEvents,
-                                    CancellationToken.None)
-                                .ConfigureAwait(false);
-                        }
-                    }
-
-                    return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                        rejected.FailureCode ?? "Runtime.SafeStopExecutionCancelRejected",
-                        rejected.FailureReason
-                        ?? "A Station rejected active execution cancellation during Safe Stop."));
-                }
-
-                return await WaitForCanceledTerminalAsync(
-                        runId,
-                        "Safe Stop",
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
+        if (run.ControlState == ProductionRunControlState.StopRequested
+            && run.SafeStopRequestedAtUtc is not null)
+        {
+            return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runtime.ProductionRunSafeStopInProgress",
+                $"Production Run {run.Id} has a durable Safe Stop barrier; only the in-flight "
+                + "Safe Stop or the independent Emergency Stop channel may proceed."));
         }
 
         var result = command.Command switch
@@ -318,7 +261,6 @@ public sealed class ProductionRunCoordinator(
                         "Scrapping a recovery-required run requires an immutable operator Recovery Decision.")
                     : run.ScrapRecovery(command.RecoveryDecision)
                 : run.Scrap(reason, clock.UtcNow),
-            ProductionRunCommand.SafeStop => run.SafeStop(reason, clock.UtcNow),
             ProductionRunCommand.Reconcile => run.ReconcileRecovery(command.RecoveryDecision!),
             ProductionRunCommand.Retry => run.RetryRecovery(command.RecoveryDecision!),
             ProductionRunCommand.Abort => run.AbortRecovery(command.RecoveryDecision!),
@@ -337,16 +279,27 @@ public sealed class ProductionRunCoordinator(
             return Result.Success(run.ToSnapshot());
         }
 
-        await repository.SaveAsync(run, entry.Revision, CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (ProductionRunConcurrencyException)
+        {
+            return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                "Runtime.ProductionRunConcurrencyConflict",
+                $"Production Run {run.Id} changed while {command.Command} was being persisted; reload it before issuing another command."));
+        }
+
         await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
 
         if (command.Command == ProductionRunCommand.Reconcile)
         {
-            await resourceLeases.ReleaseAsync(
-                    run.Id,
-                    command.RecoveryDecision!.OperationRunId!,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
+            var reconciledOperation = run.Operations.Single(operation => string.Equals(
+                operation.OperationRunId,
+                command.RecoveryDecision!.OperationRunId,
+                StringComparison.Ordinal));
+            await ReleaseOperationLeaseAsync(run.Id, reconciledOperation).ConfigureAwait(false);
         }
         else if ((command.Command == ProductionRunCommand.Stop && run.IsTerminal)
                  || command.Command is ProductionRunCommand.SafeStop
@@ -356,13 +309,338 @@ public sealed class ProductionRunCoordinator(
         {
             foreach (var operation in run.Operations)
             {
-                await resourceLeases.ReleaseAsync(run.Id, operation.OperationRunId, CancellationToken.None)
-                    .ConfigureAwait(false);
+                await ReleaseOperationLeaseAsync(run.Id, operation).ConfigureAwait(false);
             }
         }
 
         return Result.Success(run.ToSnapshot());
     }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> SafeStopAsync(
+        ProductionRunPersistenceEntry initialEntry,
+        string actorId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var entry = initialEntry;
+        var requestedAtUtc = entry.Run.SafeStopRequestedAtUtc ?? clock.UtcNow;
+        cancellationToken.ThrowIfCancellationRequested();
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var run = entry.Run;
+            if (run.IsTerminal)
+            {
+                return IsConfirmedSafeStop(run)
+                    ? Result.Success(run.ToSnapshot())
+                    : run.SafeStopRequestedAtUtc is null
+                        ? SafeStopAlreadyEnded(run)
+                        : SafeStopLostRace(run);
+            }
+
+            var barrierWasAlreadyPersisted = run.SafeStopRequestedAtUtc is not null;
+            var barrier = run.RequestSafeStop(actorId, reason, requestedAtUtc);
+            if (!barrier.Succeeded)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    barrier.Code,
+                    barrier.Message));
+            }
+
+            if (barrierWasAlreadyPersisted)
+            {
+                break;
+            }
+
+            var events = run.DomainEvents.ToArray();
+            try
+            {
+                var revision = await repository.SaveAsync(
+                        run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
+                entry = new ProductionRunPersistenceEntry(run, revision);
+                break;
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                entry = await repository.GetByIdAsync(run.Id, CancellationToken.None)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidDataException(
+                        $"Production Run {run.Id} disappeared while establishing its Safe Stop barrier.");
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunSafeStopConcurrencyConflict",
+                    $"Production Run {run.Id} kept changing while its Safe Stop barrier was being established; retry the same Safe Stop command."));
+            }
+        }
+
+        var barrierRun = entry.Run;
+        if (barrierRun.IsTerminal)
+        {
+            await ReleaseOperationLeasesAsync(barrierRun).ConfigureAwait(false);
+            return IsConfirmedSafeStop(barrierRun)
+                ? Result.Success(barrierRun.ToSnapshot())
+                : SafeStopLostRace(barrierRun);
+        }
+
+        var barrierSnapshot = barrierRun.ToSnapshot();
+        StationSafetyResult safety;
+        try
+        {
+            safety = await stationSafety.RequestSafeStopAsync(
+                    new StationSafetyRequest(
+                        barrierSnapshot,
+                        barrierRun.SafeStopRequestedBy
+                        ?? throw new InvalidDataException("Safe Stop actor evidence is missing."),
+                        reason,
+                        barrierRun.SafeStopRequestedAtUtc
+                        ?? throw new InvalidDataException("Safe Stop timestamp evidence is missing.")),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+                                          and not StackOverflowException)
+        {
+            return await FailSafeStopAsync(
+                    barrierRun.Id,
+                    "Runtime.SafeStopTransportFailed",
+                    $"Station safety channel did not confirm Safe Stop: {exception.Message}")
+                .ConfigureAwait(false);
+        }
+
+        if (!safety.Accepted)
+        {
+            return await FailSafeStopAsync(
+                    barrierRun.Id,
+                    safety.FailureCode ?? "Runtime.SafeStopRejected",
+                    safety.FailureReason ?? "Station safety channel rejected Safe Stop.")
+                .ConfigureAwait(false);
+        }
+
+        var acknowledgedAtUtc = safety.AcknowledgedAtUtc ?? clock.UtcNow;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            entry = await repository.GetByIdAsync(barrierRun.Id, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Production Run {barrierRun.Id} disappeared after Station Safe Stop acknowledgement.");
+            if (entry.Run.IsTerminal)
+            {
+                await ReleaseOperationLeasesAsync(entry.Run).ConfigureAwait(false);
+                return IsConfirmedSafeStop(entry.Run)
+                    ? Result.Success(entry.Run.ToSnapshot())
+                    : SafeStopLostRace(entry.Run);
+            }
+
+            var acknowledgement = entry.Run.AcknowledgeSafeStop(acknowledgedAtUtc);
+            if (!acknowledgement.Succeeded)
+            {
+                return await FailSafeStopAsync(
+                        entry.Run.Id,
+                        acknowledgement.Code,
+                        acknowledgement.Message)
+                    .ConfigureAwait(false);
+            }
+
+            var acknowledgementEvents = entry.Run.DomainEvents.ToArray();
+            try
+            {
+                var revision = await repository.SaveAsync(
+                        entry.Run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(
+                        entry.Run,
+                        acknowledgementEvents,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                entry = new ProductionRunPersistenceEntry(entry.Run, revision);
+                break;
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                // Reload and preserve the Station acknowledgement evidence exactly once.
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return await FailSafeStopAsync(
+                        barrierRun.Id,
+                        "Runtime.ProductionRunSafeStopConcurrencyConflict",
+                        "Production Run kept changing while the Station Safe Stop acknowledgement was being recorded.")
+                    .ConfigureAwait(false);
+            }
+        }
+
+        var runAfterSafety = entry.Run;
+        if (runAfterSafety.IsTerminal)
+        {
+            await ReleaseOperationLeasesAsync(runAfterSafety).ConfigureAwait(false);
+            return IsConfirmedSafeStop(runAfterSafety)
+                ? Result.Success(runAfterSafety.ToSnapshot())
+                : SafeStopLostRace(runAfterSafety);
+        }
+
+        if (runAfterSafety.ControlState != ProductionRunControlState.StopRequested
+            || runAfterSafety.SafeStopRequestedAtUtc != barrierRun.SafeStopRequestedAtUtc)
+        {
+            return await FailSafeStopAsync(
+                    runAfterSafety.Id,
+                    "Runtime.SafeStopBarrierLost",
+                    "The durable Safe Stop barrier changed before active execution cancellation.")
+                .ConfigureAwait(false);
+        }
+
+        var snapshot = runAfterSafety.ToSnapshot();
+        var activeOperations = snapshot.Operations
+            .Where(operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .ToArray();
+        if (activeOperations.Length == 0)
+        {
+            return await FailSafeStopAsync(
+                    runAfterSafety.Id,
+                    "Runtime.SafeStopStateInconsistent",
+                    "Safe Stop remained non-terminal without an active Station operation after its actuator acknowledgement.")
+                .ConfigureAwait(false);
+        }
+
+        StationOperationCancellationResult[] cancellationResults;
+        try
+        {
+            cancellationResults = await Task.WhenAll(activeOperations.Select(operation =>
+                    stationOperationCanceler.CancelAsync(
+                            new StationOperationCancellationRequest(
+                                snapshot,
+                                operation,
+                                actorId,
+                                reason,
+                                requestedAtUtc),
+                            CancellationToken.None)
+                        .AsTask()))
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+                                          and not StackOverflowException)
+        {
+            return await FailSafeStopAsync(
+                    runAfterSafety.Id,
+                    "Runtime.SafeStopExecutionCancelFailed",
+                    $"Safe Stop actuator succeeded, but active execution cancellation failed: {exception.Message}")
+                .ConfigureAwait(false);
+        }
+
+        var rejected = cancellationResults.FirstOrDefault(result => !result.Accepted);
+        if (rejected is not null)
+        {
+            return await FailSafeStopAsync(
+                    runAfterSafety.Id,
+                    rejected.FailureCode ?? "Runtime.SafeStopExecutionCancelRejected",
+                    rejected.FailureReason
+                    ?? "A Station rejected active execution cancellation during Safe Stop.")
+                .ConfigureAwait(false);
+        }
+
+        var terminal = await WaitForCanceledTerminalAsync(
+                runAfterSafety.Id,
+                "Safe Stop",
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        if (terminal.IsSuccess)
+        {
+            await ReleaseOperationLeasesAsync(
+                    (await repository.GetByIdAsync(runAfterSafety.Id, CancellationToken.None)
+                     .ConfigureAwait(false))?.Run
+                    ?? throw new InvalidDataException(
+                        $"Production Run {runAfterSafety.Id} disappeared after Safe Stop completion."))
+                .ConfigureAwait(false);
+        }
+
+        return terminal;
+    }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> FailSafeStopAsync(
+        ProductionRunId runId,
+        string failureCode,
+        string failureReason)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var entry = await repository.GetByIdAsync(runId, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (entry is null)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.NotFound(
+                    "Runtime.ProductionRunNotFound",
+                    $"Production Run {runId} disappeared while recording Safe Stop recovery."));
+            }
+
+            if (entry.Run.IsTerminal)
+            {
+                return IsConfirmedSafeStop(entry.Run)
+                    ? Result.Success(entry.Run.ToSnapshot())
+                    : SafeStopLostRace(entry.Run);
+            }
+
+            var recovery = entry.Run.MarkRecoveryRequired(failureReason, clock.UtcNow);
+            if (!recovery.Succeeded)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+
+            var events = entry.Run.DomainEvents.ToArray();
+            try
+            {
+                await repository.SaveAsync(
+                        entry.Run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(entry.Run, events, CancellationToken.None).ConfigureAwait(false);
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                // Reload and preserve whichever durable transition won the race.
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunSafeStopConcurrencyConflict",
+                    $"Production Run {runId} kept changing while Safe Stop recovery was being recorded."));
+            }
+        }
+
+        return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunSafeStopConcurrencyConflict",
+            $"Production Run {runId} could not persist Safe Stop recovery."));
+    }
+
+    private static bool IsConfirmedSafeStop(ProductionRun run) =>
+        run.ExecutionStatus == ExecutionStatus.Canceled
+        && run.ControlState == ProductionRunControlState.SafeStopped
+        && run.SafeStopAcknowledgedAtUtc is not null
+        && string.Equals(
+            run.FailureCode,
+            "Runtime.ProductionRunSafeStopped",
+            StringComparison.Ordinal);
+
+    private static Result<ProductionRunSnapshot> SafeStopLostRace(ProductionRun run) =>
+        Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunSafeStopLostRace",
+            $"Production Run {run.Id} ended as {run.ExecutionStatus}/{run.ControlState} while Safe Stop was in flight."));
+
+    private static Result<ProductionRunSnapshot> SafeStopAlreadyEnded(ProductionRun run) =>
+        Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunSafeStopRejected",
+            $"Production Run {run.Id} already ended as {run.ExecutionStatus}/{run.ControlState}."));
 
     private async ValueTask<Result<ProductionRunSnapshot>> CancelAsync(
         ProductionRunPersistenceEntry entry,
@@ -402,8 +680,18 @@ public sealed class ProductionRunCoordinator(
             }
 
             var events = run.DomainEvents.ToArray();
-            await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
-                .ConfigureAwait(false);
+            try
+            {
+                await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunConcurrencyConflict",
+                    $"Production Run {run.Id} changed while cancellation was being persisted; reload it before retrying."));
+            }
+
             await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
             await ReleaseOperationLeasesAsync(run).ConfigureAwait(false);
             return Result.Success(run.ToSnapshot());
@@ -480,16 +768,60 @@ public sealed class ProductionRunCoordinator(
         }
     }
 
+    private async ValueTask<Result<ProductionRunSnapshot>> ResolveExistingSubmissionAsync(
+        ProductionRun run,
+        SubmitProductionRunRequest request)
+    {
+        var result = ResolveExistingSubmission(run, request);
+        if (result.IsSuccess)
+        {
+            await TryDrainCreatedOutboxAsync().ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    private async ValueTask TryDrainCreatedOutboxAsync()
+    {
+        try
+        {
+            await createdOutboxDispatcher.DrainAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // Admission is already committed. The dispatcher recorded the failure against
+            // the durable outbox item, and the hosted retry loop or a submission retry will
+            // deliver the same event identity later.
+        }
+    }
+
     private async ValueTask ReleaseOperationLeasesAsync(ProductionRun run)
     {
         foreach (var operation in run.Operations)
         {
-            await resourceLeases.ReleaseAsync(
-                    run.Id,
-                    operation.OperationRunId,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
+            await ReleaseOperationLeaseAsync(run.Id, operation).ConfigureAwait(false);
         }
+    }
+
+    private async ValueTask ReleaseOperationLeaseAsync(
+        ProductionRunId runId,
+        OperationRun operation)
+    {
+        var claims = operation.FencingTokens
+            .Select(static pair => new ResourceLeaseReleaseClaim(pair.Key, pair.Value))
+            .ToArray();
+        if (claims.Length == 0)
+        {
+            return;
+        }
+
+        await resourceLeases.ReleaseAsync(
+                runId,
+                operation.OperationRunId,
+                claims,
+                CancellationToken.None)
+            .ConfigureAwait(false);
     }
 
     private static ApplicationError? Validate(SubmitProductionRunRequest request)

@@ -112,6 +112,7 @@ public sealed record CreateTraceRouteDecisionRequest(
     string? SourceOperationRunId,
     string? TransitionId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);

@@ -1044,7 +1044,16 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                 {
                                     transitionId = "transition.first-to-second",
                                     sourceOperationId = "operation.first",
-                                    targetOperationId = "operation.second",
+                                    targetOperationId = (string?)"operation.second",
+                                    terminalDisposition = (string?)null,
+                                    kind = "Sequence"
+                                },
+                                new
+                                {
+                                    transitionId = "transition.second-completed",
+                                    sourceOperationId = "operation.second",
+                                    targetOperationId = (string?)null,
+                                    terminalDisposition = (string?)"Completed",
                                     kind = "Sequence"
                                 }
                             },
@@ -1404,7 +1413,17 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                             resources = StationResources("main")
                         }
                     },
-                    transitions = Array.Empty<object>(),
+                    transitions = new[]
+                    {
+                        new
+                        {
+                            transitionId = "operation.main-completed",
+                            sourceOperationId = "operation.main",
+                            targetOperationId = (string?)null,
+                            terminalDisposition = "Completed",
+                            kind = "Sequence"
+                        }
+                    },
                     lineControllerAuthorizations = Array.Empty<object>()
                 });
             Assert.Equal(HttpStatusCode.Created, createProductionLineResponse.StatusCode);

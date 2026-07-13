@@ -97,7 +97,8 @@ public sealed record ProjectReleaseLineControllerAuthorization(
 public sealed record ProjectReleaseRouteTransition(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

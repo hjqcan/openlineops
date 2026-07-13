@@ -84,7 +84,7 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
                 ProductionMaterialArrivalOrigin.StationAgent);
             Assert.True(duplicate.Succeeded, duplicate.Message);
             var timeline = await materials.ListTimelineAsync(
-                new ProductionMaterialTimelineQuery(productionUnitId: unitId));
+                ProductionMaterialTimelineQuery.StrictIntersection(productionUnitId: unitId));
             Assert.Single(timeline, static evidence =>
                 evidence.Kind == ProductionMaterialEvidenceKind.LocationTransition);
         }
@@ -199,7 +199,7 @@ public sealed class ProductionMaterialArrivalIngressTests : IAsyncDisposable
                 message,
                 ProductionMaterialArrivalOrigin.StationAgent)).Succeeded);
             var timeline = await materials.ListTimelineAsync(
-                new ProductionMaterialTimelineQuery(carrierId: carrierId));
+                ProductionMaterialTimelineQuery.StrictIntersection(carrierId: carrierId));
             Assert.Single(timeline, static evidence =>
                 evidence.Kind == ProductionMaterialEvidenceKind.LocationTransition);
         }

@@ -181,7 +181,8 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 transition is null
                 || string.IsNullOrWhiteSpace(transition.TransitionId)
                 || string.IsNullOrWhiteSpace(transition.SourceOperationId)
-                || string.IsNullOrWhiteSpace(transition.TargetOperationId)
+                || (string.IsNullOrWhiteSpace(transition.TargetOperationId)
+                    == string.IsNullOrWhiteSpace(transition.TerminalDisposition))
                 || string.IsNullOrWhiteSpace(transition.Kind))
             || request.LineControllerAuthorizations.Any(authorization =>
                 authorization is null
@@ -214,7 +215,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 || (transition.ExpectedOutputKind is not null
                     && !TryParseExact(
                         transition.ExpectedOutputKind,
-                        out ProductionContextValueKind expectedOutputKind)))
+                        out ProductionContextValueKind expectedOutputKind))
+                || (transition.TerminalDisposition is not null
+                    && !TryParseExact(
+                        transition.TerminalDisposition,
+                        out TerminalDisposition terminalDisposition)))
             {
                 return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                     "Production.RouteTransitionTokenInvalid",
@@ -241,7 +246,12 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             transitions.Add(new OpenLineOps.Production.Application.LineDefinitions.RouteTransitionRequest(
                 transition.TransitionId!,
                 transition.SourceOperationId!,
-                transition.TargetOperationId!,
+                transition.TargetOperationId,
+                transition.TerminalDisposition is null
+                    ? null
+                    : Enum.Parse<TerminalDisposition>(
+                        transition.TerminalDisposition,
+                        ignoreCase: false),
                 kind,
                 judgement,
                 transition.MaxTraversals,
@@ -349,6 +359,7 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 transition.TransitionId,
                 transition.SourceOperationId,
                 transition.TargetOperationId,
+                transition.TerminalDisposition,
                 transition.Kind,
                 transition.RequiredJudgement,
                 transition.MaxTraversals,

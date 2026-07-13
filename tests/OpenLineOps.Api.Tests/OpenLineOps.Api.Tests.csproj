@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

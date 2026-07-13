@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
@@ -89,7 +90,7 @@ public sealed class ProductionRunRepositoryTests
             "3.30",
             Assert.Single(restored.Run.Operations).Outputs["measuredVoltage"].CanonicalValue);
         Assert.NotNull(await repository.GetByRunIdAsync(run.Id));
-        var timeline = await materials.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+        var timeline = await materials.ListTimelineAsync(ProductionMaterialTimelineQuery.StrictIntersection(
             productionUnitId: run.ProductionUnitId,
             productionRunId: run.Id));
         var disposition = Assert.Single(timeline, entry =>
@@ -144,6 +145,57 @@ public sealed class ProductionRunRepositoryTests
         Assert.Equal(ProductionRecoveryDecisionKind.Retry, storedDecision.Kind);
         Assert.Equal("operation.main@0002", restored.Run.Operations[^1].OperationRunId);
         Assert.Equal(ExecutionStatus.Pending, restored.Run.Operations[^1].ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task SqliteRepositoryRoundTripsTwoPhaseSafeStopEvidence()
+    {
+        await using var database = new TemporaryDatabase();
+        using var repository = new SqliteProductionRunRepository(database.ConnectionString);
+        using var materials = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var (run, plan) = CreateRun();
+        Assert.True(await repository.TryAddAsync(
+            run,
+            plan,
+            await ProductionRunTestMaterials.RegisterAsync(materials, run)));
+        Assert.True(run.Start(Now).Succeeded);
+        var operation = Assert.Single(run.Operations);
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            RuntimeSessionId.New(),
+            operation.ResourceRequirements.Select(resource => new ResourceLease(
+                resource,
+                run.Id,
+                operation.OperationRunId,
+                17,
+                Now,
+                Now.AddHours(1))).ToArray(),
+            Now).Succeeded);
+        Assert.True(run.RequestSafeStop(
+            "operator.safety",
+            "Guard opened.",
+            Now.AddSeconds(1)).Succeeded);
+        Assert.True(run.AcknowledgeSafeStop(Now.AddSeconds(2)).Succeeded);
+        Assert.True(run.CancelOperation(
+            operation.OperationRunId,
+            "Runtime.OperationCanceled",
+            "Station process tree terminated.",
+            0,
+            1,
+            0,
+            Now.AddSeconds(3)).Succeeded);
+
+        Assert.Equal(1, await repository.SaveAsync(run, 0));
+        var restored = Assert.IsType<ProductionRunPersistenceEntry>(
+            await repository.GetByIdAsync(run.Id));
+
+        Assert.Equal(ExecutionStatus.Canceled, restored.Run.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.SafeStopped, restored.Run.ControlState);
+        Assert.Equal("operator.safety", restored.Run.SafeStopRequestedBy);
+        Assert.Equal("Guard opened.", restored.Run.SafeStopReason);
+        Assert.Equal(Now.AddSeconds(1), restored.Run.SafeStopRequestedAtUtc);
+        Assert.Equal(Now.AddSeconds(2), restored.Run.SafeStopAcknowledgedAtUtc);
+        Assert.Equal("Runtime.ProductionRunSafeStopped", restored.Run.FailureCode);
     }
 
     [Fact]
@@ -253,7 +305,7 @@ public sealed class ProductionRunRepositoryTests
         var completedSlot = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
             await materials.GetSlotAsync(slotAddress));
         Assert.Equal(SlotOccupancyStatus.Occupied, completedSlot.Aggregate.Status);
-        var runTimeline = await materials.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+        var runTimeline = await materials.ListTimelineAsync(ProductionMaterialTimelineQuery.StrictIntersection(
             productionUnitId: unitId,
             productionRunId: run.Id));
         var slotCompletion = Assert.Single(runTimeline, entry =>
@@ -348,11 +400,19 @@ public sealed class ProductionRunRepositoryTests
             operation1.Definition.OperationId,
             Now,
             [operation1.Definition, operation2.Definition],
-            [new RouteTransitionDefinition(
-                "route.one-to-two",
-                operation1.Definition.OperationId,
-                operation2.Definition.OperationId,
-                RuntimeRouteTransitionKind.Sequence)]);
+            [
+                new RouteTransitionDefinition(
+                    "route.one-to-two",
+                    operation1.Definition.OperationId,
+                    operation2.Definition.OperationId,
+                    RuntimeRouteTransitionKind.Sequence),
+                new RouteTransitionDefinition(
+                    "route.two-completed",
+                    operation2.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
         var plan = new ProductionRunExecutionPlan(run.Id, [operation1, operation2]);
         var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
             await materials.GetProductionUnitAsync(unitId));
@@ -411,7 +471,7 @@ public sealed class ProductionRunRepositoryTests
     [Fact]
     public async Task ResourceLeasesAreExclusiveAndFencingTokensIncreaseAfterRelease()
     {
-        var leases = new InMemoryResourceLeaseRepository();
+        var leases = new InMemoryResourceLeaseRepository(new FixedClock(Now));
         var resource = new ResourceRequirement(ResourceKind.Station, "station.main");
         var firstRun = ProductionRunId.New();
         var secondRun = ProductionRunId.New();
@@ -421,22 +481,22 @@ public sealed class ProductionRunRepositoryTests
                 firstRun,
                 "operation@0001",
                 [resource],
-                Now,
                 TimeSpan.FromMinutes(1))));
         Assert.Null(await leases.TryAcquireAsync(
             secondRun,
             "operation@0001",
             [resource],
-            Now.AddSeconds(1),
             TimeSpan.FromMinutes(1)));
 
-        await leases.ReleaseAsync(firstRun, "operation@0001");
+        await leases.ReleaseAsync(
+            firstRun,
+            "operation@0001",
+            [ResourceLeaseReleaseClaim.FromLease(first)]);
         var second = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
             await leases.TryAcquireAsync(
                 secondRun,
                 "operation@0001",
                 [resource],
-                Now.AddSeconds(2),
                 TimeSpan.FromMinutes(1))));
         Assert.True(second.FencingToken > first.FencingToken);
     }
@@ -444,7 +504,7 @@ public sealed class ProductionRunRepositoryTests
     [Fact]
     public async Task ReplacedResourceFenceRejectsTheOldCommandEvidence()
     {
-        var leases = new InMemoryResourceLeaseRepository();
+        var leases = new InMemoryResourceLeaseRepository(new FixedClock(Now));
         var resource = new ResourceRequirement(ResourceKind.Station, "station.main");
         var run = ProductionRunId.New();
         var first = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
@@ -452,34 +512,38 @@ public sealed class ProductionRunRepositoryTests
                 run,
                 "operation@0001",
                 [resource],
-                Now,
                 TimeSpan.FromMinutes(1))));
         var firstEvidence = new[] { ResourceLeaseFenceEvidence.FromLease(first) };
 
         Assert.True((await leases.ValidateCurrentAsync(
             run,
             "operation@0001",
-            firstEvidence,
-            Now.AddSeconds(1))).Accepted);
-        await leases.ReleaseAsync(run, "operation@0001");
+            firstEvidence)).Accepted);
+        await leases.ReleaseAsync(
+            run,
+            "operation@0001",
+            [ResourceLeaseReleaseClaim.FromLease(first)]);
         var replacement = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
             await leases.TryAcquireAsync(
                 run,
                 "operation@0002",
                 [resource],
-                Now.AddSeconds(2),
                 TimeSpan.FromMinutes(1))));
+
+        await leases.ReleaseAsync(
+            run,
+            "operation@0001",
+            [ResourceLeaseReleaseClaim.FromLease(first)]);
 
         Assert.False((await leases.ValidateCurrentAsync(
             run,
             "operation@0001",
-            firstEvidence,
-            Now.AddSeconds(3))).Accepted);
+            firstEvidence)).Accepted);
         Assert.True((await leases.ValidateCurrentAsync(
             run,
             "operation@0002",
-            [ResourceLeaseFenceEvidence.FromLease(replacement)],
-            Now.AddSeconds(3))).Accepted);
+            [ResourceLeaseFenceEvidence.FromLease(replacement)])).Accepted);
+        Assert.Equal(replacement, Assert.Single(await leases.ListAsync()));
         Assert.True(replacement.FencingToken > first.FencingToken);
     }
 
@@ -514,8 +578,27 @@ public sealed class ProductionRunRepositoryTests
             operation.Definition.OperationId,
             Now,
             [operation.Definition],
-            []);
+            [
+                new RouteTransitionDefinition(
+                    "route.main-failed",
+                    operation.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed,
+                    terminalDisposition: ProductDisposition.Nonconforming),
+                new RouteTransitionDefinition(
+                    "route.main-default",
+                    operation.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
         return (run, new ProductionRunExecutionPlan(runId, [operation]));
+    }
+
+    private sealed class FixedClock(DateTimeOffset utcNow) : IClock
+    {
+        public DateTimeOffset UtcNow { get; } = utcNow;
     }
 
     private static async Task AssertSameTimestampReworkEvidenceAsync(
@@ -563,13 +646,34 @@ public sealed class ProductionRunRepositoryTests
             testOperation.Definition.OperationId,
             Now,
             [testOperation.Definition, reworkOperation.Definition],
-            [new RouteTransitionDefinition(
-                "route.test-rework",
-                testOperation.Definition.OperationId,
-                reworkOperation.Definition.OperationId,
-                RuntimeRouteTransitionKind.Rework,
-                ResultJudgement.Failed,
-                maxTraversals: 1)]);
+            [
+                new RouteTransitionDefinition(
+                    "route.test-rework",
+                    testOperation.Definition.OperationId,
+                    reworkOperation.Definition.OperationId,
+                    RuntimeRouteTransitionKind.Rework,
+                    ResultJudgement.Failed,
+                    maxTraversals: 1),
+                new RouteTransitionDefinition(
+                    "route.test-failed",
+                    testOperation.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed,
+                    terminalDisposition: ProductDisposition.Nonconforming),
+                new RouteTransitionDefinition(
+                    "route.test-default",
+                    testOperation.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Held),
+                new RouteTransitionDefinition(
+                    "route.rework-completed",
+                    reworkOperation.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
         var plan = new ProductionRunExecutionPlan(run.Id, [testOperation, reworkOperation]);
         var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
             await materials.GetProductionUnitAsync(unitId));
@@ -626,7 +730,7 @@ public sealed class ProductionRunRepositoryTests
             completedAtUtc).Succeeded);
         Assert.Equal(4, await repository.SaveAsync(run, 3));
 
-        var timeline = await materials.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+        var timeline = await materials.ListTimelineAsync(ProductionMaterialTimelineQuery.StrictIntersection(
             productionUnitId: unitId,
             productionRunId: run.Id));
         var completions = timeline.Where(entry =>

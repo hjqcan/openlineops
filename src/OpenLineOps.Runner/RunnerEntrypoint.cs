@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using OpenLineOps.Devices.Api.DependencyInjection;
 using OpenLineOps.Engineering.Api.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
@@ -75,33 +76,30 @@ public static class RunnerEntrypoint
         try
         {
             var configuration = BuildConfiguration(parseResult.Options!, currentDirectory);
-            var services = new ServiceCollection();
-            services.AddLogging();
-            services.AddSingleton<IConfiguration>(configuration);
-            services.AddOpenLineOpsProjectsModule();
-            services.AddOpenLineOpsTopologyModule();
-            services.AddOpenLineOpsRuntimeModule(configuration);
-            services.AddOpenLineOpsTraceabilityModule(configuration);
-            services.AddOpenLineOpsProcessesModule();
-            services.AddOpenLineOpsProductionModule();
-            services.AddOpenLineOpsEngineeringModule();
-            services.AddOpenLineOpsPluginsModule(configuration);
-            services.AddOpenLineOpsDevicesModule(configuration);
-            services.AddScoped<IRunnerProductionUnitPreparer, RunnerProductionUnitPreparer>();
-            services.AddScoped<RunnerCommand>();
+            using var host = new HostBuilder()
+                .UseDefaultServiceProvider(
+                    (_, options) =>
+                    {
+                        options.ValidateScopes = true;
+                        options.ValidateOnBuild = true;
+                    })
+                .ConfigureServices(services => ConfigureServices(services, configuration))
+                .Build();
 
-            await using var serviceProvider = services.BuildServiceProvider(
-                new ServiceProviderOptions
-                {
-                    ValidateScopes = true,
-                    ValidateOnBuild = true
-                });
-            await using var scope = serviceProvider.CreateAsyncScope();
-            var command = scope.ServiceProvider.GetRequiredService<RunnerCommand>();
+            await host.StartAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await using var scope = host.Services.CreateAsyncScope();
+                var command = scope.ServiceProvider.GetRequiredService<RunnerCommand>();
 
-            return await command
-                .RunAsync(parseResult.Options!, currentDirectory, output, cancellationToken)
-                .ConfigureAwait(false);
+                return await command
+                    .RunAsync(parseResult.Options!, currentDirectory, output, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -129,6 +127,26 @@ public static class RunnerEntrypoint
                 .ConfigureAwait(false);
             return RunnerExitCodes.InternalError;
         }
+    }
+
+    private static void ConfigureServices(
+        IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddLogging();
+        services.AddSingleton(configuration);
+        services.AddOpenLineOpsProjectsModule();
+        services.AddOpenLineOpsTopologyModule();
+        services.AddOpenLineOpsRuntimeModule(configuration);
+        services.AddOpenLineOpsTraceabilityModule(configuration);
+        services.AddOpenLineOpsProcessesModule();
+        services.AddOpenLineOpsProductionModule();
+        services.AddOpenLineOpsEngineeringModule();
+        services.AddOpenLineOpsPluginsModule(configuration);
+        services.AddOpenLineOpsDevicesModule(configuration);
+        services.AddScoped<IRunnerProductionUnitPreparer, RunnerProductionUnitPreparer>();
+        services.AddScoped<IProductionRunCompletionWaiter, ProductionRunCompletionWaiter>();
+        services.AddScoped<RunnerCommand>();
     }
 
     private static IConfigurationRoot BuildConfiguration(

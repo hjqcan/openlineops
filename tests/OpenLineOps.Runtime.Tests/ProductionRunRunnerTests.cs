@@ -1,7 +1,9 @@
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
@@ -183,7 +185,7 @@ public sealed class ProductionRunRunnerTests
     }
 
     [Fact]
-    public async Task SafeStopIsNotPersistedUntilIndependentSafetyChannelAcknowledges()
+    public async Task SafeStopBeforeDispatchPersistsAsNoOpWithoutCallingPhysicalSafety()
     {
         var fixture = new Fixture(
             new StationOperationDispatchResult(
@@ -205,10 +207,64 @@ public sealed class ProductionRunRunnerTests
                 "operator.safety",
                 "Guard door opened."));
 
+        Assert.True(result.IsSuccess);
+        Assert.Equal(ExecutionStatus.Canceled, result.Value.ExecutionStatus);
+        Assert.Equal(ProductionRunControlState.SafeStopped, result.Value.ControlState);
+        Assert.NotNull(result.Value.SafeStopAcknowledgedAtUtc);
+    }
+
+    [Fact]
+    public async Task SafeStopRejectsTerminalRunWithoutDispatchingStationSafety()
+    {
+        var safety = new RecordingSafetyController();
+        var fixture = new Fixture(
+            new StationOperationDispatchResult(
+                ExecutionStatus.Completed,
+                ResultJudgement.Passed,
+                null,
+                0,
+                0,
+                0,
+                Now),
+            safety);
+        var request = CreateRequest();
+        Assert.True((await fixture.SubmitAsync(request)).IsSuccess);
+        Assert.True((await fixture.Runner.ExecuteAsync(request.RunId)).IsSuccess);
+
+        var result = await fixture.Coordinator.CommandAsync(
+            request.RunId,
+            new ProductionRunCommandRequest(
+                ProductionRunCommand.SafeStop,
+                "operator.safety",
+                "Late duplicate Safe Stop."));
+
         Assert.True(result.IsFailure);
-        Assert.Equal(
-            ExecutionStatus.Pending,
-            (await fixture.Repository.GetByIdAsync(request.RunId))!.Run.ExecutionStatus);
+        Assert.Equal("Conflict.Runtime.ProductionRunSafeStopRejected", result.Error.Code);
+        Assert.Equal(0, safety.RequestCount);
+    }
+
+    [Fact]
+    public async Task SubmissionCompletesDurablyWhenCallerCancelsAfterAtomicAdmission()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var fixture = new Fixture(
+            new StationOperationDispatchResult(
+                ExecutionStatus.Completed,
+                ResultJudgement.Passed,
+                null,
+                0,
+                0,
+                0,
+                Now),
+            repositoryDecorator: repository =>
+                new CancelAfterAdmissionRepository(repository, cancellation));
+        var request = CreateRequest();
+
+        var result = await fixture.SubmitAsync(request, cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.True(result.IsSuccess);
+        Assert.NotNull(await fixture.Repository.GetByIdAsync(request.RunId));
     }
 
     [Fact]
@@ -216,8 +272,8 @@ public sealed class ProductionRunRunnerTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var repository = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
         var registry = new InProcessStationOperationRegistry();
         var dispatcher = new BoundaryDispatcher(registry, completeOnRelease: true);
@@ -228,6 +284,7 @@ public sealed class ProductionRunRunnerTests
             new AcceptingSafetyController(),
             new InProcessStationOperationCanceler(registry),
             publisher,
+            new ProductionRunCreatedOutboxDispatcher(repository, publisher),
             clock);
         var runner = new ProductionRunRunner(
             repository,
@@ -268,8 +325,8 @@ public sealed class ProductionRunRunnerTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var repository = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
         var registry = new InProcessStationOperationRegistry();
         var dispatcher = new BoundaryDispatcher(registry, completeOnRelease: false);
@@ -280,6 +337,7 @@ public sealed class ProductionRunRunnerTests
             new AcceptingSafetyController(),
             new InProcessStationOperationCanceler(registry),
             publisher,
+            new ProductionRunCreatedOutboxDispatcher(repository, publisher),
             clock);
         var runner = new ProductionRunRunner(
             repository,
@@ -326,8 +384,8 @@ public sealed class ProductionRunRunnerTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var repository = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
         var registry = new InProcessStationOperationRegistry();
         var dispatcher = new SafeStopDispatcher(registry);
@@ -338,6 +396,7 @@ public sealed class ProductionRunRunnerTests
             new AcceptingSafetyController(),
             new InProcessStationOperationCanceler(registry),
             publisher,
+            new ProductionRunCreatedOutboxDispatcher(repository, publisher),
             clock);
         var runner = new ProductionRunRunner(
             repository,
@@ -379,8 +438,8 @@ public sealed class ProductionRunRunnerTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var repository = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var publisher = new InMemoryRuntimeDomainEventPublisher();
         var dispatcher = new ConcurrentRunDispatcher();
         var coordinator = new ProductionRunCoordinator(
@@ -390,6 +449,7 @@ public sealed class ProductionRunRunnerTests
             new AcceptingSafetyController(),
             new AcceptingCanceler(),
             publisher,
+            new ProductionRunCreatedOutboxDispatcher(repository, publisher),
             clock);
         var runner = new ProductionRunRunner(
             repository,
@@ -484,7 +544,18 @@ public sealed class ProductionRunRunnerTests
             "operator.main",
             operation.Definition.OperationId,
             [operation],
-            []);
+            [
+                TerminalTransition(
+                    "route.main-failed",
+                    operation.Definition.OperationId,
+                    ProductDisposition.Nonconforming,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed),
+                TerminalTransition(
+                    "route.main-default",
+                    operation.Definition.OperationId,
+                    ProductDisposition.Completed)
+            ]);
     }
 
     private static SubmitProductionRunRequest CreateSingleStationRequest(string suffix)
@@ -515,7 +586,7 @@ public sealed class ProductionRunRunnerTests
             "operator.parallel",
             operationId,
             [operation],
-            []);
+            [TerminalTransition($"route.{suffix}.completed", operationId, ProductDisposition.Completed)]);
     }
 
     private static SubmitProductionRunRequest CreateParallelRequest()
@@ -574,7 +645,11 @@ public sealed class ProductionRunRunnerTests
                     "operation.right",
                     "operation.join",
                     RuntimeRouteTransitionKind.ParallelJoin,
-                    parallelGroupId: "parallel.work")
+                    parallelGroupId: "parallel.work"),
+                TerminalTransition(
+                    "route.join.completed",
+                    "operation.join",
+                    ProductDisposition.Completed)
             ]);
     }
 
@@ -608,47 +683,74 @@ public sealed class ProductionRunRunnerTests
                 Operation("operation.main", "station.main"),
                 Operation("operation.next", "station.next")
             ],
-            [new RouteTransitionDefinition(
-                "route.next",
-                "operation.main",
-                "operation.next",
-                RuntimeRouteTransitionKind.Sequence)]);
+            [
+                new RouteTransitionDefinition(
+                    "route.next",
+                    "operation.main",
+                    "operation.next",
+                    RuntimeRouteTransitionKind.Sequence),
+                TerminalTransition(
+                    "route.next.completed",
+                    "operation.next",
+                    ProductDisposition.Completed)
+            ]);
     }
+
+    private static RouteTransitionDefinition TerminalTransition(
+        string transitionId,
+        string sourceOperationId,
+        ProductDisposition disposition,
+        RuntimeRouteTransitionKind kind = RuntimeRouteTransitionKind.Sequence,
+        ResultJudgement? judgement = null) => new(
+            transitionId,
+            sourceOperationId,
+            null,
+            kind,
+            requiredJudgement: judgement,
+            terminalDisposition: disposition);
 
     private sealed class Fixture
     {
         private readonly InMemoryProductionMaterialRepository _materials;
         private readonly InMemoryProductionRunRepository _repository;
-        private readonly InMemoryResourceLeaseRepository _leases = new();
         private readonly FixedClock _clock = new(Now);
+        private readonly InMemoryResourceLeaseRepository _leases;
         private readonly InMemoryRuntimeDomainEventPublisher _publisher = new();
 
         public Fixture(
             StationOperationDispatchResult result,
-            IStationSafetyController? safetyController = null)
-            : this(new RecordingDispatcher(result), safetyController ?? new AcceptingSafetyController())
+            IStationSafetyController? safetyController = null,
+            Func<InMemoryProductionRunRepository, IProductionRunRepository>? repositoryDecorator = null)
+            : this(
+                new RecordingDispatcher(result),
+                safetyController ?? new AcceptingSafetyController(),
+                repositoryDecorator)
         {
         }
 
         public Fixture(Exception exception)
-            : this(new RecordingDispatcher(exception), new AcceptingSafetyController())
+            : this(new RecordingDispatcher(exception), new AcceptingSafetyController(), null)
         {
         }
 
         private Fixture(
             RecordingDispatcher dispatcher,
-            IStationSafetyController safetyController)
+            IStationSafetyController safetyController,
+            Func<InMemoryProductionRunRepository, IProductionRunRepository>? repositoryDecorator)
         {
+            _leases = new InMemoryResourceLeaseRepository(_clock);
             _materials = new InMemoryProductionMaterialRepository();
             _repository = new InMemoryProductionRunRepository(_materials);
             Dispatcher = dispatcher;
+            var coordinatorRepository = repositoryDecorator?.Invoke(_repository) ?? _repository;
             Coordinator = new ProductionRunCoordinator(
-                _repository,
+                coordinatorRepository,
                 _materials,
                 _leases,
                 safetyController,
                 new AcceptingCanceler(),
                 _publisher,
+                new ProductionRunCreatedOutboxDispatcher(coordinatorRepository, _publisher),
                 _clock);
             Runner = new ProductionRunRunner(
                 _repository,
@@ -672,7 +774,9 @@ public sealed class ProductionRunRunnerTests
         public ProductionRunRunner Runner { get; }
 
         public async ValueTask<OpenLineOps.Application.Abstractions.Results.Result<ProductionRunSnapshot>>
-            SubmitAsync(SubmitProductionRunRequest request)
+            SubmitAsync(
+                SubmitProductionRunRequest request,
+                CancellationToken cancellationToken = default)
         {
             var entryOperation = request.Operations.Single(operation => string.Equals(
                 operation.Definition.OperationId,
@@ -686,7 +790,7 @@ public sealed class ProductionRunRunnerTests
                 null,
                 request.ActorId,
                 Now.AddTicks(-1));
-            Assert.True(await _materials.TryAddAsync(unit));
+            Assert.True(await _materials.TryAddAsync(unit, cancellationToken));
             var materialService = new ProductionMaterialService(_materials, _repository);
             Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
                 Guid.NewGuid(),
@@ -695,8 +799,8 @@ public sealed class ProductionRunRunnerTests
                     request.ProductionLineDefinitionId,
                     entryOperation.Definition.StationSystemId),
                 request.ActorId,
-                Now))).Succeeded);
-            return await Coordinator.SubmitAsync(request);
+                Now), cancellationToken)).Succeeded);
+            return await Coordinator.SubmitAsync(request, cancellationToken);
         }
     }
 
@@ -889,6 +993,99 @@ public sealed class ProductionRunRunnerTests
             ValueTask.FromResult(StationSafetyResult.Failure(
                 "Safety.AgentUnavailable",
                 "Station Agent did not acknowledge Safe Stop."));
+    }
+
+    private sealed class RecordingSafetyController : IStationSafetyController
+    {
+        public int RequestCount { get; private set; }
+
+        public ValueTask<StationSafetyResult> RequestSafeStopAsync(
+            StationSafetyRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            RequestCount++;
+            return ValueTask.FromResult(StationSafetyResult.Success());
+        }
+    }
+
+    private sealed class CancelAfterAdmissionRepository(
+        IProductionRunRepository inner,
+        CancellationTokenSource cancellation) : IProductionRunRepository
+    {
+        public async ValueTask<bool> TryAddAsync(
+            ProductionRun run,
+            ProductionRunExecutionPlan executionPlan,
+            ProductionRunAdmission admission,
+            CancellationToken cancellationToken = default)
+        {
+            var added = await inner.TryAddAsync(
+                run,
+                executionPlan,
+                admission,
+                cancellationToken);
+            cancellation.Cancel();
+            return added;
+        }
+
+        public ValueTask<long> SaveAsync(
+            ProductionRun run,
+            long expectedRevision,
+            CancellationToken cancellationToken = default) =>
+            inner.SaveAsync(run, expectedRevision, cancellationToken);
+
+        public ValueTask<ProductionRunPersistenceEntry?> GetByIdAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            inner.GetByIdAsync(runId, cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRecoverableAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.ListRecoverableAsync(cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+            string? productionLineDefinitionId = null,
+            string? stationSystemId = null,
+            string? slotId = null,
+            CancellationToken cancellationToken = default) =>
+            inner.ListActiveAsync(
+                productionLineDefinitionId,
+                stationSystemId,
+                slotId,
+                cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+            ListPendingCreatedOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) =>
+            inner.ListPendingCreatedOutboxAsync(maximumCount, cancellationToken);
+
+        public ValueTask MarkCreatedOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            inner.MarkCreatedOutboxProcessedAsync(runId, cancellationToken);
+
+        public ValueTask RecordCreatedOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) =>
+            inner.RecordCreatedOutboxFailureAsync(runId, failureDescription, cancellationToken);
+
+        public ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>
+            ListPendingTerminalOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) =>
+            inner.ListPendingTerminalOutboxAsync(maximumCount, cancellationToken);
+
+        public ValueTask MarkTerminalOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            inner.MarkTerminalOutboxProcessedAsync(runId, cancellationToken);
+
+        public ValueTask RecordTerminalOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
+            CancellationToken cancellationToken = default) =>
+            inner.RecordTerminalOutboxFailureAsync(runId, failureDescription, cancellationToken);
     }
 
     private sealed class AcceptingCanceler : IStationOperationCanceler

@@ -20,6 +20,20 @@ public sealed class SqliteRuntimeSessionRepositoryTests
     private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task SaveAsyncRejectsOmittedPendingEventsWithoutWritingSessionSnapshot()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("omitted-events", BaseTimeUtc);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await repository.SaveAsync(session, []));
+
+        Assert.Contains("every pending Domain Event", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await repository.GetByIdAsync(session.Id));
+    }
+
+    [Fact]
     public async Task SaveAsyncPersistsRuntimeSessionGraphForNewRepositoryInstance()
     {
         using var database = TemporarySqliteDatabase.Create();
@@ -53,7 +67,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             "Camera temperature is above nominal range.",
             BaseTimeUtc.AddSeconds(8));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = await restartedRepository.GetByIdAsync(session.Id);
@@ -111,7 +125,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
                 "TOPOLOGY-TRACE",
                 RuntimeTestReleaseIdentity.ResourceFences("STATION-SYSTEM-TRACE")));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = await restartedRepository.GetByIdAsync(session.Id);
@@ -149,7 +163,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var session = CreateRunningSession("missing-release-identity", BaseTimeUtc);
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         await using (var connection = new SqliteConnection(database.ConnectionString))
         {
@@ -200,7 +214,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             BaseTimeUtc.AddSeconds(3),
             TimeSpan.FromSeconds(5));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = Assert.IsType<RuntimeSession>(await restartedRepository.GetByIdAsync(session.Id));
@@ -335,9 +349,9 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         var completed = CreateRunningSession("completed", BaseTimeUtc.AddMinutes(6));
         completed.Complete(BaseTimeUtc.AddMinutes(7));
 
-        await repository.SaveAsync(paused);
-        await repository.SaveAsync(completed);
-        await repository.SaveAsync(running);
+        await repository.SaveAsync(paused, paused.DomainEvents.ToArray());
+        await repository.SaveAsync(completed, completed.DomainEvents.ToArray());
+        await repository.SaveAsync(running, running.DomainEvents.ToArray());
 
         var service = new RuntimeSessionRecoveryService(repository);
         var plan = await service.CreateRecoveryPlanAsync();

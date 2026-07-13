@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -31,6 +32,19 @@ public interface IProductionRunRepository
         string? slotId = null,
         CancellationToken cancellationToken = default);
 
+    ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>> ListPendingCreatedOutboxAsync(
+        int maximumCount,
+        CancellationToken cancellationToken = default);
+
+    ValueTask MarkCreatedOutboxProcessedAsync(
+        ProductionRunId runId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask RecordCreatedOutboxFailureAsync(
+        ProductionRunId runId,
+        string failureDescription,
+        CancellationToken cancellationToken = default);
+
     ValueTask<IReadOnlyCollection<ProductionRunTerminalOutboxItem>> ListPendingTerminalOutboxAsync(
         int maximumCount,
         CancellationToken cancellationToken = default);
@@ -58,6 +72,81 @@ public sealed record ProductionRunAdmission
     public ProductionUnitSnapshot ProductionUnit { get; }
 
     public long ExpectedRevision { get; }
+}
+
+public sealed record ProductionRunCreatedOutboxItem
+{
+    public static ProductionRunCreatedOutboxItem FromAdmission(ProductionRun run)
+    {
+        ArgumentNullException.ThrowIfNull(run);
+        var events = run.DomainEvents.ToArray();
+        if (events.Length != 1
+            || events[0] is not ProductionRunCreatedDomainEvent created
+            || created.RunId != run.Id)
+        {
+            throw new ArgumentException(
+                "Production Run admission requires exactly one matching Created domain event.",
+                nameof(run));
+        }
+
+        return new ProductionRunCreatedOutboxItem(
+            run.Id,
+            created.EventId,
+            created.OccurredAtUtc,
+            0,
+            null);
+    }
+
+    public ProductionRunCreatedOutboxItem(
+        ProductionRunId runId,
+        Guid eventId,
+        DateTimeOffset occurredAtUtc,
+        int attemptCount,
+        string? lastError)
+    {
+        if (runId.Value == Guid.Empty)
+        {
+            throw new ArgumentException("Production Run id cannot be empty.", nameof(runId));
+        }
+
+        if (eventId == Guid.Empty)
+        {
+            throw new ArgumentException("Created-event id cannot be empty.", nameof(eventId));
+        }
+
+        if (occurredAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Created-event occurrence time must be UTC.", nameof(occurredAtUtc));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(attemptCount);
+        if ((attemptCount == 0) != (lastError is null)
+            || lastError is not null
+                && (string.IsNullOrWhiteSpace(lastError)
+                    || char.IsWhiteSpace(lastError[0])
+                    || char.IsWhiteSpace(lastError[^1])))
+        {
+            throw new ArgumentException(
+                "Created-event failure state requires a canonical error after every failed attempt.",
+                nameof(lastError));
+        }
+
+        RunId = runId;
+        EventId = eventId;
+        OccurredAtUtc = occurredAtUtc;
+        AttemptCount = attemptCount;
+        LastError = lastError;
+    }
+
+    public ProductionRunId RunId { get; }
+
+    public Guid EventId { get; }
+
+    public DateTimeOffset OccurredAtUtc { get; }
+
+    public int AttemptCount { get; }
+
+    public string? LastError { get; }
 }
 
 public sealed record ProductionRunTerminalOutboxItem

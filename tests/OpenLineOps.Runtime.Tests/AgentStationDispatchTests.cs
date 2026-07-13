@@ -64,13 +64,99 @@ public sealed class AgentStationDispatchTests
         var result = await controller.RequestSafeStopAsync(new StationSafetyRequest(
             request.Run,
             "operator.safety",
-            "Guard opened."));
+            "Guard opened.",
+            Now));
 
         Assert.True(result.Accepted);
         var message = Assert.IsType<StationSafeStopRequested>(gateway.Request);
         Assert.Equal(request.Run.RunId.Value, message.ProductionRunId);
         Assert.Equal("operation.main@0001", message.OperationRunId);
         Assert.Equal("operator.safety", message.ActorId);
+    }
+
+    [Fact]
+    public async Task SafetyControllerDoesNotDispatchPhysicalStopForPendingStationWork()
+    {
+        var request = CreateDispatchRequest();
+        var pendingRun = request.Run with
+        {
+            ExecutionStatus = ExecutionStatus.Pending,
+            Operations = request.Run.Operations.Select(operation => operation with
+            {
+                ExecutionStatus = ExecutionStatus.Pending,
+                RuntimeSessionId = null,
+                StartedAtUtc = null,
+                FencingTokens = new Dictionary<ResourceRequirement, long>()
+            }).ToArray()
+        };
+        var gateway = new RecordingSafetyGateway();
+        var controller = new AgentStationSafetyController(
+            gateway,
+            new FixedDeploymentResolver());
+
+        var result = await controller.RequestSafeStopAsync(new StationSafetyRequest(
+            pendingRun,
+            "operator.safety",
+            "Cancel before dispatch.",
+            Now));
+
+        Assert.True(result.Accepted);
+        Assert.Null(gateway.Request);
+    }
+
+    [Fact]
+    public async Task SafetyControllerRetryUsesIdenticalDurableMessageEvidence()
+    {
+        var request = CreateDispatchRequest();
+        var gateway = new RecordingSafetyGateway();
+        var controller = new AgentStationSafetyController(
+            gateway,
+            new FixedDeploymentResolver());
+        var safetyRequest = new StationSafetyRequest(
+            request.Run,
+            "operator.safety",
+            "Guard opened.",
+            Now);
+
+        Assert.True((await controller.RequestSafeStopAsync(safetyRequest)).Accepted);
+        var first = Assert.IsType<StationSafeStopRequested>(gateway.Request);
+        Assert.True((await controller.RequestSafeStopAsync(safetyRequest)).Accepted);
+        var retry = Assert.IsType<StationSafeStopRequested>(gateway.Request);
+
+        Assert.Equal(first, retry);
+        Assert.Equal(StationJobIdentity.CreateSafetyMessageId(first.IdempotencyKey), first.MessageId);
+        Assert.EndsWith($"/{first.OperationRunId}", first.IdempotencyKey, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SafetyControllerStillStopsOperationThatCompletedAfterDurableBarrier()
+    {
+        var request = CreateDispatchRequest();
+        var completedAfterBarrier = request.Run with
+        {
+            ExecutionStatus = ExecutionStatus.Completed,
+            Operations = request.Run.Operations.Select(operation => operation with
+            {
+                ExecutionStatus = ExecutionStatus.Completed,
+                Judgement = ResultJudgement.Passed,
+                CompletedAtUtc = Now.AddSeconds(1)
+            }).ToArray()
+        };
+        var gateway = new RecordingSafetyGateway();
+        var controller = new AgentStationSafetyController(
+            gateway,
+            new FixedDeploymentResolver());
+
+        var result = await controller.RequestSafeStopAsync(new StationSafetyRequest(
+            completedAfterBarrier,
+            "operator.safety",
+            "Barrier already won the dispatch race.",
+            Now));
+
+        Assert.True(result.Accepted);
+        Assert.NotNull(gateway.Request);
+        Assert.Equal(Assert.Single(completedAfterBarrier.Operations).OperationRunId,
+            gateway.Request.OperationRunId);
     }
 
     [Fact]
@@ -96,7 +182,8 @@ public sealed class AgentStationDispatchTests
         var result = await controller.RequestSafeStopAsync(new StationSafetyRequest(
             request.Run,
             "operator.safety",
-            "Guard opened."));
+            "Guard opened.",
+            Now));
 
         Assert.False(result.Accepted);
         Assert.Equal("Runtime.SafeStopAcknowledgementMismatch", result.FailureCode);

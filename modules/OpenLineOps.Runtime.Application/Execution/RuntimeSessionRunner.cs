@@ -569,7 +569,9 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     {
         var domainEvents = session.DomainEvents.ToArray();
 
-        await _sessionRepository.SaveAsync(session, cancellationToken).ConfigureAwait(false);
+        await _sessionRepository
+            .SaveAsync(session, domainEvents, cancellationToken)
+            .ConfigureAwait(false);
 
         if (domainEvents.Length > 0)
         {

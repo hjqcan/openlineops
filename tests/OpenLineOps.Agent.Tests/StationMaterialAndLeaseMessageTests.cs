@@ -73,7 +73,9 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
             publisher.Payload!);
         Assert.Equal(signal.MessageId, publication.MessageId);
         Assert.Equal(signal.MessageId, publication.CorrelationId);
-        Assert.Equal("station.station.main.MaterialArrived", publication.RoutingKey);
+        Assert.Equal(
+            StationTransportRoute.Event("station.main", nameof(MaterialArrived)),
+            publication.RoutingKey);
     }
 
     [Fact]

@@ -80,7 +80,6 @@ public sealed class EventBusServiceCollectionExtensionsTests
     public async Task PostCommitRegistersExplicitPolicyAndOrdinaryPublisherOnly()
     {
         var services = new ServiceCollection();
-        services.AddLogging();
         services.AddOpenLineOpsEventBus(BuildConfiguration(new Dictionary<string, string?>
         {
             ["OpenLineOps:EventBus:PublicationMode"] = "PostCommit"
@@ -151,7 +150,6 @@ public sealed class EventBusServiceCollectionExtensionsTests
             ["OpenLineOps:EventBus:RabbitMq:Enabled"] = "false"
         });
         var services = new ServiceCollection();
-        services.AddLogging();
         services.AddOpenLineOpsEventBus(configuration);
 
         return services;
