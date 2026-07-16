@@ -1,6 +1,7 @@
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
 
@@ -17,6 +18,11 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
             operation.Definition.StationId.Value,
             operation.Definition.ConfigurationSnapshotId.Value,
             operation.Definition.RecipeSnapshotId.Value,
+            operation.InputMappings.Select(mapping => new PersistedOperationInputMapping(
+                mapping.TargetInputKey,
+                mapping.SourceOperationId,
+                mapping.SourceOutputKey,
+                mapping.ExpectedValueKind.ToString())).ToArray(),
             operation.Definition.ResourceRequirements.Select(requirement =>
                 new PersistedExecutionResource(requirement.Kind.ToString(), requirement.ResourceId))
                 .ToArray(),
@@ -45,6 +51,13 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
                 operation.ExecutableProcess
                     ?? throw new InvalidDataException(
                         "Persisted operation execution plan has no executable process."),
+                operation.InputMappings?.Select(mapping => new OperationInputMappingPlan(
+                    Text(mapping.TargetInputKey, "target input key"),
+                    Text(mapping.SourceOperationId, "source operation id"),
+                    Text(mapping.SourceOutputKey, "source output key"),
+                    ParseValueKind(mapping.ExpectedValueKind)))
+                    ?? throw new InvalidDataException(
+                        "Persisted operation execution plan has no input mappings."),
                 operation.Resources?.Select(resource => new ResourceRequirement(
                     ParseResourceKind(resource.Kind),
                     Text(resource.ResourceId, "resource id")))
@@ -98,6 +111,20 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
         throw new InvalidDataException($"Persisted resource kind '{value}' is invalid.");
     }
 
+    private static ProductionContextValueKind ParseValueKind(string? value)
+    {
+        if (value is not null
+            && Enum.TryParse<ProductionContextValueKind>(value, false, out var parsed)
+            && Enum.IsDefined(parsed)
+            && string.Equals(parsed.ToString(), value, StringComparison.Ordinal))
+        {
+            return parsed;
+        }
+
+        throw new InvalidDataException(
+            $"Persisted Production Context value kind '{value}' is invalid.");
+    }
+
     private static string Text(string? value, string fieldName) =>
         string.IsNullOrWhiteSpace(value)
         || char.IsWhiteSpace(value[0])
@@ -117,9 +144,16 @@ internal sealed record PersistedOperationExecutionPlan(
     string? StationId,
     string? ConfigurationSnapshotId,
     string? RecipeSnapshotId,
+    PersistedOperationInputMapping[]? InputMappings,
     PersistedExecutionResource[]? Resources,
     PersistedExecutionMaterialSlot? MaterialSlotRequirement,
     ExecutableRuntimeProcess? ExecutableProcess);
+
+internal sealed record PersistedOperationInputMapping(
+    string? TargetInputKey,
+    string? SourceOperationId,
+    string? SourceOutputKey,
+    string? ExpectedValueKind);
 
 internal sealed record PersistedExecutionResource(string? Kind, string? ResourceId);
 

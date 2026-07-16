@@ -332,7 +332,7 @@ internal static class ExternalPluginProcessStartInfoBuilder
         ExternalPluginSandboxOptions sandbox)
     {
         var argumentsTemplate = string.IsNullOrWhiteSpace(template)
-            ? "\"{EntryAssemblyPath}\" --openlineops-plugin-host --manifest \"{ManifestPath}\""
+            ? "--openlineops-plugin-host --manifest \"{ManifestPath}\" --entry \"{EntryAssemblyPath}\" --type \"{EntryType}\""
             : template;
 
         return argumentsTemplate

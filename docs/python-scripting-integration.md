@@ -87,9 +87,15 @@ bind or forward the container fields. On a production Station,
 `StationAgentHostOptions` validates the co-packaged Windows worker, the absolute
 host Python runtime DLL, the signed co-packaged
 `OpenLineOps.LeastPrivilegeLauncher.exe`, and the fixed
-`RestrictedCurrentLowIntegrity` identity. The launcher derives a restricted
-primary token from the current Agent token and applies mandatory Low integrity
-(RID 4096); it cannot be replaced or given a custom argument template.
+`PerExecutionAppContainer` identity. The launcher creates a unique
+AppContainer profile and package SID for each command; Windows supplies Low
+integrity (RID 4096), no network capability is granted, and a kill-on-close Job
+Object owns the complete process tree. It cannot be replaced or given a custom
+argument template.
+The host Python tree is authorized only by the launcher's explicit
+`provision-python-runtime --runtime-dll <absolute-path>` administrator command
+after installation or upgrade. Script execution verifies that provisioning and
+never mutates the Python DACL at run time.
 `ProcessStationRuntimeHost` supplies only those canonical values after clearing
 the inherited environment. `ExternalProcess` remains available only when
 required least privilege is explicitly disabled for development or testing.

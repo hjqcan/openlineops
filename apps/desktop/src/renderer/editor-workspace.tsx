@@ -25,6 +25,7 @@ const EditorDocumentContext = createContext<EditorDocumentContextValue | null>(n
 
 export interface EditorDocumentState {
   dirty: boolean;
+  editRevision: unknown;
   canSave: boolean;
   save(): Promise<void>;
   revert(): Promise<void>;
@@ -77,6 +78,7 @@ export function useEditorDocument(state: EditorDocumentState): {
     }
     context.registry.update(context.documentId, {
       dirty: state.dirty,
+      editRevision: state.editRevision,
       canSave: state.canSave,
       save: () => latestRef.current.save(),
       revert: () => latestRef.current.revert(),
@@ -84,7 +86,7 @@ export function useEditorDocument(state: EditorDocumentState): {
       problems: state.problems ?? [],
       conflict: state.conflict ?? null
     });
-  }, [context, state.canSave, state.conflict, state.dirty, state.problems]);
+  }, [context, state.canSave, state.conflict, state.dirty, state.editRevision, state.problems]);
 
   return useMemo(() => ({
     markDirty: () => {

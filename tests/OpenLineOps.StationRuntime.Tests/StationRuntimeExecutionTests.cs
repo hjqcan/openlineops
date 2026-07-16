@@ -117,7 +117,7 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         Assert.Equal(
             "passed",
             result.Outputs.GetProperty("inspection.result").GetProperty("value").GetString());
-        Assert.Equal("Completed", Assert.Single(result.Commands).Status);
+        Assert.Equal(ExecutionStatus.Completed, Assert.Single(result.Commands).ExecutionStatus);
     }
 
     [Fact]
@@ -309,6 +309,7 @@ public sealed class StationRuntimeExecutionTests : IDisposable
                     "station.main",
                     "Fixed",
                     [])],
+                [],
                 [new ProjectReleaseAuthorizedAction(
                     "operation.main:action:1",
                     "operation.main",

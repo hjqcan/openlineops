@@ -1,3 +1,5 @@
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 
@@ -5,6 +7,77 @@ namespace OpenLineOps.Devices.Tests;
 
 public sealed class ExternalProgramHostPolicyTests
 {
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsIdentityReaderRequestsQueryAndDuplicateAccess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Assert.Equal(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate,
+            WindowsExternalProgramHostIdentityReader.RequiredTokenAccess);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsIdentityReaderRecognizesAuthenticatedUacFilteredTokenFacts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var identity = WindowsExternalProgramHostIdentityReader.CreateIdentity(
+            "FACTORY\\OpenLineOpsAgent",
+            new SecurityIdentifier("S-1-5-21-1000-1000-1000-1001"),
+            "Negotiate",
+            administratorProbe: static () => false);
+
+        Assert.True(identity.IsAuthenticated);
+        Assert.False(identity.IsSystem);
+        Assert.False(identity.IsAdministrator);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsIdentityReaderPreservesAdministrativeTokenFacts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var identity = WindowsExternalProgramHostIdentityReader.CreateIdentity(
+            "FACTORY\\Administrator",
+            new SecurityIdentifier("S-1-5-21-1000-1000-1000-500"),
+            "Negotiate",
+            administratorProbe: static () => true);
+
+        Assert.True(identity.IsAdministrator);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsIdentityReaderFailsClosedWhenAdministratorProbeIsDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var identity = WindowsExternalProgramHostIdentityReader.CreateIdentity(
+            "FACTORY\\OpenLineOpsAgent",
+            new SecurityIdentifier("S-1-5-21-1000-1000-1000-1001"),
+            "Negotiate",
+            administratorProbe: static () =>
+                throw new System.Security.SecurityException("Access denied."));
+
+        Assert.True(identity.IsAdministrator);
+    }
+
     [Fact]
     public void EffectivePolicyUsesTheStrictIntersectionOfHostAndFrozenResourceLimits()
     {

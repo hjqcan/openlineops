@@ -43,9 +43,20 @@ public sealed partial class SqliteRuntimeSessionRepository :
 
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var transaction = (SqliteTransaction)await connection
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+
+        if (await IsTerminalWriteIdempotentAsync(
+                connection,
+                transaction,
+                session,
+                documentJson,
+                domainEvents,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -103,6 +114,80 @@ public sealed partial class SqliteRuntimeSessionRepository :
                 cancellationToken)
             .ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<bool> IsTerminalWriteIdempotentAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RuntimeSession session,
+        string candidateDocumentJson,
+        IReadOnlyCollection<IDomainEvent> domainEvents,
+        CancellationToken cancellationToken)
+    {
+        string? existingDocumentJson = null;
+        string? existingStatus = null;
+        await using (var select = connection.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = """
+                SELECT document_json, status
+                FROM runtime_sessions
+                WHERE session_id = $session_id;
+                """;
+            select.Parameters.AddWithValue("$session_id", session.Id.Value.ToString("D"));
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                existingDocumentJson = reader.GetString(0);
+                existingStatus = reader.GetString(1);
+            }
+        }
+
+        if (existingStatus is null)
+        {
+            return false;
+        }
+
+        if (!Enum.TryParse<RuntimeSessionStatus>(existingStatus, ignoreCase: false, out var status)
+            || !Enum.IsDefined(status)
+            || !string.Equals(status.ToString(), existingStatus, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Persisted Runtime session {session.Id} has invalid status '{existingStatus}'.");
+        }
+
+        if (status is not (RuntimeSessionStatus.Stopped
+            or RuntimeSessionStatus.Completed
+            or RuntimeSessionStatus.Failed
+            or RuntimeSessionStatus.Canceled))
+        {
+            return false;
+        }
+
+        if (!string.Equals(existingDocumentJson, candidateDocumentJson, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Terminal Runtime session {session.Id} is immutable.");
+        }
+
+        foreach (var domainEvent in domainEvents)
+        {
+            var eventDocument = RuntimeMonitoringDomainEventMapper.ToDocument(domainEvent);
+            await RequireMatchingStoredEventAsync(
+                    connection,
+                    transaction,
+                    domainEvent.EventId,
+                    eventDocument.SessionId,
+                    eventDocument.EventName,
+                    eventDocument.OccurredAtUtc,
+                    candidateDocumentJson,
+                    JsonSerializer.Serialize(eventDocument, JsonOptions),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return true;
     }
 
     public async ValueTask<RuntimeSession?> GetByIdAsync(

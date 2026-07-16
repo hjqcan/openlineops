@@ -1,7 +1,10 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Infrastructure.Execution;
 
 namespace OpenLineOps.Agent;
@@ -9,6 +12,8 @@ namespace OpenLineOps.Agent;
 internal sealed record StationAgentHostOptions(
     string AgentId,
     string StationId,
+    string StationSystemId,
+    TimeSpan HeartbeatInterval,
     string DataDirectory,
     Uri BrokerUri,
     bool RequireBrokerTls,
@@ -24,7 +29,9 @@ internal sealed record StationAgentHostOptions(
     StationRuntimePythonScriptOptions PythonScript,
     string RuntimeWorkingDirectory,
     string ArtifactDirectory,
-    string ArtifactExchangeDirectory,
+    Uri CoordinatorBaseUri,
+    string ArtifactUploadBearerToken,
+    TimeSpan ArtifactUploadTimeout,
     TimeSpan RuntimeTimeout,
     int MaximumRuntimeOutputBytes,
     IReadOnlyCollection<string> AllowedRestrictedExternalProgramHostAccounts,
@@ -40,12 +47,24 @@ internal sealed record StationAgentHostOptions(
     internal const string PythonScriptWorkerExecutableFileName = "OpenLineOps.ScriptWorker.exe";
     internal const string LeastPrivilegeLauncherExecutableFileName =
         "OpenLineOps.LeastPrivilegeLauncher.exe";
-    internal const string LeastPrivilegeIdentity = "RestrictedCurrentLowIntegrity";
+    internal const string LeastPrivilegeIdentity = "PerExecutionAppContainer";
+
+    public override string ToString() =>
+        $"StationAgentHostOptions {{ AgentId = {AgentId}, StationId = {StationId}, "
+        + $"BrokerEndpoint = {BrokerUri.Scheme}://{BrokerUri.Host}:{BrokerUri.Port}, "
+        + $"CoordinatorEndpoint = {CoordinatorBaseUri.Scheme}://{CoordinatorBaseUri.Authority}, "
+        + "ArtifactUploadBearerToken = [REDACTED] }";
 
     public static StationAgentHostOptions Load(IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         var section = configuration.GetSection("OpenLineOps:Agent");
+        var agentId = StationIdentity(
+            section["AgentId"],
+            "OpenLineOps:Agent:AgentId");
+        var stationId = StationIdentity(
+            section["StationId"],
+            "OpenLineOps:Agent:StationId");
         var dataDirectory = ResolvePath(
             Required(section["DataDirectory"], "OpenLineOps:Agent:DataDirectory"));
         var brokerUriText = Required(
@@ -57,6 +76,8 @@ internal sealed record StationAgentHostOptions(
             throw new InvalidDataException(
                 "OpenLineOps:Agent:BrokerUri must be an absolute amqp or amqps URI.");
         }
+        var requireBrokerTls = Boolean(section["RequireBrokerTls"], defaultValue: true);
+        ValidateBrokerSecurity(brokerUri, requireBrokerTls);
 
         var trustedKeys = section
             .GetSection("TrustedPackagePublicKeyFiles")
@@ -119,12 +140,24 @@ internal sealed record StationAgentHostOptions(
                 "OpenLineOps Agent requires at least one restricted external program host account or SID.");
         }
 
+        var coordinatorBaseUri = ParseCoordinatorBaseUri(
+            section["CoordinatorBaseUri"],
+            "OpenLineOps:Agent:CoordinatorBaseUri");
+        var artifactUploadBearerToken = Required(
+            section["ArtifactUploadBearerToken"],
+            "OpenLineOps:Agent:ArtifactUploadBearerToken");
+        ValidateBearerToken(artifactUploadBearerToken);
+
         return new StationAgentHostOptions(
-            Required(section["AgentId"], "OpenLineOps:Agent:AgentId"),
-            Required(section["StationId"], "OpenLineOps:Agent:StationId"),
+            agentId,
+            stationId,
+            Required(section["StationSystemId"], "OpenLineOps:Agent:StationSystemId"),
+            RequiredDuration(
+                section["HeartbeatInterval"],
+                "OpenLineOps:Agent:HeartbeatInterval"),
             dataDirectory,
             brokerUri,
-            Boolean(section["RequireBrokerTls"], defaultValue: true),
+            requireBrokerTls,
             UShort(section["PrefetchCount"], 8, "OpenLineOps:Agent:PrefetchCount"),
             UShort(section["MaximumConcurrentJobs"], 4, "OpenLineOps:Agent:MaximumConcurrentJobs"),
             ResolvePath(Required(
@@ -143,9 +176,12 @@ internal sealed record StationAgentHostOptions(
             pythonScript,
             ResolvePath(section["RuntimeWorkingDirectory"], Path.Combine(dataDirectory, "work")),
             ResolvePath(section["ArtifactDirectory"], Path.Combine(dataDirectory, "artifacts")),
-            ResolvePath(Required(
-                section["ArtifactExchangeDirectory"],
-                "OpenLineOps:Agent:ArtifactExchangeDirectory")),
+            coordinatorBaseUri,
+            artifactUploadBearerToken,
+            Duration(
+                section["ArtifactUploadTimeout"],
+                TimeSpan.FromMinutes(5),
+                "OpenLineOps:Agent:ArtifactUploadTimeout"),
             Duration(
                 section["RuntimeTimeout"],
                 TimeSpan.FromHours(1),
@@ -194,7 +230,7 @@ internal sealed record StationAgentHostOptions(
         {
             throw new InvalidDataException(
                 "OpenLineOps Agent Python execution requires the fixed non-interactive "
-                + "RestrictedCurrentLowIntegrity policy without a custom arguments template.");
+                + "PerExecutionAppContainer policy without a custom arguments template.");
         }
 
         return new StationRuntimePythonScriptOptions(
@@ -223,6 +259,70 @@ internal sealed record StationAgentHostOptions(
         || char.IsWhiteSpace(value[^1])
             ? throw new InvalidDataException($"{name} is required and must be canonical text.")
             : value;
+
+    private static string StationIdentity(string? value, string name) =>
+        StationIdentityContract.IsCanonical(value)
+            ? value!
+            : throw new InvalidDataException(
+                $"{name} must satisfy the shared Station identity contract.");
+
+    private static Uri ParseCoordinatorBaseUri(string? value, string name)
+    {
+        var canonical = Required(value, name);
+        if (!Uri.TryCreate(canonical, UriKind.Absolute, out var uri)
+            || (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                && !(string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                    && uri.IsLoopback))
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            throw new InvalidDataException(
+                $"{name} must be an HTTPS URI, except loopback HTTP used for local execution.");
+        }
+
+        return uri;
+    }
+
+    private static void ValidateBearerToken(string token)
+    {
+        if (token.Length is < 43 or > 86
+            || token.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:ArtifactUploadBearerToken must be a 32-64 byte base64url secret.");
+        }
+
+        try
+        {
+            var padded = token.Replace('-', '+').Replace('_', '/');
+            padded += new string('=', (4 - padded.Length % 4) % 4);
+            var bytes = Convert.FromBase64String(padded);
+            if (bytes.Length is < 32 or > 64)
+            {
+                throw new FormatException();
+            }
+
+            var canonical = Convert.ToBase64String(bytes)
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
+            if (canonical.Length != token.Length
+                || !CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(canonical),
+                    Encoding.ASCII.GetBytes(token)))
+            {
+                throw new FormatException();
+            }
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:ArtifactUploadBearerToken must be a 32-64 byte base64url secret.",
+                exception);
+        }
+    }
 
     private static string ResolvePath(string? configured, string? fallback = null)
     {
@@ -477,5 +577,63 @@ internal sealed record StationAgentHostOptions(
               && parsed > TimeSpan.Zero
                 ? parsed
                 : throw new InvalidDataException(
-                    $"{name} must be a positive constant-format duration.");
+                $"{name} must be a positive constant-format duration.");
+
+    private static void ValidateBrokerSecurity(Uri brokerUri, bool requireBrokerTls)
+    {
+        if (!requireBrokerTls)
+        {
+            return;
+        }
+
+        if (!string.Equals(brokerUri.Scheme, "amqps", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:BrokerUri must use amqps when RequireBrokerTls is true.");
+        }
+
+        var separator = brokerUri.UserInfo.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0 || separator == brokerUri.UserInfo.Length - 1)
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:BrokerUri must include a dedicated non-guest username and non-empty password when RequireBrokerTls is true.");
+        }
+
+        string userName;
+        string password;
+        try
+        {
+            userName = Uri.UnescapeDataString(brokerUri.UserInfo[..separator]);
+            password = Uri.UnescapeDataString(brokerUri.UserInfo[(separator + 1)..]);
+        }
+        catch (UriFormatException exception)
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:BrokerUri contains invalid escaped credentials.",
+                exception);
+        }
+
+        if (string.IsNullOrWhiteSpace(userName)
+            || string.Equals(userName, "guest", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(password))
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:BrokerUri must include a dedicated non-guest username and non-empty password when RequireBrokerTls is true.");
+        }
+    }
+
+    private static TimeSpan RequiredDuration(string? value, string name)
+    {
+        var canonical = Required(value, name);
+        return TimeSpan.TryParseExact(
+                   canonical,
+                   "c",
+                   CultureInfo.InvariantCulture,
+                   out var parsed)
+               && parsed >= TimeSpan.FromMilliseconds(250)
+               && parsed <= TimeSpan.FromSeconds(10)
+            ? parsed
+            : throw new InvalidDataException(
+                $"{name} must be a constant-format duration from 00:00:00.250 through 00:00:10.");
+    }
 }

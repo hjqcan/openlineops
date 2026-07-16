@@ -476,14 +476,52 @@ function Test-WindowsBundle {
             if ($null -ne $configurationText) {
                 try {
                     $configuration = $configurationText | ConvertFrom-Json
+                    $agentConfiguration = $configuration.OpenLineOps.Agent
+                    $agentConfigurationProperties = @(
+                        $agentConfiguration.PSObject.Properties.Name)
+                    if (-not ($agentConfigurationProperties -ccontains "StationSystemId") `
+                        -or $agentConfiguration.StationSystemId -isnot [string] `
+                        -or $agentConfiguration.StationSystemId -cne "") {
+                        Add-Failure "$ArchiveName StationSystemId release template must be present and empty."
+                    }
+                    if (-not ($agentConfigurationProperties -ccontains "HeartbeatInterval") `
+                        -or $agentConfiguration.HeartbeatInterval -cne "00:00:05") {
+                        Add-Failure "$ArchiveName HeartbeatInterval release template must be exactly '00:00:05'."
+                    }
+                    $brokerUri = $null
+                    if ($agentConfiguration.RequireBrokerTls -ne $true `
+                        -or $agentConfiguration.BrokerUri -isnot [string] `
+                        -or -not [System.Uri]::TryCreate(
+                            $agentConfiguration.BrokerUri,
+                            [System.UriKind]::Absolute,
+                            [ref]$brokerUri) `
+                        -or $brokerUri.Scheme -cne "amqps" `
+                        -or -not [string]::IsNullOrEmpty($brokerUri.UserInfo)) {
+                        Add-Failure "$ArchiveName must use an amqps broker template without embedded placeholder credentials and require broker TLS."
+                    }
+                    $coordinatorUri = $null
+                    if (-not ($agentConfigurationProperties -ccontains "CoordinatorBaseUri") `
+                        -or $agentConfiguration.CoordinatorBaseUri -isnot [string] `
+                        -or -not [System.Uri]::TryCreate(
+                            $agentConfiguration.CoordinatorBaseUri,
+                            [System.UriKind]::Absolute,
+                            [ref]$coordinatorUri) `
+                        -or $coordinatorUri.Scheme -cne "https" `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.UserInfo) `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.Query) `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.Fragment) `
+                        -or $agentConfiguration.ArtifactUploadTimeout -cne "00:05:00") {
+                        Add-Failure "$ArchiveName must use a credential-free HTTPS CoordinatorBaseUri and a 00:05:00 artifact upload timeout."
+                    }
+                    if ($agentConfigurationProperties -ccontains "ArtifactUploadBearerToken") {
+                        Add-Failure "$ArchiveName must not embed ArtifactUploadBearerToken."
+                    }
                     if ($configuration.OpenLineOps.Agent.RuntimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
                         Add-Failure "$ArchiveName RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe'."
                     }
                     if ($configuration.OpenLineOps.Agent.PluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe") {
                         Add-Failure "$ArchiveName PluginHostExecutablePath must be exactly 'OpenLineOps.PluginHost.exe'."
                     }
-                    $agentConfigurationProperties = @(
-                        $configuration.OpenLineOps.Agent.PSObject.Properties.Name)
                     if (-not ($agentConfigurationProperties -ccontains "SafetyExecutablePath")) {
                         Add-Failure "$ArchiveName must declare SafetyExecutablePath."
                     }
@@ -515,10 +553,10 @@ function Test-WindowsBundle {
                                 -or $pythonSandbox.IsolationMode -cne "LeastPrivilegeIdentity") {
                                 Add-Failure "$ArchiveName must default Python execution to required LeastPrivilegeIdentity isolation."
                             }
-                            if ($pythonSandbox.LeastPrivilegeIdentity -cne "RestrictedCurrentLowIntegrity" `
+                            if ($pythonSandbox.LeastPrivilegeIdentity -cne "PerExecutionAppContainer" `
                                 -or $pythonSandbox.LeastPrivilegeLauncherExecutable -cne "OpenLineOps.LeastPrivilegeLauncher.exe" `
                                 -or -not [string]::IsNullOrWhiteSpace($pythonSandbox.LeastPrivilegeArgumentsTemplate)) {
-                                Add-Failure "$ArchiveName must use the fixed bundled RestrictedCurrentLowIntegrity launcher policy."
+                                Add-Failure "$ArchiveName must use the fixed bundled PerExecutionAppContainer launcher policy."
                             }
 
                             $removedContainerProperties = @($pythonSandbox.PSObject.Properties.Name | Where-Object {
@@ -1160,7 +1198,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
     }
 
     $requiredZipEntries = @{
-        "api" = @("OpenLineOps.Api.dll")
+        "api" = @("OpenLineOps.Api.dll", "appsettings.json")
         "agent" = @(
             "OpenLineOps.Agent.exe",
             "OpenLineOps.Agent.deps.json",
@@ -1192,11 +1230,34 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
         )
         "desktop" = @(
             "dist/index.html",
+            "dist-electron/main/api-credential-security.js",
+            "dist-electron/main/application-extension-import-security.js",
+            "dist-electron/main/backend-api-security.js",
+            "dist-electron/main/backend-process-handshake.js",
+            "dist-electron/main/local-sqlite-connection.js",
             "dist-electron/main/main.js",
-            "dist-electron/preload/preload.js",
+            "dist-electron/main/renderer-navigation-security.js",
+            "dist-electron/main/trace-artifact-save.js",
+            "dist-electron/main/trace-artifact-save-core.js",
+            "dist-electron/preload/preload.cjs",
             "package/win-unpacked/OpenLineOps.exe",
             "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
-            "package/win-unpacked/resources/app/package.json"
+            "package/win-unpacked/resources/app/package.json",
+            "package/win-unpacked/resources/app/dist/index.html",
+            "package/win-unpacked/resources/app/dist-electron/main/api-credential-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/application-extension-import-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-api-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-process-handshake.js",
+            "package/win-unpacked/resources/app/dist-electron/main/local-sqlite-connection.js",
+            "package/win-unpacked/resources/app/dist-electron/main/main.js",
+            "package/win-unpacked/resources/app/dist-electron/main/renderer-navigation-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save-core.js",
+            "package/win-unpacked/resources/app/dist-electron/preload/preload.cjs",
+            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+            "package/win-unpacked/resources/app/runtime/api/appsettings.json",
+            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe"
         )
         "plugin-host" = @("OpenLineOps.PluginHost.dll")
         "script-worker" = @("OpenLineOps.ScriptWorker.dll")
@@ -1212,6 +1273,17 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
             "eng/verify-staged-agent-bundle-e2e.ps1",
+            "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+            "eng/verify-staged-agent-evidence.ps1",
+            "eng/verify-production-closure-evidence.ps1",
+            "eng/verify-studio-two-agent-production-closure.ps1",
+            "eng/verify-studio-two-agent-production-evidence.ps1",
+            "eng/verify-studio-two-agent-production-evidence.tests.ps1",
+            "eng/verify-runner-staged-agent-e2e.ps1",
+            "eng/verify-runner-staged-agent-evidence.ps1",
+            "eng/verify-runner-staged-agent-evidence.tests.ps1",
+            "eng/verify-evidence-validation.tests.ps1",
+            "eng/evidence-validation-test-fixtures.ps1",
             "eng/verify-solution-project-coverage.ps1",
             "eng/inspect-ci-release-artifact.ps1",
             "eng/inspect-release-candidate.ps1",
@@ -1225,6 +1297,10 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/sign-windows-package.ps1",
             "eng/verify-windows-signing-readiness.ps1",
             "docs/station-agent-deployment.md",
+            "docs/coordinator-deployment.md",
+            "docs/coordinator-api-security.md",
+            "docs/trace-projection-recovery.md",
+            "apps/desktop/scripts/production-closure-e2e.mjs",
             "docs/headless-runner.md"
         )
     }
@@ -1289,7 +1365,13 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
             if ($RequireSignedWindowsArtifacts) {
                 $signedEntries = switch ($kind) {
-                    "desktop" { @("package/win-unpacked/OpenLineOps.exe") }
+                    "desktop" {
+                        @(
+                            "package/win-unpacked/OpenLineOps.exe",
+                            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+                            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+                            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe")
+                    }
                     "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe", "OpenLineOps.PluginHost.exe", "OpenLineOps.ScriptWorker.exe", "OpenLineOps.LeastPrivilegeLauncher.exe") }
                     "runner" { @("OpenLineOps.Runner.exe") }
                     default { @() }

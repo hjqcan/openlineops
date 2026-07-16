@@ -53,11 +53,10 @@ export async function stopProcess(child, timeoutMilliseconds = 8_000) {
 }
 
 export class ElectronCdpHarness {
-  constructor({ executablePath, workingDirectory, userDataDirectory, apiBaseUrl, environment, logs }) {
+  constructor({ executablePath, workingDirectory, userDataDirectory, environment, logs }) {
     this.executablePath = executablePath;
     this.workingDirectory = workingDirectory;
     this.userDataDirectory = userDataDirectory;
-    this.apiBaseUrl = apiBaseUrl;
     this.environment = environment;
     this.logs = logs;
     this.process = null;
@@ -78,8 +77,7 @@ export class ElectronCdpHarness {
         cwd: this.workingDirectory,
         env: {
           ...process.env,
-          ...this.environment,
-          OPENLINEOPS_API_BASE_URL: this.apiBaseUrl
+          ...this.environment
         }
       },
       'OpenLineOps',
@@ -163,6 +161,9 @@ export class ElectronCdpHarness {
       const element = document.querySelector('[data-testid=${JSON.stringify(testId)}]');
       if (!(element instanceof HTMLElement || element instanceof SVGElement)) {
         throw new Error('Missing element ${escapeForJavaScript(testId)}');
+      }
+      if (element instanceof HTMLButtonElement && element.disabled) {
+        throw new Error('Disabled button ${escapeForJavaScript(testId)}');
       }
       if (element instanceof HTMLElement) element.click();
       else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));

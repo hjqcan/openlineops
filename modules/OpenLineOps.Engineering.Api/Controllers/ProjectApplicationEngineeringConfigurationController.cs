@@ -13,6 +13,7 @@ using PublishApiConfigurationSnapshotRequest = OpenLineOps.Engineering.Api.Model
 namespace OpenLineOps.Engineering.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Engineering)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationEngineering)]
 public sealed class ProjectApplicationEngineeringConfigurationController : ControllerBase

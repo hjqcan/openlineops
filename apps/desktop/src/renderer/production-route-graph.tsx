@@ -79,14 +79,20 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
       .map(transition => transition.terminalDisposition)
       .filter((disposition): disposition is ProductionTerminalDisposition => disposition !== null))],
     [transitions]);
-  const canvasWidth = layout.width + (terminalDispositions.length > 0 ? 250 : 0);
-  const canvasHeight = Math.max(layout.height, 50 + terminalDispositions.length * 118 + 40);
+  const operationCanvasWidth = Math.max(
+    layout.width,
+    ...Object.values(effectivePositions).map(position => position.x + NODE_WIDTH + 70));
+  const canvasWidth = operationCanvasWidth + (terminalDispositions.length > 0 ? 250 : 0);
+  const canvasHeight = Math.max(
+    layout.height,
+    ...Object.values(effectivePositions).map(position => position.y + NODE_HEIGHT + 40),
+    50 + terminalDispositions.length * 118 + 40);
   const terminalPositions = useMemo(
     () => Object.fromEntries(terminalDispositions.map((disposition, index) => [
       disposition,
-      { x: layout.width + 24, y: 50 + index * 118 }
+      { x: operationCanvasWidth + 24, y: 50 + index * 118 }
     ])) as Partial<Record<ProductionTerminalDisposition, GraphPoint>>,
-    [layout.width, terminalDispositions]);
+    [operationCanvasWidth, terminalDispositions]);
 
   if (operations.length === 0) {
     return (

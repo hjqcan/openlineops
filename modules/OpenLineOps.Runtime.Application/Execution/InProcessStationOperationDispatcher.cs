@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Sessions;
@@ -20,25 +21,59 @@ public sealed class InProcessStationOperationDispatcher(
     {
         ArgumentNullException.ThrowIfNull(request);
         using var execution = executions.Register(request.IdempotencyKey, cancellationToken);
-        var sessionResult = await sessionRunner.RunAsync(
-            new StartRuntimeSessionRequest(
-                request.RuntimeSessionId,
-                request.ExecutionPlan.Definition.StationId,
-                request.ExecutionPlan.Definition.ConfigurationSnapshotId,
-                request.ExecutionPlan.Definition.RecipeSnapshotId,
-                request.ExecutionPlan.FrozenExecutableProcess,
-                CreateTraceMetadata(request)),
-            execution.CancellationToken).ConfigureAwait(false);
-        if (sessionResult.IsFailure)
+        Result<RuntimeSessionRunResult> sessionResult;
+        try
         {
+            sessionResult = await sessionRunner.RunAsync(
+                new StartRuntimeSessionRequest(
+                    request.RuntimeSessionId,
+                    request.ExecutionPlan.Definition.StationId,
+                    request.ExecutionPlan.Definition.ConfigurationSnapshotId,
+                    request.ExecutionPlan.Definition.RecipeSnapshotId,
+                    request.ExecutionPlan.FrozenExecutableProcess,
+                    request.Inputs,
+                    CreateTraceMetadata(request)),
+                execution.CancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (execution.CancelRequested)
+        {
+            const string code = "Runtime.OperationCanceledBeforeSessionStart";
+            const string reason =
+                "Station operation cancellation was already durable before the in-process session started.";
+            var canceledAtUtc = DateTimeOffset.UtcNow;
             return new StationOperationDispatchResult(
-                ExecutionStatus.Failed,
-                ResultJudgement.Unknown,
+                ExecutionStatus.Canceled,
+                ResultJudgement.Aborted,
+                OperationExecutionEvidenceFactory.FromCoordinatorCancellation(
+                    request,
+                    canceledAtUtc,
+                    code,
+                    reason),
                 null,
                 0,
                 0,
                 0,
-                DateTimeOffset.UtcNow,
+                canceledAtUtc,
+                code,
+                reason);
+        }
+        if (sessionResult.IsFailure)
+        {
+            var failedAtUtc = DateTimeOffset.UtcNow;
+            return new StationOperationDispatchResult(
+                ExecutionStatus.Failed,
+                ResultJudgement.Unknown,
+                OperationExecutionEvidenceFactory.FromCoordinatorFailure(
+                    request,
+                    failedAtUtc,
+                    sessionResult.Error.Code,
+                    sessionResult.Error.Message,
+                    0),
+                null,
+                0,
+                0,
+                0,
+                failedAtUtc,
                 sessionResult.Error.Code,
                 sessionResult.Error.Message);
         }
@@ -53,15 +88,17 @@ public sealed class InProcessStationOperationDispatcher(
             ?? throw new InvalidDataException(
                 $"Terminal Runtime Session {session.Id} has no completion timestamp.");
         var completedSteps = session.Steps.Count(step => step.Status == RuntimeStepStatus.Completed);
+        var executionEvidence = OperationExecutionEvidenceFactory.FromRuntimeSession(request, session);
         if (session.Status == RuntimeSessionStatus.Completed)
         {
             var outputs = ProductionContextOutputReader.ReadExplicitMany(session.Commands
                 .Where(static command =>
-                    command.Status == OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus.Completed)
+                    command.Status == ExecutionStatus.Completed)
                 .Select(static command => command.ResultPayload));
             return new StationOperationDispatchResult(
                 ExecutionStatus.Completed,
                 ResolveJudgement(session.Commands),
+                executionEvidence,
                 outputs,
                 completedSteps,
                 session.Commands.Count,
@@ -79,6 +116,7 @@ public sealed class InProcessStationOperationDispatcher(
             status == ExecutionStatus.Canceled
                 ? ResultJudgement.Aborted
                 : ResultJudgement.Unknown,
+            executionEvidence,
             null,
             completedSteps,
             session.Commands.Count,

@@ -79,7 +79,8 @@ public static class AutomationProjectManifestMapper
                 .Select(processDefinitionId => processDefinitionId.Value)
                 .Order(StringComparer.Ordinal)
                 .ToArray(),
-            application.ProjectFilePath);
+            application.ProjectFilePath,
+            []);
     }
 
     private static PublishedProjectSnapshotManifest ToManifest(PublishedProjectSnapshot snapshot)

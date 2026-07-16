@@ -46,6 +46,10 @@
     <Project Path="modules/OpenLineOps.Traceability.Domain/OpenLineOps.Traceability.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Traceability.Infrastructure/OpenLineOps.Traceability.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/lib/">
+    <Project Path="lib/NetDevPack/src/NetDevPack/NetDevPack.csproj" />
+    <Project Path="lib/pythonscript/PythonScript/PythonScript.csproj" />
+  </Folder>
   <Folder Name="/samples/" />
   <Folder Name="/samples/bounded-contexts/">
     <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Application/OpenLineOps.SampleInspection.Application.csproj" />
@@ -54,6 +58,7 @@
   </Folder>
   <Folder Name="/samples/plugins/">
     <Project Path="samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" />
+    <Project Path="samples/plugins/OpenLineOps.SamplePlugins.QualityGate/OpenLineOps.SamplePlugins.QualityGate.csproj" />
   </Folder>
   <Folder Name="/shared/">
     <Project Path="shared/OpenLineOps.Agent.Contracts/OpenLineOps.Agent.Contracts.csproj" />

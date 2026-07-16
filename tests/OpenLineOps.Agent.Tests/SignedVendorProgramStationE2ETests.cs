@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -45,6 +46,11 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
     private const string StationSystemId = "station.main";
     private const string TopologyId = "topology.main";
     private const long VendorTimeoutMilliseconds = 120_000;
+    private static readonly string ArtifactUploadToken = Convert.ToBase64String(
+            SHA256.HashData("signed-vendor-artifact-upload"u8))
+        .TrimEnd('=')
+        .Replace('+', '-')
+        .Replace('/', '_');
     private const string StagedAgentBundleRootEnvironmentVariable =
         "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT";
     private const string StagedSamplePluginRootEnvironmentVariable =
@@ -65,7 +71,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         $"olo-ve2e-{Guid.NewGuid():N}");
     private readonly string _artifactRoot;
     private readonly string _cacheRoot;
-    private readonly string _exchangeRoot;
+    private readonly ReceiptUploadHandler _artifactUploadHandler = new();
     private readonly string _runtimeWorkRoot;
     private readonly HashSet<string> _appContainerProfiles = new(StringComparer.Ordinal);
     private PackageStationOperationExecutor? _executor;
@@ -78,7 +84,6 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
     {
         _artifactRoot = Path.Combine(_root, "agent-artifacts");
         _cacheRoot = Path.Combine(_root, "package-cache");
-        _exchangeRoot = Path.Combine(_root, "artifact-exchange");
         _runtimeWorkRoot = Path.Combine(_root, "station-runtime-work");
     }
 
@@ -102,6 +107,12 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             "Failed",
             ExecutionStatus.Completed,
             ResultJudgement.Failed,
+            expectsTypedOutputs: true,
+            expectsIncident: false);
+        await VerifyTerminalScenarioAsync(
+            "Aborted",
+            ExecutionStatus.Completed,
+            ResultJudgement.Aborted,
             expectsTypedOutputs: true,
             expectsIncident: false);
         await VerifyTerminalScenarioAsync(
@@ -174,7 +185,11 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         AssertTypedOutput(outputs.RootElement, "python.station", "Text", StationSystemId);
         if (stagedBundleRoot is not null)
         {
-            AssertTypedOutput(outputs.RootElement, "python.tokenRestricted", "Boolean", "true");
+            AssertTypedOutput(outputs.RootElement, "python.tokenIsAppContainer", "Boolean", "true");
+            var appContainerSid = TypedOutputValue(
+                outputs.RootElement,
+                "python.appContainerSid");
+            Assert.StartsWith("S-1-15-2-", appContainerSid, StringComparison.Ordinal);
             AssertTypedOutput(outputs.RootElement, "python.integrityRid", "WholeNumber", "4096");
             var evidencePath = Environment.GetEnvironmentVariable(
                 StagedPythonTokenEvidenceEnvironmentVariable);
@@ -200,9 +215,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     isolationMode = TypedOutputValue(
                         outputs.RootElement,
                         "python.isolation"),
-                    tokenRestricted = bool.Parse(TypedOutputValue(
+                    tokenIsAppContainer = bool.Parse(TypedOutputValue(
                         outputs.RootElement,
-                        "python.tokenRestricted")),
+                        "python.tokenIsAppContainer")),
+                    appContainerSid,
                     integrityRid = int.Parse(
                         TypedOutputValue(outputs.RootElement, "python.integrityRid"),
                         NumberStyles.None,
@@ -250,7 +266,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         Assert.Equal(ExecutionStatus.Completed, completion.ExecutionStatus);
         Assert.Equal(ResultJudgement.NotApplicable, completion.Judgement);
         var command = Assert.Single(completion.Commands);
-        Assert.Equal("Completed", command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.ExecutionStatus);
         Assert.Equal("Echo", command.CommandName);
         Assert.NotNull(command.ResultPayload);
         using var resultPayload = JsonDocument.Parse(command.ResultPayload);
@@ -553,8 +569,8 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         Assert.Equal(CapabilityId, command.CapabilityId);
         Assert.Equal(CommandName, command.CommandName);
         Assert.Equal(expectedJudgement == ResultJudgement.Unknown
-            ? "Failed"
-            : "Completed", command.Status);
+            ? ExecutionStatus.Failed
+            : ExecutionStatus.Completed, command.ExecutionStatus);
         Assert.Equal(expectedJudgement == ResultJudgement.Unknown
             ? ResultJudgement.Unknown
             : expectedJudgement, command.ResultJudgement);
@@ -581,8 +597,15 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         var dispatcher = new StationJobOutboxDispatcher(
             store,
             messages,
-            new FileSystemStationArtifactTransfer(
-                new FileSystemStationArtifactTransferOptions(_artifactRoot, _exchangeRoot)),
+            new HttpStationArtifactTransfer(
+                new HttpStationArtifactTransferOptions(
+                    _artifactRoot,
+                    new Uri("http://127.0.0.1:51983/"),
+                    ArtifactUploadToken,
+                    AgentId,
+                    StationId,
+                    TimeSpan.FromSeconds(30)),
+                new HttpClient(_artifactUploadHandler)),
             new FixedClock(Now));
         Assert.True(await dispatcher.DispatchAsync(100) > 0);
         var completion = Assert.Single(messages.Completions);
@@ -593,9 +616,18 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         Assert.Equal(pending.Artifacts.Count, completion.Artifacts.Count);
         foreach (var artifact in completion.Artifacts)
         {
-            Assert.Equal($"sha256/{artifact.Sha256[..2]}/{artifact.Sha256}", artifact.StorageKey);
-            await VerifyArtifactAsync(
-                _exchangeRoot,
+            var expectedReceipt = StationArtifactReceiptIdentity.Create(
+                AgentId,
+                StationId,
+                request.JobId,
+                artifact.Name,
+                artifact.Kind,
+                artifact.MediaType,
+                artifact.SizeBytes,
+                artifact.Sha256);
+            Assert.Equal(expectedReceipt.StorageKey, artifact.StorageKey);
+            Assert.Equal(expectedReceipt.ReceiptId, artifact.ReceiptId);
+            _artifactUploadHandler.Verify(
                 artifact.StorageKey,
                 artifact.SizeBytes,
                 artifact.Sha256);
@@ -696,6 +728,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 $"{request.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
                 request.AgentId,
                 request.StationId,
+                request.StationSystemId,
                 request.JobId,
                 request.ProductionRunId,
                 request.OperationRunId,
@@ -780,7 +813,14 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 StationSystemId,
                 Interlocked.Increment(ref _nextFencingToken),
                 Now.AddHours(1))],
-            JsonSerializer.SerializeToElement(new { mode }),
+            JsonSerializer.SerializeToElement(new
+            {
+                mode = new
+                {
+                    kind = "Text",
+                    value = mode
+                }
+            }),
             Now);
     }
 
@@ -1105,6 +1145,8 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
 
             TOKEN_QUERY = 0x0008
             TOKEN_INTEGRITY_LEVEL = 25
+            TOKEN_IS_APP_CONTAINER = 29
+            TOKEN_APP_CONTAINER_SID = 31
 
             class SID_AND_ATTRIBUTES(ctypes.Structure):
                 _fields_ = [('Sid', ctypes.c_void_p), ('Attributes', wintypes.DWORD)]
@@ -1118,6 +1160,8 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             kernel32.GetCurrentProcess.restype = wintypes.HANDLE
             kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
             kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel32.LocalFree.restype = ctypes.c_void_p
             advapi32.OpenProcessToken.argtypes = [
                 wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
             advapi32.OpenProcessToken.restype = wintypes.BOOL
@@ -1132,8 +1176,9 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
             advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
             advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
-            advapi32.IsTokenRestricted.argtypes = [wintypes.HANDLE]
-            advapi32.IsTokenRestricted.restype = wintypes.BOOL
+            advapi32.ConvertSidToStringSidW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+            advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
 
             token = wintypes.HANDLE()
             if not advapi32.OpenProcessToken(
@@ -1152,7 +1197,41 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 count = advapi32.GetSidSubAuthorityCount(label.Label.Sid).contents.value
                 integrity_rid = advapi32.GetSidSubAuthority(
                     label.Label.Sid, count - 1).contents.value
-                token_restricted = bool(advapi32.IsTokenRestricted(token))
+
+                is_app_container = wintypes.DWORD()
+                required = wintypes.DWORD()
+                if not advapi32.GetTokenInformation(
+                        token,
+                        TOKEN_IS_APP_CONTAINER,
+                        ctypes.byref(is_app_container),
+                        ctypes.sizeof(is_app_container),
+                        ctypes.byref(required)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+
+                advapi32.GetTokenInformation(
+                    token, TOKEN_APP_CONTAINER_SID, None, 0, ctypes.byref(required))
+                app_container_buffer = ctypes.create_string_buffer(required.value)
+                if not advapi32.GetTokenInformation(
+                        token,
+                        TOKEN_APP_CONTAINER_SID,
+                        app_container_buffer,
+                        required,
+                        ctypes.byref(required)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                app_container_sid_pointer = ctypes.cast(
+                    app_container_buffer,
+                    ctypes.POINTER(ctypes.c_void_p)).contents.value
+                app_container_sid = 'NotApplicable'
+                if app_container_sid_pointer:
+                    sid_string_pointer = ctypes.c_wchar_p()
+                    if not advapi32.ConvertSidToStringSidW(
+                            app_container_sid_pointer,
+                            ctypes.byref(sid_string_pointer)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        app_container_sid = sid_string_pointer.value
+                    finally:
+                        kernel32.LocalFree(sid_string_pointer)
             finally:
                 kernel32.CloseHandle(token)
 
@@ -1163,8 +1242,11 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     'value': os.environ['OPENLINEOPS_SCRIPT_WORKER_SANDBOX_ISOLATION_MODE']
                 },
                 'python.station': {'kind': 'Text', 'value': station_system_id},
-                'python.tokenRestricted': {
-                    'kind': 'Boolean', 'value': str(token_restricted).lower()
+                'python.tokenIsAppContainer': {
+                    'kind': 'Boolean', 'value': str(bool(is_app_container.value)).lower()
+                },
+                'python.appContainerSid': {
+                    'kind': 'Text', 'value': app_container_sid
                 },
                 'python.integrityRid': {
                     'kind': 'WholeNumber', 'value': str(integrity_rid)
@@ -1380,6 +1462,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     StationSystemId,
                     "Fixed",
                     [])],
+                [],
                 [new ProjectReleaseAuthorizedAction(
                     $"{OperationId}:action:1",
                     OperationId,
@@ -1431,6 +1514,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     StationSystemId,
                     "Fixed",
                     [])],
+                [],
                 [new ProjectReleaseAuthorizedAction(
                     $"{OperationId}:action:1",
                     OperationId,
@@ -1527,6 +1611,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                         StationSystemId,
                         "Fixed",
                         [])],
+                    [],
                     [new ProjectReleaseAuthorizedAction(
                         $"{OperationId}:action:1",
                         OperationId,
@@ -1741,7 +1826,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                     RequireLeastPrivilegeExecution: true,
                     IsolationMode:
                         StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
-                    LeastPrivilegeIdentity: "RestrictedCurrentLowIntegrity",
+                    LeastPrivilegeIdentity: "PerExecutionAppContainer",
                     LeastPrivilegeLauncherExecutable: RequiredDirectStagedFile(
                         stagedBundleRoot,
                         "OpenLineOps.LeastPrivilegeLauncher.exe"),
@@ -1750,6 +1835,12 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
 
     private static string RequiredHostPythonRuntimeDllPath()
     {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(
+                StagedAgentBundleRootEnvironmentVariable)))
+        {
+            return AppContainerPythonRuntimeTestSupport.ResolveRuntimeDll();
+        }
+
         var path = Environment.GetEnvironmentVariable("PYTHONNET_PYDLL");
         if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
         {
@@ -1958,6 +2049,75 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             DateTimeOffset completedAtUtc,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class ReceiptUploadHandler : HttpMessageHandler
+    {
+        private readonly Dictionary<string, byte[]> _content = new(StringComparer.Ordinal);
+
+        public void Verify(string storageKey, long sizeBytes, string sha256)
+        {
+            var content = _content[storageKey];
+            Assert.Equal(sizeBytes, content.LongLength);
+            Assert.Equal(sha256, Convert.ToHexStringLower(SHA256.HashData(content)));
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            Assert.Equal(ArtifactUploadToken, request.Headers.Authorization?.Parameter);
+            var bytes = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+            var agentId = Header(request, StationArtifactUploadProtocol.AgentIdHeader);
+            var stationId = Header(request, StationArtifactUploadProtocol.StationIdHeader);
+            var jobId = Guid.ParseExact(
+                Header(request, StationArtifactUploadProtocol.JobIdHeader),
+                "D");
+            var name = StationArtifactUploadProtocol.DecodeArtifactName(
+                Header(request, StationArtifactUploadProtocol.ArtifactNameHeader));
+            var sizeBytes = long.Parse(
+                Header(request, StationArtifactUploadProtocol.ArtifactSizeHeader),
+                CultureInfo.InvariantCulture);
+            var sha256 = Header(request, StationArtifactUploadProtocol.ArtifactSha256Header);
+            var kind = StationArtifactUploadProtocol.DecodeArtifactKind(
+                Header(request, StationArtifactUploadProtocol.ArtifactKindHeader));
+            var mediaType = request.Headers.TryGetValues(
+                    StationArtifactUploadProtocol.ArtifactMediaTypeHeader,
+                    out var mediaTypeValues)
+                ? StationArtifactUploadProtocol.DecodeMediaType(Assert.Single(mediaTypeValues))
+                : null;
+            Assert.Equal(sizeBytes, bytes.LongLength);
+            Assert.Equal(sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            var receipt = StationArtifactReceiptIdentity.Create(
+                agentId,
+                stationId,
+                jobId,
+                name,
+                kind,
+                mediaType,
+                sizeBytes,
+                sha256);
+            if (_content.TryGetValue(receipt.StorageKey, out var existing))
+            {
+                Assert.Equal(existing, bytes);
+            }
+            else
+            {
+                _content.Add(receipt.StorageKey, bytes);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(receipt, MessageJsonOptions),
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+
+        private static string Header(HttpRequestMessage request, string name) =>
+            Assert.Single(request.Headers.GetValues(name));
     }
 
     private sealed class CapturingPublisher : IStationAgentMessagePublisher

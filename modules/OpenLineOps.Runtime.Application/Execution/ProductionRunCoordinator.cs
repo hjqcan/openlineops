@@ -18,6 +18,7 @@ public sealed class ProductionRunCoordinator(
     IProductionRunRepository repository,
     IProductionMaterialRepository materials,
     IResourceLeaseRepository resourceLeases,
+    IProductionRunSafetyTransitionStore safetyTransitions,
     IStationSafetyController stationSafety,
     IStationOperationCanceler stationOperationCanceler,
     IRuntimeDomainEventPublisher domainEventPublisher,
@@ -246,6 +247,17 @@ public sealed class ProductionRunCoordinator(
                 + "Safe Stop or the independent Emergency Stop channel may proceed."));
         }
 
+        if (command.Command == ProductionRunCommand.Scrap
+            && run.ControlState != ProductionRunControlState.RecoveryRequired)
+        {
+            return await ScrapAsync(
+                    entry,
+                    command.ActorId,
+                    reason,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var result = command.Command switch
         {
             ProductionRunCommand.Pause => run.Pause(clock.UtcNow),
@@ -254,13 +266,11 @@ public sealed class ProductionRunCoordinator(
             ProductionRunCommand.Hold => run.Hold(reason, clock.UtcNow),
             ProductionRunCommand.Release => run.Release(clock.UtcNow),
             ProductionRunCommand.Rework => run.Rework(command.OperationId!, clock.UtcNow),
-            ProductionRunCommand.Scrap => run.ControlState == ProductionRunControlState.RecoveryRequired
-                ? command.RecoveryDecision is null
-                    ? RuntimeOperationResult.Rejected(
-                        "Runtime.RecoveryDecisionRequired",
-                        "Scrapping a recovery-required run requires an immutable operator Recovery Decision.")
-                    : run.ScrapRecovery(command.RecoveryDecision)
-                : run.Scrap(reason, clock.UtcNow),
+            ProductionRunCommand.Scrap => command.RecoveryDecision is null
+                ? RuntimeOperationResult.Rejected(
+                    "Runtime.RecoveryDecisionRequired",
+                    "Scrapping a recovery-required run requires an immutable operator Recovery Decision.")
+                : run.ScrapRecovery(command.RecoveryDecision),
             ProductionRunCommand.Reconcile => run.ReconcileRecovery(command.RecoveryDecision!),
             ProductionRunCommand.Retry => run.RetryRecovery(command.RecoveryDecision!),
             ProductionRunCommand.Abort => run.AbortRecovery(command.RecoveryDecision!),
@@ -276,6 +286,7 @@ public sealed class ProductionRunCoordinator(
         var events = run.DomainEvents.ToArray();
         if (command.RecoveryDecision is not null && events.Length == 0)
         {
+            await ReleaseRecoveryDecisionHoldsAsync(run, command).ConfigureAwait(false);
             return Result.Success(run.ToSnapshot());
         }
 
@@ -299,18 +310,19 @@ public sealed class ProductionRunCoordinator(
                 operation.OperationRunId,
                 command.RecoveryDecision!.OperationRunId,
                 StringComparison.Ordinal));
-            await ReleaseOperationLeaseAsync(run.Id, reconciledOperation).ConfigureAwait(false);
+            await ReleaseRecoveryHoldAsync(run.Id, reconciledOperation).ConfigureAwait(false);
         }
-        else if ((command.Command == ProductionRunCommand.Stop && run.IsTerminal)
-                 || command.Command is ProductionRunCommand.SafeStop
-                     or ProductionRunCommand.Scrap
-                     or ProductionRunCommand.Retry
-                     or ProductionRunCommand.Abort)
+        else if (command.Command == ProductionRunCommand.Stop && run.IsTerminal)
         {
-            foreach (var operation in run.Operations)
-            {
-                await ReleaseOperationLeaseAsync(run.Id, operation).ConfigureAwait(false);
-            }
+            await ReleaseTerminalLeasesAsync(run).ConfigureAwait(false);
+        }
+        else if (command.Command is ProductionRunCommand.Retry
+                     or ProductionRunCommand.Abort
+                 || command.Command == ProductionRunCommand.Scrap
+                     && command.RecoveryDecision is not null
+                     && run.IsTerminal)
+        {
+            await ReleaseAllRecoveryHoldsAsync(run).ConfigureAwait(false);
         }
 
         return Result.Success(run.ToSnapshot());
@@ -330,6 +342,7 @@ public sealed class ProductionRunCoordinator(
             var run = entry.Run;
             if (run.IsTerminal)
             {
+                await ReleaseTerminalLeasesAsync(run).ConfigureAwait(false);
                 return IsConfirmedSafeStop(run)
                     ? Result.Success(run.ToSnapshot())
                     : run.SafeStopRequestedAtUtc is null
@@ -354,7 +367,7 @@ public sealed class ProductionRunCoordinator(
             var events = run.DomainEvents.ToArray();
             try
             {
-                var revision = await repository.SaveAsync(
+                var revision = await SaveProtectedTransitionAsync(
                         run,
                         entry.Revision,
                         CancellationToken.None)
@@ -381,13 +394,29 @@ public sealed class ProductionRunCoordinator(
         var barrierRun = entry.Run;
         if (barrierRun.IsTerminal)
         {
-            await ReleaseOperationLeasesAsync(barrierRun).ConfigureAwait(false);
+            await ReleaseTerminalLeasesAsync(barrierRun).ConfigureAwait(false);
             return IsConfirmedSafeStop(barrierRun)
                 ? Result.Success(barrierRun.ToSnapshot())
                 : SafeStopLostRace(barrierRun);
         }
 
         var barrierSnapshot = barrierRun.ToSnapshot();
+        var operationsToCancel = barrierSnapshot.Operations
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .ToArray();
+        var cancellationTask = Task.WhenAll(operationsToCancel.Select(operation =>
+            RequestSafeStopCancellationAsync(
+                barrierSnapshot,
+                operation,
+                actorId,
+                reason,
+                requestedAtUtc)));
+
+        // Execution cancellation is an admission barrier, while the independent Station
+        // safety request is the physical acknowledgement boundary. Start cancellation first
+        // so a dispatch that has been durably started but has not registered in-process is
+        // pre-canceled; always attempt physical safety even when cancellation is rejected.
         StationSafetyResult safety;
         try
         {
@@ -430,7 +459,7 @@ public sealed class ProductionRunCoordinator(
                     $"Production Run {barrierRun.Id} disappeared after Station Safe Stop acknowledgement.");
             if (entry.Run.IsTerminal)
             {
-                await ReleaseOperationLeasesAsync(entry.Run).ConfigureAwait(false);
+                await ReleaseTerminalLeasesAsync(entry.Run).ConfigureAwait(false);
                 return IsConfirmedSafeStop(entry.Run)
                     ? Result.Success(entry.Run.ToSnapshot())
                     : SafeStopLostRace(entry.Run);
@@ -479,7 +508,7 @@ public sealed class ProductionRunCoordinator(
         var runAfterSafety = entry.Run;
         if (runAfterSafety.IsTerminal)
         {
-            await ReleaseOperationLeasesAsync(runAfterSafety).ConfigureAwait(false);
+            await ReleaseTerminalLeasesAsync(runAfterSafety).ConfigureAwait(false);
             return IsConfirmedSafeStop(runAfterSafety)
                 ? Result.Success(runAfterSafety.ToSnapshot())
                 : SafeStopLostRace(runAfterSafety);
@@ -497,7 +526,7 @@ public sealed class ProductionRunCoordinator(
 
         var snapshot = runAfterSafety.ToSnapshot();
         var activeOperations = snapshot.Operations
-            .Where(operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
             .ToArray();
         if (activeOperations.Length == 0)
         {
@@ -508,30 +537,7 @@ public sealed class ProductionRunCoordinator(
                 .ConfigureAwait(false);
         }
 
-        StationOperationCancellationResult[] cancellationResults;
-        try
-        {
-            cancellationResults = await Task.WhenAll(activeOperations.Select(operation =>
-                    stationOperationCanceler.CancelAsync(
-                            new StationOperationCancellationRequest(
-                                snapshot,
-                                operation,
-                                actorId,
-                                reason,
-                                requestedAtUtc),
-                            CancellationToken.None)
-                        .AsTask()))
-                .ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException
-                                          and not StackOverflowException)
-        {
-            return await FailSafeStopAsync(
-                    runAfterSafety.Id,
-                    "Runtime.SafeStopExecutionCancelFailed",
-                    $"Safe Stop actuator succeeded, but active execution cancellation failed: {exception.Message}")
-                .ConfigureAwait(false);
-        }
+        var cancellationResults = await cancellationTask.ConfigureAwait(false);
 
         var rejected = cancellationResults.FirstOrDefault(result => !result.Accepted);
         if (rejected is not null)
@@ -551,7 +557,7 @@ public sealed class ProductionRunCoordinator(
             .ConfigureAwait(false);
         if (terminal.IsSuccess)
         {
-            await ReleaseOperationLeasesAsync(
+            await ReleaseTerminalLeasesAsync(
                     (await repository.GetByIdAsync(runAfterSafety.Id, CancellationToken.None)
                      .ConfigureAwait(false))?.Run
                     ?? throw new InvalidDataException(
@@ -560,6 +566,35 @@ public sealed class ProductionRunCoordinator(
         }
 
         return terminal;
+    }
+
+    private async Task<StationOperationCancellationResult> RequestSafeStopCancellationAsync(
+        ProductionRunSnapshot run,
+        OperationRunSnapshot operation,
+        string actorId,
+        string reason,
+        DateTimeOffset requestedAtUtc)
+    {
+        try
+        {
+            return await stationOperationCanceler.CancelAsync(
+                    new StationOperationCancellationRequest(
+                        run,
+                        operation,
+                        actorId,
+                        reason,
+                        requestedAtUtc),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+                                          and not StackOverflowException)
+        {
+            return StationOperationCancellationResult.Failure(
+                "Runtime.SafeStopExecutionCancelFailed",
+                $"Safe Stop active execution cancellation failed for Operation Run "
+                + $"{operation.OperationRunId}: {exception.Message}");
+        }
     }
 
     private async ValueTask<Result<ProductionRunSnapshot>> FailSafeStopAsync(
@@ -580,6 +615,7 @@ public sealed class ProductionRunCoordinator(
 
             if (entry.Run.IsTerminal)
             {
+                await ReleaseTerminalLeasesAsync(entry.Run).ConfigureAwait(false);
                 return IsConfirmedSafeStop(entry.Run)
                     ? Result.Success(entry.Run.ToSnapshot())
                     : SafeStopLostRace(entry.Run);
@@ -596,7 +632,7 @@ public sealed class ProductionRunCoordinator(
             var events = entry.Run.DomainEvents.ToArray();
             try
             {
-                await repository.SaveAsync(
+                await SaveProtectedTransitionAsync(
                         entry.Run,
                         entry.Revision,
                         CancellationToken.None)
@@ -642,87 +678,520 @@ public sealed class ProductionRunCoordinator(
             "Runtime.ProductionRunSafeStopRejected",
             $"Production Run {run.Id} already ended as {run.ExecutionStatus}/{run.ControlState}."));
 
-    private async ValueTask<Result<ProductionRunSnapshot>> CancelAsync(
-        ProductionRunPersistenceEntry entry,
+    private async ValueTask<Result<ProductionRunSnapshot>> ScrapAsync(
+        ProductionRunPersistenceEntry initialEntry,
         string actorId,
         string reason,
         CancellationToken cancellationToken)
     {
-        var run = entry.Run;
-        if (run.ControlState == ProductionRunControlState.RecoveryRequired)
+        var entry = initialEntry;
+        var requestedAtUtc = entry.Run.ScrapRequestedAtUtc ?? clock.UtcNow;
+        cancellationToken.ThrowIfCancellationRequested();
+        for (var attempt = 0; attempt < 8; attempt++)
         {
-            return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                "Runtime.ProductionRunCancelRejected",
-                $"Production Run {run.Id} requires an explicit Reconcile, Retry, Abort, or Scrap Recovery Decision."));
-        }
+            var run = entry.Run;
+            if (run.IsTerminal)
+            {
+                await ReleaseTerminalLeasesAsync(run).ConfigureAwait(false);
+                return IsConfirmedScrap(run, actorId, reason, requestedAtUtc)
+                    ? Result.Success(run.ToSnapshot())
+                    : ScrapAlreadyEnded(run);
+            }
 
-        if (run.IsTerminal)
-        {
-            return run.ExecutionStatus == ExecutionStatus.Canceled
-                ? Result.Success(run.ToSnapshot())
-                : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                    "Runtime.ProductionRunCancelRejected",
-                    $"Production Run {run.Id} already ended as {run.ExecutionStatus}."));
-        }
-
-        var snapshot = run.ToSnapshot();
-        var activeOperations = snapshot.Operations
-            .Where(operation => operation.ExecutionStatus == ExecutionStatus.Running)
-            .ToArray();
-        if (activeOperations.Length == 0)
-        {
-            var canceled = run.Cancel(reason, clock.UtcNow);
-            if (!canceled.Succeeded)
+            var barrierWasAlreadyPersisted = run.ScrapRequestedAtUtc is not null;
+            var barrier = run.RequestScrap(actorId, reason, requestedAtUtc);
+            if (!barrier.Succeeded)
             {
                 return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                    canceled.Code,
-                    canceled.Message));
+                    barrier.Code,
+                    barrier.Message));
+            }
+
+            if (barrierWasAlreadyPersisted)
+            {
+                break;
             }
 
             var events = run.DomainEvents.ToArray();
             try
             {
-                await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
+                var revision = await SaveProtectedTransitionAsync(
+                        run,
+                        entry.Revision,
+                        CancellationToken.None)
                     .ConfigureAwait(false);
+                await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
+                entry = new ProductionRunPersistenceEntry(run, revision);
+                break;
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                entry = await repository.GetByIdAsync(run.Id, CancellationToken.None)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidDataException(
+                        $"Production Run {run.Id} disappeared while establishing its Scrap barrier.");
             }
             catch (ProductionRunConcurrencyException)
             {
                 return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                    "Runtime.ProductionRunConcurrencyConflict",
-                    $"Production Run {run.Id} changed while cancellation was being persisted; reload it before retrying."));
+                    "Runtime.ProductionRunScrapConcurrencyConflict",
+                    $"Production Run {run.Id} kept changing while its Scrap barrier was being established; retry the same Scrap command."));
+            }
+        }
+
+        var barrierRun = entry.Run;
+        if (barrierRun.IsTerminal)
+        {
+            if (!IsConfirmedScrap(barrierRun, actorId, reason, requestedAtUtc))
+            {
+                return ScrapAlreadyEnded(barrierRun);
             }
 
-            await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
-            await ReleaseOperationLeasesAsync(run).ConfigureAwait(false);
-            return Result.Success(run.ToSnapshot());
+            await ReleaseTerminalLeasesAsync(barrierRun).ConfigureAwait(false);
+            return Result.Success(barrierRun.ToSnapshot());
         }
 
-        var requestedAtUtc = clock.UtcNow;
-        var cancellationTasks = activeOperations.Select(operation => stationOperationCanceler
-                .CancelAsync(
-                    new StationOperationCancellationRequest(
-                        snapshot,
-                        operation,
-                        actorId,
-                        reason,
-                        requestedAtUtc),
-                    cancellationToken)
-                .AsTask())
-            .ToArray();
-        var results = await Task.WhenAll(cancellationTasks).ConfigureAwait(false);
-        var rejected = results.FirstOrDefault(result => !result.Accepted);
-        if (rejected is not null)
+        if (barrierRun.ControlState == ProductionRunControlState.RecoveryRequired)
         {
             return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
-                rejected.FailureCode ?? "Runtime.ProductionRunCancelRejected",
-                rejected.FailureReason ?? "A Station rejected the cancellation request."));
+                "Runtime.ProductionRunScrapRecoveryRequired",
+                $"Production Run {barrierRun.Id} has an uncertain Scrap cancellation boundary and requires an explicit Recovery Decision."));
         }
 
-        return await WaitForCanceledTerminalAsync(
-                run.Id,
+        if (barrierRun.ControlState != ProductionRunControlState.StopRequested
+            || barrierRun.ScrapRequestedAtUtc != requestedAtUtc
+            || !string.Equals(barrierRun.ScrapRequestedBy, actorId, StringComparison.Ordinal)
+            || !string.Equals(barrierRun.ScrapReason, reason, StringComparison.Ordinal))
+        {
+            return await FailScrapAsync(
+                    barrierRun.Id,
+                    "Runtime.ScrapBarrierLost",
+                    "The durable Scrap request barrier changed before active execution cancellation.")
+                .ConfigureAwait(false);
+        }
+
+        var snapshot = barrierRun.ToSnapshot();
+        var activeOperations = snapshot.Operations
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .ToArray();
+        if (activeOperations.Length == 0)
+        {
+            return await FailScrapAsync(
+                    barrierRun.Id,
+                    "Runtime.ScrapStateInconsistent",
+                    "Scrap remained non-terminal without an active Station operation.")
+                .ConfigureAwait(false);
+        }
+
+        StationOperationCancellationResult[] cancellationResults;
+        try
+        {
+            cancellationResults = await Task.WhenAll(activeOperations.Select(operation =>
+                    stationOperationCanceler.CancelAsync(
+                            new StationOperationCancellationRequest(
+                                snapshot,
+                                operation,
+                                actorId,
+                                reason,
+                                requestedAtUtc),
+                            CancellationToken.None)
+                        .AsTask()))
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+                                          and not StackOverflowException)
+        {
+            return await FailScrapAsync(
+                    barrierRun.Id,
+                    "Runtime.ScrapExecutionCancelFailed",
+                    $"Active execution cancellation for Scrap failed: {exception.Message}")
+                .ConfigureAwait(false);
+        }
+
+        var rejected = cancellationResults.FirstOrDefault(static result => !result.Accepted);
+        if (rejected is not null)
+        {
+            return await FailScrapAsync(
+                    barrierRun.Id,
+                    rejected.FailureCode ?? "Runtime.ScrapExecutionCancelRejected",
+                    rejected.FailureReason
+                    ?? "A Station returned an unknown rejection for active Scrap cancellation.")
+                .ConfigureAwait(false);
+        }
+
+        var terminal = await WaitForScrappedTerminalAsync(barrierRun.Id).ConfigureAwait(false);
+        if (terminal.IsSuccess)
+        {
+            var latest = await repository.GetByIdAsync(barrierRun.Id, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Production Run {barrierRun.Id} disappeared after Scrap completion.");
+            await ReleaseTerminalLeasesAsync(latest.Run).ConfigureAwait(false);
+        }
+
+        return terminal;
+    }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> FailScrapAsync(
+        ProductionRunId runId,
+        string failureCode,
+        string failureReason)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var entry = await repository.GetByIdAsync(runId, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (entry is null)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.NotFound(
+                    "Runtime.ProductionRunNotFound",
+                    $"Production Run {runId} disappeared while recording Scrap recovery."));
+            }
+
+            if (entry.Run.IsTerminal)
+            {
+                await ReleaseTerminalLeasesAsync(entry.Run).ConfigureAwait(false);
+                return entry.Run.Disposition == ProductDisposition.Scrapped
+                    ? Result.Success(entry.Run.ToSnapshot())
+                    : ScrapAlreadyEnded(entry.Run);
+            }
+
+            var detectedAtUtc = clock.UtcNow < entry.Run.LastTransitionAtUtc
+                ? entry.Run.LastTransitionAtUtc
+                : clock.UtcNow;
+            var recovery = entry.Run.MarkRecoveryRequired(failureReason, detectedAtUtc);
+            if (!recovery.Succeeded)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+
+            var events = entry.Run.DomainEvents.ToArray();
+            try
+            {
+                await SaveProtectedTransitionAsync(
+                        entry.Run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(entry.Run, events, CancellationToken.None).ConfigureAwait(false);
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                // Reload and preserve the durable Scrap request and whichever result won.
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunScrapConcurrencyConflict",
+                    $"Production Run {runId} kept changing while Scrap recovery was being recorded."));
+            }
+        }
+
+        return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunScrapConcurrencyConflict",
+            $"Production Run {runId} could not persist Scrap recovery."));
+    }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> WaitForScrappedTerminalAsync(
+        ProductionRunId runId)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var current = await repository.GetByIdAsync(runId, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Production Run {runId} disappeared after Scrap cancellation was accepted.");
+            if (current.Run.IsTerminal)
+            {
+                return current.Run.ExecutionStatus == ExecutionStatus.Completed
+                    && current.Run.Judgement == ResultJudgement.Failed
+                    && current.Run.Disposition == ProductDisposition.Scrapped
+                    ? Result.Success(current.Run.ToSnapshot())
+                    : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                        "Runtime.ProductionRunScrapLostRace",
+                        $"Production Run {runId} ended as {current.Run.ExecutionStatus}/{current.Run.Disposition} while Scrap was in flight."));
+            }
+
+            if (current.Run.ControlState == ProductionRunControlState.RecoveryRequired)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunScrapRecoveryRequired",
+                    $"Production Run {runId} entered recovery while Scrap was in flight."));
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunScrapPending",
+            $"Station cancellation for Scrap was accepted, but Production Run {runId} has not durably settled; poll the run before issuing another command."));
+    }
+
+    private static bool IsConfirmedScrap(
+        ProductionRun run,
+        string actorId,
+        string reason,
+        DateTimeOffset requestedAtUtc) =>
+        run.ExecutionStatus == ExecutionStatus.Completed
+        && run.Judgement == ResultJudgement.Failed
+        && run.Disposition == ProductDisposition.Scrapped
+        && string.Equals(run.ScrapRequestedBy, actorId, StringComparison.Ordinal)
+        && string.Equals(run.ScrapReason, reason, StringComparison.Ordinal)
+        && run.ScrapRequestedAtUtc == requestedAtUtc;
+
+    private static Result<ProductionRunSnapshot> ScrapAlreadyEnded(ProductionRun run) =>
+        Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunScrapRejected",
+            $"Production Run {run.Id} already ended as {run.ExecutionStatus}/{run.Disposition}."));
+
+    private async ValueTask<Result<ProductionRunSnapshot>> CancelAsync(
+        ProductionRunPersistenceEntry initialEntry,
+        string actorId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var entry = initialEntry;
+        var requestedAtUtc = IsCancelBarrier(entry.Run)
+            ? entry.Run.LastTransitionAtUtc
+            : clock.UtcNow;
+        cancellationToken.ThrowIfCancellationRequested();
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var run = entry.Run;
+            if (run.ControlState == ProductionRunControlState.RecoveryRequired)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunCancelRejected",
+                    $"Production Run {run.Id} requires an explicit Reconcile, Retry, Abort, or Scrap Recovery Decision."));
+            }
+
+            if (run.IsTerminal)
+            {
+                await ReleaseTerminalLeasesAsync(run).ConfigureAwait(false);
+                return run.ExecutionStatus == ExecutionStatus.Canceled
+                    ? Result.Success(run.ToSnapshot())
+                    : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                        "Runtime.ProductionRunCancelRejected",
+                        $"Production Run {run.Id} already ended as {run.ExecutionStatus}."));
+            }
+
+            var barrierWasAlreadyPersisted = IsCancelBarrier(run);
+            var barrier = run.RequestCancel(reason, requestedAtUtc);
+            if (!barrier.Succeeded)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    barrier.Code,
+                    barrier.Message));
+            }
+
+            if (barrierWasAlreadyPersisted)
+            {
+                break;
+            }
+
+            var events = run.DomainEvents.ToArray();
+            try
+            {
+                var revision = await SaveProtectedTransitionAsync(
+                        run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(run, events, CancellationToken.None).ConfigureAwait(false);
+                entry = new ProductionRunPersistenceEntry(run, revision);
+                break;
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                entry = await repository.GetByIdAsync(run.Id, CancellationToken.None)
+                    .ConfigureAwait(false)
+                    ?? throw new InvalidDataException(
+                        $"Production Run {run.Id} disappeared while establishing its Cancel barrier.");
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunCancelConcurrencyConflict",
+                    $"Production Run {run.Id} kept changing while its Cancel barrier was being established; retry the same Cancel command."));
+            }
+        }
+
+        var barrierRun = entry.Run;
+        if (barrierRun.IsTerminal)
+        {
+            await ReleaseTerminalLeasesAsync(barrierRun).ConfigureAwait(false);
+            return barrierRun.ExecutionStatus == ExecutionStatus.Canceled
+                ? Result.Success(barrierRun.ToSnapshot())
+                : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunCancelLostRace",
+                    $"Production Run {barrierRun.Id} ended as {barrierRun.ExecutionStatus} while Operator Cancel was being established."));
+        }
+
+        if (!IsCancelBarrier(barrierRun)
+            || !string.Equals(barrierRun.FailureReason, reason, StringComparison.Ordinal))
+        {
+            return await FailCancelAsync(
+                    barrierRun.Id,
+                    "Runtime.ProductionRunCancelBarrierLost",
+                    "The durable Cancel request barrier changed before active execution cancellation.")
+                .ConfigureAwait(false);
+        }
+
+        var snapshot = barrierRun.ToSnapshot();
+        var activeOperations = snapshot.Operations
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .ToArray();
+        if (activeOperations.Length == 0)
+        {
+            return await FailCancelAsync(
+                    barrierRun.Id,
+                    "Runtime.ProductionRunCancelStateInconsistent",
+                    "Cancel remained non-terminal without an active Station operation.")
+                .ConfigureAwait(false);
+        }
+
+        StationOperationCancellationResult[] results;
+        try
+        {
+            results = await Task.WhenAll(activeOperations.Select(operation =>
+                    stationOperationCanceler.CancelAsync(
+                            new StationOperationCancellationRequest(
+                                snapshot,
+                                operation,
+                                actorId,
+                                reason,
+                                requestedAtUtc),
+                            CancellationToken.None)
+                        .AsTask()))
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+                                          and not StackOverflowException)
+        {
+            return await FailCancelAsync(
+                    barrierRun.Id,
+                    "Runtime.ProductionRunCancelTransportFailed",
+                    $"Active execution cancellation did not reach a durable Station boundary: {exception.Message}")
+                .ConfigureAwait(false);
+        }
+
+        var rejected = results.FirstOrDefault(static result => !result.Accepted);
+        if (rejected is not null)
+        {
+            var latest = await repository.GetByIdAsync(barrierRun.Id, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Production Run {barrierRun.Id} disappeared after Station cancellation rejection.");
+            if (latest.Run.IsTerminal && latest.Run.ExecutionStatus == ExecutionStatus.Canceled)
+            {
+                await ReleaseTerminalLeasesAsync(latest.Run).ConfigureAwait(false);
+                return Result.Success(latest.Run.ToSnapshot());
+            }
+
+            return await FailCancelAsync(
+                    barrierRun.Id,
+                    rejected.FailureCode ?? "Runtime.ProductionRunCancelRejected",
+                    rejected.FailureReason ?? "A Station rejected the cancellation request.")
+                .ConfigureAwait(false);
+        }
+
+        var terminal = await WaitForCanceledTerminalAsync(
+                barrierRun.Id,
                 "Operator Cancel",
-                cancellationToken)
+                CancellationToken.None)
             .ConfigureAwait(false);
+        if (terminal.IsSuccess)
+        {
+            var latest = await repository.GetByIdAsync(barrierRun.Id, CancellationToken.None)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    $"Production Run {barrierRun.Id} disappeared after Operator Cancel completion.");
+            await ReleaseTerminalLeasesAsync(latest.Run).ConfigureAwait(false);
+        }
+
+        return terminal;
+    }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> FailCancelAsync(
+        ProductionRunId runId,
+        string failureCode,
+        string failureReason)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var entry = await repository.GetByIdAsync(runId, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (entry is null)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.NotFound(
+                    "Runtime.ProductionRunNotFound",
+                    $"Production Run {runId} disappeared while recording Cancel recovery."));
+            }
+
+            if (entry.Run.IsTerminal)
+            {
+                await ReleaseTerminalLeasesAsync(entry.Run).ConfigureAwait(false);
+                return entry.Run.ExecutionStatus == ExecutionStatus.Canceled
+                    ? Result.Success(entry.Run.ToSnapshot())
+                    : Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                        "Runtime.ProductionRunCancelLostRace",
+                        $"Production Run {runId} ended as {entry.Run.ExecutionStatus} while Cancel recovery was being recorded."));
+            }
+
+            if (entry.Run.ControlState == ProductionRunControlState.RecoveryRequired)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+
+            var detectedAtUtc = clock.UtcNow < entry.Run.LastTransitionAtUtc
+                ? entry.Run.LastTransitionAtUtc
+                : clock.UtcNow;
+            var recovery = entry.Run.MarkRecoveryRequired(failureReason, detectedAtUtc);
+            if (!recovery.Succeeded)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+
+            var events = entry.Run.DomainEvents.ToArray();
+            try
+            {
+                await SaveProtectedTransitionAsync(
+                        entry.Run,
+                        entry.Revision,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await PublishAsync(entry.Run, events, CancellationToken.None).ConfigureAwait(false);
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    failureCode,
+                    failureReason));
+            }
+            catch (ProductionRunConcurrencyException) when (attempt < 7)
+            {
+                // Reload and preserve whichever durable result or recovery transition won.
+            }
+            catch (ProductionRunConcurrencyException)
+            {
+                return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+                    "Runtime.ProductionRunCancelConcurrencyConflict",
+                    $"Production Run {runId} kept changing while Cancel recovery was being recorded."));
+            }
+        }
+
+        return Result.Failure<ProductionRunSnapshot>(ApplicationError.Conflict(
+            "Runtime.ProductionRunCancelConcurrencyConflict",
+            $"Production Run {runId} could not persist Cancel recovery."));
     }
 
     private async ValueTask<Result<ProductionRunSnapshot>> WaitForCanceledTerminalAsync(
@@ -804,6 +1273,18 @@ public sealed class ProductionRunCoordinator(
         }
     }
 
+    private async ValueTask ReleaseTerminalLeasesAsync(ProductionRun run)
+    {
+        if (!run.IsTerminal)
+        {
+            throw new InvalidOperationException(
+                $"Production Run {run.Id} must be terminal before terminal lease cleanup.");
+        }
+
+        await ReleaseAllRecoveryHoldsAsync(run).ConfigureAwait(false);
+        await ReleaseOperationLeasesAsync(run).ConfigureAwait(false);
+    }
+
     private async ValueTask ReleaseOperationLeaseAsync(
         ProductionRunId runId,
         OperationRun operation)
@@ -823,6 +1304,147 @@ public sealed class ProductionRunCoordinator(
                 CancellationToken.None)
             .ConfigureAwait(false);
     }
+
+    private async ValueTask ReleaseRecoveryDecisionHoldsAsync(
+        ProductionRun run,
+        ProductionRunCommandRequest command)
+    {
+        if (command.Command == ProductionRunCommand.Reconcile)
+        {
+            var operation = run.Operations.Single(candidate => string.Equals(
+                candidate.OperationRunId,
+                command.RecoveryDecision!.OperationRunId,
+                StringComparison.Ordinal));
+            await ReleaseRecoveryHoldAsync(run.Id, operation).ConfigureAwait(false);
+            return;
+        }
+
+        if (command.Command is ProductionRunCommand.Retry
+            or ProductionRunCommand.Abort
+            or ProductionRunCommand.Scrap)
+        {
+            await ReleaseAllRecoveryHoldsAsync(run).ConfigureAwait(false);
+        }
+    }
+
+    private async ValueTask ReleaseAllRecoveryHoldsAsync(ProductionRun run)
+    {
+        var heldOperationIds = (await resourceLeases.ListAsync(CancellationToken.None)
+                .ConfigureAwait(false))
+            .Where(lease => lease.ProductionRunId == run.Id
+                && lease.ExpiresAtUtc == DateTimeOffset.MaxValue)
+            .Select(static lease => lease.OperationRunId)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (heldOperationIds.Length == 0)
+        {
+            return;
+        }
+
+        var holds = heldOperationIds
+            .Select(operationRunId => CreateLeaseHold(run.Operations.Single(operation =>
+                string.Equals(
+                    operation.OperationRunId,
+                    operationRunId,
+                    StringComparison.Ordinal))))
+            .ToArray();
+        await ReleaseRecoveryHoldsIdempotentlyAsync(run.Id, holds).ConfigureAwait(false);
+    }
+
+    private async ValueTask ReleaseRecoveryHoldAsync(
+        ProductionRunId runId,
+        OperationRun operation)
+    {
+        var hasRecoveryHold = (await resourceLeases.ListAsync(CancellationToken.None)
+                .ConfigureAwait(false))
+            .Any(lease => lease.ProductionRunId == runId
+                && string.Equals(
+                    lease.OperationRunId,
+                    operation.OperationRunId,
+                    StringComparison.Ordinal)
+                && lease.ExpiresAtUtc == DateTimeOffset.MaxValue);
+        if (!hasRecoveryHold)
+        {
+            return;
+        }
+
+        await ReleaseRecoveryHoldsIdempotentlyAsync(
+                runId,
+                [CreateLeaseHold(operation)])
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask ReleaseRecoveryHoldsIdempotentlyAsync(
+        ProductionRunId runId,
+        IReadOnlyCollection<ProductionRunLeaseHold> holds)
+    {
+        try
+        {
+            await resourceLeases.ReleaseRecoveryHoldAsync(
+                    runId,
+                    holds,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (ResourceLeaseOwnershipException)
+        {
+            var operationRunIds = holds
+                .Select(static hold => hold.OperationRunId)
+                .ToHashSet(StringComparer.Ordinal);
+            var recoveryHoldStillExists = (await resourceLeases.ListAsync(CancellationToken.None)
+                    .ConfigureAwait(false))
+                .Any(lease => lease.ProductionRunId == runId
+                    && operationRunIds.Contains(lease.OperationRunId)
+                    && lease.ExpiresAtUtc == DateTimeOffset.MaxValue);
+            if (recoveryHoldStillExists)
+            {
+                throw;
+            }
+        }
+    }
+
+    private ValueTask<long> SaveProtectedTransitionAsync(
+        ProductionRun run,
+        long expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        var leaseHolds = CreateActiveLeaseHolds(run);
+        return leaseHolds.Length == 0
+            ? repository.SaveAsync(run, expectedRevision, cancellationToken)
+            : safetyTransitions.SaveWithLeaseHoldsAsync(
+                run,
+                expectedRevision,
+                leaseHolds,
+                cancellationToken);
+    }
+
+    private static ProductionRunLeaseHold[] CreateActiveLeaseHolds(ProductionRun run) =>
+        run.Operations
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .Select(static operation => new ProductionRunLeaseHold(
+                operation.OperationRunId,
+                operation.FencingTokens
+                    .Select(static pair => new ResourceLeaseHoldClaim(pair.Key, pair.Value))
+                    .ToArray()))
+            .ToArray();
+
+    private static ProductionRunLeaseHold CreateLeaseHold(OperationRun operation) =>
+        new(
+            operation.OperationRunId,
+            operation.FencingTokens
+                .Select(static pair => new ResourceLeaseHoldClaim(pair.Key, pair.Value))
+                .ToArray());
+
+    private static bool IsCancelBarrier(ProductionRun run) =>
+        run.ControlState == ProductionRunControlState.StopRequested
+        && string.Equals(
+            run.FailureCode,
+            "Runtime.ProductionRunCancelRequested",
+            StringComparison.Ordinal)
+        && run.SafeStopRequestedAtUtc is null
+        && run.ScrapRequestedAtUtc is null;
 
     private static ApplicationError? Validate(SubmitProductionRunRequest request)
     {

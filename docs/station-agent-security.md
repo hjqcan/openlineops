@@ -38,6 +38,8 @@ machine-wide prefix scan.
     "Agent": {
       "AgentId": "agent-line-a-eol",
       "StationId": "station.eol",
+      "StationSystemId": "station.system.eol",
+      "HeartbeatInterval": "00:00:05",
       "AllowedRestrictedExternalProgramHostSids": [
         "S-1-5-21-..."
       ],
@@ -90,21 +92,60 @@ package remains read-only.
 
 The release bundle also contains the self-contained Python Script Worker.
 Agent configuration binds Station Runtime to its absolute co-packaged path and
-to one explicit sandbox policy. The production default requires least-privilege
-execution through the signed co-packaged
+to one explicit sandbox policy. Production requires the signed co-packaged
 `OpenLineOps.LeastPrivilegeLauncher.exe` and the fixed
-`RestrictedCurrentLowIntegrity` identity. The launcher derives a restricted
-primary token from the current Agent token, sets mandatory Low integrity (RID
-4096), and starts only its sibling Script Worker. Agent startup fails closed if
-the launcher is missing, redirected, a reparse point, file-identity aliased, or
-configured with another identity or argument layout. It never uses `runas`, a
-password, or an interactive prompt.
+`PerExecutionAppContainer` identity.
+
+Every invocation creates a unique AppContainer profile and package SID. The
+Worker payload is copied from the verified sibling executable into that
+profile: its content directory has a protected read-and-execute ACL while its
+runtime directory grants modify access only to the current package SID, the
+trusted service identity, and SYSTEM. Windows supplies the AppContainer Low
+integrity token (RID 4096). No network capability is present. The stable
+`OpenLineOps.pythonRuntime` capability receives read-and-execute access to the
+reviewed Python installation and is the only additional Worker capability.
+That access is installed explicitly after Python installation or update:
+
+```powershell
+& 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.LeastPrivilegeLauncher.exe' provision-python-runtime --runtime-dll 'C:\Program Files\Python312\python312.dll'
+```
+
+This command is an installer/administrator operation whose caller must already
+have permission to change the Python tree DACL. Normal Agent execution never
+changes that DACL: it verifies the inheritable capability rule and fails closed
+with an actionable provisioning error if the rule is absent. Consequently the
+Station service identity requires neither elevation nor `WRITE_DAC` over the
+host Python installation.
+
+The launcher creates the Worker suspended with
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, passes only the standard-stream
+handles and its explicit environment, assigns the process to an unnamed
+kill-on-close Job Object, and resumes it only after assignment. Worker exit,
+cancellation, launcher termination, or Agent failure closes the Job and kills
+every descendant before profile cleanup. Deleting the AppContainer profile is
+the cleanup authority for its complete writable tree, including read-only,
+deep, and wide content; there is no custom recursive delete path.
+
+The protected `%LOCALAPPDATA%\OpenLineOps\ScriptWorker` directory contains
+only locked active-profile markers. A normal exit deletes the profile and
+marker. After a crash, the next launcher can exclusively open only stale
+markers, deletes their exact canonical profiles, and never scans or deletes
+another namespace. Locked markers protect concurrent executions. Cleanup
+failure returns launcher failure and retains the marker for recovery instead
+of hiding residue behind a successful result.
+
+Agent startup fails closed if the launcher is missing, redirected, a reparse
+point, file-identity aliased, or configured with another identity or argument
+layout. It never uses `runas`, a password, or an interactive prompt.
 Container isolation is not an Agent option: the Windows worker and host Python
-DLL are never represented as if they were files inside an unverified image.
+DLL are never represented as files inside an unverified image.
 `ExternalProcess` is limited to development or test configuration with required
 least privilege explicitly disabled. The configured host Python runtime DLL
 path is passed explicitly through the cleared Station Runtime environment;
-ambient worker commands are ignored.
+ambient worker commands are ignored. Windows rewrites standard AppContainer
+`TEMP` and `LOCALAPPDATA` locations into the profile. OpenLineOps therefore
+uses a dedicated per-execution runtime-root variable and keeps the bundle
+extraction root inside the same profile.
 
 On Windows, the native launcher supports a frozen executable whose absolute
 path exceeds `MAX_PATH` by passing an extended-length application name directly

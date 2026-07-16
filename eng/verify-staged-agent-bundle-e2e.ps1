@@ -73,10 +73,120 @@ function New-CleanDirectory {
     return $fullPath
 }
 
+function Remove-PrivateStagedExecutionFiles {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    foreach ($entry in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
+        if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to sanitize a staged Agent evidence tree containing a reparse point: $($entry.FullName)"
+        }
+    }
+
+    foreach ($entry in Get-ChildItem -LiteralPath $Root -Force) {
+        if ($entry.Name -cin @("evidence.json", "test-results", "rabbitmq-process")) {
+            continue
+        }
+        Remove-Item -LiteralPath $entry.FullName -Recurse -Force
+    }
+    $rabbitRoot = Join-Path $Root "rabbitmq-process"
+    foreach ($entry in Get-ChildItem -LiteralPath $rabbitRoot -Force) {
+        if ($entry.Name -ceq "evidence.json") {
+            continue
+        }
+        Remove-Item -LiteralPath $entry.FullName -Recurse -Force
+    }
+}
+
 function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Read-SafeXml {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $settings = [System.Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $reader = [System.Xml.XmlReader]::Create($Path, $settings)
+    try {
+        $document = [System.Xml.XmlDocument]::new()
+        $document.XmlResolver = $null
+        $document.Load($reader)
+        return $document
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Write-SanitizedExactTestTrx {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $FullyQualifiedName,
+        [Parameter(Mandatory = $true)][string] $TestId
+    )
+
+    $lastSeparator = $FullyQualifiedName.LastIndexOf('.')
+    if ($lastSeparator -le 0 -or $lastSeparator -eq $FullyQualifiedName.Length - 1) {
+        throw "Exact staged test name is not canonical: '$FullyQualifiedName'."
+    }
+    $className = $FullyQualifiedName.Substring(0, $lastSeparator)
+    $methodName = $FullyQualifiedName.Substring($lastSeparator + 1)
+    $settings = [System.Xml.XmlWriterSettings]::new()
+    $settings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $settings.Indent = $true
+    $settings.NewLineChars = "`n"
+    $settings.NewLineHandling = [System.Xml.NewLineHandling]::Replace
+    $writer = [System.Xml.XmlWriter]::Create($Path, $settings)
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement(
+            "TestRun",
+            "http://microsoft.com/schemas/VisualStudio/TeamTest/2010")
+        $writer.WriteAttributeString("name", "staged-agent-bundle-e2e")
+        $writer.WriteAttributeString("runUser", "redacted")
+
+        $writer.WriteStartElement("Results")
+        $writer.WriteStartElement("UnitTestResult")
+        $writer.WriteAttributeString("testId", $TestId)
+        $writer.WriteAttributeString("testName", $FullyQualifiedName)
+        $writer.WriteAttributeString("computerName", "redacted")
+        $writer.WriteAttributeString("outcome", "Passed")
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement("TestDefinitions")
+        $writer.WriteStartElement("UnitTest")
+        $writer.WriteAttributeString("name", $FullyQualifiedName)
+        $writer.WriteAttributeString("storage", "OpenLineOps.Agent.Tests.dll")
+        $writer.WriteAttributeString("id", $TestId)
+        $writer.WriteStartElement("TestMethod")
+        $writer.WriteAttributeString("codeBase", "OpenLineOps.Agent.Tests.dll")
+        $writer.WriteAttributeString("className", $className)
+        $writer.WriteAttributeString("name", $methodName)
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteStartElement("ResultSummary")
+        $writer.WriteAttributeString("outcome", "Completed")
+        $writer.WriteStartElement("Counters")
+        $writer.WriteAttributeString("total", "1")
+        $writer.WriteAttributeString("executed", "1")
+        $writer.WriteAttributeString("passed", "1")
+        $writer.WriteAttributeString("failed", "0")
+        $writer.WriteAttributeString("notExecuted", "0")
+        $writer.WriteEndElement()
+        $writer.WriteEndElement()
+
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    }
+    finally {
+        $writer.Dispose()
+    }
 }
 
 function Get-RelativePathUnderDirectory {
@@ -273,13 +383,48 @@ function Assert-AgentReleaseSecurityTemplate {
     $configuration = Get-Content -LiteralPath (Join-Path $BundleRoot "appsettings.json") -Raw |
         ConvertFrom-Json
     $agent = $configuration.OpenLineOps.Agent
+    $agentProperties = @($agent.PSObject.Properties.Name)
+    if (-not ($agentProperties -ccontains "StationSystemId") `
+        -or $agent.StationSystemId -isnot [string] `
+        -or $agent.StationSystemId -cne "" `
+        -or -not ($agentProperties -ccontains "HeartbeatInterval") `
+        -or $agent.HeartbeatInterval -cne "00:00:05") {
+        throw "Agent release template must expose an empty deployment StationSystemId and a 00:00:05 HeartbeatInterval."
+    }
+    $brokerUri = $null
+    if ($agent.RequireBrokerTls -ne $true `
+        -or $agent.BrokerUri -isnot [string] `
+        -or -not [System.Uri]::TryCreate(
+            $agent.BrokerUri,
+            [System.UriKind]::Absolute,
+            [ref]$brokerUri) `
+        -or $brokerUri.Scheme -cne "amqps" `
+        -or -not [string]::IsNullOrEmpty($brokerUri.UserInfo)) {
+        throw "Agent release template must require amqps without embedded placeholder broker credentials."
+    }
+    $coordinatorUri = $null
+    if (-not ($agentProperties -ccontains "CoordinatorBaseUri") `
+        -or $agent.CoordinatorBaseUri -isnot [string] `
+        -or -not [System.Uri]::TryCreate(
+            $agent.CoordinatorBaseUri,
+            [System.UriKind]::Absolute,
+            [ref]$coordinatorUri) `
+        -or $coordinatorUri.Scheme -cne "https" `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.UserInfo) `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.Query) `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.Fragment) `
+        -or $agent.ArtifactUploadTimeout -cne "00:05:00") {
+        throw "Agent release template must use a credential-free HTTPS CoordinatorBaseUri and a 00:05:00 artifact upload timeout."
+    }
+    if ($agentProperties -ccontains "ArtifactUploadBearerToken") {
+        throw "Agent release template must not embed ArtifactUploadBearerToken."
+    }
     if ($agent.RuntimeExecutablePath -cne "OpenLineOps.StationRuntime.exe" `
         -or $agent.PluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe" `
         -or $agent.PythonScript.WorkerExecutablePath -cne "OpenLineOps.ScriptWorker.exe") {
         throw "Agent release template does not pin every executable to its co-packaged entry point."
     }
 
-    $agentProperties = @($agent.PSObject.Properties.Name)
     if (-not ($agentProperties -ccontains "SafetyExecutablePath") `
         -or $agent.SafetyExecutablePath -isnot [string] `
         -or $agent.SafetyExecutablePath -cne "") {
@@ -289,11 +434,11 @@ function Assert-AgentReleaseSecurityTemplate {
     $sandbox = $agent.PythonScript.Sandbox
     if ($sandbox.RequireLeastPrivilegeExecution -ne $true `
         -or $sandbox.IsolationMode -cne "LeastPrivilegeIdentity" `
-        -or $sandbox.LeastPrivilegeIdentity -cne "RestrictedCurrentLowIntegrity" `
+        -or $sandbox.LeastPrivilegeIdentity -cne "PerExecutionAppContainer" `
         -or $sandbox.LeastPrivilegeLauncherExecutable -cne "OpenLineOps.LeastPrivilegeLauncher.exe" `
         -or $sandbox.LeastPrivilegeNoInteractivePrompt -ne $true `
         -or -not [string]::IsNullOrWhiteSpace($sandbox.LeastPrivilegeArgumentsTemplate)) {
-        throw "Agent release template must require the fixed bundled non-interactive RestrictedCurrentLowIntegrity launcher."
+        throw "Agent release template must require the fixed bundled non-interactive PerExecutionAppContainer launcher."
     }
     if (-not (Test-Path `
             -LiteralPath (Join-Path $BundleRoot "OpenLineOps.LeastPrivilegeLauncher.exe") `
@@ -315,7 +460,8 @@ function Invoke-EntryPointProbe {
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [int] $ExpectedExitCode = [int]::MinValue,
         [switch] $RequireNonZeroExit,
-        [Parameter(Mandatory = $true)][string] $ExpectedOutputPattern
+        [Parameter(Mandatory = $true)][string] $ExpectedOutputPattern,
+        [hashtable] $EnvironmentOverrides = @{}
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -326,6 +472,9 @@ function Invoke-EntryPointProbe {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = $utf8WithoutBom
+    $startInfo.StandardErrorEncoding = $utf8WithoutBom
     foreach ($key in @($startInfo.EnvironmentVariables.Keys)) {
         if ($key -like "OpenLineOps__Agent__*" `
             -or $key -ceq "DOTNET_ENVIRONMENT" `
@@ -333,10 +482,21 @@ function Invoke-EntryPointProbe {
             $startInfo.EnvironmentVariables.Remove($key)
         }
     }
+    foreach ($entry in $EnvironmentOverrides.GetEnumerator()) {
+        if ($entry.Key -isnot [string] `
+            -or [string]::IsNullOrWhiteSpace([string]$entry.Key) `
+            -or $entry.Value -isnot [string] `
+            -or [string]::IsNullOrWhiteSpace([string]$entry.Value)) {
+            throw "Staged entry point '$Name' has an invalid probe environment override."
+        }
+        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+    }
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
+    $previousInputEncoding = [Console]::InputEncoding
     try {
+        [Console]::InputEncoding = $utf8WithoutBom
         if (-not $process.Start()) {
             throw "Staged entry point '$Name' did not start."
         }
@@ -370,13 +530,108 @@ function Invoke-EntryPointProbe {
         }
     }
     finally {
+        [Console]::InputEncoding = $previousInputEncoding
         $process.Dispose()
+    }
+}
+
+function Invoke-ExactDotNetTest {
+    param(
+        [Parameter(Mandatory = $true)][string] $TestProject,
+        [Parameter(Mandatory = $true)][string] $Configuration,
+        [Parameter(Mandatory = $true)][string] $FullyQualifiedName,
+        [Parameter(Mandatory = $true)][string] $ResultName,
+        [Parameter(Mandatory = $true)][string] $ResultsDirectory,
+        [switch] $NoBuild,
+        [switch] $NoRestore
+    )
+
+    [System.IO.Directory]::CreateDirectory($ResultsDirectory) | Out-Null
+    $trxName = "$ResultName.trx"
+    $trxPath = Join-Path $ResultsDirectory $trxName
+    Remove-Item -LiteralPath $trxPath -Force -ErrorAction SilentlyContinue
+    $arguments = @(
+        "test",
+        $TestProject,
+        "--configuration",
+        $Configuration,
+        "--filter",
+        "FullyQualifiedName=$FullyQualifiedName",
+        "--results-directory",
+        $ResultsDirectory,
+        "--logger",
+        "trx;LogFileName=$trxName"
+    )
+    if ($NoBuild) {
+        $arguments += "--no-build"
+    }
+    if ($NoRestore) {
+        $arguments += "--no-restore"
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $testOutput = & dotnet @arguments 2>&1
+        $testExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $testOutput | ForEach-Object { Write-Host $_ }
+    if ($testExitCode -ne 0) {
+        throw "Exact staged test '$FullyQualifiedName' failed with exit code $testExitCode."
+    }
+    if (-not (Test-Path -LiteralPath $trxPath -PathType Leaf)) {
+        throw "Exact staged test '$FullyQualifiedName' did not produce its TRX evidence."
+    }
+
+    $trx = Read-SafeXml $trxPath
+    $definitions = @($trx.TestRun.TestDefinitions.UnitTest)
+    $results = @($trx.TestRun.Results.UnitTestResult)
+    $counters = $trx.TestRun.ResultSummary.Counters
+    if ($definitions.Count -ne 1 `
+        -or $results.Count -ne 1 `
+        -or $null -eq $counters) {
+        throw "Exact staged test '$FullyQualifiedName' must discover and execute exactly one test."
+    }
+    $definition = $definitions[0]
+    $result = $results[0]
+    $discoveredName = "$($definition.TestMethod.className).$($definition.TestMethod.name)"
+    if ($discoveredName -cne $FullyQualifiedName `
+        -or $definition.name -cne $FullyQualifiedName `
+        -or $result.testName -cne $FullyQualifiedName `
+        -or $result.testId -cne $definition.id `
+        -or $result.outcome -cne "Passed" `
+        -or [int]$counters.total -ne 1 `
+        -or [int]$counters.executed -ne 1 `
+        -or [int]$counters.passed -ne 1 `
+        -or [int]$counters.failed -ne 0 `
+        -or [int]$counters.notExecuted -ne 0) {
+        throw "Exact staged test evidence does not prove '$FullyQualifiedName' passed."
+    }
+
+    Write-SanitizedExactTestTrx `
+        -Path $trxPath `
+        -FullyQualifiedName $FullyQualifiedName `
+        -TestId ([string]$definition.id)
+
+    return [pscustomobject][ordered]@{
+        fullyQualifiedName = $FullyQualifiedName
+        result = "passed"
+        trxRelativePath = (Get-RelativePathUnderDirectory `
+            -Root $resolvedWorkRoot `
+            -Path $trxPath).Replace('\', '/')
+        trxSha256 = Get-FileSha256 $trxPath
     }
 }
 
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows)) {
     throw "The staged Agent bundle E2E gate requires Windows."
+}
+if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+    throw "OPENLINEOPS_RABBITMQ_URI is required; the staged Agent bundle E2E cannot skip its real RabbitMQ process boundary."
 }
 
 $resolvedArtifactsRoot = Resolve-RepoPath $ArtifactsRoot
@@ -400,6 +655,10 @@ $agentArtifact = Get-SingleReleaseArtifact `
     -Manifest $releaseManifest `
     -Kind "agent" `
     -ArtifactsRoot $resolvedArtifactsRoot
+$apiArtifact = Get-SingleReleaseArtifact `
+    -Manifest $releaseManifest `
+    -Kind "api" `
+    -ArtifactsRoot $resolvedArtifactsRoot
 $samplePluginArtifact = Get-SingleReleaseArtifact `
     -Manifest $releaseManifest `
     -Kind "sample-plugin" `
@@ -410,6 +669,12 @@ $agentBundleRoot = Expand-CanonicalArchive `
 $samplePluginRoot = Expand-CanonicalArchive `
     -ArchivePath $samplePluginArtifact.Path `
     -DestinationPath (Join-Path $resolvedWorkRoot "sample-plugin")
+$apiBundleRoot = Expand-CanonicalArchive `
+    -ArchivePath $apiArtifact.Path `
+    -DestinationPath (Join-Path $resolvedWorkRoot "api-bundle")
+if (-not (Test-Path -LiteralPath (Join-Path $apiBundleRoot "OpenLineOps.Api.exe") -PathType Leaf)) {
+    throw "The staged API bundle is missing OpenLineOps.Api.exe."
+}
 
 $bundleManifest = Assert-AgentBundleManifest -BundleRoot $agentBundleRoot
 Assert-AgentReleaseSecurityTemplate -BundleRoot $agentBundleRoot
@@ -420,7 +685,11 @@ $probes += Invoke-EntryPointProbe `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.Agent.exe") `
     -WorkingDirectory $agentBundleRoot `
     -RequireNonZeroExit `
-    -ExpectedOutputPattern "TrustedPackagePublicKeyFiles"
+    -ExpectedOutputPattern "BrokerUri must include a dedicated non-guest username" `
+    -EnvironmentOverrides @{
+        "OpenLineOps__Agent__AgentId" = "agent.release-probe"
+        "OpenLineOps__Agent__StationId" = "station.release-probe"
+    }
 $probes += Invoke-EntryPointProbe `
     -Name "station-runtime" `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.StationRuntime.exe") `
@@ -438,54 +707,68 @@ $probes += Invoke-EntryPointProbe `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.ScriptWorker.exe") `
     -WorkingDirectory $agentBundleRoot `
     -ExpectedExitCode 2 `
-    -ExpectedOutputPattern "Python script worker request JSON is invalid"
+    -ExpectedOutputPattern "Python script worker request body is required"
 
 $testProject = Resolve-RepoPath "tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj"
-$testFilter = "FullyQualifiedName=OpenLineOps.Agent.Tests.SignedVendorProgramStationE2ETests.SignedFrozenPluginRunsThroughAgentStationRuntimeAndBundledHost|FullyQualifiedName=OpenLineOps.Agent.Tests.SignedVendorProgramStationE2ETests.SignedFrozenPythonFlowRunsThroughAgentStationRuntimeAndWorker"
-$testArguments = @(
-    "test",
-    $testProject,
-    "--configuration",
-    $Configuration,
-    "--filter",
-    $testFilter,
-    "--logger",
-    "console;verbosity=minimal"
-)
-if ($NoBuild) {
-    $testArguments += "--no-build"
-}
-if ($NoRestore) {
-    $testArguments += "--no-restore"
-}
-
 $previousAgentBundleRoot = $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT
 $previousSamplePluginRoot = $env:OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT
 $previousPythonTokenEvidencePath = $env:OPENLINEOPS_STAGED_PYTHON_TOKEN_EVIDENCE_PATH
+$previousRequireRealAppContainer = $env:OPENLINEOPS_REQUIRE_REAL_APPCONTAINER
 $pythonTokenEvidencePath = Join-Path $resolvedWorkRoot "python-child-token-evidence.json"
+$testResultsDirectory = Join-Path $resolvedWorkRoot "test-results"
+$testEvidence = @()
 try {
     $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT = $agentBundleRoot
     $env:OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT = $samplePluginRoot
     $env:OPENLINEOPS_STAGED_PYTHON_TOKEN_EVIDENCE_PATH = $pythonTokenEvidencePath
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $testOutput = & dotnet @testArguments 2>&1
-        $testExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    $testOutput | ForEach-Object { Write-Host $_ }
-    if ($testExitCode -ne 0) {
-        throw "Signed staged Agent process-chain tests failed with exit code $testExitCode."
-    }
+    $env:OPENLINEOPS_REQUIRE_REAL_APPCONTAINER = "1"
+    $testEvidence += Invoke-ExactDotNetTest `
+        -TestProject $testProject `
+        -Configuration $Configuration `
+        -FullyQualifiedName "OpenLineOps.Agent.Tests.SignedVendorProgramStationE2ETests.SignedFrozenPluginRunsThroughAgentStationRuntimeAndBundledHost" `
+        -ResultName "signed-frozen-plugin" `
+        -ResultsDirectory $testResultsDirectory `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
+    $testEvidence += Invoke-ExactDotNetTest `
+        -TestProject $testProject `
+        -Configuration $Configuration `
+        -FullyQualifiedName "OpenLineOps.Agent.Tests.SignedVendorProgramStationE2ETests.SignedFrozenPythonFlowRunsThroughAgentStationRuntimeAndWorker" `
+        -ResultName "signed-frozen-python" `
+        -ResultsDirectory $testResultsDirectory `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
+    $testEvidence += Invoke-ExactDotNetTest `
+        -TestProject $testProject `
+        -Configuration $Configuration `
+        -FullyQualifiedName "OpenLineOps.Agent.Tests.LeastPrivilegeLauncherContractTests.ConcurrentWorkersUseDistinctAppContainersAndKillDescendants" `
+        -ResultName "staged-launcher-isolation" `
+        -ResultsDirectory $testResultsDirectory `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
+    $testEvidence += Invoke-ExactDotNetTest `
+        -TestProject $testProject `
+        -Configuration $Configuration `
+        -FullyQualifiedName "OpenLineOps.Agent.Tests.LeastPrivilegeLauncherContractTests.StaleAppContainerProfileIsRecoveredBeforeNextLaunch" `
+        -ResultName "staged-launcher-crash-recovery" `
+        -ResultsDirectory $testResultsDirectory `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
+    $testEvidence += Invoke-ExactDotNetTest `
+        -TestProject $testProject `
+        -Configuration $Configuration `
+        -FullyQualifiedName "OpenLineOps.Agent.Tests.LeastPrivilegeLauncherContractTests.ProvisioningCommandGrantsRuntimeCapabilityRecursively" `
+        -ResultName "staged-python-runtime-provisioning" `
+        -ResultsDirectory $testResultsDirectory `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
 }
 finally {
     $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT = $previousAgentBundleRoot
     $env:OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT = $previousSamplePluginRoot
     $env:OPENLINEOPS_STAGED_PYTHON_TOKEN_EVIDENCE_PATH =
         $previousPythonTokenEvidencePath
+    $env:OPENLINEOPS_REQUIRE_REAL_APPCONTAINER = $previousRequireRealAppContainer
 }
 
 if (-not (Test-Path -LiteralPath $pythonTokenEvidencePath -PathType Leaf)) {
@@ -494,16 +777,18 @@ if (-not (Test-Path -LiteralPath $pythonTokenEvidencePath -PathType Leaf)) {
 $pythonTokenEvidence = Get-Content -LiteralPath $pythonTokenEvidencePath -Raw |
     ConvertFrom-Json
 $pythonTokenEvidenceProperties = @($pythonTokenEvidence.PSObject.Properties.Name)
-if ($pythonTokenEvidenceProperties.Count -ne 4 `
+if ($pythonTokenEvidenceProperties.Count -ne 5 `
     -or -not ($pythonTokenEvidenceProperties -ccontains "schemaVersion") `
     -or -not ($pythonTokenEvidenceProperties -ccontains "isolationMode") `
-    -or -not ($pythonTokenEvidenceProperties -ccontains "tokenRestricted") `
+    -or -not ($pythonTokenEvidenceProperties -ccontains "tokenIsAppContainer") `
+    -or -not ($pythonTokenEvidenceProperties -ccontains "appContainerSid") `
     -or -not ($pythonTokenEvidenceProperties -ccontains "integrityRid") `
     -or $pythonTokenEvidence.schemaVersion -ne 1 `
     -or $pythonTokenEvidence.isolationMode -cne "LeastPrivilegeIdentity" `
-    -or $pythonTokenEvidence.tokenRestricted -ne $true `
+    -or $pythonTokenEvidence.tokenIsAppContainer -ne $true `
+    -or $pythonTokenEvidence.appContainerSid -cnotmatch '^S-1-15-2-(?:[0-9]+-){6}[0-9]+$' `
     -or $pythonTokenEvidence.integrityRid -ne 4096) {
-    throw "The staged Python child token evidence is not restricted Low Integrity execution."
+    throw "The staged Python child evidence is not a unique Low Integrity AppContainer execution."
 }
 
 $evidence = [ordered]@{
@@ -521,20 +806,24 @@ $evidence = [ordered]@{
     }
     entryPoints = @($bundleManifest.entryPoints)
     entryPointProbes = $probes
+    exactTestEvidence = $testEvidence
     signedPackageProcessChains = @(
         [ordered]@{
             name = "signed-frozen-plugin"
             path = "Agent application layer -> staged StationRuntime -> staged PluginHost"
             packageFormat = ".olopkg"
+            exactTest = $testEvidence[0]
             status = "passed"
         },
         [ordered]@{
             name = "signed-frozen-python"
             path = "Agent application layer -> staged StationRuntime -> staged ScriptWorker"
             packageFormat = ".olopkg"
-            executionPolicy = "Required RestrictedCurrentLowIntegrity"
-            tokenRestricted = [bool]$pythonTokenEvidence.tokenRestricted
+            executionPolicy = "Required PerExecutionAppContainer"
+            tokenIsAppContainer = [bool]$pythonTokenEvidence.tokenIsAppContainer
+            appContainerSid = [string]$pythonTokenEvidence.appContainerSid
             integrityRid = [int]$pythonTokenEvidence.integrityRid
+            exactTest = $testEvidence[1]
             status = "passed"
         }
     )
@@ -542,57 +831,160 @@ $evidence = [ordered]@{
         templateVerified = $true
         requireLeastPrivilegeExecution = $true
         isolationMode = "LeastPrivilegeIdentity"
-        identity = "RestrictedCurrentLowIntegrity"
+        identity = "PerExecutionAppContainer"
         launcher = "OpenLineOps.LeastPrivilegeLauncher.exe"
         noInteractivePrompt = $true
-        childTokenRestricted = [bool]$pythonTokenEvidence.tokenRestricted
+        childTokenIsAppContainer = [bool]$pythonTokenEvidence.tokenIsAppContainer
+        childAppContainerSid = [string]$pythonTokenEvidence.appContainerSid
         childIntegrityRid = [int]$pythonTokenEvidence.integrityRid
+        stagedIsolationTest = $testEvidence[2]
+        stagedCrashRecoveryTest = $testEvidence[3]
+        stagedPythonRuntimeProvisioningTest = $testEvidence[4]
         stagedExecutionVerified = $true
     }
-    rabbitMqTransportCoverage = [ordered]@{
-        status = "not-requested"
-        requirement = "Set OPENLINEOPS_RABBITMQ_URI to run the real staged Agent process boundary."
-    }
+    rabbitMqTransportCoverage = $null
     status = "passed"
 }
 $evidencePath = Join-Path $resolvedWorkRoot "evidence.json"
+$rabbitMqWorkRoot = Join-Path $resolvedWorkRoot "rabbitmq-process"
+& (Join-Path $PSScriptRoot "verify-staged-agent-rabbitmq-e2e.ps1") `
+    -AgentBundleRoot $agentBundleRoot `
+    -SamplePluginRoot $samplePluginRoot `
+    -ApiBundleRoot $apiBundleRoot `
+    -BrokerUri $env:OPENLINEOPS_RABBITMQ_URI `
+    -WorkRoot $rabbitMqWorkRoot `
+    -Configuration $Configuration `
+    -NoBuild:$NoBuild `
+    -NoRestore:$NoRestore
+$rabbitMqEvidencePath = Join-Path $rabbitMqWorkRoot "evidence.json"
+if (-not (Test-Path -LiteralPath $rabbitMqEvidencePath -PathType Leaf)) {
+    throw "The staged Agent RabbitMQ child gate did not produce required evidence."
+}
+
+$privateRabbitMqEvidence = Get-Content `
+    -LiteralPath $rabbitMqEvidencePath `
+    -Raw | ConvertFrom-Json
+$publicAgentIdentity = [ordered]@{
+    nonAdministrative = [bool]$privateRabbitMqEvidence.agentHostIdentity.nonAdministrative
+    isPrimaryToken = [bool]$privateRabbitMqEvidence.agentHostIdentity.isPrimaryToken
+    isElevated = [bool]$privateRabbitMqEvidence.agentHostIdentity.isElevated
+    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupEnabled
+    principalAdministratorMembership = [bool]$privateRabbitMqEvidence.agentHostIdentity.principalAdministratorMembership
+    identityStrategy = [string]$privateRabbitMqEvidence.agentHostIdentity.identityStrategy
+    userSid = [string]$privateRabbitMqEvidence.agentHostIdentity.userSid
+}
+$publicRestartedAgentIdentity = [ordered]@{
+    nonAdministrative = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.nonAdministrative
+    isPrimaryToken = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isPrimaryToken
+    isElevated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isElevated
+    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupEnabled
+    principalAdministratorMembership = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.principalAdministratorMembership
+    identityStrategy = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.identityStrategy
+    userSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.userSid
+}
+$publicPresence = [ordered]@{
+    persistedStates = @($privateRabbitMqEvidence.presence.persistedStates)
+    startedAndHeartbeatPersisted = [bool]$privateRabbitMqEvidence.presence.startedAndHeartbeatPersisted
+    expiredOfflineDuringBrokerOutage = [bool]$privateRabbitMqEvidence.presence.expiredOfflineDuringBrokerOutage
+    offlineDuringBrokerOutage = [ordered]@{
+        status = [string]$privateRabbitMqEvidence.presence.offlineDuringBrokerOutage.status
+        health = [string]$privateRabbitMqEvidence.presence.offlineDuringBrokerOutage.health
+    }
+    freshOnlineAfterReconnect = [bool]$privateRabbitMqEvidence.presence.freshOnlineAfterReconnect
+    onlineAfterReconnect = [ordered]@{
+        status = [string]$privateRabbitMqEvidence.presence.onlineAfterReconnect.status
+        health = [string]$privateRabbitMqEvidence.presence.onlineAfterReconnect.health
+    }
+}
+$publicVendorArtifacts = @($privateRabbitMqEvidence.vendorArtifacts | ForEach-Object {
+        [ordered]@{
+            Name = [string]$_.Name
+            Kind = [string]$_.Kind
+            StorageKey = [string]$_.StorageKey
+            ReceiptId = [string]$_.ReceiptId
+            SizeBytes = [long]$_.SizeBytes
+            Sha256 = [string]$_.Sha256
+        }
+    })
+$rabbitMqEvidence = [ordered]@{
+    schema = "openlineops.staged-agent-rabbitmq-e2e-evidence"
+    schemaVersion = 1
+    executionStatus = [string]$privateRabbitMqEvidence.executionStatus
+    judgement = [string]$privateRabbitMqEvidence.judgement
+    vendorProgram = [string]$privateRabbitMqEvidence.vendorProgram
+    centralArtifactTransport = [string]$privateRabbitMqEvidence.centralArtifactTransport
+    operatorTraceGetVerified = [bool]$privateRabbitMqEvidence.operatorTraceGetVerified
+    brokerOutageVerified = [bool]$privateRabbitMqEvidence.brokerOutageVerified
+    coordinatorTransportResultInboxRestartedAfterBrokerRecovery = `
+        [bool]$privateRabbitMqEvidence.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
+    offlinePendingOutboxCount = [int]$privateRabbitMqEvidence.offlinePendingOutboxCount
+    offlineCompletionWasNotDelivered = [bool]$privateRabbitMqEvidence.offlineCompletionWasNotDelivered
+    completionDeliveredOnceAfterReconnect = [bool]$privateRabbitMqEvidence.completionDeliveredOnceAfterReconnect
+    duplicateRedeliveryRejected = [bool]$privateRabbitMqEvidence.duplicateRedeliveryRejected
+    duplicateAfterRestartRejected = [bool]$privateRabbitMqEvidence.duplicateAfterRestartRejected
+    runtimeFinishedExecutionCount = [int]$privateRabbitMqEvidence.runtimeFinishedExecutionCount
+    firstAgentPid = [int]$privateRabbitMqEvidence.firstAgentPid
+    restartedAgentPid = [int]$privateRabbitMqEvidence.restartedAgentPid
+    packageContentSha256 = [string]$privateRabbitMqEvidence.packageContentSha256
+    AgentId = [string]$privateRabbitMqEvidence.AgentId
+    StationId = [string]$privateRabbitMqEvidence.StationId
+    vendorArtifacts = $publicVendorArtifacts
+    agentHostIdentity = $publicAgentIdentity
+    restartedAgentHostIdentity = $publicRestartedAgentIdentity
+    eventKinds = @($privateRabbitMqEvidence.eventKinds)
+    progressPhases = @($privateRabbitMqEvidence.progressPhases)
+    outageControlMode = [string]$privateRabbitMqEvidence.outageControlMode
+    presence = $publicPresence
+    cleanShutdownVerified = [bool]$privateRabbitMqEvidence.cleanShutdownVerified
+}
+[System.IO.File]::WriteAllText(
+    $rabbitMqEvidencePath,
+    (($rabbitMqEvidence | ConvertTo-Json -Depth 10) + "`r`n"),
+    [System.Text.UTF8Encoding]::new($false))
+$evidence["rabbitMqTransportCoverage"] = [ordered]@{
+    status = "passed"
+    executionStatus = $rabbitMqEvidence.executionStatus
+    judgement = $rabbitMqEvidence.judgement
+    vendorProgram = $rabbitMqEvidence.vendorProgram
+    centralArtifactTransport = $rabbitMqEvidence.centralArtifactTransport
+    operatorTraceGetVerified = $rabbitMqEvidence.operatorTraceGetVerified
+    vendorArtifacts = @($rabbitMqEvidence.vendorArtifacts)
+    brokerOutageVerified = $rabbitMqEvidence.brokerOutageVerified
+    coordinatorTransportResultInboxRestartedAfterBrokerRecovery = `
+        $rabbitMqEvidence.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
+    agentHostIdentity = $rabbitMqEvidence.agentHostIdentity
+    restartedAgentHostIdentity = $rabbitMqEvidence.restartedAgentHostIdentity
+    agentId = $rabbitMqEvidence.AgentId
+    stationId = $rabbitMqEvidence.StationId
+    packageContentSha256 = $rabbitMqEvidence.packageContentSha256
+    firstAgentPid = $rabbitMqEvidence.firstAgentPid
+    restartedAgentPid = $rabbitMqEvidence.restartedAgentPid
+    runtimeFinishedExecutionCount = $rabbitMqEvidence.runtimeFinishedExecutionCount
+    eventKinds = @($rabbitMqEvidence.eventKinds)
+    progressPhases = @($rabbitMqEvidence.progressPhases)
+    offlinePendingOutboxCount = $rabbitMqEvidence.offlinePendingOutboxCount
+    offlineCompletionWasNotDelivered = $rabbitMqEvidence.offlineCompletionWasNotDelivered
+    completionDeliveredOnceAfterReconnect = `
+        $rabbitMqEvidence.completionDeliveredOnceAfterReconnect
+    duplicateRedeliveryRejected = $rabbitMqEvidence.duplicateRedeliveryRejected
+    duplicateAfterRestartRejected = $rabbitMqEvidence.duplicateAfterRestartRejected
+    outageControlMode = $rabbitMqEvidence.outageControlMode
+    presence = $rabbitMqEvidence.presence
+    cleanShutdownVerified = $rabbitMqEvidence.cleanShutdownVerified
+    evidence = "rabbitmq-process/evidence.json"
+    evidenceSha256 = Get-FileSha256 $rabbitMqEvidencePath
+}
 [System.IO.File]::WriteAllText(
     $evidencePath,
     (($evidence | ConvertTo-Json -Depth 10) + "`r`n"),
     [System.Text.UTF8Encoding]::new($false))
 
-if (-not [string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
-    $rabbitMqWorkRoot = Join-Path $resolvedWorkRoot "rabbitmq-process"
-    & (Join-Path $PSScriptRoot "verify-staged-agent-rabbitmq-e2e.ps1") `
-        -AgentBundleRoot $agentBundleRoot `
-        -SamplePluginRoot $samplePluginRoot `
-        -BrokerUri $env:OPENLINEOPS_RABBITMQ_URI `
-        -WorkRoot $rabbitMqWorkRoot `
-        -Configuration $Configuration `
-        -NoBuild:$NoBuild `
-        -NoRestore:$NoRestore
-    $rabbitMqEvidencePath = Join-Path $rabbitMqWorkRoot "evidence.json"
-    if (-not (Test-Path -LiteralPath $rabbitMqEvidencePath -PathType Leaf)) {
-        throw "The staged Agent RabbitMQ child gate did not produce required evidence."
-    }
-
-    $rabbitMqEvidence = Get-Content `
-        -LiteralPath $rabbitMqEvidencePath `
-        -Raw | ConvertFrom-Json
-    $evidence["rabbitMqTransportCoverage"] = [ordered]@{
-        status = "passed"
-        executionStatus = $rabbitMqEvidence.executionStatus
-        judgement = $rabbitMqEvidence.judgement
-        duplicateRedeliveryRejected = $rabbitMqEvidence.duplicateRedeliveryRejected
-        duplicateAfterRestartRejected = $rabbitMqEvidence.duplicateAfterRestartRejected
-        cleanShutdownVerified = $rabbitMqEvidence.cleanShutdownVerified
-        evidence = "rabbitmq-process/evidence.json"
-    }
-    [System.IO.File]::WriteAllText(
-        $evidencePath,
-        (($evidence | ConvertTo-Json -Depth 10) + "`r`n"),
-        [System.Text.UTF8Encoding]::new($false))
-}
+& (Join-Path $PSScriptRoot "verify-staged-agent-evidence.ps1") `
+    -EvidenceRoot $resolvedWorkRoot
+Remove-PrivateStagedExecutionFiles -Root $resolvedWorkRoot
+& (Join-Path $PSScriptRoot "verify-staged-agent-evidence.ps1") `
+    -EvidenceRoot $resolvedWorkRoot `
+    -RequireSanitizedRoot
 
 Write-Host "Staged Agent bundle E2E passed."
 Write-Host " - Agent archive: $($agentArtifact.Entry.relativePath)"

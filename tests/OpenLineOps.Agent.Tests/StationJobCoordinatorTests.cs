@@ -87,7 +87,7 @@ public sealed class StationJobCoordinatorTests
                 "system.tester",
                 "device.tester",
                 "Measure",
-                "Completed",
+                ExecutionStatus.Completed,
                 Now.AddSeconds(-1),
                 Now.AddMinutes(1),
                 Now.AddSeconds(-1),
@@ -603,7 +603,8 @@ public sealed class StationJobCoordinatorTests
 
     private static StationJobRequested CreateRequest(long fencingToken = 42)
     {
-        using var inputs = JsonDocument.Parse("{\"serialNumber\":\"BOARD-001\"}");
+        using var inputs = JsonDocument.Parse(
+            "{\"serialNumber\":{\"kind\":\"Text\",\"value\":\"BOARD-001\"}}");
         return new StationJobRequested(
             Guid.NewGuid(),
             Guid.NewGuid(),
@@ -667,6 +668,7 @@ public sealed class StationJobCoordinatorTests
                 $"{request.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
                 request.AgentId,
                 request.StationId,
+                request.StationSystemId,
                 request.JobId,
                 request.ProductionRunId,
                 request.OperationRunId,
@@ -690,6 +692,7 @@ public sealed class StationJobCoordinatorTests
                 $"{job.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
                 job.AgentId,
                 job.StationId,
+                job.StationSystemId,
                 job.JobId.Value,
                 job.ProductionRunId,
                 job.OperationRunId.Value,

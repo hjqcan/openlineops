@@ -10,4 +10,4 @@ public sealed record PluginDeviceCommandInvocationRequest(
     string CommandName,
     string? InputPayload,
     int TimeoutMilliseconds,
-    PluginPackageRuntimeIdentity? PackageIdentity = null);
+    PluginPackageExecutionIdentity PackageIdentity);

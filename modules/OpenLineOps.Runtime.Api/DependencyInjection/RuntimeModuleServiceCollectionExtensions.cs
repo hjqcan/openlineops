@@ -40,10 +40,23 @@ public static class RuntimeModuleServiceCollectionExtensions
         var coordinationOptions = LoadCoordinationPersistenceOptions(configuration);
         var transportOptions = LoadStationCoordinatorTransportOptions(configuration);
         var stationExecutionOptions = LoadStationExecutionOptions(configuration);
+        var coordinationProvider = ProductionCoordinationPersistenceProviders.Parse(
+            coordinationOptions.Provider);
+        var transportProvider = StationCoordinatorTransportProviders.Parse(transportOptions.Provider);
+        var stationExecutionProvider = StationExecutionProviders.Parse(
+            stationExecutionOptions.Provider);
+        var agentPresenceOptions = LoadAgentPresenceMonitoringOptions(
+            configuration,
+            stationExecutionProvider == StationExecutionProvider.Agent);
+        ValidateProductionComposition(
+            coordinationProvider,
+            transportProvider,
+            stationExecutionProvider);
         services.AddSingleton(persistenceOptions);
         services.AddSingleton(coordinationOptions);
         services.AddSingleton(transportOptions);
         services.AddSingleton(stationExecutionOptions);
+        services.AddSingleton(agentPresenceOptions);
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
 
@@ -77,8 +90,6 @@ public static class RuntimeModuleServiceCollectionExtensions
             serviceProvider.GetRequiredService<RuntimeMonitoringProjection>());
         services.AddHostedService<RuntimeMonitoringProjectionStartupHostedService>();
 
-        var coordinationProvider = ProductionCoordinationPersistenceProviders.Parse(
-            coordinationOptions.Provider);
         switch (coordinationProvider)
         {
             case ProductionCoordinationPersistenceProvider.PostgreSql:
@@ -92,6 +103,8 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
                 services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
+                services.AddSingleton<IProductionRunSafetyTransitionStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
                 services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<PostgreSqlProductionCoordinationStore>());
                 services.AddSingleton<IProductionMaterialRepository>(_ =>
@@ -103,6 +116,10 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<IProductionMaterialArrivalInbox>(_ =>
                     new PostgreSqlProductionMaterialArrivalInbox(
                         productionPostgreSqlConnectionString));
+                services.AddSingleton(_ => new PostgreSqlAgentPresenceRepository(
+                    productionPostgreSqlConnectionString));
+                services.AddSingleton<IAgentPresenceRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<PostgreSqlAgentPresenceRepository>());
                 break;
             case ProductionCoordinationPersistenceProvider.Sqlite:
                 var productionSqliteConnectionString = coordinationOptions.ResolveSqliteConnectionString();
@@ -112,10 +129,16 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
                 services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<SqliteProductionRunRepository>());
-                services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
+                services.AddSingleton<SqliteResourceLeaseRepository>(serviceProvider =>
                     new SqliteResourceLeaseRepository(
                         productionSqliteConnectionString,
                         serviceProvider.GetRequiredService<IClock>()));
+                services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteResourceLeaseRepository>());
+                services.AddSingleton<IProductionRunSafetyTransitionStore>(serviceProvider =>
+                    new SqliteProductionRunSafetyTransitionStore(
+                        serviceProvider.GetRequiredService<SqliteProductionRunRepository>(),
+                        serviceProvider.GetRequiredService<SqliteResourceLeaseRepository>()));
                 services.AddSingleton<InMemoryStationJobCoordinationStore>();
                 services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
@@ -125,6 +148,8 @@ public static class RuntimeModuleServiceCollectionExtensions
                     new SqliteStationEmergencyStopRepository(productionSqliteConnectionString));
                 services.AddSingleton<IProductionMaterialArrivalInbox>(_ =>
                     new SqliteProductionMaterialArrivalInbox(productionSqliteConnectionString));
+                services.AddSingleton<IAgentPresenceRepository,
+                    InMemoryAgentPresenceRepository>();
                 break;
             case ProductionCoordinationPersistenceProvider.InMemory:
                 services.AddSingleton<InMemoryProductionMaterialRepository>();
@@ -135,7 +160,13 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<InMemoryProductionRunRepository>());
                 services.AddSingleton<IProductionRunExecutionPlanRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryProductionRunRepository>());
-                services.AddSingleton<IResourceLeaseRepository, InMemoryResourceLeaseRepository>();
+                services.AddSingleton<InMemoryResourceLeaseRepository>();
+                services.AddSingleton<IResourceLeaseRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryResourceLeaseRepository>());
+                services.AddSingleton<IProductionRunSafetyTransitionStore>(serviceProvider =>
+                    new InMemoryProductionRunSafetyTransitionStore(
+                        serviceProvider.GetRequiredService<InMemoryProductionRunRepository>(),
+                        serviceProvider.GetRequiredService<InMemoryResourceLeaseRepository>()));
                 services.AddSingleton<InMemoryStationJobCoordinationStore>();
                 services.AddSingleton<IStationJobCoordinationStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryStationJobCoordinationStore>());
@@ -143,6 +174,8 @@ public static class RuntimeModuleServiceCollectionExtensions
                     InMemoryStationEmergencyStopRepository>();
                 services.AddSingleton<IProductionMaterialArrivalInbox,
                     InMemoryProductionMaterialArrivalInbox>();
+                services.AddSingleton<IAgentPresenceRepository,
+                    InMemoryAgentPresenceRepository>();
                 break;
         }
 
@@ -164,7 +197,6 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddScoped<IProductionRunRecoveryService, ProductionRunRecoveryService>();
         services.AddScoped<StationJobRecoveryRequiredIngress>();
         services.AddHostedService<ProductionRunStartupRecoveryHostedService>();
-        var transportProvider = StationCoordinatorTransportProviders.Parse(transportOptions.Provider);
         switch (transportProvider)
         {
             case StationCoordinatorTransportProvider.RabbitMq:
@@ -180,8 +212,8 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<RabbitMqStationSafetyGateway>());
                 services.TryAddSingleton<IStationJobCancellationGateway>(serviceProvider =>
                     serviceProvider.GetRequiredService<RabbitMqStationSafetyGateway>());
-                services.AddHostedService<StationJobOutboxHostedService>();
                 services.AddHostedService<StationResultInboxHostedService>();
+                services.AddHostedService<StationJobOutboxHostedService>();
                 break;
             case StationCoordinatorTransportProvider.Disabled:
                 if (coordinationProvider == ProductionCoordinationPersistenceProvider.PostgreSql)
@@ -199,24 +231,6 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.TryAddSingleton<IStationJobCancellationGateway>(serviceProvider =>
                     serviceProvider.GetRequiredService<DisabledStationSafetyGateway>());
                 break;
-        }
-
-        var stationExecutionProvider = StationExecutionProviders.Parse(
-            stationExecutionOptions.Provider);
-        if (stationExecutionProvider == StationExecutionProvider.Agent
-            && transportProvider != StationCoordinatorTransportProvider.RabbitMq)
-        {
-            throw new InvalidOperationException(
-                "Agent Station execution requires RabbitMq Station transport.");
-        }
-
-        if (stationExecutionProvider == StationExecutionProvider.InProcess
-            && (coordinationProvider == ProductionCoordinationPersistenceProvider.PostgreSql
-                || transportProvider != StationCoordinatorTransportProvider.Disabled))
-        {
-            throw new InvalidOperationException(
-                "InProcess Station execution is allowed only with explicit local/test coordination "
-                + "and Disabled Agent transport.");
         }
 
         services.AddSingleton<IRuntimeDomainEventPublisher, RuntimeDomainEventPublisher>();
@@ -267,6 +281,39 @@ public static class RuntimeModuleServiceCollectionExtensions
         return services;
     }
 
+    private static void ValidateProductionComposition(
+        ProductionCoordinationPersistenceProvider coordinationProvider,
+        StationCoordinatorTransportProvider transportProvider,
+        StationExecutionProvider stationExecutionProvider)
+    {
+        if (stationExecutionProvider == StationExecutionProvider.Agent)
+        {
+            if (coordinationProvider != ProductionCoordinationPersistenceProvider.PostgreSql)
+            {
+                throw new InvalidOperationException(
+                    "Agent Station execution requires PostgreSql Production coordination so "
+                    + "Station job Outbox, result Inbox, and execution checkpoints survive "
+                    + "Coordinator restart.");
+            }
+
+            if (transportProvider != StationCoordinatorTransportProvider.RabbitMq)
+            {
+                throw new InvalidOperationException(
+                    "Agent Station execution requires RabbitMq Station transport.");
+            }
+
+            return;
+        }
+
+        if (coordinationProvider == ProductionCoordinationPersistenceProvider.PostgreSql
+            || transportProvider != StationCoordinatorTransportProvider.Disabled)
+        {
+            throw new InvalidOperationException(
+                "InProcess Station execution is allowed only with explicit local/test coordination "
+                + "and Disabled Agent transport.");
+        }
+    }
+
     private static RuntimeSessionPersistenceOptions LoadPersistenceOptions(IConfiguration? configuration)
     {
         var section = configuration?.GetSection(RuntimeSessionPersistenceOptions.SectionName);
@@ -308,6 +355,39 @@ public static class RuntimeModuleServiceCollectionExtensions
         {
             Provider = section?["Provider"] ?? StationExecutionProviders.Agent
         };
+    }
+
+    private static AgentPresenceMonitoringOptions LoadAgentPresenceMonitoringOptions(
+        IConfiguration? configuration,
+        bool presenceRequired)
+    {
+        var section = configuration?.GetSection(AgentPresenceMonitoringOptions.SectionName);
+        var unknownSetting = section?.GetChildren().FirstOrDefault(child =>
+            !string.Equals(child.Key, "TimeToLive", StringComparison.Ordinal));
+        if (unknownSetting is not null)
+        {
+            throw new InvalidOperationException(
+                $"Unsupported Agent presence setting '{unknownSetting.Path}'.");
+        }
+
+        var configuredTimeToLive = section?["TimeToLive"];
+        var timeToLive = configuredTimeToLive is null
+            ? TimeSpan.FromSeconds(15)
+            : TimeSpan.TryParseExact(
+                configuredTimeToLive,
+                "c",
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed)
+                ? parsed
+                : throw new InvalidOperationException(
+                    $"{AgentPresenceMonitoringOptions.SectionName}:TimeToLive must use constant duration format.");
+        var options = new AgentPresenceMonitoringOptions
+        {
+            TimeToLive = timeToLive,
+            PresenceRequired = presenceRequired
+        };
+        options.Validate();
+        return options;
     }
 
     private static PythonScriptRuntimeOptions LoadPythonScriptRuntimeOptions(IConfiguration? configuration)

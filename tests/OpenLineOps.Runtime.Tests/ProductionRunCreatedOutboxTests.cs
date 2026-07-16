@@ -31,10 +31,12 @@ public sealed class ProductionRunCreatedOutboxTests
         var publisher = new RuntimeDomainEventPublisher([subscriber]);
         using var dispatcher = new ProductionRunCreatedOutboxDispatcher(repository, publisher);
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var coordinator = new ProductionRunCoordinator(
             repository,
             materials,
-            new InMemoryResourceLeaseRepository(clock),
+            leases,
+            new InMemoryProductionRunSafetyTransitionStore(repository, leases),
             new AcceptingSafetyController(),
             new AcceptingCanceler(),
             publisher,
@@ -191,7 +193,8 @@ public sealed class ProductionRunCreatedOutboxTests
             new ExecutableRuntimeProcess(
                 new ProcessDefinitionId($"process.{suffix}"),
                 new ProcessVersionId($"process-version.{suffix}"),
-                []));
+                []),
+            []);
         var run = ProductionRun.Create(
             ProductionRunId.New(),
             $"project.{suffix}",

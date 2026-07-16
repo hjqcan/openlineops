@@ -28,6 +28,7 @@ export interface EditorDocumentConflict {
 export interface EditorDocumentRegistration {
   title: string;
   dirty: boolean;
+  editRevision: unknown;
   canSave: boolean;
   save(): Promise<void>;
   revert(): Promise<void>;
@@ -71,6 +72,7 @@ export function closeEditorTab(state: EditorTabState, id: string): EditorTabStat
 
 export class DirtyDocumentRegistry {
   private readonly documents = new Map<string, EditorDocumentRegistration>();
+  private readonly editGenerations = new Map<string, number>();
   private readonly listeners = new Set<DocumentListener>();
 
   subscribe(listener: DocumentListener): () => void {
@@ -82,6 +84,7 @@ export class DirtyDocumentRegistry {
     const current = this.documents.get(id);
     if (!current) {
       this.documents.set(id, createRegistration(title));
+      this.editGenerations.set(id, 0);
       this.emit();
     } else if (current.title !== title) {
       this.documents.set(id, { ...current, title });
@@ -90,6 +93,7 @@ export class DirtyDocumentRegistry {
 
     return () => {
       if (this.documents.delete(id)) {
+        this.editGenerations.delete(id);
         this.emit();
       }
     };
@@ -97,6 +101,12 @@ export class DirtyDocumentRegistry {
 
   update(id: string, update: Partial<EditorDocumentRegistration>): void {
     const current = this.documents.get(id) ?? createRegistration(id);
+    const hasEditRevision = Object.prototype.hasOwnProperty.call(update, 'editRevision');
+    const editRevisionChanged = hasEditRevision
+      && !Object.is(current.editRevision, update.editRevision);
+    if (update.dirty === true && (!hasEditRevision || editRevisionChanged)) {
+      this.advanceEditGeneration(id);
+    }
 
     this.documents.set(id, { ...current, ...update });
     this.emit();
@@ -104,7 +114,8 @@ export class DirtyDocumentRegistry {
 
   markDirty(id: string): void {
     const current = this.documents.get(id);
-    if (current && !current.dirty) {
+    if (current) {
+      this.advanceEditGeneration(id);
       this.documents.set(id, { ...current, dirty: true, saveError: null });
       this.emit();
     }
@@ -153,16 +164,25 @@ export class DirtyDocumentRegistry {
       return false;
     }
 
+    const editGeneration = this.getEditGeneration(id);
     this.documents.set(id, { ...document, saving: true, saveError: null });
     this.emit();
     try {
       await document.save();
       const latest = this.documents.get(id);
+      const changedWhileSaving = this.getEditGeneration(id) !== editGeneration;
       if (latest) {
-        this.documents.set(id, { ...latest, dirty: false, saving: false, saveError: null });
+        this.documents.set(id, {
+          ...latest,
+          dirty: changedWhileSaving,
+          saving: false,
+          saveError: changedWhileSaving
+            ? 'The document changed while it was being saved. Save the newer draft before continuing.'
+            : null
+        });
         this.emit();
       }
-      return true;
+      return !changedWhileSaving;
     } catch (error) {
       const latest = this.documents.get(id);
       if (latest) {
@@ -221,17 +241,28 @@ export class DirtyDocumentRegistry {
     }
   }
 
-  discardAll(ids?: ReadonlySet<string>): void {
-    for (const [id, document] of this.dirtyEntries(ids)) {
-      this.documents.set(id, { ...document, dirty: false, saveError: null, conflict: null });
+  async revertAll(ids?: ReadonlySet<string>): Promise<boolean> {
+    const dirtyIds = this.dirtyEntries(ids).map(([id]) => id);
+    for (const id of dirtyIds) {
+      if (!await this.revert(id)) {
+        return false;
+      }
     }
-    this.emit();
+    return true;
   }
 
   private emit(): void {
     for (const listener of this.listeners) {
       listener();
     }
+  }
+
+  private advanceEditGeneration(id: string): void {
+    this.editGenerations.set(id, this.getEditGeneration(id) + 1);
+  }
+
+  private getEditGeneration(id: string): number {
+    return this.editGenerations.get(id) ?? 0;
   }
 }
 
@@ -248,6 +279,7 @@ function createRegistration(title: string): EditorDocumentRegistration {
   return {
     title,
     dirty: false,
+    editRevision: null,
     canSave: false,
     save: async () => undefined,
     revert: async () => undefined,

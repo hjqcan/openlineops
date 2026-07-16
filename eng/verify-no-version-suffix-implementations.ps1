@@ -1,8 +1,19 @@
-param()
+param(
+    [string] $RepositoryRoot
+)
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$RepoRoot = if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+}
+else {
+    [System.IO.Path]::GetFullPath($RepositoryRoot)
+}
+if (-not (Test-Path -LiteralPath $RepoRoot -PathType Container)) {
+    throw "RepositoryRoot does not exist: $RepoRoot"
+}
+
 $SourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase)
 @(
@@ -17,13 +28,35 @@ $ExcludedRoots = @(
     "lib/NetDevPack/",
     "lib/pythonscript/",
     "node_modules/",
+    "bin/",
+    "obj/",
     "output/"
+)
+$InternalImplementationRoots = @(
+    "apps/desktop/src/",
+    "modules/",
+    "samples/",
+    "shared/",
+    "src/",
+    "tests/",
+    "tools/"
 )
 
 $Failures = [System.Collections.Generic.List[string]]::new()
-$trackedFiles = & git -C $RepoRoot ls-files --cached --others --exclude-standard
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not enumerate repository files."
+$gitDirectory = Join-Path $RepoRoot ".git"
+if (Test-Path -LiteralPath $gitDirectory) {
+    $trackedFiles = & git -C $RepoRoot ls-files --cached --others --exclude-standard
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not enumerate repository files."
+    }
+}
+else {
+    $repoRootPrefix = $RepoRoot.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar) +
+        [System.IO.Path]::DirectorySeparatorChar
+    $trackedFiles = Get-ChildItem -LiteralPath $RepoRoot -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($repoRootPrefix.Length) }
 }
 
 foreach ($relativePath in $trackedFiles) {
@@ -41,9 +74,17 @@ foreach ($relativePath in $trackedFiles) {
     }
 
     $fileNameWithoutExtension = [System.IO.Path]::GetFileNameWithoutExtension($portablePath)
-    if ($fileNameWithoutExtension -match '(?i)(?:^|[._-])v[1-9][0-9]*$') {
+    if ($fileNameWithoutExtension -match '(?i)(?:^|[._-])v[1-9][0-9]*$|[A-Za-z0-9_]v[1-9][0-9]*$') {
         $Failures.Add("Version-suffixed implementation filename: $portablePath") | Out-Null
     }
+
+    if ($portablePath -match '(?i)(?:^|/)v[1-9][0-9]*(?:/|$)') {
+        $Failures.Add("Version-suffixed implementation path segment: $portablePath") | Out-Null
+    }
+
+    $isInternalImplementation = $InternalImplementationRoots.Where({
+        $portablePath.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0
 
     $fullPath = Join-Path $RepoRoot $relativePath
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
@@ -53,7 +94,7 @@ foreach ($relativePath in $trackedFiles) {
     $lineNumber = 0
     foreach ($line in Get-Content -LiteralPath $fullPath) {
         $lineNumber += 1
-        if ($line -cmatch '\b[A-Za-z_][A-Za-z0-9_]*V[1-9][0-9]*\b') {
+        if ($line -cmatch '\b[A-Za-z_][A-Za-z0-9_]*V[1-9][0-9]*(?=[A-Z_]|\b)') {
             $Failures.Add("Version-suffixed implementation identifier: ${portablePath}:$lineNumber") | Out-Null
         }
 
@@ -64,6 +105,17 @@ foreach ($relativePath in $trackedFiles) {
         if ($line -match '["'']/(?:api/)?v[1-9][0-9]*(?:/|["''])') {
             $Failures.Add("Versioned pre-release route: ${portablePath}:$lineNumber") | Out-Null
         }
+
+        $isAllowedExternalVersionLiteral =
+            $portablePath.Equals(
+                "tests/OpenLineOps.Agent.Tests/LeastPrivilegeLauncherContractTests.cs",
+                [System.StringComparison]::OrdinalIgnoreCase) -and
+            $line -match "WindowsPowerShell.*['`"]v1\.0['`"].*powershell\.exe"
+        if ($isInternalImplementation -and $line -match '(?i)(?:["'']v[1-9][0-9]*(?:\.[0-9]+)*["'']|[A-Za-z0-9](?:[._/-])v[1-9][0-9]*(?:["'']|[._/-]))') {
+            if (-not $isAllowedExternalVersionLiteral) {
+                $Failures.Add("Forbidden internal version literal: ${portablePath}:$lineNumber") | Out-Null
+            }
+        }
     }
 }
 
@@ -72,4 +124,4 @@ if ($Failures.Count -gt 0) {
     throw "Version-suffixed implementations are forbidden. Replace the current model directly."
 }
 
-Write-Host "No forbidden internal version tokens, version-suffixed implementations, or pre-release routes found."
+Write-Host "No forbidden internal version tokens, literals, version-suffixed implementations, or pre-release routes found."

@@ -41,6 +41,35 @@ public sealed class InMemoryRuntimeSessionRepository :
         var snapshotDocument = JsonSerializer.Serialize(snapshot, JsonOptions);
         lock (_gate)
         {
+            if (_sessions.TryGetValue(session.Id, out var existingSnapshot)
+                && IsTerminal(existingSnapshot.Status))
+            {
+                var existingDocument = JsonSerializer.Serialize(existingSnapshot, JsonOptions);
+                if (!string.Equals(existingDocument, snapshotDocument, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Terminal Runtime session {session.Id} is immutable.");
+                }
+
+                foreach (var domainEvent in domainEvents)
+                {
+                    var existingEvent = _eventLog.SingleOrDefault(item =>
+                        item.DomainEvent.EventId == domainEvent.EventId);
+                    if (existingEvent is null
+                        || !Equals(existingEvent.DomainEvent, domainEvent)
+                        || !string.Equals(
+                            existingEvent.SessionDocument,
+                            snapshotDocument,
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            $"Terminal Runtime session {session.Id} cannot append monitoring evidence.");
+                    }
+                }
+
+                return ValueTask.CompletedTask;
+            }
+
             foreach (var domainEvent in domainEvents)
             {
                 var existing = _eventLog.SingleOrDefault(item => item.DomainEvent.EventId == domainEvent.EventId);
@@ -307,6 +336,12 @@ public sealed class InMemoryRuntimeSessionRepository :
             _ = RuntimeMonitoringEventProjection.Create(1, session, domainEvent);
         }
     }
+
+    private static bool IsTerminal(string status) => status is
+        nameof(RuntimeSessionStatus.Stopped)
+        or nameof(RuntimeSessionStatus.Completed)
+        or nameof(RuntimeSessionStatus.Failed)
+        or nameof(RuntimeSessionStatus.Canceled);
 
     private sealed record StoredMonitoringEvent(
         long Sequence,

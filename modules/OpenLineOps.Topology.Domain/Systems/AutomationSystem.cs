@@ -76,14 +76,24 @@ public abstract class AutomationSystem : Entity<AutomationSystemId>
     internal void Update(
         string systemType,
         string displayName,
+        IEnumerable<CapabilityContractId> requiredCapabilities,
+        IEnumerable<CapabilityContractId> providedCapabilities,
         IReadOnlyDictionary<string, string> metadata)
     {
         var validatedSystemType = TopologyIdGuard.NotBlank(systemType, nameof(systemType));
         var validatedDisplayName = TopologyIdGuard.NotBlank(displayName, nameof(displayName));
+        ArgumentNullException.ThrowIfNull(requiredCapabilities);
+        ArgumentNullException.ThrowIfNull(providedCapabilities);
+        var validatedRequiredCapabilities = requiredCapabilities.Distinct().ToArray();
+        var validatedProvidedCapabilities = providedCapabilities.Distinct().ToArray();
         var validatedMetadata = new ReadOnlyDictionary<string, string>(CopyMetadata(metadata));
 
         SystemType = validatedSystemType;
         DisplayName = validatedDisplayName;
+        _requiredCapabilities.Clear();
+        _requiredCapabilities.AddRange(validatedRequiredCapabilities);
+        _providedCapabilities.Clear();
+        _providedCapabilities.AddRange(validatedProvidedCapabilities);
         Metadata = validatedMetadata;
     }
 

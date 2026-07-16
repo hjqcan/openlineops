@@ -5,13 +5,13 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class OperationsAlarmsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private readonly HttpClient _client;
 
-    public OperationsAlarmsApiTests(WebApplicationFactory<Program> factory)
+    public OperationsAlarmsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -51,7 +51,7 @@ public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFacto
 
         using var acknowledgeResponse = await _client.PostAsJsonAsync(
             $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/acknowledgement",
-            new { acknowledgedBy = "operator-api" });
+            new { });
         using var acknowledgeBody = await ReadJsonAsync(acknowledgeResponse);
 
         Assert.Equal(HttpStatusCode.OK, acknowledgeResponse.StatusCode);
@@ -61,13 +61,22 @@ public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFacto
             $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/resolution",
             new
             {
-                resolvedBy = "operator-api",
                 resolutionNote = "Recovered and verified."
             });
         using var resolveBody = await ReadJsonAsync(resolveResponse);
 
         Assert.Equal(HttpStatusCode.OK, resolveResponse.StatusCode);
         Assert.True(resolveBody.RootElement.GetProperty("succeeded").GetBoolean());
+
+        using var resolvedResponse = await _client.GetAsync(
+            $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}");
+        using var resolvedBody = await ReadJsonAsync(resolvedResponse);
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            resolvedBody.RootElement.GetProperty("acknowledgedBy").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            resolvedBody.RootElement.GetProperty("resolvedBy").GetString());
 
         using var resolvedOpenResponse = await _client.GetAsync(
             $"/api/operations/alarms/open?stationId={Uri.EscapeDataString(stationId)}");

@@ -19,6 +19,48 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
 
     internal object CoordinationGate => _gate;
 
+    internal CoordinationSnapshot CaptureCoordinationSnapshot() => new(
+        new Dictionary<ProductionUnitId, Stored<ProductionUnitSnapshot>>(_units),
+        new Dictionary<ProductionLotId, Stored<ProductionLotSnapshot>>(_lots),
+        new Dictionary<CarrierId, Stored<CarrierSnapshot>>(_carriers),
+        new Dictionary<SlotAddress, Stored<SlotOccupancySnapshot>>(_slots),
+        new Dictionary<MaterialGenealogyLinkId, MaterialGenealogyLink>(_genealogy),
+        new Dictionary<Guid, ProductionMaterialTimelineEntry>(_timeline));
+
+    internal void RestoreCoordinationSnapshot(CoordinationSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        Restore(_units, snapshot.Units);
+        Restore(_lots, snapshot.Lots);
+        Restore(_carriers, snapshot.Carriers);
+        Restore(_slots, snapshot.Slots);
+        Restore(_genealogy, snapshot.Genealogy);
+        Restore(_timeline, snapshot.Timeline);
+    }
+
+    internal IReadOnlyList<ProductionMaterialTimelineEntry> CaptureTerminalTimeline(
+        ProductionRun run)
+    {
+        ArgumentNullException.ThrowIfNull(run);
+        if (!run.IsTerminal || run.CompletedAtUtc is null)
+        {
+            throw new ArgumentException(
+                "Only a terminal Production Run can freeze material evidence.",
+                nameof(run));
+        }
+
+        var query = ProductionMaterialTimelineQuery.UnionScope(
+            run.ProductionUnitId,
+            run.Id,
+            run.CarrierId is null ? null : new CarrierId(run.CarrierId),
+            run.CompletedAtUtc.Value);
+        return _timeline.Values
+            .Where(query.Matches)
+            .OrderBy(static entry => entry.OccurredAtUtc)
+            .ThenBy(static entry => entry.EvidenceId)
+            .ToArray();
+    }
+
     internal bool TryReserveProductionRun(
         ProductionRun run,
         ProductionRunAdmission admission)
@@ -548,5 +590,25 @@ public sealed class InMemoryProductionMaterialRepository : IProductionMaterialRe
         }
     }
 
-    private sealed record Stored<TSnapshot>(TSnapshot Snapshot, long Revision);
+    private static void Restore<TKey, TValue>(
+        Dictionary<TKey, TValue> target,
+        IReadOnlyDictionary<TKey, TValue> snapshot)
+        where TKey : notnull
+    {
+        target.Clear();
+        foreach (var pair in snapshot)
+        {
+            target.Add(pair.Key, pair.Value);
+        }
+    }
+
+    internal sealed record CoordinationSnapshot(
+        IReadOnlyDictionary<ProductionUnitId, Stored<ProductionUnitSnapshot>> Units,
+        IReadOnlyDictionary<ProductionLotId, Stored<ProductionLotSnapshot>> Lots,
+        IReadOnlyDictionary<CarrierId, Stored<CarrierSnapshot>> Carriers,
+        IReadOnlyDictionary<SlotAddress, Stored<SlotOccupancySnapshot>> Slots,
+        IReadOnlyDictionary<MaterialGenealogyLinkId, MaterialGenealogyLink> Genealogy,
+        IReadOnlyDictionary<Guid, ProductionMaterialTimelineEntry> Timeline);
+
+    internal sealed record Stored<TSnapshot>(TSnapshot Snapshot, long Revision);
 }

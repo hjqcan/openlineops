@@ -413,6 +413,13 @@ public sealed class TraceRecord
     private ResultJudgement AggregateJudgement()
     {
         var judgements = _operations.Select(operation => operation.Judgement).ToArray();
+        if (Disposition == ProductDisposition.Scrapped
+            && Judgement == ResultJudgement.Failed
+            && judgements.Contains(ResultJudgement.Aborted))
+        {
+            return ResultJudgement.Failed;
+        }
+
         if (judgements.Contains(ResultJudgement.Aborted))
         {
             return ResultJudgement.Aborted;

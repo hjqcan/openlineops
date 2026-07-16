@@ -11,6 +11,7 @@ using OpenLineOps.Runtime.Contracts;
 namespace OpenLineOps.Projects.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationExternalPrograms)]
 public sealed class ExternalProgramResourcesController : ControllerBase
@@ -323,33 +324,48 @@ public sealed class ExternalProgramResourcesController : ControllerBase
         ExternalProgramTrialApiRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.Inputs is null
-            || request.Inputs.Any(item => item.Value is null
-                || string.IsNullOrWhiteSpace(item.Key)
-                || string.IsNullOrWhiteSpace(item.Value.Kind)
-                || string.IsNullOrWhiteSpace(item.Value.CanonicalValue)
-                || !Enum.TryParse<ExternalProgramTrialInputKind>(
-                    item.Value.Kind,
-                    ignoreCase: false,
-                    out var kind)
-                || !Enum.IsDefined(kind)
-                || !string.Equals(item.Value.Kind, kind.ToString(), StringComparison.Ordinal)))
+        var trialRequest = ToTrialRequest(request.Inputs);
+        if (trialRequest.IsFailure)
         {
-            return BadRequestProblem(
-                "Projects.ExternalProgramTrialInputInvalid",
-                "Typed trial inputs are required.");
+            return ToProblem(trialRequest.Error);
         }
 
         var result = await _service.TrialAsync(
                 projectId,
                 applicationId,
                 resourceId,
-                new ExternalProgramProtocolTrialRequest(request.Inputs.ToDictionary(
-                    item => item.Key,
-                    item => new ExternalProgramTrialInputValue(
-                        Enum.Parse<ExternalProgramTrialInputKind>(item.Value!.Kind!, ignoreCase: false),
-                        item.Value.CanonicalValue!),
-                    StringComparer.Ordinal)),
+                trialRequest.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
+    }
+
+    [HttpPost("trial")]
+    [ProducesResponseType<ExternalProgramTrialApiResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<ExternalProgramTrialApiResponse>> TrialDefinitionAsync(
+        string projectId,
+        string applicationId,
+        ExternalProgramDefinitionTrialApiRequest request,
+        CancellationToken cancellationToken)
+    {
+        var definition = ToApplicationRequest(request.Definition, request.Definition?.ResourceId);
+        if (definition.IsFailure)
+        {
+            return ToProblem(definition.Error);
+        }
+
+        var trialRequest = ToTrialRequest(request.Inputs);
+        if (trialRequest.IsFailure)
+        {
+            return ToProblem(trialRequest.Error);
+        }
+
+        var result = await _service.TrialDefinitionAsync(
+                projectId,
+                applicationId,
+                definition.Value,
+                trialRequest.Value,
                 cancellationToken)
             .ConfigureAwait(false);
         return result.IsFailure ? ToProblem(result.Error) : Ok(ToResponse(result.Value));
@@ -474,6 +490,34 @@ public sealed class ExternalProgramResourcesController : ControllerBase
                 request.ExecutionLimits.MaximumArtifactCount.Value,
                 request.ExecutionLimits.MaximumArtifactBytes.Value,
                 request.ExecutionLimits.MaximumTotalArtifactBytes.Value)));
+    }
+
+    private static Result<ExternalProgramProtocolTrialRequest> ToTrialRequest(
+        IReadOnlyDictionary<string, ExternalProgramTrialInputApiRequest?>? inputs)
+    {
+        if (inputs is null
+            || inputs.Any(item => item.Value is null
+                || string.IsNullOrWhiteSpace(item.Key)
+                || string.IsNullOrWhiteSpace(item.Value.Kind)
+                || string.IsNullOrWhiteSpace(item.Value.CanonicalValue)
+                || !Enum.TryParse<ExternalProgramTrialInputKind>(
+                    item.Value.Kind,
+                    ignoreCase: false,
+                    out var kind)
+                || !Enum.IsDefined(kind)
+                || !string.Equals(item.Value.Kind, kind.ToString(), StringComparison.Ordinal)))
+        {
+            return Result.Failure<ExternalProgramProtocolTrialRequest>(ApplicationError.Validation(
+                "Projects.ExternalProgramTrialInputInvalid",
+                "Typed trial inputs are required."));
+        }
+
+        return Result.Success(new ExternalProgramProtocolTrialRequest(inputs.ToDictionary(
+            item => item.Key,
+            item => new ExternalProgramTrialInputValue(
+                Enum.Parse<ExternalProgramTrialInputKind>(item.Value!.Kind!, ignoreCase: false),
+                item.Value.CanonicalValue!),
+            StringComparer.Ordinal)));
     }
 
     private static Result<IReadOnlyCollection<ValidatedUpload>> ValidateUploadManifest(

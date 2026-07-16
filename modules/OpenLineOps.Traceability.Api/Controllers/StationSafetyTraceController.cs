@@ -9,6 +9,7 @@ namespace OpenLineOps.Traceability.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Traceability)]
 [Route(OpenLineOpsApiRoutes.Traceability + "/station-safety-evidence")]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class StationSafetyTraceController(
     IStationEmergencyStopRepository repository) : ControllerBase
 {

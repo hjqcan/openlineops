@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writePackageContentManifest } from './write-package-content-manifest.mjs';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -20,22 +21,18 @@ const resourcesApp = path.join(packageRoot, 'resources', 'app');
 const bundledRuntimeRoot = path.join(resourcesApp, 'runtime');
 const bundledApiRoot = path.join(bundledRuntimeRoot, 'api');
 const bundledScriptWorkerRoot = path.join(bundledRuntimeRoot, 'script-worker');
-const bundledPluginsRoot = path.join(bundledRuntimeRoot, 'plugins');
+const bundledPluginHostRoot = path.join(bundledRuntimeRoot, 'plugin-host');
 const apiProject = path.join(repoRoot, 'src', 'OpenLineOps.Api', 'OpenLineOps.Api.csproj');
 const scriptWorkerProject = path.join(
   repoRoot,
   'src',
   'OpenLineOps.ScriptWorker',
   'OpenLineOps.ScriptWorker.csproj');
-const samplePluginRoot = path.join(
+const pluginHostProject = path.join(
   repoRoot,
-  'samples',
-  'plugins',
-  'OpenLineOps.SamplePlugins.LoopbackDevice');
-const samplePluginProject = path.join(samplePluginRoot, 'OpenLineOps.SamplePlugins.LoopbackDevice.csproj');
-const bundledSamplePluginRoot = path.join(
-  bundledPluginsRoot,
-  'OpenLineOps.SamplePlugins.LoopbackDevice');
+  'src',
+  'OpenLineOps.PluginHost',
+  'OpenLineOps.PluginHost.csproj');
 
 async function assertDirectory(directory, label) {
   const stat = await fs.stat(directory).catch(() => null);
@@ -130,19 +127,21 @@ async function publishBundledRuntime() {
     'dotnet',
     [
       'publish',
-      samplePluginProject,
+      pluginHostProject,
       '--configuration',
       'Release',
+      '--runtime',
+      'win-x64',
+      '--self-contained',
+      'true',
       '--output',
-      bundledSamplePluginRoot,
+      bundledPluginHostRoot,
       '--nologo',
       '-p:DebugSymbols=false',
       '-p:DebugType=None'
     ],
     repoRoot);
-  await fs.copyFile(
-    path.join(samplePluginRoot, 'manifest.json'),
-    path.join(bundledSamplePluginRoot, 'manifest.json'));
+  await assertDirectory(bundledPluginHostRoot, 'Bundled plugin host');
 
   const apiExecutable = path.join(bundledApiRoot, 'OpenLineOps.Api.exe');
   const apiExecutableStat = await fs.stat(apiExecutable).catch(() => null);
@@ -156,6 +155,13 @@ async function publishBundledRuntime() {
   const scriptWorkerExecutableStat = await fs.stat(scriptWorkerExecutable).catch(() => null);
   if (!scriptWorkerExecutableStat?.isFile()) {
     throw new Error(`Bundled Python script worker executable was not found: ${scriptWorkerExecutable}`);
+  }
+  const pluginHostExecutable = path.join(
+    bundledPluginHostRoot,
+    'OpenLineOps.PluginHost.exe');
+  const pluginHostExecutableStat = await fs.stat(pluginHostExecutable).catch(() => null);
+  if (!pluginHostExecutableStat?.isFile()) {
+    throw new Error(`Bundled plugin host executable was not found: ${pluginHostExecutable}`);
   }
 
   const configurationPath = path.join(bundledApiRoot, 'appsettings.json');
@@ -178,11 +184,10 @@ async function writePackageNotes() {
     '',
     'This package contains the Electron automation IDE, its self-contained',
     'OpenLineOps.Api runtime, its process-isolated Python ScriptWorker,',
-    'and the bundled loopback sample plugin.',
+    'and its process-isolated PluginHost. Application extensions are imported',
+    'explicitly into each project Application and are never globally bundled.',
     'Runtime databases are stored under the current user profile.',
-    '',
-    'Useful environment variables:',
-    '- OPENLINEOPS_API_BASE_URL: API URL, defaults to http://localhost:5135',
+    'The bundled API binds a per-launch operating-system-assigned loopback port.',
     '',
     'For production release, sign the package contents before creating',
     'release archives, manifests, and checksums.',
@@ -218,6 +223,7 @@ async function main() {
   await fs.copyFile(path.join(projectRoot, 'package.json'), path.join(resourcesApp, 'package.json'));
   await fs.copyFile(path.join(projectRoot, 'README.md'), path.join(resourcesApp, 'README.md'));
   await writePackageNotes();
+  await writePackageContentManifest(packageRoot);
 
   console.log(`OpenLineOps Windows desktop package created: ${packageRoot}`);
 }

@@ -12,6 +12,7 @@ using AppSaveRequest = OpenLineOps.Production.Application.LineDefinitions.SavePr
 namespace OpenLineOps.Production.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Production)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProductionLines)]
 public sealed class ProductionLineDefinitionsController : ControllerBase
@@ -156,11 +157,12 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
             || string.IsNullOrWhiteSpace(request.EntryOperationId)
             || request.Operations is null
             || request.Transitions is null
-            || request.LineControllerAuthorizations is null)
+            || request.LineControllerAuthorizations is null
+            || request.RouteLayout?.OperationPositions is null)
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestIncomplete",
-                "Line identity, topology, product model, entry operation, operations and transitions are required."));
+                "Line identity, topology, product model, entry operation, operations, transitions and route layout are required."));
         }
 
         if (request.Operations.Any(operation =>
@@ -171,12 +173,18 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 || string.IsNullOrWhiteSpace(operation.FlowDefinitionId)
                 || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId)
                 || operation.Resources is null
+                || operation.InputMappings is null
                 || operation.Resources.Count == 0
                 || operation.Resources.Any(resource => resource is null
                     || string.IsNullOrWhiteSpace(resource.BindingId)
                     || string.IsNullOrWhiteSpace(resource.Kind)
                     || string.IsNullOrWhiteSpace(resource.TopologyTargetId)
-                    || string.IsNullOrWhiteSpace(resource.Resolution)))
+                    || string.IsNullOrWhiteSpace(resource.Resolution))
+                || operation.InputMappings.Any(mapping => mapping is null
+                    || string.IsNullOrWhiteSpace(mapping.TargetInputKey)
+                    || string.IsNullOrWhiteSpace(mapping.SourceOperationId)
+                    || string.IsNullOrWhiteSpace(mapping.SourceOutputKey)
+                    || string.IsNullOrWhiteSpace(mapping.ExpectedValueKind)))
             || request.Transitions.Any(transition =>
                 transition is null
                 || string.IsNullOrWhiteSpace(transition.TransitionId)
@@ -197,7 +205,9 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                 || string.IsNullOrWhiteSpace(authorization.TargetSystemId)
                 || string.IsNullOrWhiteSpace(authorization.TargetBindingId)
                 || string.IsNullOrWhiteSpace(authorization.TargetCapabilityId)
-                || string.IsNullOrWhiteSpace(authorization.TargetAction)))
+                || string.IsNullOrWhiteSpace(authorization.TargetAction))
+            || request.RouteLayout.OperationPositions.Any(position => position is null
+                || string.IsNullOrWhiteSpace(position.OperationId)))
         {
             return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
                 "Production.RequestItemIncomplete",
@@ -288,13 +298,33 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     resolution));
             }
 
+            var inputMappings = new List<OpenLineOps.Production.Application.LineDefinitions.OperationInputMappingRequest>();
+            foreach (var mapping in operation.InputMappings!)
+            {
+                if (!TryParseExact(
+                        mapping!.ExpectedValueKind!,
+                        out ProductionContextValueKind expectedValueKind))
+                {
+                    return Result.Failure<AppSaveRequest>(ApplicationError.Validation(
+                        "Production.OperationInputMappingValueKindInvalid",
+                        "Operation input mapping value kinds must use exact supported tokens."));
+                }
+
+                inputMappings.Add(new OpenLineOps.Production.Application.LineDefinitions.OperationInputMappingRequest(
+                    mapping.TargetInputKey!,
+                    mapping.SourceOperationId!,
+                    mapping.SourceOutputKey!,
+                    expectedValueKind));
+            }
+
             operations.Add(new OpenLineOps.Production.Application.LineDefinitions.OperationDefinitionRequest(
                 operation.OperationId!,
                 operation.DisplayName!,
                 operation.StationSystemId!,
                 operation.FlowDefinitionId!,
                 operation.ConfigurationSnapshotId!,
-                resources));
+                resources,
+                inputMappings));
         }
 
         return Result.Success(new AppSaveRequest(
@@ -322,7 +352,14 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     authorization.TargetBindingId!,
                     authorization.TargetCapabilityId!,
                     authorization.TargetAction!))
-                .ToArray()));
+                .ToArray(),
+            new OpenLineOps.Production.Application.LineDefinitions.ProductionRouteLayoutRequest(
+                request.RouteLayout.OperationPositions.Select(position =>
+                    new OpenLineOps.Production.Application.LineDefinitions.OperationCanvasPositionRequest(
+                        position!.OperationId!,
+                        position.X,
+                        position.Y))
+                    .ToArray())));
     }
 
     private static bool TryParseExact<T>(string value, out T parsed)
@@ -354,7 +391,12 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     resource.BindingId,
                     resource.Kind,
                     resource.TopologyTargetId,
-                    resource.Resolution)).ToArray())).ToArray(),
+                    resource.Resolution)).ToArray(),
+                operation.InputMappings.Select(mapping => new OperationInputMappingResponse(
+                    mapping.TargetInputKey,
+                    mapping.SourceOperationId,
+                    mapping.SourceOutputKey,
+                    mapping.ExpectedValueKind)).ToArray())).ToArray(),
             details.Transitions.Select(transition => new RouteTransitionResponse(
                 transition.TransitionId,
                 transition.SourceOperationId,
@@ -381,6 +423,11 @@ public sealed class ProductionLineDefinitionsController : ControllerBase
                     authorization.TargetBindingId,
                     authorization.TargetCapabilityId,
                     authorization.TargetAction)).ToArray(),
+            new ProductionRouteLayoutResponse(details.RouteLayout.OperationPositions.Select(position =>
+                new OperationCanvasPositionResponse(
+                    position.OperationId,
+                    position.X,
+                    position.Y)).ToArray()),
             details.CreatedAtUtc,
             details.UpdatedAtUtc,
             EditorDocumentConcurrency.ComputeRevision(details));

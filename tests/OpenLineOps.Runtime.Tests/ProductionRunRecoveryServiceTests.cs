@@ -30,7 +30,7 @@ public sealed class ProductionRunRecoveryServiceTests
                 static operation => operation.OperationRunId,
                 static operation => operation.RuntimeSessionId,
                 StringComparer.Ordinal);
-        var service = fixture.CreateRecoveryService(fixture.Leases);
+        var service = fixture.CreateRecoveryService();
 
         var result = await service.RecoverAsync();
         var restored = (await fixture.Repository.GetByIdAsync(fixture.Run.Id))!.Run;
@@ -64,31 +64,71 @@ public sealed class ProductionRunRecoveryServiceTests
     }
 
     [Fact]
-    public async Task HoldFailureLeavesRunFailClosedAndNextColdRecoveryCompletesEveryHold()
+    public async Task ProtectedTransitionHoldsOnlyRunningOperationWhenSiblingAlreadyHasEvidence()
     {
         var fixture = await ParallelRecoveryFixture.CreateAsync();
-        var leases = new FailOnceResourceLeaseRepository(
-            fixture.Leases,
+        var left = fixture.Run.Operations.Single(operation => string.Equals(
+            operation.OperationRunId,
+            "operation.left@0001",
+            StringComparison.Ordinal));
+        var right = fixture.Run.Operations.Single(operation => string.Equals(
+            operation.OperationRunId,
+            "operation.right@0001",
+            StringComparison.Ordinal));
+        var completedAtUtc = Now.AddSeconds(4);
+        Assert.True(fixture.Run.RecordOperationCompletion(
+            left.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            0,
+            0,
+            0,
+            completedAtUtc,
+            ProductionRunExecutionEvidenceTestFactory.Create(
+                fixture.Run,
+                left.OperationRunId,
+                ExecutionStatus.Completed,
+                ResultJudgement.Passed,
+                completedAtUtc)).Succeeded);
+        Assert.True(fixture.Run.MarkRecoveryRequired(
+            "The sibling Station remains uncertain.",
+            Now.AddSeconds(5)).Succeeded);
+
+        var rightHold = LeaseHold(right);
+        var canonical = ProductionRunLeaseHold.RequireExactFor(fixture.Run, [rightHold]);
+        Assert.Equal(right.OperationRunId, Assert.Single(canonical).OperationRunId);
+        Assert.Throws<ArgumentException>(() => ProductionRunLeaseHold.RequireExactFor(
+            fixture.Run,
+            [LeaseHold(left), rightHold]));
+    }
+
+    [Fact]
+    public async Task ExactHoldFailureLeavesRunAndLeaseSetUnchangedThenColdRecoveryRetriesWholeSet()
+    {
+        var fixture = await ParallelRecoveryFixture.CreateAsync();
+        var safetyTransitions = new FailOnceProductionRunSafetyTransitionStore(
+            new InMemoryProductionRunSafetyTransitionStore(
+                fixture.Repository,
+                fixture.Leases),
             "operation.right@0001");
-        var service = fixture.CreateRecoveryService(leases);
+        var service = fixture.CreateRecoveryService(safetyTransitions);
 
         var failure = await Assert.ThrowsAsync<IOException>(
             () => service.RecoverAsync().AsTask());
 
         Assert.Contains("operation.right@0001", failure.Message, StringComparison.Ordinal);
         var protectedRun = (await fixture.Repository.GetByIdAsync(fixture.Run.Id))!.Run;
-        Assert.Equal(ProductionRunControlState.RecoveryRequired, protectedRun.ControlState);
+        Assert.Equal(ProductionRunControlState.Active, protectedRun.ControlState);
         var afterFailure = (await fixture.Leases.ListAsync())
             .ToDictionary(static lease => lease.OperationRunId, StringComparer.Ordinal);
-        Assert.Equal(DateTimeOffset.MaxValue, afterFailure["operation.left@0001"].ExpiresAtUtc);
+        Assert.NotEqual(DateTimeOffset.MaxValue, afterFailure["operation.left@0001"].ExpiresAtUtc);
         Assert.NotEqual(DateTimeOffset.MaxValue, afterFailure["operation.right@0001"].ExpiresAtUtc);
-        await AssertRunnerDoesNotDispatchAsync(fixture);
 
         var recovered = await service.RecoverAsync();
 
         Assert.Equal(1, recovered.RecoveryRequiredRunCount);
         await AssertEveryParallelLeaseIsHeldAsync(fixture);
-        Assert.Equal(4, leases.HoldAttempts.Count);
+        Assert.Equal(4, safetyTransitions.HoldAttempts.Count);
         Assert.Equal(
             [
                 "operation.left@0001",
@@ -96,29 +136,25 @@ public sealed class ProductionRunRecoveryServiceTests
                 "operation.left@0001",
                 "operation.right@0001"
             ],
-            leases.HoldAttempts);
+            safetyTransitions.HoldAttempts);
     }
 
     [Fact]
-    public async Task PersistFailureStopsRecoveryBeforeLeaseMutation()
+    public async Task SafetyTransitionFailureLeavesRunAndEveryLeaseUnchanged()
     {
         var fixture = await ParallelRecoveryFixture.CreateAsync();
-        var repository = new FailingSaveProductionRunRepository(fixture.Repository);
-        var leases = new RecordingResourceLeaseRepository(fixture.Leases);
-        var service = new ProductionRunRecoveryService(
-            repository,
-            leases,
-            fixture.Publisher,
-            fixture.Clock);
+        var safetyTransitions = new FailingProductionRunSafetyTransitionStore();
+        var service = fixture.CreateRecoveryService(safetyTransitions);
 
         var failure = await Assert.ThrowsAsync<IOException>(
             () => service.RecoverAsync().AsTask());
 
         Assert.Contains("persist recovery", failure.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(leases.HoldAttempts);
         Assert.Equal(ProductionRunControlState.Active,
             (await fixture.Repository.GetByIdAsync(fixture.Run.Id))!.Run.ControlState);
-        Assert.Equal(1, repository.SaveAttempts);
+        Assert.Equal(1, safetyTransitions.SaveAttempts);
+        Assert.All(await fixture.Leases.ListAsync(), static lease =>
+            Assert.NotEqual(DateTimeOffset.MaxValue, lease.ExpiresAtUtc));
     }
 
     [Fact]
@@ -132,6 +168,9 @@ public sealed class ProductionRunRecoveryServiceTests
         var service = new ProductionRunRecoveryService(
             repository,
             fixture.Leases,
+            new InMemoryProductionRunSafetyTransitionStore(
+                fixture.Repository,
+                fixture.Leases),
             fixture.Publisher,
             fixture.Clock);
 
@@ -156,9 +195,11 @@ public sealed class ProductionRunRecoveryServiceTests
             plan,
             await ProductionRunTestMaterials.RegisterAsync(materials, run)));
         var clock = new FixedClock(Now);
+        var leases = new InMemoryResourceLeaseRepository(clock);
         var service = new ProductionRunRecoveryService(
             repository,
-            new InMemoryResourceLeaseRepository(clock),
+            leases,
+            new InMemoryProductionRunSafetyTransitionStore(repository, leases),
             new InMemoryRuntimeDomainEventPublisher(),
             clock);
 
@@ -169,7 +210,7 @@ public sealed class ProductionRunRecoveryServiceTests
     }
 
     [Fact]
-    public async Task StationRecoveryMessageImmediatelyProtectsExactRunAndOperationLeaseIdempotently()
+    public async Task StationRecoveryMessageImmediatelyProtectsEveryRunningLeaseIdempotently()
     {
         var fixture = await ParallelRecoveryFixture.CreateAsync();
         var operation = fixture.Run.Operations.Single(item => string.Equals(
@@ -191,6 +232,9 @@ public sealed class ProductionRunRecoveryServiceTests
         var ingress = new StationJobRecoveryRequiredIngress(
             fixture.Repository,
             fixture.Leases,
+            new InMemoryProductionRunSafetyTransitionStore(
+                fixture.Repository,
+                fixture.Leases),
             fixture.Publisher,
             fixture.Clock);
 
@@ -204,7 +248,7 @@ public sealed class ProductionRunRecoveryServiceTests
         var leases = (await fixture.Leases.ListAsync())
             .ToDictionary(static lease => lease.OperationRunId, StringComparer.Ordinal);
         Assert.Equal(DateTimeOffset.MaxValue, leases[operation.OperationRunId].ExpiresAtUtc);
-        Assert.NotEqual(
+        Assert.Equal(
             DateTimeOffset.MaxValue,
             leases["operation.right@0001"].ExpiresAtUtc);
     }
@@ -265,7 +309,7 @@ public sealed class ProductionRunRecoveryServiceTests
             Assert.Single(request.ResourceFences));
         Assert.True(await dispatchStore.TryEnqueueAsync(request, [leaseChange]));
 
-        _ = await fixture.CreateRecoveryService(fixture.Leases).RecoverAsync();
+        _ = await fixture.CreateRecoveryService().RecoverAsync();
         var authorization = await new StationDispatchPublicationAuthorizer(
                 fixture.Repository,
                 fixture.Leases,
@@ -290,6 +334,13 @@ public sealed class ProductionRunRecoveryServiceTests
     private static string LeaseIdentity(ResourceLease lease) =>
         $"{lease.Resource.Kind}/{lease.Resource.ResourceId}/{lease.OperationRunId}";
 
+    private static ProductionRunLeaseHold LeaseHold(OperationRun operation) =>
+        new(
+            operation.OperationRunId,
+            operation.FencingTokens
+                .Select(static pair => new ResourceLeaseHoldClaim(pair.Key, pair.Value))
+                .ToArray());
+
     private static async Task AssertEveryParallelLeaseIsHeldAsync(ParallelRecoveryFixture fixture)
     {
         var leases = (await fixture.Leases.ListAsync())
@@ -312,6 +363,9 @@ public sealed class ProductionRunRecoveryServiceTests
             fixture.Repository,
             fixture.Repository,
             fixture.Leases,
+            new InMemoryProductionRunSafetyTransitionStore(
+                fixture.Repository,
+                fixture.Leases),
             new ProductionOperationReadinessEvaluator(fixture.Materials),
             dispatcher,
             fixture.Publisher,
@@ -357,7 +411,8 @@ public sealed class ProductionRunRecoveryServiceTests
         new ExecutableRuntimeProcess(
             new ProcessDefinitionId($"process.{operationId}"),
             new ProcessVersionId($"process-version.{operationId}"),
-            []));
+            []),
+        []);
 
     private sealed class ParallelRecoveryFixture(
         InMemoryProductionMaterialRepository materials,
@@ -449,7 +504,15 @@ public sealed class ProductionRunRecoveryServiceTests
                 1,
                 1,
                 0,
-                Now.AddSeconds(2)).Succeeded);
+                Now.AddSeconds(2),
+                ProductionRunExecutionEvidenceTestFactory.Create(
+                    run,
+                    "operation.entry@0001",
+                    ExecutionStatus.Completed,
+                    ResultJudgement.NotApplicable,
+                    Now.AddSeconds(2),
+                    1,
+                    1)).Succeeded);
 
             foreach (var operation in run.Operations
                          .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Pending)
@@ -472,8 +535,16 @@ public sealed class ProductionRunRecoveryServiceTests
             return new ParallelRecoveryFixture(materials, repository, leases, publisher, clock, run);
         }
 
-        public ProductionRunRecoveryService CreateRecoveryService(IResourceLeaseRepository resourceLeases) =>
-            new(Repository, resourceLeases, Publisher, Clock);
+        public ProductionRunRecoveryService CreateRecoveryService(
+            IProductionRunSafetyTransitionStore? safetyTransitions = null) =>
+            new(
+                Repository,
+                Leases,
+                safetyTransitions ?? new InMemoryProductionRunSafetyTransitionStore(
+                    Repository,
+                    Leases),
+                Publisher,
+                Clock);
 
         private static void StartWithSyntheticLease(
             ProductionRun run,
@@ -519,79 +590,80 @@ public sealed class ProductionRunRecoveryServiceTests
         }
     }
 
-    private class RecordingResourceLeaseRepository(IResourceLeaseRepository inner)
-        : IResourceLeaseRepository
+    private class RecordingProductionRunSafetyTransitionStore(
+        IProductionRunSafetyTransitionStore inner) : IProductionRunSafetyTransitionStore
     {
-        protected IResourceLeaseRepository Inner { get; } =
+        protected IProductionRunSafetyTransitionStore Inner { get; } =
             inner ?? throw new ArgumentNullException(nameof(inner));
 
         public List<string> HoldAttempts { get; } = [];
 
-        public ValueTask<IReadOnlyCollection<ResourceLease>> ListAsync(
-            CancellationToken cancellationToken = default) =>
-            Inner.ListAsync(cancellationToken);
-
-        public ValueTask<IReadOnlyCollection<ResourceLease>?> TryAcquireAsync(
-            ProductionRunId runId,
-            string operationRunId,
-            IReadOnlyCollection<ResourceRequirement> resources,
-            TimeSpan duration,
-            CancellationToken cancellationToken = default) =>
-            Inner.TryAcquireAsync(
-                runId,
-                operationRunId,
-                resources,
-                duration,
-                cancellationToken);
-
-        public ValueTask<ResourceLeaseFenceValidationResult> ValidateCurrentAsync(
-            ProductionRunId runId,
-            string operationRunId,
-            IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-            CancellationToken cancellationToken = default) =>
-            Inner.ValidateCurrentAsync(
-                runId,
-                operationRunId,
-                evidence,
-                cancellationToken);
-
-        public ValueTask ReleaseAsync(
-            ProductionRunId runId,
-            string operationRunId,
-            IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
-            CancellationToken cancellationToken = default) =>
-            Inner.ReleaseAsync(runId, operationRunId, claims, cancellationToken);
-
-        public virtual ValueTask HoldForRecoveryAsync(
-            ProductionRunId runId,
-            string operationRunId,
+        public virtual ValueTask<long> SaveWithLeaseHoldsAsync(
+            ProductionRun run,
+            long expectedRevision,
+            IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
             CancellationToken cancellationToken = default)
         {
-            HoldAttempts.Add(operationRunId);
-            return Inner.HoldForRecoveryAsync(runId, operationRunId, cancellationToken);
+            HoldAttempts.AddRange(leaseHolds.Select(static hold => hold.OperationRunId));
+            return Inner.SaveWithLeaseHoldsAsync(
+                run,
+                expectedRevision,
+                leaseHolds,
+                cancellationToken);
         }
     }
 
-    private sealed class FailOnceResourceLeaseRepository(
-        IResourceLeaseRepository inner,
-        string operationRunIdToFail) : RecordingResourceLeaseRepository(inner)
+    private sealed class FailOnceProductionRunSafetyTransitionStore(
+        IProductionRunSafetyTransitionStore inner,
+        string operationRunIdToFail) : RecordingProductionRunSafetyTransitionStore(inner)
     {
         private int _remainingFailures = 1;
 
-        public override ValueTask HoldForRecoveryAsync(
-            ProductionRunId runId,
-            string operationRunId,
+        public override ValueTask<long> SaveWithLeaseHoldsAsync(
+            ProductionRun run,
+            long expectedRevision,
+            IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
             CancellationToken cancellationToken = default)
         {
-            HoldAttempts.Add(operationRunId);
-            if (string.Equals(operationRunId, operationRunIdToFail, StringComparison.Ordinal)
+            HoldAttempts.AddRange(leaseHolds.Select(static hold => hold.OperationRunId));
+            if (leaseHolds.Any(hold => string.Equals(
+                    hold.OperationRunId,
+                    operationRunIdToFail,
+                    StringComparison.Ordinal))
                 && Interlocked.Exchange(ref _remainingFailures, 0) == 1)
             {
-                return ValueTask.FromException(new IOException(
-                    $"Could not hold {operationRunId} for recovery."));
+                return ValueTask.FromException<long>(new IOException(
+                    $"Could not hold {operationRunIdToFail} for recovery."));
             }
 
-            return Inner.HoldForRecoveryAsync(runId, operationRunId, cancellationToken);
+            return Inner.SaveWithLeaseHoldsAsync(
+                run,
+                expectedRevision,
+                leaseHolds,
+                cancellationToken);
+        }
+    }
+
+    private sealed class FailingProductionRunSafetyTransitionStore
+        : IProductionRunSafetyTransitionStore
+    {
+        private int _saveAttempts;
+
+        public int SaveAttempts => Volatile.Read(ref _saveAttempts);
+
+        public ValueTask<long> SaveWithLeaseHoldsAsync(
+            ProductionRun run,
+            long expectedRevision,
+            IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
+            CancellationToken cancellationToken = default)
+        {
+            _ = run;
+            _ = expectedRevision;
+            _ = leaseHolds;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _saveAttempts);
+            return ValueTask.FromException<long>(
+                new IOException("Could not persist recovery state."));
         }
     }
 
@@ -634,6 +706,11 @@ public sealed class ProductionRunRecoveryServiceTests
                 slotId,
                 cancellationToken);
 
+        public virtual ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+            ProductionRunTerminalPageRequest request,
+            CancellationToken cancellationToken = default) =>
+            Inner.ListTerminalAsync(request, cancellationToken);
+
         public virtual ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
             ListPendingCreatedOutboxAsync(
                 int maximumCount,
@@ -667,27 +744,6 @@ public sealed class ProductionRunRecoveryServiceTests
             string failureDescription,
             CancellationToken cancellationToken = default) =>
             Inner.RecordTerminalOutboxFailureAsync(runId, failureDescription, cancellationToken);
-    }
-
-    private sealed class FailingSaveProductionRunRepository(IProductionRunRepository inner)
-        : DelegatingProductionRunRepository(inner)
-    {
-        private int _saveAttempts;
-
-        public int SaveAttempts => Volatile.Read(ref _saveAttempts);
-
-        public override ValueTask<long> SaveAsync(
-            ProductionRun run,
-            long expectedRevision,
-            CancellationToken cancellationToken = default)
-        {
-            _ = run;
-            _ = expectedRevision;
-            _ = cancellationToken;
-            Interlocked.Increment(ref _saveAttempts);
-            return ValueTask.FromException<long>(
-                new IOException("Could not persist recovery state."));
-        }
     }
 
     private sealed class CancelAfterListingProductionRunRepository(

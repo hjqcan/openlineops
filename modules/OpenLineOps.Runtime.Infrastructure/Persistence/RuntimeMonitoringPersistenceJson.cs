@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Domain.Abstractions.Serialization;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Incidents;
@@ -26,7 +27,7 @@ internal static class RuntimeMonitoringPersistenceJson
             value => new RuntimeIncidentId(value),
             value => value.Value));
         options.Converters.Add(new CanonicalEnumJsonConverter<RuntimeSessionStatus>());
-        options.Converters.Add(new CanonicalEnumJsonConverter<RuntimeCommandStatus>());
+        options.Converters.Add(new CanonicalEnumJsonConverter<ExecutionStatus>());
         options.Converters.Add(new CanonicalEnumJsonConverter<RuntimeIncidentSeverity>());
         return options;
     }

@@ -15,16 +15,20 @@ import {
   XCircle
 } from 'lucide-react';
 import type {
+  ArtifactRecordResponse,
   EngineeringTraceSearchResponse,
   EngineeringTraceSearchRowResponse,
+  ProductionUnitMaterialLifecycleResponse,
   TraceFacetCountResponse,
   TraceOperationExecutionResponse,
   TraceRecordExportPackageResponse,
   TraceRecordResponse,
   StationEmergencyStopResponse
 } from './contracts';
+import { desktop } from './desktop-bridge';
 import {
   exportTraceRecord,
+  getProductionUnitMaterialLifecycle,
   getTraceRecord,
   searchEngineeringTrace,
   searchStationSafetyTrace
@@ -79,6 +83,7 @@ export function TraceWorkbench({
   const [searchResult, setSearchResult] = useState<EngineeringTraceSearchResponse>(emptySearch);
   const [selectedTraceId, setSelectedTraceId] = useState('');
   const [details, setDetails] = useState<TraceRecordResponse | null>(null);
+  const [materialLifecycle, setMaterialLifecycle] = useState<ProductionUnitMaterialLifecycleResponse | null>(null);
   const [exportPackage, setExportPackage] = useState<TraceRecordExportPackageResponse | null>(null);
   const [safetyEvidence, setSafetyEvidence] = useState<StationEmergencyStopResponse[]>([]);
   const [busy, setBusy] = useState(false);
@@ -90,6 +95,7 @@ export function TraceWorkbench({
     setFilters(createScopedFilters(projectId, applicationId));
     setSelectedTraceId('');
     setDetails(null);
+    setMaterialLifecycle(null);
     setExportPackage(null);
     setSafetyEvidence([]);
   }, [applicationId, projectId]);
@@ -144,14 +150,24 @@ export function TraceWorkbench({
   useEffect(() => {
     if (!isBackendHealthy || !selectedTraceId) {
       setDetails(null);
+      setMaterialLifecycle(null);
       return;
     }
     let disposed = false;
     getTraceRecord(selectedTraceId)
-      .then(trace => {
+      .then(async trace => {
+        if (disposed) {
+          return;
+        }
+        setDetails(trace);
+        setMaterialLifecycle(null);
+        setExportPackage(null);
+        if (!trace) {
+          return;
+        }
+        const lifecycle = await getProductionUnitMaterialLifecycle(trace.productionUnitId);
         if (!disposed) {
-          setDetails(trace);
-          setExportPackage(null);
+          setMaterialLifecycle(lifecycle);
         }
       })
       .catch(error => onMessage(`Production trace detail failed: ${String(error)}`));
@@ -238,7 +254,14 @@ export function TraceWorkbench({
           <span>{selectedRow?.executionStatus ?? 'none'}</span>
         </div>
         {details ? (
-          <TraceDetails details={details} exportPackage={exportPackage} onExport={loadExportPackage} disabled={busy} />
+          <TraceDetails
+            details={details}
+            materialLifecycle={materialLifecycle}
+            exportPackage={exportPackage}
+            onExport={loadExportPackage}
+            onMessage={onMessage}
+            disabled={busy}
+          />
         ) : (
           <div className="trace-empty">Select a production run to inspect its Operation evidence.</div>
         )}
@@ -326,13 +349,17 @@ function TraceResults({
 
 function TraceDetails({
   details,
+  materialLifecycle,
   exportPackage,
   onExport,
+  onMessage,
   disabled
 }: {
   details: TraceRecordResponse;
+  materialLifecycle: ProductionUnitMaterialLifecycleResponse | null;
   exportPackage: TraceRecordExportPackageResponse | null;
   onExport(): Promise<void>;
+  onMessage(message: string): void;
   disabled: boolean;
 }): React.ReactElement {
   return (
@@ -365,8 +392,19 @@ function TraceDetails({
       {exportPackage ? (
         <div className="trace-export-box"><strong>{exportPackage.packageFormat}</strong><span>{formatDateTime(exportPackage.exportedAtUtc)}</span></div>
       ) : null}
+      <TraceRunMaterialEvidence details={details} />
+      <TraceProductMaterialLifecycle
+        lifecycle={materialLifecycle}
+        runCompletedAtUtc={details.completedAtUtc}
+      />
       <div className="trace-operation-stack">
-        {details.operations.map(operation => <TraceOperationCard key={operation.operationRunId} operation={operation} />)}
+        {details.operations.map(operation => (
+          <TraceOperationCard
+            key={operation.operationRunId}
+            operation={operation}
+            onMessage={onMessage}
+          />
+        ))}
       </div>
       <section className="trace-route-decisions">
         <strong>Route decisions</strong>
@@ -395,7 +433,13 @@ function TraceDetails({
   );
 }
 
-function TraceOperationCard({ operation }: { operation: TraceOperationExecutionResponse }): React.ReactElement {
+function TraceOperationCard({
+  operation,
+  onMessage
+}: {
+  operation: TraceOperationExecutionResponse;
+  onMessage(message: string): void;
+}): React.ReactElement {
   const isFailed = operation.executionStatus === 'Failed'
     || operation.executionStatus === 'Canceled'
     || operation.executionStatus === 'TimedOut'
@@ -431,7 +475,7 @@ function TraceOperationCard({ operation }: { operation: TraceOperationExecutionR
           <EvidenceSection title="Commands" emptyText="No commands">
             {operation.commands.slice(0, 8).map(command => (
               <article key={command.runtimeCommandId}>
-                <span>{command.commandName}</span><strong>{command.status} · {command.resultJudgement ?? 'Pending'}</strong>
+                <span>{command.commandName}</span><strong>{command.executionStatus} · {command.resultJudgement}</strong>
                 <small>{command.actionId} · {command.targetKind}:{command.targetId}</small>
               </article>
             ))}
@@ -446,7 +490,7 @@ function TraceOperationCard({ operation }: { operation: TraceOperationExecutionR
               <article key={measurement.measurementRecordId}>
                 <span>{measurement.name}</span>
                 <strong>{formatMeasurementValue(measurement.numericValue, measurement.textValue, measurement.unit)}</strong>
-                <small>{measurement.commandStatus} · {measurement.passed === false ? 'failed' : measurement.passed === true ? 'passed' : 'indeterminate'}</small>
+                <small>{measurement.commandExecutionStatus} · {measurement.commandResultJudgement} · {measurement.passed === false ? 'failed' : measurement.passed === true ? 'passed' : 'indeterminate'}</small>
               </article>
             ))}
           </EvidenceSection>
@@ -464,13 +508,221 @@ function TraceOperationCard({ operation }: { operation: TraceOperationExecutionR
           </EvidenceSection>
           <EvidenceSection title="Artifacts" emptyText="No artifacts">
             {operation.artifacts.slice(0, 8).map(artifact => (
-              <article key={artifact.artifactRecordId}><span>{artifact.name}</span><strong>{artifact.kind}</strong><small>{artifact.storageKey}</small></article>
+              <article key={artifact.artifactRecordId}>
+                <span>{artifact.name}</span><strong>{artifact.kind}</strong>
+                <small>{artifact.storageKey}</small>
+                <button
+                  type="button"
+                  className="button ghost"
+                  disabled={!artifact.sha256}
+                  data-testid={`trace-artifact-save-${artifact.artifactRecordId}`}
+                  onClick={() => void saveTraceArtifact(artifact, onMessage)}
+                >
+                  <Download size={13} />Save verified evidence
+                </button>
+              </article>
             ))}
           </EvidenceSection>
         </div>
       </div>
     </details>
   );
+}
+
+function TraceRunMaterialEvidence({
+  details
+}: {
+  details: TraceRecordResponse;
+}): React.ReactElement {
+  const evidenceCount = details.genealogy.length
+    + details.materialLocationTransitions.length
+    + details.slotOccupancyTransitions.length
+    + details.dispositionTransitions.length;
+  return (
+    <details className="trace-material-evidence" open data-testid="trace-run-material-evidence">
+      <summary>
+        <span>
+          <strong>Immutable run material evidence</strong>
+          <small>Frozen through {formatDateTime(details.completedAtUtc)}</small>
+        </span>
+        <em>{evidenceCount} records</em>
+      </summary>
+      <div className="trace-material-evidence-grid">
+        <EvidenceSection title="Material movement" emptyText="No material movement">
+          {details.materialLocationTransitions.map(transition => (
+            <article key={transition.evidenceId}>
+              <span>{transition.materialKind} {transition.materialId}</span>
+              <strong>{formatMaterialLocation(transition.source)} → {formatMaterialLocation(transition.destination)}</strong>
+              <small>{formatDateTime(transition.occurredAtUtc)} · {transition.actorId}</small>
+            </article>
+          ))}
+        </EvidenceSection>
+        <EvidenceSection title="Slot occupancy" emptyText="No Slot transitions">
+          {details.slotOccupancyTransitions.map(transition => (
+            <article key={transition.evidenceId}>
+              <span>{transition.stationSystemId} / {transition.slotId}</span>
+              <strong>{transition.previousStatus} → {transition.currentStatus}</strong>
+              <small>{transition.materialKind ?? 'Empty'} {transition.materialId ?? ''} · {formatDateTime(transition.occurredAtUtc)}</small>
+            </article>
+          ))}
+        </EvidenceSection>
+        <EvidenceSection title="Disposition" emptyText="No disposition transitions">
+          {details.dispositionTransitions.map(transition => (
+            <article key={transition.evidenceId}>
+              <span>{transition.previousDisposition} → {transition.currentDisposition}</span>
+              <strong>{transition.reason ?? 'No reason recorded'}</strong>
+              <small>{formatDateTime(transition.occurredAtUtc)} · {transition.actorId}</small>
+            </article>
+          ))}
+        </EvidenceSection>
+        <EvidenceSection title="Genealogy" emptyText="No genealogy links">
+          {details.genealogy.map(link => (
+            <article key={link.linkId}>
+              <span>{link.parentProductionUnitId} → {link.childProductionUnitId}</span>
+              <strong>{link.relationship}</strong>
+              <small>{link.operationId} · {formatDateTime(link.linkedAtUtc)}</small>
+            </article>
+          ))}
+        </EvidenceSection>
+      </div>
+    </details>
+  );
+}
+
+function TraceProductMaterialLifecycle({
+  lifecycle,
+  runCompletedAtUtc
+}: {
+  lifecycle: ProductionUnitMaterialLifecycleResponse | null;
+  runCompletedAtUtc: string;
+}): React.ReactElement {
+  if (!lifecycle) {
+    return (
+      <section className="trace-product-lifecycle loading" data-testid="trace-product-material-lifecycle">
+        <strong>Product material lifecycle</strong>
+        <span>Loading the latest persisted material projection…</span>
+      </section>
+    );
+  }
+  const isPostRun = (occurredAtUtc: string): boolean => (
+    Date.parse(occurredAtUtc) > Date.parse(runCompletedAtUtc));
+  const postRunCount = lifecycle.materialLocationTransitions
+    .filter(transition => isPostRun(transition.occurredAtUtc)).length
+    + lifecycle.slotOccupancyTransitions
+      .filter(transition => isPostRun(transition.occurredAtUtc)).length
+    + lifecycle.dispositionTransitions
+      .filter(transition => isPostRun(transition.occurredAtUtc)).length;
+  return (
+    <section className="trace-product-lifecycle" data-testid="trace-product-material-lifecycle">
+      <header>
+        <span>
+          <strong>Product material lifecycle</strong>
+          <small>Observed through {formatDateTime(lifecycle.observedThroughUtc)}</small>
+        </span>
+        <em>{postRunCount} after-run records</em>
+      </header>
+      <dl>
+        <dt>Current location</dt><dd>{formatMaterialLocation(lifecycle.currentLocation)}</dd>
+        <dt>Carrier location</dt><dd>{formatMaterialLocation(lifecycle.currentCarrierLocation)}</dd>
+        <dt>Disposition</dt><dd>{lifecycle.currentDisposition}{lifecycle.dispositionReason ? ` · ${lifecycle.dispositionReason}` : ''}</dd>
+      </dl>
+      <div className="trace-material-evidence-grid">
+        <EvidenceSection title="Complete movement timeline" emptyText="No material movement">
+          {lifecycle.materialLocationTransitions.map(transition => {
+            const afterRun = isPostRun(transition.occurredAtUtc);
+            return (
+              <article
+                key={transition.evidenceId}
+                className={afterRun ? 'post-run' : undefined}
+                data-testid={afterRun ? 'trace-product-post-run-location-transition' : undefined}
+              >
+                <span>{transition.materialKind} {transition.materialId}</span>
+                <strong>{formatMaterialLocation(transition.source)} → {formatMaterialLocation(transition.destination)}</strong>
+                <small>{afterRun ? 'After run · ' : ''}{formatDateTime(transition.occurredAtUtc)} · {transition.actorId}</small>
+              </article>
+            );
+          })}
+        </EvidenceSection>
+        <EvidenceSection title="Complete Slot timeline" emptyText="No Slot transitions">
+          {lifecycle.slotOccupancyTransitions.map(transition => {
+            const afterRun = isPostRun(transition.occurredAtUtc);
+            return (
+              <article
+                key={transition.evidenceId}
+                className={afterRun ? 'post-run' : undefined}
+                data-testid={afterRun ? 'trace-product-post-run-slot-transition' : undefined}
+              >
+                <span>{transition.stationSystemId} / {transition.slotId}</span>
+                <strong>{transition.previousStatus} → {transition.currentStatus}</strong>
+                <small>{afterRun ? 'After run · ' : ''}{transition.materialKind ?? 'Empty'} {transition.materialId ?? ''} · {formatDateTime(transition.occurredAtUtc)}</small>
+              </article>
+            );
+          })}
+        </EvidenceSection>
+        <EvidenceSection title="Complete disposition timeline" emptyText="No disposition transitions">
+          {lifecycle.dispositionTransitions.map(transition => {
+            const afterRun = isPostRun(transition.occurredAtUtc);
+            return (
+              <article key={transition.evidenceId} className={afterRun ? 'post-run' : undefined}>
+                <span>{transition.previousDisposition} → {transition.currentDisposition}</span>
+                <strong>{transition.reason ?? 'No reason recorded'}</strong>
+                <small>{afterRun ? 'After run · ' : ''}{formatDateTime(transition.occurredAtUtc)} · {transition.actorId}</small>
+              </article>
+            );
+          })}
+        </EvidenceSection>
+        <EvidenceSection title="Complete genealogy" emptyText="No genealogy links">
+          {lifecycle.genealogy.map(link => (
+            <article key={link.linkId}>
+              <span>{link.parentProductionUnitId} → {link.childProductionUnitId}</span>
+              <strong>{link.relationship}</strong>
+              <small>{link.operationId} · {formatDateTime(link.linkedAtUtc)}</small>
+            </article>
+          ))}
+        </EvidenceSection>
+      </div>
+    </section>
+  );
+}
+
+function formatMaterialLocation(
+  location: TraceRecordResponse['materialLocationTransitions'][number]['destination'] | null
+): string {
+  if (!location) {
+    return 'Unlocated';
+  }
+  return [
+    location.kind,
+    location.lineId,
+    location.stationSystemId,
+    location.slotId,
+    location.carrierId,
+    location.carrierPositionId
+  ].filter((value): value is string => Boolean(value)).join(' / ');
+}
+
+async function saveTraceArtifact(
+  artifact: ArtifactRecordResponse,
+  onMessage: (message: string) => void
+): Promise<void> {
+  if (!artifact.sha256) {
+    onMessage(`Artifact ${artifact.name} has no immutable SHA-256 and cannot be saved`);
+    return;
+  }
+
+  try {
+    const result = await desktop.saveTraceArtifact({
+      storageKey: artifact.storageKey,
+      fileName: artifact.name,
+      expectedSizeBytes: artifact.sizeBytes,
+      expectedSha256: artifact.sha256
+    });
+    onMessage(result.canceled
+      ? `Artifact save canceled: ${artifact.name}`
+      : `Verified artifact saved: ${result.path}`);
+  } catch (error) {
+    onMessage(`Artifact save failed: ${String(error)}`);
+  }
 }
 
 function EvidenceSection({

@@ -1,5 +1,7 @@
 export interface DesktopConfig {
   apiBaseUrl: string;
+  apiAccessToken: string;
+  apiActorId: string;
   logPath: string;
   isPackaged: boolean;
 }
@@ -8,7 +10,7 @@ export interface BackendStatus {
   isRunning: boolean;
   pid: number | null;
   health: 'Healthy' | 'Unreachable';
-  apiBaseUrl: string;
+  apiBaseUrl: string | null;
   startedAtUtc: string | null;
   lastExitCode: number | null;
   recentLogs: string[];
@@ -67,6 +69,28 @@ export interface ExternalProgramUploadFile {
   resourceRelativePath: string;
 }
 
+export interface TraceArtifactSaveOptions {
+  storageKey: string;
+  fileName: string;
+  expectedSizeBytes: number;
+  expectedSha256: string;
+}
+
+export interface TraceArtifactSaveResult {
+  canceled: boolean;
+  path: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+}
+
+export interface ApplicationExtensionImportResult<T = unknown> {
+  canceled: boolean;
+  portableId: string | null;
+  fileName: string | null;
+  sizeBytes: number | null;
+  response: ApiResponse<T> | null;
+}
+
 export interface OpenLineOpsDesktopApi {
   getConfig(): Promise<DesktopConfig>;
   getBackendStatus(): Promise<BackendStatus>;
@@ -84,5 +108,10 @@ export interface OpenLineOpsDesktopApi {
     files: ExternalProgramUploadFile[],
     headers?: Record<string, string>
   ): Promise<ApiResponse<T>>;
+  importApplicationExtension<T = unknown>(
+    projectId: string,
+    applicationId: string
+  ): Promise<ApplicationExtensionImportResult<T>>;
+  saveTraceArtifact(options: TraceArtifactSaveOptions): Promise<TraceArtifactSaveResult>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

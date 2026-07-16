@@ -38,6 +38,15 @@ public sealed class AgentStationDispatchTests
         Assert.Equal(request.Run.TopologyId, message.TopologyId);
         Assert.Equal(request.Run.ActorId, message.ActorId);
         Assert.Equal("station.main", message.StationSystemId);
+        Assert.Equal("physical.main", message.StationId);
+        var productionInputs = ProductionContextDocument.Read(message.Inputs);
+        Assert.Equal(2, productionInputs.Count);
+        Assert.Equal(
+            new ProductionContextValue(ProductionContextValueKind.Text, "recipe-a"),
+            productionInputs["recipe.name"]);
+        Assert.Equal(
+            new ProductionContextValue(ProductionContextValueKind.WholeNumber, "3"),
+            productionInputs["fixture.count"]);
         Assert.Equal(request.ResourceLeases.Count, message.ResourceFences.Count);
         Assert.All(message.ResourceFences, fence =>
         {
@@ -50,6 +59,7 @@ public sealed class AgentStationDispatchTests
         Assert.Equal(0, result.CompletedStepCount);
         Assert.Equal(0, result.CommandCount);
         Assert.Equal(0, result.IncidentCount);
+        Assert.Equal("station.main", result.ExecutionEvidence.StationId);
     }
 
     [Fact]
@@ -215,6 +225,7 @@ public sealed class AgentStationDispatchTests
                 new ProcessDefinitionId("flow.main"),
                 new ProcessVersionId("flow-version.main"),
                 []),
+            [],
             [
                 new ResourceRequirement(ResourceKind.Station, "station.main"),
                 new ResourceRequirement(ResourceKind.Slot, "line.main/station.main/slot.01"),
@@ -253,6 +264,11 @@ public sealed class AgentStationDispatchTests
             Assert.Single(snapshot.Operations),
             plan,
             sessionId,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["recipe.name"] = new(ProductionContextValueKind.Text, "recipe-a"),
+                ["fixture.count"] = new(ProductionContextValueKind.WholeNumber, "3")
+            },
             leases);
     }
 
@@ -264,7 +280,7 @@ public sealed class AgentStationDispatchTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(new StationDeploymentRoute(
                 "agent.main",
-                "station.main",
+                "physical.main",
                 new string('a', 64),
                 lineId));
     }

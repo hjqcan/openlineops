@@ -13,7 +13,7 @@ using OpenLineOps.Runtime.Infrastructure.Persistence;
 namespace OpenLineOps.Api.Tests;
 
 public sealed class ProductionMaterialsApiTests :
-    IClassFixture<WebApplicationFactory<Program>>,
+    IClassFixture<OpenLineOpsApiWebApplicationFactory>,
     IDisposable
 {
     private static readonly DateTimeOffset BaseTimeUtc =
@@ -22,7 +22,7 @@ public sealed class ProductionMaterialsApiTests :
     private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
 
-    public ProductionMaterialsApiTests(WebApplicationFactory<Program> factory)
+    public ProductionMaterialsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory.WithWebHostBuilder(builder =>
         {
@@ -46,7 +46,7 @@ public sealed class ProductionMaterialsApiTests :
                     AllowingApiMaterialArrivalAuthorizer>();
             });
         });
-        _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = _factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -64,7 +64,6 @@ public sealed class ProductionMaterialsApiTests :
             lotId,
             productModelId = "product.board",
             declaredQuantity = 24,
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc
         });
         using var lotPostBody = await ReadJsonAsync(lotPost);
@@ -74,6 +73,9 @@ public sealed class ProductionMaterialsApiTests :
         Assert.Equal(lotId, lotPostBody.RootElement.GetProperty("lotId").GetString());
         Assert.Equal("product.board", lotPostBody.RootElement.GetProperty("productModelId").GetString());
         Assert.Equal(24, lotPostBody.RootElement.GetProperty("declaredQuantity").GetInt32());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            lotPostBody.RootElement.GetProperty("registeredBy").GetString());
 
         using var unitPost = await _client.PostAsJsonAsync("/api/production-units", new
         {
@@ -82,7 +84,6 @@ public sealed class ProductionMaterialsApiTests :
             identityKey = "serialNumber",
             identityValue = $"BOARD-{suffix}",
             lotId,
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc.AddSeconds(1)
         });
         using var unitPostBody = await ReadJsonAsync(unitPost);
@@ -95,6 +96,9 @@ public sealed class ProductionMaterialsApiTests :
             .GetProperty("productionUnitId").GetGuid());
         Assert.Equal("serialNumber", unitPostBody.RootElement.GetProperty("identityKey").GetString());
         Assert.Equal(lotId, unitPostBody.RootElement.GetProperty("lotId").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            unitPostBody.RootElement.GetProperty("registeredBy").GetString());
         Assert.Equal("InProcess", unitPostBody.RootElement.GetProperty("disposition").GetString());
         Assert.Equal(JsonValueKind.Null, unitPostBody.RootElement.GetProperty("location").ValueKind);
 
@@ -133,7 +137,6 @@ public sealed class ProductionMaterialsApiTests :
                 stationId = stationSystemId,
                 lineId,
                 stationSystemId,
-                actorId = "scanner.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(1)
             });
         using var arrivalBody = await ReadJsonAsync(arrival);
@@ -205,7 +208,6 @@ public sealed class ProductionMaterialsApiTests :
                 materialKind = "ProductionUnit",
                 materialId = productionUnitId.ToString("D"),
                 destination = StationQueueLocation(lineId, stationSystemId),
-                actorId = "operator.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(6)
             });
         using var unloadBody = await ReadJsonAsync(unload);
@@ -251,7 +253,6 @@ public sealed class ProductionMaterialsApiTests :
                     materialId = (string?)null,
                     destination = (object?)null,
                     reason,
-                    actorId = "operator.material-api",
                     occurredAtUtc
                 });
             using var body = await ReadJsonAsync(response);
@@ -290,7 +291,6 @@ public sealed class ProductionMaterialsApiTests :
             carrierId,
             carrierTypeId = "carrier-type.board-tray",
             capacity = 8,
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc
         });
         Assert.Equal(HttpStatusCode.Created, carrierPost.StatusCode);
@@ -306,7 +306,6 @@ public sealed class ProductionMaterialsApiTests :
                 stationId = stationSystemId,
                 lineId,
                 stationSystemId,
-                actorId = "scanner.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(1)
             });
         using var carrierArrivalBody = await ReadJsonAsync(carrierArrival);
@@ -328,7 +327,6 @@ public sealed class ProductionMaterialsApiTests :
                 stationId = stationSystemId,
                 lineId,
                 stationSystemId,
-                actorId = "scanner.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(1)
             });
         Assert.Equal(HttpStatusCode.OK, unitArrival.StatusCode);
@@ -347,7 +345,6 @@ public sealed class ProductionMaterialsApiTests :
                     carrierId,
                     carrierPositionId = "position-01"
                 },
-                actorId = "operator.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(2)
             });
         using var transferBody = await ReadJsonAsync(transfer);
@@ -380,7 +377,6 @@ public sealed class ProductionMaterialsApiTests :
             childProductionUnitId = childId,
             relationship = "ComponentOf",
             operationId = "operation.assembly",
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc.AddSeconds(1)
         };
 
@@ -415,7 +411,6 @@ public sealed class ProductionMaterialsApiTests :
                 childProductionUnitId = childId,
                 relationship = "ComponentOf",
                 operationId = "operation.assembly-repeat",
-                actorId = "operator.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(2)
             });
         using var duplicateBody = await ReadJsonAsync(duplicate);
@@ -440,7 +435,6 @@ public sealed class ProductionMaterialsApiTests :
             identityKey = "serialNumber",
             identityValue = $"BOARD-{suffix}",
             lotId = (string?)null,
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc.AddSeconds(1)
         });
         using var duplicateBody = await ReadJsonAsync(duplicate);
@@ -463,7 +457,6 @@ public sealed class ProductionMaterialsApiTests :
                 stationId = "station.missing",
                 lineId = "line.missing",
                 stationSystemId = "station.missing",
-                actorId = "scanner.material-api",
                 occurredAtUtc = BaseTimeUtc
             });
         using var missingArrivalBody = await ReadJsonAsync(missingArrival);
@@ -507,7 +500,6 @@ public sealed class ProductionMaterialsApiTests :
                 materialKind,
                 materialId = productionUnitId.ToString("D"),
                 destination = (object?)null,
-                actorId = "operator.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(1)
             });
 
@@ -537,7 +529,6 @@ public sealed class ProductionMaterialsApiTests :
                 stationId = stationSystemId,
                 lineId,
                 stationSystemId,
-                actorId = "scanner.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(1)
             });
         Assert.Equal(HttpStatusCode.OK, arrival.StatusCode);
@@ -556,7 +547,6 @@ public sealed class ProductionMaterialsApiTests :
                     carrierPositionId = (string?)null
                 },
                 destination = StationQueueLocation(lineId, $"{stationSystemId}-next"),
-                actorId = "operator.material-api",
                 occurredAtUtc = BaseTimeUtc.AddSeconds(2)
             });
 
@@ -578,7 +568,6 @@ public sealed class ProductionMaterialsApiTests :
               "identityKey": "serialNumber",
               "identityValue": "BOARD-STRICT-{{productionUnitId:N}}",
               "lotId": null,
-              "actorId": "operator.material-api",
               "occurredAtUtc": "2026-07-11T09:00:00+00:00",
               "{{legacyField}}": "removed"
             }
@@ -607,7 +596,6 @@ public sealed class ProductionMaterialsApiTests :
             identityKey = "serialNumber",
             identityValue = $"BOARD-{suffix}",
             lotId = (string?)null,
-            actorId = "operator.material-api",
             occurredAtUtc = BaseTimeUtc
         });
 
@@ -621,7 +609,6 @@ public sealed class ProductionMaterialsApiTests :
             lineId,
             stationSystemId,
             slotId,
-            actorId = "engineer.material-api",
             occurredAtUtc = BaseTimeUtc
         });
 
@@ -643,7 +630,6 @@ public sealed class ProductionMaterialsApiTests :
                 materialKind = "ProductionUnit",
                 materialId = productionUnitId.ToString("D"),
                 destination = (object?)null,
-                actorId = "operator.material-api",
                 occurredAtUtc
             });
     }

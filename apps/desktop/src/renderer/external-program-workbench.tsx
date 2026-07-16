@@ -24,15 +24,21 @@ import type {
 import {
   deleteExternalProgramResource,
   getAutomationTopology,
+  getProductionLine,
   importExternalProgramResource,
   importExternalProgramResourceFile,
   listExternalProgramResources,
+  listProductionLines,
   saveExternalProgramResource,
   trialExternalProgramResource,
   type ProjectApplicationApiScope
 } from './api';
 import { desktop } from './desktop-bridge';
 import { useEditorDocument } from './editor-workspace';
+import {
+  DraftTransitionDialog,
+  useDraftTransitionGuard
+} from './draft-transition-guard';
 import {
   readEditorConflictRevision,
   type EditorDocumentConflict,
@@ -75,8 +81,9 @@ export function ExternalProgramWorkbench({
     ? { projectId: activeWorkspace.project.projectId, applicationId: application.applicationId }
     : null, [activeWorkspace, application]);
   const [topology, setTopology] = useState<AutomationTopologyResponse | null>(null);
+  const [productionInputKeys, setProductionInputKeys] = useState<string[]>([]);
   const [resources, setResources] = useState<ExternalProgramResourceResponse[]>([]);
-  const [draft, setDraft] = useState<ResourceDraft>(() => createDraft(null));
+  const [draft, setDraft] = useState<ResourceDraft>(() => createDraft(null, false));
   const [busy, setBusy] = useState(false);
   const [trialKindsByTarget, setTrialKindsByTarget] = useState<Record<string, ExternalProgramTrialInputKind>>({});
   const [trialValues, setTrialValues] = useState<Record<string, string>>({});
@@ -91,29 +98,54 @@ export function ExternalProgramWorkbench({
     setConflict(null);
   }, []);
 
-  const refresh = useCallback(async () => {
+  const loadResource = useCallback(async (resourceId: string) => {
+    if (!scope) {
+      throw new Error('Open an Application before loading a Program Resource.');
+    }
+    const nextResources = await listExternalProgramResources(scope);
+    const resource = nextResources.find(item => item.resourceId === resourceId);
+    if (!resource) {
+      throw new Error(`External program ${resourceId} no longer exists.`);
+    }
+    setResources(nextResources);
+    selectResource(resource);
+  }, [scope, selectResource]);
+
+  const refresh = useCallback(async (preserveDirty = false) => {
     if (!scope || !isBackendHealthy) {
       setResources([]);
       setTopology(null);
+      setProductionInputKeys([]);
       return;
     }
-    const [nextResources, topologyResponse] = await Promise.all([
+    const [nextResources, topologyResponse, lineSummaries] = await Promise.all([
       listExternalProgramResources(scope),
       application?.topologyId
         ? getAutomationTopology(application.topologyId, scope)
-        : Promise.resolve(null)
+        : Promise.resolve(null),
+      listProductionLines(scope)
     ]);
+    const lineResponses = await Promise.all(lineSummaries.map(line =>
+      getProductionLine(line.lineDefinitionId, scope)));
+    setProductionInputKeys(Array.from(new Set(lineResponses.flatMap(response =>
+      response.ok && response.body
+        ? response.body.operations.flatMap(operation =>
+            operation.inputMappings.map(mapping => mapping.targetInputKey))
+        : []))).sort((left, right) => left.localeCompare(right)));
     const nextTopology = topologyResponse?.ok && topologyResponse.body ? topologyResponse.body : null;
     setResources(nextResources);
     setTopology(nextTopology);
     setDraft(current => {
+      if (preserveDirty && current.dirty) {
+        return current;
+      }
       const currentResource = nextResources.find(item => item.resourceId === current.resourceId);
-      return currentResource ? fromResponse(currentResource) : createDraft(nextTopology);
+      return currentResource ? fromResponse(currentResource) : createDraft(nextTopology, false);
     });
   }, [application?.topologyId, isBackendHealthy, scope]);
 
   useEffect(() => {
-    refresh().catch(error => onMessage(`External program resources refresh failed: ${String(error)}`));
+    refresh(true).catch(error => onMessage(`External program resources refresh failed: ${String(error)}`));
   }, [onMessage, refresh]);
 
   const newResource = useCallback(() => {
@@ -159,7 +191,9 @@ export function ExternalProgramWorkbench({
       }
       selectResource(response.body);
       setConflict(null);
-      await refresh();
+      await refresh().catch(error => {
+        onMessage(`External program list refresh failed after save: ${String(error)}`);
+      });
       onMessage(`External program resource saved ${response.body.resourceId}`);
     } catch (error) {
       onMessage(`External program save failed: ${String(error)}`);
@@ -174,14 +208,8 @@ export function ExternalProgramWorkbench({
       newResource();
       return;
     }
-    const nextResources = await listExternalProgramResources(scope);
-    const current = nextResources.find(item => item.resourceId === draft.resourceId);
-    if (!current) {
-      throw new Error(`External program ${draft.resourceId} no longer exists.`);
-    }
-    setResources(nextResources);
-    selectResource(current);
-  }, [draft.persisted, draft.resourceId, newResource, scope, selectResource]);
+    await loadResource(draft.resourceId);
+  }, [draft.persisted, draft.resourceId, loadResource, newResource, scope]);
 
   const importEntryPoint = useCallback(async () => {
     if (!scope || !isBackendHealthy) return;
@@ -319,10 +347,23 @@ export function ExternalProgramWorkbench({
     if (!draft.resourceId.trim()) problems.push({ id: 'program-resource-id', severity: 'Error', message: 'Resource ID is required.', targetId: 'external-program-resource-id' });
     if (!draft.capabilityId.trim()) problems.push({ id: 'program-capability', severity: 'Error', message: 'A topology capability is required.', targetId: 'external-program-capability' });
     if (!draft.commandName.trim()) problems.push({ id: 'program-command', severity: 'Error', message: 'Command name is required.', targetId: 'external-program-command' });
+    draft.inputMappings.forEach((mapping, index) => {
+      if (!mapping.source.startsWith('$production.')) return;
+      const inputKey = mapping.source.slice('$production.'.length);
+      if (!inputKey || !productionInputKeys.includes(inputKey)) {
+        problems.push({
+          id: `program-production-input-${index}`,
+          severity: 'Error',
+          message: `Production input '${inputKey || mapping.source}' is not declared by an Operation in this Application.`,
+          targetId: `external-program-input-source-${index}`
+        });
+      }
+    });
     return problems;
-  }, [draft.capabilityId, draft.commandName, draft.resourceId]);
+  }, [draft.capabilityId, draft.commandName, draft.inputMappings, draft.resourceId, productionInputKeys]);
   useEditorDocument({
     dirty: draft.dirty,
+    editRevision: draft,
     canSave: isBackendHealthy && editorProblems.length === 0,
     save: () => save(),
     revert: reloadResource,
@@ -332,6 +373,15 @@ export function ExternalProgramWorkbench({
     problems: editorProblems,
     conflict
   });
+  const draftTransitionGuard = useDraftTransitionGuard({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && editorProblems.length === 0,
+    save: () => save(),
+    onError: onMessage
+  });
+  const currentDraftLabel = draft.displayName.trim()
+    || draft.resourceId.trim()
+    || 'Untitled Program Resource';
 
   if (!activeWorkspace || !application) {
     return <section className="external-program-workbench empty"><FileCode2 size={28} /><h2>Open an Application to manage its program resources.</h2></section>;
@@ -346,9 +396,35 @@ export function ExternalProgramWorkbench({
       <header className="external-program-command-bar">
         <div><FileCode2 size={20} /><span><strong>Program Resources</strong><small>{activeWorkspace.project.displayName} / {application.displayName}</small></span></div>
         <div>
-          <button className="button ghost" type="button" onClick={() => void refresh()} disabled={busy}><RefreshCw size={14} /> Refresh</button>
-          <button className="button" type="button" onClick={newResource} disabled={busy} data-testid="new-external-program-resource"><Plus size={14} /> New Resource</button>
-          <button className="button primary" type="button" onClick={() => void save().catch(() => undefined)} disabled={busy || !isBackendHealthy} data-testid="save-external-program-resource"><Save size={14} /> Save</button>
+          <button
+            className="button ghost"
+            type="button"
+            onClick={() => draftTransitionGuard.request({
+              id: 'external-program:refresh',
+              title: 'Save changes before refreshing Program Resources?',
+              detail: 'Refresh reloads the selected resource and its Application metadata from disk.',
+              currentDocumentLabel: currentDraftLabel,
+              targetLabel: 'the latest Program Resources',
+              proceed: () => refresh()
+            })}
+            disabled={busy || draftTransitionGuard.busy}
+            data-testid="refresh-external-program-resources"
+          ><RefreshCw size={14} /> Refresh</button>
+          <button
+            className="button"
+            type="button"
+            onClick={() => draftTransitionGuard.request({
+              id: 'external-program:new',
+              title: 'Save changes before creating a Program Resource?',
+              detail: 'The selected Program Resource has unsaved changes. Save them, discard them, or cancel and keep editing.',
+              currentDocumentLabel: currentDraftLabel,
+              targetLabel: 'a new Program Resource',
+              proceed: newResource
+            })}
+            disabled={busy || draftTransitionGuard.busy}
+            data-testid="new-external-program-resource"
+          ><Plus size={14} /> New Resource</button>
+          <button className="button primary" type="button" onClick={() => void save().catch(() => undefined)} disabled={busy || !isBackendHealthy || editorProblems.length > 0} data-testid="save-external-program-resource"><Save size={14} /> Save</button>
         </div>
       </header>
 
@@ -356,7 +432,26 @@ export function ExternalProgramWorkbench({
         <aside className="external-program-browser">
           <header><span>APPLICATION RESOURCES</span><small>{resources.length}</small></header>
           {resources.map(resource => (
-            <button key={resource.resourceId} type="button" className={draft.persisted && draft.resourceId === resource.resourceId ? 'active' : ''} onClick={() => selectResource(resource)}>
+            <button
+              key={resource.resourceId}
+              type="button"
+              className={draft.persisted && draft.resourceId === resource.resourceId ? 'active' : ''}
+              disabled={busy || draftTransitionGuard.busy}
+              onClick={() => {
+                if (draft.persisted && draft.resourceId === resource.resourceId) {
+                  return;
+                }
+                draftTransitionGuard.request({
+                  id: `external-program:open:${resource.resourceId}`,
+                  title: 'Save changes before opening another Program Resource?',
+                  detail: 'Opening another Program Resource replaces the current editor draft.',
+                  currentDocumentLabel: currentDraftLabel,
+                  targetLabel: resource.displayName || resource.resourceId,
+                  proceed: () => loadResource(resource.resourceId)
+                });
+              }}
+              data-testid={`external-program-resource-${resource.resourceId}`}
+            >
               <FileCode2 size={15} /><span><strong>{resource.displayName}</strong><small>{resource.resourceId} · {resource.launchKind}</small></span>
             </button>
           ))}
@@ -396,7 +491,7 @@ export function ExternalProgramWorkbench({
 
           <section className="external-program-card">
             <header><span><small>PROTOCOL</small><strong>Typed inputs and results</strong></span></header>
-            <MappingRows draft={draft} onChange={setDraft} />
+            <MappingRows draft={draft} productionInputKeys={productionInputKeys} onChange={setDraft} />
           </section>
 
           <section className="external-program-card permission" data-testid="external-program-permission-profile">
@@ -451,14 +546,16 @@ export function ExternalProgramWorkbench({
           </section>
         </main>
       </div>
+      <DraftTransitionDialog controller={draftTransitionGuard} testIdPrefix="external-program-draft-transition" />
     </section>
   );
 }
 
-function MappingRows({ draft, onChange }: { draft: ResourceDraft; onChange: React.Dispatch<React.SetStateAction<ResourceDraft>> }): React.ReactElement {
+function MappingRows({ draft, productionInputKeys, onChange }: { draft: ResourceDraft; productionInputKeys: string[]; onChange: React.Dispatch<React.SetStateAction<ResourceDraft>> }): React.ReactElement {
   return <div className="external-program-mappings">
-    <header><span>Inputs</span><button type="button" onClick={() => onChange(current => ({ ...current, inputMappings: [...current.inputMappings, { source: '$product.identity', target: `input${current.inputMappings.length + 1}` }] }))}><Plus size={12} /> Add</button></header>
-    {draft.inputMappings.map((mapping, index) => <div key={index}><input value={mapping.source} onChange={event => onChange(current => ({ ...current, inputMappings: replaceAt(current.inputMappings, index, { ...mapping, source: event.target.value }) }))} /><ArrowRight size={13} /><input value={mapping.target} onChange={event => onChange(current => ({ ...current, inputMappings: replaceAt(current.inputMappings, index, { ...mapping, target: event.target.value }) }))} /><button type="button" onClick={() => onChange(current => ({ ...current, inputMappings: current.inputMappings.filter((_, candidate) => candidate !== index) }))}><Trash2 size={12} /></button></div>)}
+    <header><span>Inputs</span><button type="button" onClick={() => onChange(current => ({ ...current, inputMappings: [...current.inputMappings, { source: productionInputKeys.length > 0 ? `$production.${productionInputKeys[0]}` : '$product.identity', target: `input${current.inputMappings.length + 1}` }] }))}><Plus size={12} /> Add</button></header>
+    <p>Operation inputs are available as <code>$production.&lt;targetInputKey&gt;</code>. The release validator requires the selected key on every referencing Operation.</p>
+    {draft.inputMappings.map((mapping, index) => <div key={index}><input list={`external-program-input-sources-${index}`} value={mapping.source} data-testid={`external-program-input-source-${index}`} onChange={event => onChange(current => ({ ...current, inputMappings: replaceAt(current.inputMappings, index, { ...mapping, source: event.target.value }) }))} /><datalist id={`external-program-input-sources-${index}`}><option value="$product.identity" /><option value="$product.model" />{productionInputKeys.map(inputKey => <option key={inputKey} value={`$production.${inputKey}`} />)}</datalist><ArrowRight size={13} /><input value={mapping.target} onChange={event => onChange(current => ({ ...current, inputMappings: replaceAt(current.inputMappings, index, { ...mapping, target: event.target.value }) }))} /><button type="button" onClick={() => onChange(current => ({ ...current, inputMappings: current.inputMappings.filter((_, candidate) => candidate !== index) }))}><Trash2 size={12} /></button></div>)}
     <header><span>Typed results</span><button type="button" onClick={() => onChange(current => ({ ...current, resultMappings: [...current.resultMappings, { sourcePath: '$.value', targetKey: `result.${current.resultMappings.length + 1}`, valueKind: 'Text' }] }))}><Plus size={12} /> Add</button></header>
     {draft.resultMappings.map((mapping, index) => <div key={index}><input value={mapping.sourcePath} onChange={event => onChange(current => ({ ...current, resultMappings: replaceAt(current.resultMappings, index, { ...mapping, sourcePath: event.target.value }) }))} /><ArrowRight size={13} /><input value={mapping.targetKey} onChange={event => onChange(current => ({ ...current, resultMappings: replaceAt(current.resultMappings, index, { ...mapping, targetKey: event.target.value }) }))} /><select value={mapping.valueKind} onChange={event => onChange(current => ({ ...current, resultMappings: replaceAt(current.resultMappings, index, { ...mapping, valueKind: event.target.value as ProductionContextValueKind }) }))}>{valueKinds.map(kind => <option key={kind}>{kind}</option>)}</select><button type="button" onClick={() => onChange(current => ({ ...current, resultMappings: current.resultMappings.filter((_, candidate) => candidate !== index) }))}><Trash2 size={12} /></button></div>)}
     <div className="external-program-outcome">
@@ -478,12 +575,12 @@ function Limit({ label, value, onChange }: { label: string; value: number; onCha
   return <Field label={label}><input type="number" min={1} step={1} value={value} onChange={event => onChange(Number(event.target.value))} /></Field>;
 }
 
-function createDraft(topology: AutomationTopologyResponse | null): ResourceDraft {
+function createDraft(topology: AutomationTopologyResponse | null, dirty = true): ResourceDraft {
   const capability = topology?.capabilities[0];
   const binding = topology?.driverBindings.find(item => item.capabilityId === capability?.capabilityId);
   return {
     persisted: false,
-    dirty: true,
+    dirty,
     files: [],
     contentSha256: '',
     revision: '',

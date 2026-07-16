@@ -18,6 +18,30 @@ public sealed class WindowsProcessLauncherTests
 {
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(20);
 
+    [Fact]
+    public async Task ExitCodeComesFromTheOwnedCreateProcessHandle()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var launched = Launch(
+            [
+                "sandbox-exit",
+                OpenLineOps.VendorTestHelper.Program.CrashExitCode.ToString(
+                    CultureInfo.InvariantCulture)
+            ],
+            EnvironmentForChild());
+        launched.StandardInput.Dispose();
+        using var timeout = new CancellationTokenSource(ProcessTimeout);
+        await launched.WaitForExitAsync(timeout.Token);
+
+        Assert.Equal(OpenLineOps.VendorTestHelper.Program.CrashExitCode, launched.ExitCode);
+        await WaitForJobEmptyAsync(launched, timeout.Token);
+        Assert.Equal(0u, launched.ActiveProcessCount);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("plain")]
@@ -106,8 +130,8 @@ public sealed class WindowsProcessLauncherTests
 
         const string profileName = "OpenLineOps.Tests.ProcessIsolation";
         var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
-        var executable = HelperExecutablePath();
-        var executableDirectory = Path.GetDirectoryName(executable)!;
+        var executableDirectory = NewPath("appcontainer-helper");
+        var executable = CopyHelperPayload(executableDirectory);
         var workspace = NewPath("appcontainer-workspace");
         Directory.CreateDirectory(workspace);
         WindowsContentAccessAuthorizer.GrantReadExecute(executableDirectory, appContainerSid);
@@ -152,6 +176,7 @@ public sealed class WindowsProcessLauncherTests
         finally
         {
             Environment.SetEnvironmentVariable(inheritedSecretName, previous);
+            Directory.Delete(executableDirectory, recursive: true);
             Directory.Delete(workspace, recursive: true);
             WindowsAppContainerIdentity.DeleteProfile(profileName);
         }
@@ -167,8 +192,8 @@ public sealed class WindowsProcessLauncherTests
 
         const string profileName = "OpenLineOps.Tests.ProcessIsolation";
         var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
-        var executable = HelperExecutablePath();
-        var executableDirectory = Path.GetDirectoryName(executable)!;
+        var executableDirectory = NewPath("appcontainer-network-helper");
+        var executable = CopyHelperPayload(executableDirectory);
         var workspace = NewPath("appcontainer-network-capability-workspace");
         Directory.CreateDirectory(workspace);
         WindowsContentAccessAuthorizer.GrantReadExecute(executableDirectory, appContainerSid);
@@ -207,6 +232,7 @@ public sealed class WindowsProcessLauncherTests
         }
         finally
         {
+            Directory.Delete(executableDirectory, recursive: true);
             Directory.Delete(workspace, recursive: true);
             WindowsAppContainerIdentity.DeleteProfile(profileName);
         }
@@ -482,8 +508,8 @@ public sealed class WindowsProcessLauncherTests
 
         const string profileName = "OpenLineOps.Tests.ProcessIsolation";
         var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
-        var executable = HelperExecutablePath();
-        var executableDirectory = Path.GetDirectoryName(executable)!;
+        var executableDirectory = NewPath("appcontainer-network-denied-helper");
+        var executable = CopyHelperPayload(executableDirectory);
         var workspace = NewPath("appcontainer-network-workspace");
         Directory.CreateDirectory(workspace);
         WindowsContentAccessAuthorizer.GrantReadExecute(executableDirectory, appContainerSid);
@@ -526,6 +552,7 @@ public sealed class WindowsProcessLauncherTests
         finally
         {
             listener.Stop();
+            Directory.Delete(executableDirectory, recursive: true);
             Directory.Delete(workspace, recursive: true);
             WindowsAppContainerIdentity.DeleteProfile(profileName);
         }
@@ -670,7 +697,15 @@ public sealed class WindowsProcessLauncherTests
             await launched.WaitForExitAsync(timeout.Token);
             childProcessId = await ReadProcessIdAsync(pidFile, timeout.Token);
             Assert.True(IsProcessRunning(childProcessId));
+            Assert.True(launched.ActiveProcessCount >= 1);
             launched.TerminateProcessTree();
+            var stopwatch = Stopwatch.StartNew();
+            while (launched.ActiveProcessCount != 0 && stopwatch.Elapsed < ProcessTimeout)
+            {
+                await Task.Delay(25);
+            }
+
+            Assert.Equal(0u, launched.ActiveProcessCount);
         }
 
         await AssertProcessExitedAsync(childProcessId);
@@ -753,6 +788,29 @@ public sealed class WindowsProcessLauncherTests
                 executable);
     }
 
+    private static string CopyHelperPayload(string destinationDirectory)
+    {
+        var sourceExecutable = HelperExecutablePath();
+        var sourceDirectory = Path.GetDirectoryName(sourceExecutable)
+                              ?? throw new InvalidDataException(
+                                  "Vendor test helper executable has no parent directory.");
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (var extension in new[] { ".exe", ".dll", ".deps.json", ".runtimeconfig.json" })
+        {
+            var fileName = "OpenLineOps.VendorTestHelper" + extension;
+            var sourcePath = Path.Combine(sourceDirectory, fileName);
+            if (!File.Exists(sourcePath))
+            {
+                throw new FileNotFoundException(
+                    "Vendor test helper payload is incomplete.",
+                    sourcePath);
+            }
+            File.Copy(sourcePath, Path.Combine(destinationDirectory, fileName));
+        }
+
+        return Path.Combine(destinationDirectory, "OpenLineOps.VendorTestHelper.exe");
+    }
+
     private static string NewPath(string fileName) =>
         Path.Combine(Path.GetTempPath(), $"openlineops-{Guid.NewGuid():N}-{fileName}");
 
@@ -788,6 +846,16 @@ public sealed class WindowsProcessLauncherTests
         }
 
         Assert.False(IsProcessRunning(processId));
+    }
+
+    private static async Task WaitForJobEmptyAsync(
+        WindowsIsolatedProcess launched,
+        CancellationToken cancellationToken)
+    {
+        while (launched.ActiveProcessCount != 0)
+        {
+            await Task.Delay(10, cancellationToken);
+        }
     }
 
     private static bool IsProcessRunning(int processId)

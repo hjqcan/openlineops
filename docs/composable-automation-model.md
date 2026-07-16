@@ -98,6 +98,13 @@ provider can be a frozen plugin package, simulator, external program adapter,
 or another explicitly supported runtime provider. The binding is design-time
 configuration. Publication resolves and locks the exact provider artifact.
 
+Studio authors this relationship directly in Systems & Layout: create an
+immutable Capability contract, assign it to a System as required and/or
+provided, then create that System's Driver binding. Updating a System replaces
+the two declared capability sets atomically. The domain rejects an unknown
+Capability and rejects removal of a Capability while one of that System's
+Driver bindings still uses it.
+
 A Driver is not a child System and a Capability is not runtime state. Keeping
 these concepts separate makes a System replaceable when another provider
 satisfies the same contract.
@@ -168,6 +175,8 @@ A line definition contains:
   published Flow, and frozen configuration snapshot;
 - `RouteTransition` edges for sequence, result judgement, typed output equality,
   bounded rework, parallel fork, and parallel join;
+- one strict route layout containing exactly one bounded integer canvas
+  position per Operation;
 - optional external-program adapter resources with arguments, input mappings,
   typed result mappings, timeout, and provider/executable declaration.
 
@@ -177,6 +186,11 @@ and trace lifecycle. A vendor-reported product failure is
 `Completed + Failed`; a crash, invalid protocol, or device fault is
 `Failed + Unknown` and creates an Incident. Production cannot launch an
 arbitrary program around Runtime.
+
+The Line Designer layout is persisted atomically with these semantics in the
+same Application-owned line resource. It shares the line revision and conflict
+contract, so reopening Studio or copying the Application restores the same
+route graph without a second layout document drifting from the route.
 
 ## ProcessDefinition and Flow IR
 

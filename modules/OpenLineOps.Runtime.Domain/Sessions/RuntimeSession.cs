@@ -7,6 +7,7 @@ using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
+using CommandExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 
 namespace OpenLineOps.Runtime.Domain.Sessions;
 
@@ -136,6 +137,14 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             }
         }
 
+        if (IsTerminalStatus(status)
+            && (restoredSteps.Any(step => !IsTerminalStepStatus(step.Status))
+                || restoredCommands.Any(command => !IsTerminalCommandStatus(command.Status))))
+        {
+            throw new InvalidOperationException(
+                $"Terminal Runtime session {id} cannot contain open Step or Command evidence.");
+        }
+
         var session = new RuntimeSession(
             id,
             stationId,
@@ -223,6 +232,19 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
 
     public RuntimeOperationResult Fail(DateTimeOffset failedAtUtc, string code, string message)
     {
+        if (IsTerminal)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.SessionTerminal",
+                $"Runtime session {Id} is terminal and its evidence cannot be changed.");
+        }
+
+        var readiness = RequireClosedWorkForTerminalTransition();
+        if (readiness is not null)
+        {
+            return readiness;
+        }
+
         var incident = RecordIncident(
             RuntimeIncidentSeverity.Error,
             code,
@@ -358,7 +380,7 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         DateTimeOffset canceledAtUtc,
         string reason = "Command canceled.",
         string? resultPayload = null,
-        ResultJudgement resultJudgement = ResultJudgement.Unknown)
+        ResultJudgement resultJudgement = ResultJudgement.Aborted)
     {
         return ChangeCommandStatus(
             commandId,
@@ -380,6 +402,8 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         string message,
         DateTimeOffset occurredAtUtc)
     {
+        EnsureNotTerminal();
+
         var incident = RuntimeIncident.Record(
             RuntimeIncidentId.New(),
             severity,
@@ -402,6 +426,8 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         RuntimeStepId stepId,
         Func<RuntimeStep, RuntimeOperationResult> transition)
     {
+        EnsureNotTerminal();
+
         var step = _steps.SingleOrDefault(candidate => candidate.Id == stepId);
 
         if (step is null)
@@ -427,6 +453,8 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         Func<RuntimeCommand, RuntimeOperationResult> transition,
         string reason)
     {
+        EnsureNotTerminal();
+
         var command = _commands.SingleOrDefault(candidate => candidate.Id == commandId);
 
         if (command is null)
@@ -457,6 +485,15 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         DateTimeOffset utcNow,
         string reason)
     {
+        if (IsTerminalStatus(target))
+        {
+            var readiness = RequireClosedWorkForTerminalTransition();
+            if (readiness is not null)
+            {
+                return readiness;
+            }
+        }
+
         if (Status == target)
         {
             return RuntimeOperationResult.Accepted();
@@ -501,6 +538,27 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         }
     }
 
+    private void EnsureNotTerminal()
+    {
+        if (IsTerminal)
+        {
+            throw new InvalidOperationException(
+                $"Runtime session {Id} is terminal and its evidence cannot be changed.");
+        }
+    }
+
+    private RuntimeOperationResult? RequireClosedWorkForTerminalTransition()
+    {
+        var openStepCount = _steps.Count(step => !IsTerminalStepStatus(step.Status));
+        var openCommandCount = _commands.Count(command => !IsTerminalCommandStatus(command.Status));
+        return openStepCount == 0 && openCommandCount == 0
+            ? null
+            : RuntimeOperationResult.Rejected(
+                "Runtime.SessionHasActiveWork",
+                $"Runtime session {Id} cannot become terminal while "
+                + $"{openStepCount} Step(s) and {openCommandCount} Command(s) remain open.");
+    }
+
     private static bool CanTransition(RuntimeSessionStatus from, RuntimeSessionStatus to)
     {
         if (IsTerminalStatus(from))
@@ -539,6 +597,19 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
             or RuntimeSessionStatus.Failed
             or RuntimeSessionStatus.Canceled;
     }
+
+    private static bool IsTerminalStepStatus(RuntimeStepStatus status) => status is
+        RuntimeStepStatus.Completed
+        or RuntimeStepStatus.Failed
+        or RuntimeStepStatus.Skipped
+        or RuntimeStepStatus.Canceled;
+
+    private static bool IsTerminalCommandStatus(CommandExecutionStatus status) => status is
+        CommandExecutionStatus.Completed
+        or CommandExecutionStatus.Failed
+        or CommandExecutionStatus.TimedOut
+        or CommandExecutionStatus.Canceled
+        or CommandExecutionStatus.Rejected;
 
     private static string RequiredReason(string reason)
     {

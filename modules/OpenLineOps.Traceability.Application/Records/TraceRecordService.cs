@@ -288,9 +288,11 @@ public sealed class TraceRecordService : ITraceRecordService
             request.TargetId!,
             request.TargetCapabilityId!,
             request.CommandName!,
-            ParseEnum<TraceCommandStatus>(request.Status!, "Traceability.InvalidCommandStatus"),
-            ParseOptionalEnum<OpenLineOps.Runtime.Contracts.ResultJudgement>(
-                request.ResultJudgement,
+            ParseEnum<ExecutionStatus>(
+                request.ExecutionStatus!,
+                "Traceability.InvalidCommandExecutionStatus"),
+            ParseEnum<ResultJudgement>(
+                request.ResultJudgement!,
                 "Traceability.InvalidCommandResultJudgement"),
             request.CreatedAtUtc,
             request.DeadlineAtUtc,
@@ -316,7 +318,12 @@ public sealed class TraceRecordService : ITraceRecordService
             request.ActionId!,
             ParseEnum<TraceTargetKind>(request.TargetKind!, "Traceability.InvalidTargetKind"),
             request.TargetId!,
-            ParseEnum<TraceCommandStatus>(request.CommandStatus!, "Traceability.InvalidCommandStatus"),
+            ParseEnum<ExecutionStatus>(
+                request.CommandExecutionStatus!,
+                "Traceability.InvalidCommandExecutionStatus"),
+            ParseEnum<ResultJudgement>(
+                request.CommandResultJudgement!,
+                "Traceability.InvalidCommandResultJudgement"),
             request.Passed,
             request.MeasuredAtUtc);
     }

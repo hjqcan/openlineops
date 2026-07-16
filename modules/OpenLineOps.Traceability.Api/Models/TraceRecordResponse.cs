@@ -164,8 +164,8 @@ public sealed record TraceCommandResponse(
     string TargetId,
     string TargetCapabilityId,
     string CommandName,
-    string Status,
-    string? ResultJudgement,
+    string ExecutionStatus,
+    string ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,
@@ -185,7 +185,8 @@ public sealed record MeasurementRecordResponse(
     string ActionId,
     string TargetKind,
     string TargetId,
-    string CommandStatus,
+    string CommandExecutionStatus,
+    string CommandResultJudgement,
     bool? Passed,
     DateTimeOffset MeasuredAtUtc);
 

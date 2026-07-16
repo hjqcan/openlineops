@@ -16,7 +16,7 @@ public sealed class InspectionPersistenceTemplateTests
         await connection.OpenAsync();
 
         var options = CreateOptions(connection);
-        var planId = new InspectionPlanId("inspection.plan.visual-axis-check.v1");
+        var planId = new InspectionPlanId("inspection.plan.visual-axis-check");
         var createdAtUtc = new DateTimeOffset(2026, 6, 30, 8, 0, 0, TimeSpan.Zero);
         var activatedAtUtc = new DateTimeOffset(2026, 6, 30, 8, 30, 0, TimeSpan.Zero);
 

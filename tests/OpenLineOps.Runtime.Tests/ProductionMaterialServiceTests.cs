@@ -1,8 +1,14 @@
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
+using OpenLineOps.Runtime.Domain.Resources;
+using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -146,6 +152,149 @@ public sealed class ProductionMaterialServiceTests
             [ProductDisposition.Held, ProductDisposition.InProcess, ProductDisposition.Scrapped],
             dispositions.Select(entry => entry.CurrentDisposition!.Value).ToArray());
         Assert.All(timeline, entry => Assert.False(string.IsNullOrWhiteSpace(entry.ActorId)));
+    }
+
+    [Fact]
+    public async Task PostTerminalMaterialEventsRetainTheLastProductionRunContext()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var runs = new InMemoryProductionRunRepository(materials);
+        var service = new ProductionMaterialService(materials, runs);
+        var unitId = ProductionUnitId.New();
+        var material = MaterialReference.ForProductionUnit(unitId);
+        var slot = new SlotAddress("line-last-run", "station-test", "slot-01");
+        var station = MaterialLocation.AtStation(slot.LineId, slot.StationSystemId);
+        var downstream = MaterialLocation.AtStation(slot.LineId, "station-pack");
+
+        await RegisterUnit(service, unitId, "SN-LAST-RUN-SLOT");
+        await AssertAccepted(service.RegisterSlotAsync(new RegisterSlotCommand(
+            slot,
+            "engineer-a",
+            BaseTimeUtc)));
+        await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
+            material,
+            station,
+            "scanner-a",
+            BaseTimeUtc.AddSeconds(1))));
+        await AssertAccepted(service.ReserveSlotAsync(new ReserveSlotCommand(
+            slot,
+            material,
+            "coordinator-a",
+            BaseTimeUtc.AddSeconds(2))));
+        await AssertAccepted(service.LoadSlotAsync(new LoadSlotCommand(
+            slot,
+            material,
+            "operator-a",
+            BaseTimeUtc.AddSeconds(3))));
+        await AssertAccepted(service.StartSlotAsync(new StartSlotCommand(
+            slot,
+            material,
+            "agent-a",
+            BaseTimeUtc.AddSeconds(4))));
+
+        var passedRun = await CompleteServiceRunAsync(
+            materials,
+            runs,
+            unitId,
+            "SN-LAST-RUN-SLOT",
+            ResultJudgement.Passed,
+            BaseTimeUtc.AddSeconds(5),
+            slot);
+        var terminalUnit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(unitId));
+        Assert.Null(terminalUnit.Aggregate.ActiveProductionRunId);
+        Assert.Equal(passedRun.Id, terminalUnit.Aggregate.LastProductionRunId);
+        await AssertAccepted(service.UnloadSlotAsync(new UnloadSlotCommand(
+            slot,
+            material,
+            station,
+            "operator-a",
+            BaseTimeUtc.AddSeconds(8))));
+        await AssertAccepted(service.TransferAsync(new TransferMaterialCommand(
+            material,
+            station,
+            downstream,
+            "conveyor-a",
+            BaseTimeUtc.AddSeconds(9))));
+
+        var passedTimeline = await materials.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.StrictIntersection(
+                productionUnitId: unitId,
+                productionRunId: passedRun.Id));
+        Assert.Contains(passedTimeline, entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.LocationTransition
+            && entry.SourceLocation == MaterialLocation.InSlot(slot)
+            && entry.DestinationLocation == station
+            && entry.ProductionRunId == passedRun.Id);
+        Assert.Contains(passedTimeline, entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.SlotOccupancyTransition
+            && entry.PreviousSlotStatus == SlotOccupancyStatus.Occupied
+            && entry.CurrentSlotStatus == SlotOccupancyStatus.Available
+            && entry.ProductionRunId == passedRun.Id);
+        Assert.Contains(passedTimeline, entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.LocationTransition
+            && entry.SourceLocation == station
+            && entry.DestinationLocation == downstream
+            && entry.ProductionRunId == passedRun.Id);
+
+        var dispositionUnitId = ProductionUnitId.New();
+        await RegisterUnit(service, dispositionUnitId, "SN-LAST-RUN-DISPOSITION");
+        await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(dispositionUnitId),
+            station,
+            "scanner-a",
+            BaseTimeUtc.AddSeconds(1))));
+        var failedRun = await CompleteServiceRunAsync(
+            materials,
+            runs,
+            dispositionUnitId,
+            "SN-LAST-RUN-DISPOSITION",
+            ResultJudgement.Failed,
+            BaseTimeUtc.AddSeconds(2));
+        await AssertAccepted(service.HoldAsync(new HoldProductionUnitCommand(
+            dispositionUnitId,
+            "post-run review",
+            "quality-a",
+            BaseTimeUtc.AddSeconds(5))));
+        await AssertAccepted(service.ScrapAsync(new ScrapProductionUnitCommand(
+            dispositionUnitId,
+            "post-run rejection",
+            "quality-a",
+            BaseTimeUtc.AddSeconds(6))));
+        var dispositionTimeline = await materials.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.StrictIntersection(
+                productionUnitId: dispositionUnitId,
+                productionRunId: failedRun.Id));
+        Assert.Equal(3, dispositionTimeline.Count(entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.DispositionTransition
+            && entry.ProductionRunId == failedRun.Id));
+
+        var arrivalUnitId = ProductionUnitId.New();
+        await RegisterUnit(service, arrivalUnitId, "SN-LAST-RUN-ARRIVAL");
+        var arrivalRun = await CompleteServiceRunAsync(
+            materials,
+            runs,
+            arrivalUnitId,
+            "SN-LAST-RUN-ARRIVAL",
+            ResultJudgement.Failed,
+            BaseTimeUtc.AddSeconds(1));
+        await AssertAccepted(service.ArriveAsync(new ArriveMaterialCommand(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(arrivalUnitId),
+            station,
+            "scanner-a",
+            BaseTimeUtc.AddSeconds(4))));
+        var arrivalTimeline = await materials.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.StrictIntersection(
+                productionUnitId: arrivalUnitId,
+                productionRunId: arrivalRun.Id));
+        Assert.Contains(arrivalTimeline, entry =>
+            entry.Kind == ProductionMaterialEvidenceKind.LocationTransition
+            && entry.SourceLocation is null
+            && entry.DestinationLocation == station
+            && entry.ProductionRunId == arrivalRun.Id);
     }
 
     [Fact]
@@ -316,6 +465,117 @@ public sealed class ProductionMaterialServiceTests
             null,
             "operator-a",
             BaseTimeUtc)));
+    }
+
+    private static async Task<ProductionRun> CompleteServiceRunAsync(
+        InMemoryProductionMaterialRepository materials,
+        InMemoryProductionRunRepository runs,
+        ProductionUnitId unitId,
+        string identityValue,
+        ResultJudgement judgement,
+        DateTimeOffset createdAtUtc,
+        SlotAddress? slot = null)
+    {
+        var runId = ProductionRunId.New();
+        var stationSystemId = slot?.StationSystemId ?? "station-test";
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.last-run-context"),
+            new ProcessVersionId("process-version.last-run-context"),
+            []);
+        var operationPlan = new OperationExecutionPlan(
+            "operation.last-run-context",
+            stationSystemId,
+            new StationId(stationSystemId),
+            new ConfigurationSnapshotId("configuration.last-run-context"),
+            new RecipeSnapshotId("recipe.last-run-context"),
+            process,
+            []);
+        var run = ProductionRun.Create(
+            runId,
+            "project.last-run-context",
+            "application.last-run-context",
+            "snapshot.last-run-context",
+            "topology.last-run-context",
+            slot?.LineId ?? "line-last-run",
+            unitId,
+            new ProductionUnitIdentity("board-a", "serial-number", identityValue),
+            null,
+            null,
+            "operator-a",
+            operationPlan.Definition.OperationId,
+            createdAtUtc,
+            [operationPlan.Definition],
+            [
+                new RouteTransitionDefinition(
+                    "route.last-run-failed",
+                    operationPlan.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Judgement,
+                    ResultJudgement.Failed,
+                    terminalDisposition: ProductDisposition.Nonconforming),
+                new RouteTransitionDefinition(
+                    "route.last-run-default",
+                    operationPlan.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
+        var unit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(unitId));
+        Assert.True(await runs.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(runId, [operationPlan]),
+            new ProductionRunAdmission(unit.Aggregate.ToSnapshot(), unit.Revision)));
+        Assert.True(run.Start(createdAtUtc.AddMilliseconds(1)).Succeeded);
+        var operation = Assert.Single(run.Operations);
+        var stationResource = Assert.Single(operation.ResourceRequirements);
+        var leases = new List<ResourceLease>
+        {
+            new(
+                stationResource,
+                run.Id,
+                operation.OperationRunId,
+                1,
+                createdAtUtc.AddMilliseconds(2),
+                createdAtUtc.AddMinutes(1))
+        };
+        if (slot is not null)
+        {
+            leases.Add(new ResourceLease(
+                new ResourceRequirement(ResourceKind.Slot, slot.ToString()),
+                run.Id,
+                operation.OperationRunId,
+                2,
+                createdAtUtc.AddMilliseconds(2),
+                createdAtUtc.AddMinutes(1)));
+        }
+
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            createdAtUtc.AddMilliseconds(2)).Succeeded);
+        Assert.Equal(1, await runs.SaveAsync(run, 0));
+        var completedAtUtc = createdAtUtc.AddSeconds(2);
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            judgement,
+            null,
+            1,
+            1,
+            0,
+            completedAtUtc,
+            ProductionRunExecutionEvidenceTestFactory.Create(
+                run,
+                operation.OperationRunId,
+                ExecutionStatus.Completed,
+                judgement,
+                completedAtUtc,
+                1,
+                1)).Succeeded);
+        Assert.Equal(2, await runs.SaveAsync(run, 1));
+        Assert.True(run.IsTerminal);
+        return run;
     }
 
     private static LinkMaterialGenealogyCommand Link(

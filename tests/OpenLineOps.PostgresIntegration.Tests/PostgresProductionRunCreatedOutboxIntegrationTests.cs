@@ -34,7 +34,8 @@ public sealed class PostgresProductionRunCreatedOutboxIntegrationTests(
             new ExecutableRuntimeProcess(
                 new ProcessDefinitionId($"process-created-{suffix}"),
                 new ProcessVersionId($"process-version-created-{suffix}"),
-                []));
+                []),
+            []);
         var unitId = ProductionUnitId.New();
         var run = ProductionRun.Create(
             ProductionRunId.New(),

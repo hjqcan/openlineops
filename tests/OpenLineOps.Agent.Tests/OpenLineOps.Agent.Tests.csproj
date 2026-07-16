@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="RabbitMQ.Client" />
     <PackageReference Include="xunit" />
@@ -37,10 +38,11 @@
                       ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.LoopbackDevice\OpenLineOps.SamplePlugins.LoopbackDevice.csproj"
                       ReferenceOutputAssembly="false" />
-    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj"
-                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.LeastPrivilegeLauncher\OpenLineOps.LeastPrivilegeLauncher.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Agent\OpenLineOps.Agent.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj"
+                      Aliases="OpenLineOpsApi" />
     <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>

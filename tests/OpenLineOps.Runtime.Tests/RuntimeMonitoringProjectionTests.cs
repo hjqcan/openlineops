@@ -6,6 +6,7 @@ using OpenLineOps.Runtime.Application.Identifiers;
 using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -114,7 +115,7 @@ public sealed class RuntimeMonitoringProjectionTests
     }
 
     [Fact]
-    public async Task TargetProjectionTracksExactInProgressTerminalLatestAndCaseSensitiveStatuses()
+    public async Task TargetProjectionTracksExactRunningTerminalLatestAndCaseSensitiveStatuses()
     {
         var repository = new InMemoryRuntimeSessionRepository();
         var projection = new RuntimeMonitoringProjection(repository);
@@ -177,22 +178,22 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.True(firstRun.IsSuccess);
         Assert.Equal(RuntimeSessionStatus.Failed, firstRun.Value.Status);
         Assert.Collection(
-            executor.ObservedInProgressStatuses.Take(4),
-            status => AssertInProgressTarget(status, RuntimeTargetKinds.System, "System.Main"),
-            status => AssertInProgressTarget(status, RuntimeTargetKinds.SlotGroup, "Group.A"),
-            status => AssertInProgressTarget(status, RuntimeTargetKinds.Slot, "Slot.A"),
-            status => AssertInProgressTarget(status, RuntimeTargetKinds.Slot, "slot.a"));
+            executor.ObservedRunningStatuses.Take(4),
+            status => AssertRunningTarget(status, RuntimeTargetKinds.System, "System.Main"),
+            status => AssertRunningTarget(status, RuntimeTargetKinds.SlotGroup, "Group.A"),
+            status => AssertRunningTarget(status, RuntimeTargetKinds.Slot, "Slot.A"),
+            status => AssertRunningTarget(status, RuntimeTargetKinds.Slot, "slot.a"));
 
         var firstStatuses = await projection.GetTargetStatusesAsync(MonitoringScope, "Station.System");
         Assert.Equal(4, firstStatuses.Count);
-        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.System, "System.Main", RuntimeCommandStatus.Completed, null);
-        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.SlotGroup, "Group.A", RuntimeCommandStatus.Completed, null);
-        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.Slot, "Slot.A", RuntimeCommandStatus.Completed, null);
+        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.System, "System.Main", ExecutionStatus.Completed, null);
+        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.SlotGroup, "Group.A", ExecutionStatus.Completed, null);
+        AssertTargetStatus(firstStatuses, RuntimeTargetKinds.Slot, "Slot.A", ExecutionStatus.Completed, null);
         AssertTargetStatus(
             firstStatuses,
             RuntimeTargetKinds.Slot,
             "slot.a",
-            RuntimeCommandStatus.Failed,
+            ExecutionStatus.Failed,
             "lowercase slot failed");
 
         var secondRun = await runner.RunAsync(CreateStartRequest(
@@ -215,7 +216,7 @@ public sealed class RuntimeMonitoringProjectionTests
             status => status.TargetKind == RuntimeTargetKinds.System);
         Assert.Equal(secondRun.Value.SessionId, latestSystem.SessionId);
         Assert.Equal("action-system-newest", latestSystem.ActionId);
-        Assert.Equal(RuntimeCommandStatus.Failed, latestSystem.CommandStatus);
+        Assert.Equal(ExecutionStatus.Failed, latestSystem.CommandStatus);
         Assert.Equal("newest system session failed", latestSystem.FailureReason);
         Assert.True(latestSystem.IsTerminal);
 
@@ -285,8 +286,8 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.Equal("application-b", stationB.ApplicationId);
         var targetA = Assert.Single(await projection.GetTargetStatusesAsync(scopeA, "station.shared"));
         var targetB = Assert.Single(await projection.GetTargetStatusesAsync(scopeB, "station.shared"));
-        Assert.Equal(RuntimeCommandStatus.Completed, targetA.CommandStatus);
-        Assert.Equal(RuntimeCommandStatus.Failed, targetB.CommandStatus);
+        Assert.Equal(ExecutionStatus.Completed, targetA.CommandStatus);
+        Assert.Equal(ExecutionStatus.Failed, targetB.CommandStatus);
         Assert.Equal("application-b failed", targetB.FailureReason);
         Assert.Empty(await projection.GetStationStatusesAsync(new RuntimeMonitoringScope(
             "project-shared",
@@ -353,8 +354,8 @@ public sealed class RuntimeMonitoringProjectionTests
 
         var firstTarget = Assert.Single(await projection.GetTargetStatusesAsync(firstScope));
         var secondTarget = Assert.Single(await projection.GetTargetStatusesAsync(secondScope));
-        Assert.Equal(RuntimeCommandStatus.Completed, firstTarget.CommandStatus);
-        Assert.Equal(RuntimeCommandStatus.Failed, secondTarget.CommandStatus);
+        Assert.Equal(ExecutionStatus.Completed, firstTarget.CommandStatus);
+        Assert.Equal(ExecutionStatus.Failed, secondTarget.CommandStatus);
         Assert.Equal(2, (await projection.GetTargetStatusesAsync(unfilteredScope)).Count);
         Assert.Empty(await projection.GetSessionTimelineAsync(firstRun.Value.SessionId, secondScope));
         Assert.NotEmpty(await projection.GetSessionTimelineAsync(firstRun.Value.SessionId, firstScope));
@@ -419,7 +420,7 @@ public sealed class RuntimeMonitoringProjectionTests
             expectedAlarm = acknowledgement.Value;
 
             Assert.Equal(RuntimeSessionStatus.Failed, expectedStation.SessionStatus);
-            Assert.Equal(RuntimeCommandStatus.Failed, expectedTarget.CommandStatus);
+            Assert.Equal(ExecutionStatus.Failed, expectedTarget.CommandStatus);
             Assert.True(expectedTimeline.Length > 1);
             Assert.Equal(
                 expectedTimeline.Select(entry => entry.EventId).Distinct().Count(),
@@ -447,7 +448,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 liveRun.SessionId,
                 MonitoringScope)).ToArray();
             Assert.Equal(RuntimeSessionStatus.Completed, expectedLiveStation.SessionStatus);
-            Assert.Equal(RuntimeCommandStatus.Completed, expectedLiveTarget.CommandStatus);
+            Assert.Equal(ExecutionStatus.Completed, expectedLiveTarget.CommandStatus);
         }
 
         using (var repository = new SqliteRuntimeSessionRepository(database.ConnectionString))
@@ -531,6 +532,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessDefinitionId("process-monitoring"),
                 new ProcessVersionId("process-monitoring@1.0.0"),
                 executableNodes),
+            new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.TraceMetadata(
                 stationSystemId: stationSystemId,
                 actorId: "runtime-monitoring-tests",
@@ -570,6 +572,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessDefinitionId($"process-{scope.ApplicationId}"),
                 new ProcessVersionId($"process-{scope.ApplicationId}@1.0.0"),
                 nodes),
+            new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.TraceMetadata(
                 stationSystemId: stationSystemId,
                 actorId: "runtime-monitoring-tests",
@@ -595,6 +598,7 @@ public sealed class RuntimeMonitoringProjectionTests
                 new ProcessDefinitionId("process-run-scope"),
                 new ProcessVersionId("process-run-scope@1.0.0"),
                 nodes),
+            new Dictionary<string, ProductionContextValue>(),
             new RuntimeSessionTraceMetadata(
                 productionRunId,
                 ProductionUnitId.New(),
@@ -636,7 +640,7 @@ public sealed class RuntimeMonitoringProjectionTests
             new RuntimeTargetReference(targetKind, targetId));
     }
 
-    private static void AssertInProgressTarget(
+    private static void AssertRunningTarget(
         RuntimeTargetStatusProjection status,
         string targetKind,
         string targetId)
@@ -649,7 +653,7 @@ public sealed class RuntimeMonitoringProjectionTests
         Assert.Equal(1, status.OperationAttempt);
         Assert.Equal("Station.System", status.StationSystemId);
         Assert.Equal("UNIT-DEFAULT", status.ProductionUnitIdentity.Value);
-        Assert.Equal(RuntimeCommandStatus.InProgress, status.CommandStatus);
+        Assert.Equal(ExecutionStatus.Running, status.CommandStatus);
         Assert.False(status.IsTerminal);
         Assert.Null(status.FailureReason);
     }
@@ -658,7 +662,7 @@ public sealed class RuntimeMonitoringProjectionTests
         IEnumerable<RuntimeTargetStatusProjection> statuses,
         string targetKind,
         string targetId,
-        RuntimeCommandStatus expectedStatus,
+        ExecutionStatus expectedStatus,
         string? expectedFailureReason)
     {
         var status = Assert.Single(
@@ -741,7 +745,7 @@ public sealed class RuntimeMonitoringProjectionTests
             _results = new Queue<RuntimeCommandExecutionResult>(results);
         }
 
-        public List<RuntimeTargetStatusProjection> ObservedInProgressStatuses { get; } = [];
+        public List<RuntimeTargetStatusProjection> ObservedRunningStatuses { get; } = [];
 
         public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
             RuntimeCommandExecutionContext context,
@@ -754,7 +758,7 @@ public sealed class RuntimeMonitoringProjectionTests
                     cancellationToken),
                 status => status.TargetKind == context.TargetKind
                     && status.TargetId == context.TargetId);
-            ObservedInProgressStatuses.Add(current);
+            ObservedRunningStatuses.Add(current);
 
             return _results.Count == 0
                 ? RuntimeCommandExecutionResult.Completed()

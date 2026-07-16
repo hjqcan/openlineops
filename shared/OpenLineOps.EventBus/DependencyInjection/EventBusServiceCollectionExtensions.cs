@@ -13,6 +13,8 @@ namespace OpenLineOps.EventBus.DependencyInjection;
 
 public static class EventBusServiceCollectionExtensions
 {
+    private const string CapStorageIsolationKey = "openlineops";
+
     public static IServiceCollection AddOpenLineOpsEventBus(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -76,7 +78,7 @@ public static class EventBusServiceCollectionExtensions
             capOptions.FailedRetryCount = options.FailedRetryCount;
             capOptions.FailedRetryInterval = options.FailedRetryIntervalSeconds;
             capOptions.EnablePublishParallelSend = true;
-            capOptions.Version = "v1";
+            capOptions.Version = CapStorageIsolationKey;
             capOptions.SucceedMessageExpiredAfter = options.SucceedMessageExpiredAfterSeconds;
             capOptions.FailedMessageExpiredAfter = options.FailedMessageExpiredAfterSeconds;
             capOptions.ConsumerThreadCount = options.ConsumerThreadCount;

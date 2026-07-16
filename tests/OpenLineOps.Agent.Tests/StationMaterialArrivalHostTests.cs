@@ -107,6 +107,61 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         Assert.True(reader.IsDBNull(2));
     }
 
+    [Fact]
+    public async Task ClientRetriesTheSameMessageAfterAcknowledgementConnectionDrops()
+    {
+        var pipeName = $"openlineops-material-retry-{Guid.NewGuid():N}";
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.retry",
+            Now);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var server = Task.Run(async () =>
+        {
+            byte[] firstPayload;
+            await using (var first = CreateTestPipe(pipeName))
+            {
+                await first.WaitForConnectionAsync(timeout.Token);
+                firstPayload = await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+                    first,
+                    64 * 1024,
+                    timeout.Token);
+            }
+
+            await using var second = CreateTestPipe(pipeName);
+            await second.WaitForConnectionAsync(timeout.Token);
+            var replayPayload = await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+                second,
+                64 * 1024,
+                timeout.Token);
+            Assert.Equal(firstPayload, replayPayload);
+            await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
+                second,
+                JsonSerializer.SerializeToUtf8Bytes(
+                    new
+                    {
+                        messageId = signal.MessageId,
+                        accepted = true,
+                        replayed = true,
+                        failureCode = (string?)null
+                    }),
+                timeout.Token);
+        }, timeout.Token);
+
+        var response = await new StationMaterialArrivalLocalIpcClient(
+                new StationMaterialArrivalLocalIpcOptions(pipeName))
+            .ReportAsync(signal, TimeSpan.FromSeconds(5), timeout.Token);
+        await server;
+
+        Assert.True(response.Accepted);
+        Assert.True(response.Replayed);
+        Assert.Equal(signal.MessageId, response.MessageId);
+    }
+
     public ValueTask DisposeAsync()
     {
         if (Directory.Exists(_root))
@@ -116,6 +171,13 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
 
         return ValueTask.CompletedTask;
     }
+
+    private static NamedPipeServerStream CreateTestPipe(string pipeName) => new(
+        pipeName,
+        PipeDirection.InOut,
+        maxNumberOfServerInstances: 1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
     private IHost CreateHost(
         string databasePath,

@@ -60,7 +60,14 @@ public sealed record ProjectReleaseOperation(
     string FlowIrCanonicalJson,
     IReadOnlyCollection<string> BlockVersionIds,
     IReadOnlyCollection<ProjectReleaseOperationResource> Resources,
+    IReadOnlyCollection<ProjectReleaseOperationInputMapping> InputMappings,
     IReadOnlyCollection<ProjectReleaseAuthorizedAction> AuthorizedActions);
+
+public sealed record ProjectReleaseOperationInputMapping(
+    string TargetInputKey,
+    string SourceOperationId,
+    string SourceOutputKey,
+    string ExpectedValueKind);
 
 public sealed record ProjectReleaseOperationResource(
     string BindingId,

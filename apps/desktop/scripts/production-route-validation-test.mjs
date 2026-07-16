@@ -5,14 +5,70 @@ import ts from 'typescript';
 
 const sourceUrl = new URL('../src/renderer/production-route-validation.ts', import.meta.url);
 const source = await readFile(sourceUrl, 'utf8');
+assert.equal(source.includes('DeviceInstance'), false);
+assert.equal(source.includes("'ExternalSystem'"), false);
+const layoutSource = await readFile(
+  new URL('../src/renderer/production-route-layout.ts', import.meta.url),
+  'utf8');
+const compiledLayout = ts.transpileModule(layoutSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022
+  },
+  fileName: 'production-route-layout.ts'
+}).outputText;
+const layoutModuleUrl = `data:text/javascript;base64,${Buffer.from(compiledLayout).toString('base64')}`;
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ES2022,
     target: ts.ScriptTarget.ES2022
   },
   fileName: 'production-route-validation.ts'
-}).outputText;
+}).outputText.replace(
+  /from ['"]\.\/production-route-layout['"];/,
+  `from '${layoutModuleUrl}';`);
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`;
+const validationModule = await import(moduleUrl);
+for (const value of ['0', '-1', '9223372036854775807', '-9223372036854775808']) {
+  assert.equal(validationModule.isCanonicalContextValue('WholeNumber', value), true, value);
+}
+for (const value of ['+1', '01', '9223372036854775808', '-9223372036854775809']) {
+  assert.equal(validationModule.isCanonicalContextValue('WholeNumber', value), false, value);
+}
+for (const value of [
+  '0',
+  '3.5',
+  '-0.5',
+  '0.0000000000000000000000000001',
+  '79228162514264337593543950335',
+  '-79228162514264337593543950335'
+]) {
+  assert.equal(validationModule.isCanonicalContextValue('FixedPoint', value), true, value);
+}
+for (const value of [
+  '3.50',
+  '03.5',
+  '+3.5',
+  '.5',
+  '3.',
+  '-0',
+  '0.00000000000000000000000000001',
+  '79228162514264337593543950336'
+]) {
+  assert.equal(validationModule.isCanonicalContextValue('FixedPoint', value), false, value);
+}
+assert.equal(
+  validationModule.isCanonicalContextValue(
+    'DateTimeUtc',
+    '2028-02-29T08:00:00.0000000+00:00'),
+  true);
+for (const value of [
+  '2028-02-29T08:00:00.0000000Z',
+  '2027-02-29T08:00:00.0000000+00:00',
+  '2028-02-30T08:00:00.0000000+00:00'
+]) {
+  assert.equal(validationModule.isCanonicalContextValue('DateTimeUtc', value), false, value);
+}
 const workerSource = `
   import { parentPort, workerData } from 'node:worker_threads';
   const validation = await import(workerData.moduleUrl);
@@ -22,6 +78,7 @@ const workerSource = `
     stationSystemId: station,
     flowDefinitionId: \`flow.\${id}\`,
     configurationSnapshotId: \`configuration.\${id}\`,
+    inputMappings: [],
     resources: [{
       bindingId: \`resource.\${id}\`,
       kind: 'Station',
@@ -100,7 +157,13 @@ const workerSource = `
         'operation.vendor-test',
         'Completed')
     ],
-    lineControllerAuthorizations: []
+    lineControllerAuthorizations: [],
+    routeLayout: {
+      operationPositions: [
+        { operationId: 'operation.preparation', x: 120, y: 80 },
+        { operationId: 'operation.vendor-test', x: 400, y: 80 }
+      ]
+    }
   }, {
     topology: {
       topologyId: 'topology.main',
@@ -113,14 +176,14 @@ const workerSource = `
           bindingId: 'binding.operation.preparation',
           ownerSystemId: 'station.preparation',
           capabilityId: 'capability.preparation',
-          providerKind: 'ExternalSystem',
+          providerKind: 'Simulator',
           providerKey: 'program.preparation'
         },
         {
           bindingId: 'binding.operation.vendor-test',
           ownerSystemId: 'station.vendor-test',
           capabilityId: 'capability.vendor-test',
-          providerKind: 'ExternalSystem',
+          providerKind: 'Simulator',
           providerKey: 'program.vendor-test'
         }
       ],

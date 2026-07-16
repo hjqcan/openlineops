@@ -13,6 +13,7 @@ using OpenLineOps.Runtime.Domain.ProductionUnits;
 namespace OpenLineOps.Runtime.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.ProductionUnits)]
 public sealed class ProductionUnitsController(
@@ -38,7 +39,7 @@ public sealed class ProductionUnitsController(
                         request.IdentityKey,
                         request.IdentityValue,
                         request.LotId is null ? null : new ProductionLotId(request.LotId),
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -108,7 +109,7 @@ public sealed class ProductionUnitsController(
                 request.StationId,
                 request.LineId,
                 request.StationSystemId,
-                request.ActorId,
+                User.GetRequiredActorId(),
                 request.OccurredAtUtc);
             var result = await arrivalIngress.HandleAsync(
                     new MaterialArrived(
@@ -125,7 +126,7 @@ public sealed class ProductionUnitsController(
                         request.LineId,
                         request.StationSystemId,
                         StationMaterialArrivalSources.Api,
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     ProductionMaterialArrivalOrigin.CoordinatorApi,
                     cancellationToken)
@@ -165,19 +166,22 @@ public sealed class ProductionUnitsController(
                         new HoldProductionUnitCommand(
                             id,
                             ProductionMaterialApi.RequiredReason(request.Reason, command),
-                            request.ActorId,
+                            User.GetRequiredActorId(),
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Release" => await service.ReleaseAsync(
-                        new ReleaseProductionUnitCommand(id, request.ActorId, request.OccurredAtUtc),
+                        new ReleaseProductionUnitCommand(
+                            id,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Scrap" => await service.ScrapAsync(
                         new ScrapProductionUnitCommand(
                             id,
                             ProductionMaterialApi.RequiredReason(request.Reason, command),
-                            request.ActorId,
+                            User.GetRequiredActorId(),
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
@@ -214,7 +218,7 @@ public sealed class ProductionUnitsController(
                         MaterialReference.ForProductionUnit(id),
                         ProductionMaterialApi.ToDomain(request.ExpectedLocation),
                         ProductionMaterialApi.ToDomain(request.Destination),
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -245,6 +249,7 @@ public sealed class ProductionUnitsController(
 }
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.ProductionLots)]
 public sealed class ProductionLotsController(
@@ -264,7 +269,7 @@ public sealed class ProductionLotsController(
                         id,
                         request.ProductModelId,
                         request.DeclaredQuantity,
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -310,6 +315,7 @@ public sealed class ProductionLotsController(
 }
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.ProductionCarriers)]
 public sealed class ProductionCarriersController(
@@ -330,7 +336,7 @@ public sealed class ProductionCarriersController(
                         id,
                         request.CarrierTypeId,
                         request.Capacity,
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -386,7 +392,7 @@ public sealed class ProductionCarriersController(
                 request.StationId,
                 request.LineId,
                 request.StationSystemId,
-                request.ActorId,
+                User.GetRequiredActorId(),
                 request.OccurredAtUtc);
             var result = await arrivalIngress.HandleAsync(
                     new MaterialArrived(
@@ -403,7 +409,7 @@ public sealed class ProductionCarriersController(
                         request.LineId,
                         request.StationSystemId,
                         StationMaterialArrivalSources.Api,
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     ProductionMaterialArrivalOrigin.CoordinatorApi,
                     cancellationToken)
@@ -432,7 +438,7 @@ public sealed class ProductionCarriersController(
                         MaterialReference.ForCarrier(id),
                         ProductionMaterialApi.ToDomain(request.ExpectedLocation),
                         ProductionMaterialApi.ToDomain(request.Destination),
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -473,6 +479,7 @@ public sealed class ProductionCarriersController(
 }
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.SlotOccupancies)]
 public sealed class SlotOccupanciesController(
@@ -488,7 +495,10 @@ public sealed class SlotOccupanciesController(
         {
             var address = new SlotAddress(request.LineId, request.StationSystemId, request.SlotId);
             var result = await service.RegisterSlotAsync(
-                    new RegisterSlotCommand(address, request.ActorId, request.OccurredAtUtc),
+                    new RegisterSlotCommand(
+                        address,
+                        User.GetRequiredActorId(),
+                        request.OccurredAtUtc),
                     cancellationToken)
                 .ConfigureAwait(false);
             if (!result.Succeeded)
@@ -560,27 +570,43 @@ public sealed class SlotOccupanciesController(
             var result = command switch
             {
                 "Reserve" => await service.ReserveSlotAsync(
-                        new ReserveSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
+                        new ReserveSlotCommand(
+                            address,
+                            material!,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "ReleaseReservation" => await service.ReleaseSlotReservationAsync(
                         new ReleaseSlotReservationCommand(
                             address,
                             material!,
-                            request.ActorId,
+                            User.GetRequiredActorId(),
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Load" => await service.LoadSlotAsync(
-                        new LoadSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
+                        new LoadSlotCommand(
+                            address,
+                            material!,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Start" => await service.StartSlotAsync(
-                        new StartSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
+                        new StartSlotCommand(
+                            address,
+                            material!,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Complete" => await service.CompleteSlotAsync(
-                        new CompleteSlotCommand(address, material!, request.ActorId, request.OccurredAtUtc),
+                        new CompleteSlotCommand(
+                            address,
+                            material!,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Unload" => await service.UnloadSlotAsync(
@@ -591,7 +617,7 @@ public sealed class SlotOccupanciesController(
                                 ?? throw new ArgumentException(
                                     "Unload requires a destination.",
                                     nameof(request))),
-                            request.ActorId,
+                            User.GetRequiredActorId(),
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
@@ -599,20 +625,29 @@ public sealed class SlotOccupanciesController(
                         new BlockSlotCommand(
                             address,
                             ProductionMaterialApi.RequiredReason(request.Reason, command),
-                            request.ActorId,
+                            User.GetRequiredActorId(),
                             request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "Unblock" => await service.UnblockSlotAsync(
-                        new UnblockSlotCommand(address, request.ActorId, request.OccurredAtUtc),
+                        new UnblockSlotCommand(
+                            address,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "SetOffline" => await service.SetSlotOfflineAsync(
-                        new SetSlotOfflineCommand(address, request.ActorId, request.OccurredAtUtc),
+                        new SetSlotOfflineCommand(
+                            address,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 "BringOnline" => await service.BringSlotOnlineAsync(
-                        new BringSlotOnlineCommand(address, request.ActorId, request.OccurredAtUtc),
+                        new BringSlotOnlineCommand(
+                            address,
+                            User.GetRequiredActorId(),
+                            request.OccurredAtUtc),
                         cancellationToken)
                     .ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Unsupported Slot command {command}.")
@@ -635,6 +670,7 @@ public sealed class SlotOccupanciesController(
 }
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.MaterialGenealogy)]
 public sealed class MaterialGenealogyController(ProductionMaterialService service) : ControllerBase
@@ -652,7 +688,7 @@ public sealed class MaterialGenealogyController(ProductionMaterialService servic
                 new ProductionUnitId(request.ChildProductionUnitId),
                 request.Relationship,
                 request.OperationId,
-                request.ActorId,
+                User.GetRequiredActorId(),
                 request.OccurredAtUtc);
             var result = await service.LinkGenealogyAsync(command, cancellationToken)
                 .ConfigureAwait(false);
@@ -669,7 +705,7 @@ public sealed class MaterialGenealogyController(ProductionMaterialService servic
                     request.ChildProductionUnitId,
                     request.Relationship,
                     request.OperationId,
-                    request.ActorId,
+                    User.GetRequiredActorId(),
                     request.OccurredAtUtc));
         }
         catch (Exception exception) when (exception is ArgumentException

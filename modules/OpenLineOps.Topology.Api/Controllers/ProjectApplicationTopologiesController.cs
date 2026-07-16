@@ -30,6 +30,7 @@ using AppUpdateSystemRequest = OpenLineOps.Topology.Application.Topologies.Updat
 namespace OpenLineOps.Topology.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationTopologies)]
 public sealed class ProjectApplicationTopologiesController : ControllerBase, IAsyncActionFilter
@@ -250,7 +251,12 @@ public sealed class ProjectApplicationTopologiesController : ControllerBase, IAs
             applicationId,
             topologyId,
             systemId,
-            new AppUpdateSystemRequest(request.SystemType, request.DisplayName, request.Metadata),
+            new AppUpdateSystemRequest(
+                request.SystemType,
+                request.DisplayName,
+                request.RequiredCapabilityIds,
+                request.ProvidedCapabilityIds,
+                request.Metadata),
             cancellationToken).ConfigureAwait(false);
         return ToActionResult(result);
     }

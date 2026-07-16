@@ -1,7 +1,7 @@
 using System.Text.Json;
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Contracts;
-using ProductionExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
+using RuntimeExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 
 namespace OpenLineOps.Agent.Domain.StationJobs;
 
@@ -204,7 +204,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
                 $"Station job {Id} cannot start with an expired resource fence.");
         }
         Status = StationJobStatus.Running;
-        ExecutionStatus = ProductionExecutionStatus.Running;
+        ExecutionStatus = RuntimeExecutionStatus.Running;
     }
 
     public void ReportProgress(int percent, string phase, DateTimeOffset progressedAtUtc)
@@ -226,8 +226,8 @@ public sealed class StationJob : AggregateRoot<StationJobId>
     {
         ArgumentNullException.ThrowIfNull(completion);
         RequireStatus(StationJobStatus.Running);
-        if (completion.ExecutionStatus is ProductionExecutionStatus.Pending
-            or ProductionExecutionStatus.Running)
+        if (completion.ExecutionStatus is RuntimeExecutionStatus.Pending
+            or RuntimeExecutionStatus.Running)
         {
             throw new ArgumentException("Station job completion requires a terminal execution status.", nameof(completion));
         }
@@ -245,16 +245,16 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         FailureCode = Optional(completion.FailureCode, nameof(completion.FailureCode));
         FailureReason = Optional(completion.FailureReason, nameof(completion.FailureReason));
         CompletedAtUtc = completedAtUtc;
-        ProgressPercent = completion.ExecutionStatus == ProductionExecutionStatus.Completed
+        ProgressPercent = completion.ExecutionStatus == RuntimeExecutionStatus.Completed
             ? 100
             : ProgressPercent;
         Status = completion.ExecutionStatus switch
         {
-            ProductionExecutionStatus.Completed => StationJobStatus.Completed,
-            ProductionExecutionStatus.Failed => StationJobStatus.Failed,
-            ProductionExecutionStatus.TimedOut => StationJobStatus.TimedOut,
-            ProductionExecutionStatus.Canceled => StationJobStatus.Canceled,
-            ProductionExecutionStatus.Rejected => StationJobStatus.Rejected,
+            RuntimeExecutionStatus.Completed => StationJobStatus.Completed,
+            RuntimeExecutionStatus.Failed => StationJobStatus.Failed,
+            RuntimeExecutionStatus.TimedOut => StationJobStatus.TimedOut,
+            RuntimeExecutionStatus.Canceled => StationJobStatus.Canceled,
+            RuntimeExecutionStatus.Rejected => StationJobStatus.Rejected,
             _ => throw new ArgumentOutOfRangeException(nameof(completion))
         };
         ValidateTerminalResult();
@@ -265,7 +265,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         RequireStatus(StationJobStatus.Accepted);
         var atUtc = Utc(rejectedAtUtc, nameof(rejectedAtUtc));
         EnsureNotBefore(atUtc, AcceptedAtUtc!.Value, nameof(rejectedAtUtc));
-        ExecutionStatus = ProductionExecutionStatus.Rejected;
+        ExecutionStatus = RuntimeExecutionStatus.Rejected;
         Judgement = ResultJudgement.Unknown;
         OutputsJson = "{}";
         FailureCode = Required(code, nameof(code));
@@ -288,7 +288,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             atUtc,
             LastProgressAtUtc ?? StartedAtUtc ?? AcceptedAtUtc!.Value,
             nameof(canceledAtUtc));
-        ExecutionStatus = ProductionExecutionStatus.Canceled;
+        ExecutionStatus = RuntimeExecutionStatus.Canceled;
         Judgement = ResultJudgement.Aborted;
         OutputsJson = "{}";
         FailureCode = "Agent.ExecutionCanceled";
@@ -306,7 +306,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         }
 
         Status = StationJobStatus.RecoveryRequired;
-        ExecutionStatus = ProductionExecutionStatus.Failed;
+        ExecutionStatus = RuntimeExecutionStatus.Failed;
         Judgement = ResultJudgement.Unknown;
         FailureCode = "Agent.RecoveryRequired";
         FailureReason = Required(reason, nameof(reason));
@@ -388,23 +388,23 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         }
 
         var hasFailure = FailureCode is not null && FailureReason is not null;
-        if (ExecutionStatus == ProductionExecutionStatus.Completed
+        if (ExecutionStatus == RuntimeExecutionStatus.Completed
             && (hasFailure || Judgement == ResultJudgement.Unknown))
         {
             throw new InvalidDataException(
                 "Completed station execution requires a product judgement and cannot contain a system failure.");
         }
 
-        if (ExecutionStatus == ProductionExecutionStatus.Canceled
+        if (ExecutionStatus == RuntimeExecutionStatus.Canceled
             && (!hasFailure || Judgement != ResultJudgement.Aborted))
         {
             throw new InvalidDataException(
                 "Canceled station execution requires Aborted judgement and failure evidence.");
         }
 
-        if (ExecutionStatus is ProductionExecutionStatus.Failed
-                or ProductionExecutionStatus.TimedOut
-                or ProductionExecutionStatus.Rejected
+        if (ExecutionStatus is RuntimeExecutionStatus.Failed
+                or RuntimeExecutionStatus.TimedOut
+                or RuntimeExecutionStatus.Rejected
             && (!hasFailure || Judgement != ResultJudgement.Unknown))
         {
             throw new InvalidDataException(

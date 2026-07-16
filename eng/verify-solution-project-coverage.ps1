@@ -27,6 +27,31 @@ function Get-NormalizedRepoPath {
     return $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
 }
 
+function Get-SourceProjectFiles {
+    param([Parameter(Mandatory = $true)][string] $RootPath)
+
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push([System.IO.Path]::GetFullPath($RootPath))
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in Get-ChildItem -LiteralPath $directory -Force) {
+            if ($entry.PSIsContainer) {
+                if ($entry.Name -cin @("bin", "obj") `
+                    -or ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+
+                $pending.Push($entry.FullName)
+                continue
+            }
+
+            if ($entry.Extension -ceq ".csproj") {
+                $entry
+            }
+        }
+    }
+}
+
 $expectedProjects = @(
     foreach ($sourceRoot in $sourceRoots) {
         $rootPath = Join-Path $repoRoot $sourceRoot
@@ -34,10 +59,7 @@ $expectedProjects = @(
             throw "Required source root does not exist: $rootPath"
         }
 
-        Get-ChildItem -LiteralPath $rootPath -Filter "*.csproj" -File -Recurse |
-            Where-Object {
-                $_.FullName -notmatch "[\\/](?:bin|obj)[\\/]"
-            } |
+        Get-SourceProjectFiles -RootPath $rootPath |
             ForEach-Object {
                 Get-NormalizedRepoPath -Path $_.FullName
             }

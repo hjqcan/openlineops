@@ -33,7 +33,7 @@ public sealed class AlarmAppServiceTests
             var appService = new AlarmAppService(repository);
 
             details = await appService.RaiseAsync(new RaiseAlarmRequest(
-                "operations.alarm.application.v1",
+                "operations.alarm.application",
                 "station-beta",
                 "runtime",
                 "session-beta",
@@ -42,7 +42,7 @@ public sealed class AlarmAppServiceTests
                 "Runtime command failed."));
         }
 
-        Assert.Equal("operations.alarm.application.v1", details.Id);
+        Assert.Equal("operations.alarm.application", details.Id);
         Assert.Equal("station-beta", details.StationId);
         Assert.Equal(AlarmStatus.Raised, details.Status);
 

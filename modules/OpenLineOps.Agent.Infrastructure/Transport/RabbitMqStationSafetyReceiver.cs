@@ -233,7 +233,10 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         await DeclarePriorityQueueAsync(
                 channel,
                 EmergencyQueueName(),
-                $"station.{_options.AgentId}.{_options.StationId}.emergency-stop",
+                StationTransportRoute.Safety(
+                    _options.AgentId,
+                    _options.StationId,
+                    "emergency-stop"),
                 cancellationToken)
             .ConfigureAwait(false);
         await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
@@ -248,13 +251,19 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         await DeclarePriorityQueueAsync(
                 channel,
                 SafeStopQueueName(),
-                $"station.{_options.AgentId}.{_options.StationId}.safe-stop",
+                StationTransportRoute.Safety(
+                    _options.AgentId,
+                    _options.StationId,
+                    "safe-stop"),
                 cancellationToken)
             .ConfigureAwait(false);
         await DeclarePriorityQueueAsync(
                 channel,
                 JobCancelQueueName(),
-                $"station.{_options.AgentId}.{_options.StationId}.job-cancel",
+                StationTransportRoute.Safety(
+                    _options.AgentId,
+                    _options.StationId,
+                    "job-cancel"),
                 cancellationToken)
             .ConfigureAwait(false);
         await channel.BasicQosAsync(0, 1, global: false, cancellationToken)
@@ -349,13 +358,22 @@ public sealed class RabbitMqStationSafetyReceiver : IStationSafetyReceiver, IAsy
         delivery.Body);
 
     private string EmergencyQueueName() =>
-        $"openlineops.station.{_options.AgentId}.{_options.StationId}.emergency-stop";
+        StationTransportRoute.SafetyQueue(
+            _options.AgentId,
+            _options.StationId,
+            "emergency-stop");
 
     private string SafeStopQueueName() =>
-        $"openlineops.station.{_options.AgentId}.{_options.StationId}.safe-stop";
+        StationTransportRoute.SafetyQueue(
+            _options.AgentId,
+            _options.StationId,
+            "safe-stop");
 
     private string JobCancelQueueName() =>
-        $"openlineops.station.{_options.AgentId}.{_options.StationId}.job-cancel";
+        StationTransportRoute.SafetyQueue(
+            _options.AgentId,
+            _options.StationId,
+            "job-cancel");
 
     private static async ValueTask DisposeChannelAsync(IChannel? channel)
     {

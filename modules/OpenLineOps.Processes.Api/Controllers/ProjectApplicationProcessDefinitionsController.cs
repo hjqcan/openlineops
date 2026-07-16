@@ -9,6 +9,7 @@ using CreateApiDefinitionRequest = OpenLineOps.Processes.Api.Models.CreateProces
 namespace OpenLineOps.Processes.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Processes)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProcesses)]
 public sealed class ProjectApplicationProcessDefinitionsController : ControllerBase

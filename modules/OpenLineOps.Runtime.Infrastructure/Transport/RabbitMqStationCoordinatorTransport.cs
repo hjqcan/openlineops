@@ -1,5 +1,7 @@
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Execution;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
@@ -11,36 +13,51 @@ public sealed class RabbitMqStationCoordinatorTransport :
     IAsyncDisposable
 {
     private readonly StationCoordinatorTransportOptions _options;
-    private readonly ConnectionFactory _factory;
+    private readonly ConnectionFactory _publisherFactory;
+    private readonly ConnectionFactory _inboxFactory;
     private readonly IStationCoordinatorConfirmedPublicationTransport? _publicationTransport;
     private readonly StationResultDeliveryProcessor _resultProcessor;
-    private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _publisherConnectionGate = new(1, 1);
+    private readonly SemaphoreSlim _inboxConnectionGate = new(1, 1);
+    private readonly SemaphoreSlim _inboxConsumerGate = new(1, 1);
     private readonly SemaphoreSlim _publishGate = new(1, 1);
-    private IConnection? _connection;
+    private IConnection? _publisherConnection;
+    private IConnection? _inboxConnection;
     private IChannel? _publisherChannel;
     private IChannel? _inboxChannel;
+    private string? _inboxConsumerTag;
+    private int _disposed;
 
     public RabbitMqStationCoordinatorTransport(
         StationCoordinatorTransportOptions options,
         IStationJobCoordinationStore store,
+        IAgentPresenceRepository presenceRepository,
+        IStationArtifactReceiptVerifier artifactReceiptVerifier,
+        IClock clock,
         IStationCoordinatorConfirmedPublicationTransport? publicationTransport = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(presenceRepository);
+        ArgumentNullException.ThrowIfNull(artifactReceiptVerifier);
+        ArgumentNullException.ThrowIfNull(clock);
         ValidateName(options.CoordinatorId, nameof(options.CoordinatorId));
         ValidateName(options.JobExchange, nameof(options.JobExchange));
         ValidateName(options.EventExchange, nameof(options.EventExchange));
         _options = options;
         _publicationTransport = publicationTransport;
-        _resultProcessor = new StationResultDeliveryProcessor(store);
-        _factory = new ConnectionFactory
-        {
-            Uri = options.ResolveBrokerUri(),
-            ClientProvidedName = $"OpenLineOps.Coordinator/{options.CoordinatorId}",
-            AutomaticRecoveryEnabled = true,
-            TopologyRecoveryEnabled = true,
-            ConsumerDispatchConcurrency = 1
-        };
+        _resultProcessor = new StationResultDeliveryProcessor(
+            store,
+            presenceRepository,
+            artifactReceiptVerifier,
+            options,
+            clock);
+        _publisherFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Coordinator.Publisher/{options.CoordinatorId}");
+        _inboxFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Coordinator.Inbox/{options.CoordinatorId}");
     }
 
     public async ValueTask PublishAsync(
@@ -112,55 +129,119 @@ public sealed class RabbitMqStationCoordinatorTransport :
         Func<StationJobRecoveryRequired, CancellationToken, ValueTask> recoveryRequiredHandler,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(materialArrivalHandler);
-        ArgumentNullException.ThrowIfNull(recoveryRequiredHandler);
-        var channel = await GetInboxChannelAsync(cancellationToken).ConfigureAwait(false);
-        var settlement = new RabbitMqSettlement(channel);
-        var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += (_, delivery) => _resultProcessor.ProcessAsync(
-                ToDelivery(delivery),
-                settlement,
+        await StartResultInboxAsync(
                 materialArrivalHandler,
                 recoveryRequiredHandler,
-                cancellationToken)
-            .AsTask();
-        await channel.BasicConsumeAsync(
-                ResultQueueName(),
-                autoAck: false,
-                consumerTag: string.Empty,
-                noLocal: false,
-                exclusive: false,
-                arguments: null,
-                consumer,
+                cancellationToken,
                 cancellationToken)
             .ConfigureAwait(false);
-        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await StopResultInboxAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    public async Task StartResultInboxAsync(
+        Func<MaterialArrived, CancellationToken, ValueTask> materialArrivalHandler,
+        Func<StationJobRecoveryRequired, CancellationToken, ValueTask> recoveryRequiredHandler,
+        CancellationToken processingCancellationToken,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(materialArrivalHandler);
+        ArgumentNullException.ThrowIfNull(recoveryRequiredHandler);
+        await _inboxConsumerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_inboxConsumerTag is not null)
+            {
+                throw new InvalidOperationException(
+                    "The Station result Inbox consumer is already running.");
+            }
+
+            var channel = await GetInboxChannelAsync(cancellationToken).ConfigureAwait(false);
+            var settlement = new RabbitMqSettlement(channel);
+            var consumer = new AsyncEventingBasicConsumer(channel);
+            consumer.ReceivedAsync += (_, delivery) => _resultProcessor.ProcessAsync(
+                    ToDelivery(delivery),
+                    settlement,
+                    materialArrivalHandler,
+                    recoveryRequiredHandler,
+                    processingCancellationToken)
+                .AsTask();
+            _inboxConsumerTag = await channel.BasicConsumeAsync(
+                    ResultQueueName(),
+                    autoAck: false,
+                    consumerTag: string.Empty,
+                    noLocal: false,
+                    exclusive: false,
+                    arguments: null,
+                    consumer,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await InvalidateInboxChannelAsync().ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            _inboxConsumerGate.Release();
+        }
+    }
+
+    public async Task StopResultInboxAsync(CancellationToken cancellationToken = default)
+    {
+        await _inboxConsumerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _inboxConsumerTag = null;
+            await InvalidateInboxChannelAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _inboxConsumerGate.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_inboxChannel is not null)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            await _inboxChannel.DisposeAsync().ConfigureAwait(false);
+            return;
         }
+
+        await StopResultInboxAsync(CancellationToken.None).ConfigureAwait(false);
 
         if (_publisherChannel is not null)
         {
             await _publisherChannel.DisposeAsync().ConfigureAwait(false);
         }
 
-        if (_connection is not null)
+        if (_inboxConnection is not null)
         {
-            await _connection.DisposeAsync().ConfigureAwait(false);
+            await _inboxConnection.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_publisherConnection is not null)
+        {
+            await _publisherConnection.DisposeAsync().ConfigureAwait(false);
         }
 
         _publishGate.Dispose();
-        _connectionGate.Dispose();
+        _inboxConsumerGate.Dispose();
+        _inboxConnectionGate.Dispose();
+        _publisherConnectionGate.Dispose();
     }
 
     private async ValueTask<IChannel> GetPublisherChannelAsync(CancellationToken cancellationToken)
     {
-        var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await GetPublisherConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
         if (_publisherChannel is { IsOpen: true })
         {
             return _publisherChannel;
@@ -187,7 +268,8 @@ public sealed class RabbitMqStationCoordinatorTransport :
 
     private async ValueTask<IChannel> GetInboxChannelAsync(CancellationToken cancellationToken)
     {
-        var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await GetInboxConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
         if (_inboxChannel is { IsOpen: true })
         {
             return _inboxChannel;
@@ -225,7 +307,8 @@ public sealed class RabbitMqStationCoordinatorTransport :
                      nameof(StationJobProgressed),
                      nameof(StationJobCompleted),
                      nameof(StationJobRecoveryRequired),
-                     nameof(MaterialArrived)
+                     nameof(MaterialArrived),
+                     nameof(AgentPresenceReported)
                  })
         {
             await _inboxChannel.QueueBindAsync(
@@ -251,34 +334,89 @@ public sealed class RabbitMqStationCoordinatorTransport :
         }
     }
 
-    private async ValueTask<IConnection> GetConnectionAsync(CancellationToken cancellationToken)
+    private async ValueTask InvalidateInboxChannelAsync()
     {
-        if (_connection is { IsOpen: true })
+        var channel = Interlocked.Exchange(ref _inboxChannel, null);
+        if (channel is not null)
         {
-            return _connection;
+            await channel.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async ValueTask<IConnection> GetPublisherConnectionAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_publisherConnection is { IsOpen: true })
+        {
+            return _publisherConnection;
         }
 
-        await _connectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _publisherConnectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_connection is { IsOpen: true })
+            if (_publisherConnection is { IsOpen: true })
             {
-                return _connection;
+                return _publisherConnection;
             }
 
-            if (_connection is not null)
+            if (_publisherConnection is not null)
             {
-                await _connection.DisposeAsync().ConfigureAwait(false);
+                await _publisherConnection.DisposeAsync().ConfigureAwait(false);
             }
 
-            _connection = await _factory.CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
-            return _connection;
+            _publisherConnection = await _publisherFactory
+                .CreateConnectionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return _publisherConnection;
         }
         finally
         {
-            _connectionGate.Release();
+            _publisherConnectionGate.Release();
         }
     }
+
+    private async ValueTask<IConnection> GetInboxConnectionAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_inboxConnection is { IsOpen: true })
+        {
+            return _inboxConnection;
+        }
+
+        await _inboxConnectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_inboxConnection is { IsOpen: true })
+            {
+                return _inboxConnection;
+            }
+
+            if (_inboxConnection is not null)
+            {
+                await _inboxConnection.DisposeAsync().ConfigureAwait(false);
+            }
+
+            _inboxConnection = await _inboxFactory
+                .CreateConnectionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return _inboxConnection;
+        }
+        finally
+        {
+            _inboxConnectionGate.Release();
+        }
+    }
+
+    private static ConnectionFactory CreateFactory(
+        StationCoordinatorTransportOptions options,
+        string clientProvidedName) => new()
+        {
+            Uri = options.ResolveBrokerUri(),
+            ClientProvidedName = clientProvidedName,
+            AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true,
+            ConsumerDispatchConcurrency = 1
+        };
 
     private string ResultQueueName() =>
         $"openlineops.coordinator.{_options.CoordinatorId}.station-results";

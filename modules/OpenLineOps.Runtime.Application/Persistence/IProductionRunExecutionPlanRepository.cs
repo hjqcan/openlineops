@@ -26,6 +26,17 @@ public sealed record ProductionRunExecutionPlan
                 "A Production Run execution plan requires an id and at least one operation.");
         }
 
+        var operationIds = operations.Select(static operation => operation.Definition.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (operationIds.Count != operations.Count
+            || operations.Any(operation => operation.InputMappings.Any(mapping =>
+                !operationIds.Contains(mapping.SourceOperationId))))
+        {
+            throw new ArgumentException(
+                "A Production Run execution plan requires unique Operations and existing input mapping sources.",
+                nameof(operations));
+        }
+
         Operations = operations.ToArray();
     }
 

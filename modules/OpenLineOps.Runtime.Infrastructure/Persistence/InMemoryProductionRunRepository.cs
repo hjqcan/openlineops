@@ -25,6 +25,8 @@ public sealed class InMemoryProductionRunRepository :
 
     public int SaveCount => Volatile.Read(ref _saveCount);
 
+    internal object CoordinationGate => _materials.CoordinationGate;
+
     public ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
@@ -112,23 +114,65 @@ public sealed class InMemoryProductionRunRepository :
                 throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
             }
 
-            nextRevision = checked(expectedRevision + 1);
-            _materials.SynchronizeProductionRun(run, nextRevision);
-            var updated = new StoredProductionRun(
-                ProductionRunSnapshotMapper.ToSnapshot(run),
-                stored.ExecutionPlan,
-                nextRevision);
-            if (!_runs.TryUpdate(run.Id, updated, stored))
+            if (ProductionRunSnapshotMapper.ToAggregate(stored.Snapshot).IsTerminal)
             {
-                throw new InvalidOperationException(
-                    $"Production Run {run.Id} lost atomic ownership while synchronizing its Unit.");
+                var candidate = ProductionRunSnapshotMapper.ToSnapshot(run);
+                if (!CanonicalJsonEquals(stored.Snapshot, candidate))
+                {
+                    throw new InvalidOperationException(
+                        $"Terminal Production Run {run.Id} is immutable.");
+                }
+
+                return ValueTask.FromResult(stored.Revision);
             }
 
-            if (run.IsTerminal)
+            nextRevision = checked(expectedRevision + 1);
+            var materialSnapshot = _materials.CaptureCoordinationSnapshot();
+            var hadTerminalOutbox = _terminalOutbox.TryGetValue(run.Id, out var terminalOutbox);
+            StoredProductionRun? updated = null;
+            try
             {
-                _terminalOutbox.TryAdd(
-                    run.Id,
-                    new StoredTerminalOutboxItem(run.ToSnapshot(), 0, null));
+                _materials.SynchronizeProductionRun(run, nextRevision);
+                updated = new StoredProductionRun(
+                    ProductionRunSnapshotMapper.ToSnapshot(run),
+                    stored.ExecutionPlan,
+                    nextRevision,
+                    run.IsTerminal
+                        ? new ProductionRunTerminalEvidence(
+                            run.ToSnapshot(),
+                            _materials.CaptureTerminalTimeline(run))
+                        : null);
+                if (!_runs.TryUpdate(run.Id, updated, stored))
+                {
+                    throw new InvalidOperationException(
+                        $"Production Run {run.Id} lost atomic ownership while synchronizing its Unit.");
+                }
+
+                if (run.IsTerminal
+                    && !_terminalOutbox.TryAdd(run.Id, new StoredTerminalOutboxItem(0, null)))
+                {
+                    throw new InvalidDataException(
+                        $"Production Run {run.Id} has orphaned terminal outbox state.");
+                }
+            }
+            catch
+            {
+                _materials.RestoreCoordinationSnapshot(materialSnapshot);
+                if (updated is not null)
+                {
+                    _runs.TryUpdate(run.Id, stored, updated);
+                }
+
+                if (hadTerminalOutbox)
+                {
+                    _terminalOutbox[run.Id] = terminalOutbox!;
+                }
+                else
+                {
+                    _terminalOutbox.TryRemove(run.Id, out _);
+                }
+
+                throw;
             }
         }
 
@@ -190,6 +234,31 @@ public sealed class InMemoryProductionRunRepository :
             .ThenBy(entry => entry.Run.Id.Value)
             .ToArray();
         return ValueTask.FromResult<IReadOnlyCollection<ProductionRunPersistenceEntry>>(entries);
+    }
+
+    public ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+        ProductionRunTerminalPageRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        var entries = _runs.Values
+            .Select(static stored => stored.TerminalEvidence)
+            .Where(static evidence => evidence is not null)
+            .Cast<ProductionRunTerminalEvidence>()
+            .Where(evidence => request.After is null || IsAfter(evidence.Run, request.After))
+            .OrderBy(static evidence => evidence.Run.LastTransitionAtUtc)
+            .ThenBy(static evidence => evidence.Run.RunId.Value)
+            .Take(request.PageSize + 1)
+            .ToArray();
+        var hasMore = entries.Length > request.PageSize;
+        var items = hasMore ? entries[..request.PageSize] : entries;
+        var next = hasMore
+            ? new ProductionRunTerminalCursor(
+                items[^1].Run.LastTransitionAtUtc,
+                items[^1].Run.RunId)
+            : null;
+        return ValueTask.FromResult(new ProductionRunTerminalPage(items, next));
     }
 
     public ValueTask<ProductionRunExecutionPlan?> GetByRunIdAsync(
@@ -280,14 +349,26 @@ public sealed class InMemoryProductionRunRepository :
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
         cancellationToken.ThrowIfCancellationRequested();
-        var items = _terminalOutbox.Values
-            .OrderBy(item => item.Run.CompletedAtUtc)
-            .ThenBy(item => item.Run.RunId.Value)
+        var items = _terminalOutbox
+            .Select(pair => new
+            {
+                pair.Key,
+                Outbox = pair.Value,
+                Evidence = _runs.TryGetValue(pair.Key, out var stored)
+                    ? stored.TerminalEvidence
+                    : null
+            })
+            .Select(item => item.Evidence is null
+                ? throw new InvalidDataException(
+                    $"Production Run {item.Key} terminal outbox has no immutable evidence.")
+                : new { item.Key, item.Outbox, Evidence = item.Evidence })
+            .OrderBy(item => item.Evidence.Run.CompletedAtUtc)
+            .ThenBy(item => item.Key.Value)
             .Take(maximumCount)
             .Select(item => new ProductionRunTerminalOutboxItem(
-                item.Run,
-                item.AttemptCount,
-                item.LastError))
+                item.Evidence,
+                item.Outbox.AttemptCount,
+                item.Outbox.LastError))
             .ToArray();
         return ValueTask.FromResult<IReadOnlyCollection<ProductionRunTerminalOutboxItem>>(items);
     }
@@ -333,14 +414,36 @@ public sealed class InMemoryProductionRunRepository :
     private sealed record StoredProductionRun(
         PersistedProductionRun Snapshot,
         ProductionRunExecutionPlan ExecutionPlan,
-        long Revision);
+        long Revision,
+        ProductionRunTerminalEvidence? TerminalEvidence = null);
     private sealed record StoredCreatedOutboxItem(
         Guid EventId,
         DateTimeOffset OccurredAtUtc,
         int AttemptCount,
         string? LastError);
     private sealed record StoredTerminalOutboxItem(
-        ProductionRunSnapshot Run,
         int AttemptCount,
         string? LastError);
+
+    private static bool IsAfter(
+        ProductionRunSnapshot run,
+        ProductionRunTerminalCursor cursor)
+    {
+        var timestampComparison = run.LastTransitionAtUtc.CompareTo(cursor.LastTransitionAtUtc);
+        return timestampComparison > 0
+            || timestampComparison == 0 && run.RunId.Value.CompareTo(cursor.RunId.Value) > 0;
+    }
+
+    private static bool CanonicalJsonEquals(
+        PersistedProductionRun left,
+        PersistedProductionRun right)
+    {
+        var leftJson = System.Text.Json.JsonSerializer.Serialize(left);
+        var rightJson = System.Text.Json.JsonSerializer.Serialize(right);
+        using var leftDocument = System.Text.Json.JsonDocument.Parse(leftJson);
+        using var rightDocument = System.Text.Json.JsonDocument.Parse(rightJson);
+        return System.Text.Json.JsonElement.DeepEquals(
+            leftDocument.RootElement,
+            rightDocument.RootElement);
+    }
 }

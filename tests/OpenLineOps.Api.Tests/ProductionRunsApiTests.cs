@@ -17,15 +17,15 @@ using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public ProductionRunsApiTests(WebApplicationFactory<Program> factory)
+    public ProductionRunsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -40,14 +40,13 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             services.RemoveAll<IProjectReleaseProductionRunLauncher>();
             services.AddSingleton<IProjectReleaseProductionRunLauncher>(launcher);
         }));
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         using var response = await client.PostAsJsonAsync("/api/production-runs", new
         {
             projectId = "project.raw-plan",
             projectSnapshotId = "snapshot.raw-plan",
             productionRunId = Guid.NewGuid().ToString("D"),
             productionUnitId = Guid.NewGuid().ToString("D"),
-            actorId = "operator.raw-plan",
             operations = new[] { new { resourceId = "client.injected" } }
         });
 
@@ -65,8 +64,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
                 projectId = "project.removed",
                 projectSnapshotId = "snapshot.removed",
                 productionRunId = Guid.NewGuid().ToString("D"),
-                productionUnitId = Guid.NewGuid().ToString("D"),
-                actorId = "operator.removed"
+                productionUnitId = Guid.NewGuid().ToString("D")
             });
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
@@ -132,10 +130,11 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operation.OperationRunId,
             ResultJudgement.Failed,
             null,
-            3,
-            4,
-            1,
-            createdAtUtc.AddSeconds(3)).Succeeded);
+            0,
+            0,
+            0,
+            createdAtUtc.AddSeconds(3),
+            CreateExecutionEvidence(run, operation, createdAtUtc.AddSeconds(3))).Succeeded);
         await repository.SaveAsync(run, 0);
 
         using var response = await _client.GetAsync($"/api/production-runs/{runId.Value:D}");
@@ -223,7 +222,6 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         var decisionId = "a5555555-5555-5555-5555-555555555555";
         var request = new
         {
-            actorId = "operator.recovery",
             reason = "Inspection confirms completion.",
             operationId = (string?)null,
             recoveryDecision = new
@@ -252,6 +250,9 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         var recovery = Assert.Single(document.RootElement.GetProperty("recoveryDecisions").EnumerateArray());
         Assert.Equal(decisionId, recovery.GetProperty("decisionId").GetGuid().ToString("D"));
         Assert.Equal("Reconcile", recovery.GetProperty("kind").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            recovery.GetProperty("actorId").GetString());
 
         using var duplicate = await _client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
@@ -262,7 +263,6 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
-                request.actorId,
                 reason = "Different immutable evidence.",
                 request.operationId,
                 recoveryDecision = new
@@ -282,7 +282,6 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
-                request.actorId,
                 request.reason,
                 request.operationId,
                 recoveryDecision = new
@@ -308,7 +307,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         new ExecutableRuntimeProcess(
             new ProcessDefinitionId("process.main"),
             new ProcessVersionId("process-version.main"),
-            []));
+            []),
+        []);
 
     private static RouteTransitionDefinition[] TerminalRoutes(string operationId) =>
     [
@@ -326,6 +326,48 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             RuntimeRouteTransitionKind.Sequence,
             terminalDisposition: ProductDisposition.Completed)
     ];
+
+    private static OperationExecutionEvidence CreateExecutionEvidence(
+        ProductionRun run,
+        OperationRun operation,
+        DateTimeOffset completedAtUtc) => new(
+            OperationExecutionEvidenceOrigin.RuntimeSession,
+            operation.RuntimeSessionId!.Value.Value,
+            run.Id.Value,
+            run.ProductionUnitId.Value,
+            run.ProductionLineDefinitionId,
+            operation.OperationId,
+            operation.OperationRunId,
+            operation.Attempt,
+            operation.StationSystemId,
+            operation.StationId.Value,
+            operation.ProcessDefinitionId.Value,
+            operation.ProcessVersionId.Value,
+            operation.ConfigurationSnapshotId.Value,
+            operation.RecipeSnapshotId.Value,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            run.LotId,
+            run.CarrierId,
+            null,
+            null,
+            run.ActorId,
+            run.ProjectId,
+            run.ApplicationId,
+            run.ProjectSnapshotId,
+            run.TopologyId,
+            "Completed",
+            completedAtUtc,
+            operation.FencingTokens.Select(pair => new OperationResourceFenceEvidence(
+                pair.Key.Kind.ToString(),
+                pair.Key.ResourceId,
+                pair.Value,
+                completedAtUtc.AddMinutes(5))).ToArray(),
+            [],
+            [],
+            [],
+            []);
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
         await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());

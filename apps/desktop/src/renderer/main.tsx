@@ -27,7 +27,7 @@ import type {
   PlatformResponse,
   PublishedProjectSnapshotResponse,
   RuntimeAlarm,
-  RuntimeCommandStatus,
+  ExecutionStatus,
   RuntimeMonitoringScope,
   RuntimeSessionStatus,
   RuntimeStationStatus,
@@ -76,6 +76,10 @@ import {
   type EditorTabModel,
   type EditorTabState
 } from './editor-workspace-model';
+import {
+  loadRuntimeMonitoringProjection,
+  type RuntimeMonitoringProjection
+} from './runtime-monitoring-refresh-model';
 import './styles.css';
 import './production.css';
 import './operations.css';
@@ -125,7 +129,6 @@ type HubState = 'Disconnected' | 'Connecting' | 'Connected' | 'Reconnecting';
 interface ProductionRunFormState {
   productionUnitId: string;
   productionUnitIdentityValue: string;
-  actorId: string;
 }
 
 interface PendingUnsavedGuard {
@@ -138,8 +141,7 @@ interface PendingUnsavedGuard {
 
 const emptyProductionRunForm: ProductionRunFormState = {
   productionUnitId: '',
-  productionUnitIdentityValue: '',
-  actorId: ''
+  productionUnitIdentityValue: ''
 };
 
 declare global {
@@ -173,6 +175,7 @@ function App(): React.ReactElement {
   const documentRegistry = useMemo(() => new DirtyDocumentRegistry(), []);
   const [editorTabState, setEditorTabState] = useState<EditorTabState>({ tabs: [], activeId: null });
   const [pendingUnsavedGuard, setPendingUnsavedGuard] = useState<PendingUnsavedGuard | null>(null);
+  const [unsavedGuardBusy, setUnsavedGuardBusy] = useState(false);
   useDocumentRegistrySnapshot(documentRegistry);
 
   const activeApplication = useMemo(
@@ -247,40 +250,14 @@ function App(): React.ReactElement {
     }
 
     if (status.health === 'Healthy') {
-      const [stationRows, alarmRows, traceResponse] = await Promise.all([
-        activeMonitoringScope
-          ? getStationStatuses(activeMonitoringScope)
-          : Promise.resolve([]),
-        getAlarms(),
-        getTraceRecords()
-      ]);
-      const scopedStationRows = stationRows.filter(statusRow =>
-        runtimeStatusMatchesScope(statusRow, activeMonitoringScope)
-        && isRuntimeSessionStatus(statusRow.sessionStatus));
-      setStations(scopedStationRows);
-      setAlarms(alarmRows);
-      setTraceRows(traceResponse?.items ?? []);
-      const scopedTargetRows = activeMonitoringScope
-        ? (await getTargetStatuses(
-          activeMonitoringScope,
-          scopedStationRows.map(station => station.stationSystemId)))
-          .filter(statusRow => runtimeStatusMatchesScope(statusRow, activeMonitoringScope)
-            && isRuntimeCommandStatus(statusRow.commandStatus))
-        : [];
-      setTargetStatuses(scopedTargetRows);
-
-      const selectedSessionId = activeMonitoringScope
-        ? lastProjectRunSessionId ?? scopedStationRows[0]?.latestSessionId
-        : null;
-      if (selectedSessionId && activeMonitoringScope) {
-        setTimeline(await getTimeline(selectedSessionId, activeMonitoringScope));
-      } else {
-        setTimeline([]);
-      }
-    } else {
-      setStations([]);
-      setTargetStatuses([]);
-      setTimeline([]);
+      const projection = await readRuntimeMonitoringProjection(
+        activeMonitoringScope,
+        lastProjectRunSessionId);
+      setStations(projection.stations);
+      setTargetStatuses(projection.targets);
+      setAlarms(projection.alarms);
+      setTraceRows(projection.traces);
+      setTimeline(projection.timeline);
     }
   }, [activeMonitoringScope, lastProjectRunSessionId]);
   const refreshRef = useRef(refresh);
@@ -412,7 +389,7 @@ function App(): React.ReactElement {
       return;
     }
 
-    const connection = createRuntimeHubConnection(config.apiBaseUrl);
+    const connection = createRuntimeHubConnection(config.apiBaseUrl, config.apiAccessToken);
     runtimeHubConnectionRef.current = connection;
     let disposed = false;
     let retryTimer: number | undefined;
@@ -458,7 +435,7 @@ function App(): React.ReactElement {
     connection.on('TargetStatusChanged', (status: RuntimeTargetStatus) => {
       recordSmokeEvent('TargetStatusChanged');
       if (!runtimeStatusMatchesScope(status, monitoringScopeRef.current)
-          || !isRuntimeCommandStatus(status.commandStatus)) {
+          || !isExecutionStatus(status.commandStatus)) {
         return;
       }
 
@@ -510,7 +487,7 @@ function App(): React.ReactElement {
       joinedMonitoringScopeRef.current = null;
       void connection.stop();
     };
-  }, [backendStatus?.health, config?.apiBaseUrl]);
+  }, [backendStatus?.health, config?.apiAccessToken, config?.apiBaseUrl]);
 
   useEffect(() => {
     const connection = runtimeHubConnectionRef.current;
@@ -570,6 +547,7 @@ function App(): React.ReactElement {
       proceed();
       return;
     }
+    setUnsavedGuardBusy(false);
     setPendingUnsavedGuard({ title, detail, documentIds, proceed, cancel });
   }, [documentRegistry]);
 
@@ -632,9 +610,19 @@ function App(): React.ReactElement {
       return;
     }
 
-    setWorkspaceMode(mode);
-    setActiveNav(mode === 'run' ? 'topology' : activeNav === 'dashboard' ? 'projects' : activeNav);
-  }, [activeApplicationSnapshot, activeNav, activeWorkspace]);
+    const applyMode = (): void => {
+      setWorkspaceMode(mode);
+      setActiveNav(mode === 'run' ? 'topology' : activeNav === 'dashboard' ? 'projects' : activeNav);
+    };
+    if (mode === 'run') {
+      runWithUnsavedGuard(
+        'Enter Run mode?',
+        'Editable Application source contains unsaved changes. Save or discard it before loading the immutable runtime snapshot.',
+        applyMode);
+      return;
+    }
+    applyMode();
+  }, [activeApplicationSnapshot, activeNav, activeWorkspace, runWithUnsavedGuard]);
 
   const openRunProjectDialog = useCallback(() => {
     if (!activeWorkspace) {
@@ -660,15 +648,20 @@ function App(): React.ReactElement {
       return;
     }
 
-    setProductionRunForm({
-      ...emptyProductionRunForm,
-      productionUnitId: crypto.randomUUID()
-    });
-    setRunDialogOpen(true);
-  }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, hubState]);
+    runWithUnsavedGuard(
+      'Run the published Project?',
+      'Unsaved editor source is not part of the immutable snapshot. Save or discard it before creating a Production Run.',
+      () => {
+        setProductionRunForm({
+          ...emptyProductionRunForm,
+          productionUnitId: crypto.randomUUID()
+        });
+        setRunDialogOpen(true);
+      });
+  }, [activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, hubState, runWithUnsavedGuard]);
 
   const runActiveProject = useCallback(async () => {
-    if (!activeWorkspace || !activeApplicationSnapshot) {
+    if (!activeWorkspace || !activeApplicationSnapshot || !config) {
       setMessage('Open a published Application snapshot before running.');
       setRunDialogOpen(false);
       return;
@@ -700,8 +693,7 @@ function App(): React.ReactElement {
       projectId: activeWorkspace.project.projectId,
       projectSnapshotId: snapshotId,
       productionRunId,
-      productionUnitId: productionRunForm.productionUnitId,
-      actorId: productionRunForm.actorId
+      productionUnitId: productionRunForm.productionUnitId
     };
     setMessage(`Starting published snapshot ${snapshotId}`);
     try {
@@ -735,7 +727,6 @@ function App(): React.ReactElement {
           identityKey: context.productModelIdentityInputKey,
           identityValue: productionRunForm.productionUnitIdentityValue,
           lotId: null,
-          actorId: productionRunForm.actorId,
           occurredAtUtc: new Date().toISOString()
         });
       }
@@ -760,7 +751,6 @@ function App(): React.ReactElement {
           stationId: context.entryStationId,
           lineId: context.productionLineDefinitionId,
           stationSystemId: context.entryStationSystemId,
-          actorId: productionRunForm.actorId,
           occurredAtUtc: new Date().toISOString()
         });
         if (!unitResponse.ok || !unitResponse.body) {
@@ -795,25 +785,24 @@ function App(): React.ReactElement {
         response.body,
         runScope,
         request,
-        productionRunForm.productionUnitIdentityValue);
+        productionRunForm.productionUnitIdentityValue,
+        config.apiActorId);
 
       setLastProjectRun(response.body);
       setRunDialogOpen(false);
       setMessage(`Production run ${response.body.executionStatus}: ${response.body.productionRunId}`);
-      const stationRows = (await getStationStatuses(runScope))
-        .filter(status => runtimeStatusMatchesScope(status, runScope)
-          && isRuntimeSessionStatus(status.sessionStatus));
-      setStations(stationRows);
-      const targetRows = await getTargetStatuses(
-        runScope,
-        stationRows.map(station => station.stationSystemId));
-      setTargetStatuses(targetRows.filter(status =>
-        runtimeStatusMatchesScope(status, runScope)
-        && isRuntimeCommandStatus(status.commandStatus)));
-      const runtimeSessionId = latestProductionRunSessionId(response.body);
-      if (runtimeSessionId) {
-        setTimeline((await getTimeline(runtimeSessionId, runScope))
-          .filter(entry => runtimeTimelineMatchesScope(entry, runScope)));
+      try {
+        const projection = await readRuntimeMonitoringProjection(
+          runScope,
+          latestProductionRunSessionId(response.body));
+        setStations(projection.stations);
+        setTargetStatuses(projection.targets);
+        setAlarms(projection.alarms);
+        setTraceRows(projection.traces);
+        setTimeline(projection.timeline);
+      } catch (monitoringError) {
+        setMessage(
+          `Production run ${response.body.productionRunId} was accepted; monitoring refresh failed: ${String(monitoringError)}`);
       }
     } catch (error) {
       setMessage(`Production run failed: ${String(error)}`);
@@ -831,7 +820,7 @@ function App(): React.ReactElement {
     } finally {
       setBusy(false);
     }
-  }, [activeApplicationSnapshot, activeWorkspace, backendStatus?.health, hubState, productionRunForm]);
+  }, [activeApplicationSnapshot, activeWorkspace, backendStatus?.health, config, hubState, productionRunForm]);
 
   const applyApplicationSelection = useCallback((applicationId: string) => {
     if (!applicationId) {
@@ -869,26 +858,46 @@ function App(): React.ReactElement {
       setActiveNav('projects');
       return;
     }
-    const tab = createEditorTab(activeWorkspace, activeApplication.applicationId, nav);
-    setEditorTabState(current => openEditorTab(current, tab));
-    setActiveNav(nav);
-    setWorkspaceMode(current => nav === 'dashboard'
-      ? 'run'
-      : nav === 'topology'
-        ? current
-        : 'edit');
-  }, [activeApplication, activeWorkspace]);
+    const applyOpen = (): void => {
+      const tab = createEditorTab(activeWorkspace, activeApplication.applicationId, nav);
+      setEditorTabState(current => openEditorTab(current, tab));
+      setActiveNav(nav);
+      setWorkspaceMode(current => nav === 'dashboard'
+        ? 'run'
+        : nav === 'topology'
+          ? current
+          : 'edit');
+    };
+    if (nav === 'dashboard') {
+      runWithUnsavedGuard(
+        'Open runtime operations?',
+        'Save or discard editable Application source before entering the immutable runtime workspace.',
+        applyOpen);
+      return;
+    }
+    applyOpen();
+  }, [activeApplication, activeWorkspace, runWithUnsavedGuard]);
 
   const activateEditor = useCallback((tab: EditorTabModel) => {
-    setEditorTabState(current => activateEditorTab(current, tab.id));
     const nav = tab.kind as NavId;
-    setActiveNav(nav);
-    setWorkspaceMode(current => nav === 'dashboard'
-      ? 'run'
-      : nav === 'topology'
-        ? current
-        : 'edit');
-  }, []);
+    const applyActivation = (): void => {
+      setEditorTabState(current => activateEditorTab(current, tab.id));
+      setActiveNav(nav);
+      setWorkspaceMode(current => nav === 'dashboard'
+        ? 'run'
+        : nav === 'topology'
+          ? current
+          : 'edit');
+    };
+    if (nav === 'dashboard') {
+      runWithUnsavedGuard(
+        'Open runtime operations?',
+        'Save or discard editable Application source before entering the immutable runtime workspace.',
+        applyActivation);
+      return;
+    }
+    applyActivation();
+  }, [runWithUnsavedGuard]);
 
   const requestCloseEditor = useCallback((tab: EditorTabModel) => {
     const applyClose = (): void => {
@@ -968,6 +977,7 @@ function App(): React.ReactElement {
             projectId={activeWorkspace?.project.projectId ?? null}
             applicationId={activeApplication?.applicationId ?? null}
             projectSnapshotId={activeApplicationSnapshot?.snapshotId ?? null}
+            actorId={config?.apiActorId ?? ''}
             onFilterChanged={operationsProjection.setFilter}
             onRefresh={operationsProjection.refresh}
             onOpenTopology={() => {
@@ -1070,6 +1080,8 @@ function App(): React.ReactElement {
       return (
         <PluginsWorkbench
           isBackendHealthy={backendStatus?.health === 'Healthy'}
+          activeWorkspace={activeWorkspace}
+          activeApplicationId={activeApplication?.applicationId ?? null}
           onMessage={setMessage}
         />
       );
@@ -1387,17 +1399,8 @@ function App(): React.ReactElement {
             />
           </label>
           <label>
-            <span>Actor</span>
-            <input
-              value={productionRunForm.actorId}
-              onChange={event => setProductionRunForm(current => ({
-                ...current,
-                actorId: event.target.value
-              }))}
-              required
-              autoComplete="off"
-              data-testid="production-run-actor"
-            />
+            <span>Authenticated Actor</span>
+            <input value={config?.apiActorId ?? ''} readOnly data-testid="production-run-actor" />
           </label>
           <p>The Unit is registered and arrived at the entry Station before the immutable run is submitted. Resources come only from the frozen Operation definition.</p>
         </form>
@@ -1451,6 +1454,7 @@ function App(): React.ReactElement {
                 pendingUnsavedGuard.cancel?.();
                 setPendingUnsavedGuard(null);
               }}
+              disabled={unsavedGuardBusy}
               data-testid="unsaved-cancel"
             >
               Cancel
@@ -1459,29 +1463,46 @@ function App(): React.ReactElement {
               type="button"
               className="button danger"
               onClick={() => {
-                documentRegistry.discardAll(pendingUnsavedGuard.documentIds ?? undefined);
-                const proceed = pendingUnsavedGuard.proceed;
-                setPendingUnsavedGuard(null);
-                proceed();
+                setUnsavedGuardBusy(true);
+                void documentRegistry
+                  .revertAll(pendingUnsavedGuard.documentIds ?? undefined)
+                  .then(success => {
+                    if (!success) {
+                      setUnsavedGuardBusy(false);
+                      setMessage('Discard failed. The editor remains open with its draft intact.');
+                      return;
+                    }
+                    const proceed = pendingUnsavedGuard.proceed;
+                    setPendingUnsavedGuard(null);
+                    setUnsavedGuardBusy(false);
+                    proceed();
+                  });
               }}
+              disabled={unsavedGuardBusy}
               data-testid="unsaved-discard"
             >
-              Discard Changes
+              {unsavedGuardBusy ? 'Discarding…' : 'Discard Changes'}
             </button>
             <button
               type="button"
               className="button primary"
-              onClick={() => void documentRegistry
-                .saveAll(pendingUnsavedGuard.documentIds ?? undefined)
-                .then(success => {
-                  if (!success) {
-                    setMessage('Save failed. The editor remains open with its draft intact.');
-                    return;
-                  }
-                  const proceed = pendingUnsavedGuard.proceed;
-                  setPendingUnsavedGuard(null);
-                  proceed();
-                })}
+              onClick={() => {
+                setUnsavedGuardBusy(true);
+                void documentRegistry
+                  .saveAll(pendingUnsavedGuard.documentIds ?? undefined)
+                  .then(success => {
+                    if (!success) {
+                      setUnsavedGuardBusy(false);
+                      setMessage('Save failed. The editor remains open with its draft intact.');
+                      return;
+                    }
+                    const proceed = pendingUnsavedGuard.proceed;
+                    setPendingUnsavedGuard(null);
+                    setUnsavedGuardBusy(false);
+                    proceed();
+                  });
+              }}
+              disabled={unsavedGuardBusy}
               data-testid="unsaved-save"
             >
               Save &amp; Continue
@@ -1819,6 +1840,43 @@ function latestProductionRunSessionId(
   return null;
 }
 
+async function readRuntimeMonitoringProjection(
+  scope: RuntimeMonitoringScope | null,
+  preferredSessionId: string | null
+): Promise<RuntimeMonitoringProjection<
+  RuntimeStationStatus,
+  RuntimeTargetStatus,
+  RuntimeAlarm,
+  TraceRecordSummary,
+  RuntimeTimelineEntry
+>> {
+  return loadRuntimeMonitoringProjection({
+    loadStations: async () => scope
+      ? (await getStationStatuses(scope)).filter(status =>
+        runtimeStatusMatchesScope(status, scope)
+        && isRuntimeSessionStatus(status.sessionStatus))
+      : [],
+    loadTargets: async stations => scope
+      ? (await getTargetStatuses(
+        scope,
+        stations.map(station => station.stationSystemId)))
+        .filter(status => runtimeStatusMatchesScope(status, scope)
+          && isExecutionStatus(status.commandStatus))
+      : [],
+    loadAlarms: () => getAlarms(),
+    loadTraces: async () => (await getTraceRecords()).items,
+    loadTimeline: async stations => {
+      const sessionId = scope
+        ? preferredSessionId ?? stations[0]?.latestSessionId ?? null
+        : null;
+      return sessionId && scope
+        ? (await getTimeline(sessionId, scope))
+          .filter(entry => runtimeTimelineMatchesScope(entry, scope))
+        : [];
+    }
+  });
+}
+
 function runtimeTargetStatusKey(status: RuntimeTargetStatus): string {
   return JSON.stringify([
     status.projectId,
@@ -1951,10 +2009,6 @@ function validateProductionRunForm(form: ProductionRunFormState): string | null 
     return 'Production Unit identity is required and cannot start or end with whitespace.';
   }
 
-  if (!isCanonicalRunIdentity(form.actorId)) {
-    return 'Actor is required and cannot start or end with whitespace.';
-  }
-
   return null;
 }
 
@@ -1972,7 +2026,8 @@ function assertProductionRunResponseIdentity(
   response: ProductionRunReadModel,
   scope: RuntimeMonitoringScope,
   request: SubmitProductionRunRequest,
-  expectedIdentityValue: string
+  expectedIdentityValue: string,
+  expectedActorId: string
 ): void {
   const terminalExecutionStatuses = new Set(['Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected']);
   if (response.productionRunId !== scope.productionRunId
@@ -1983,7 +2038,7 @@ function assertProductionRunResponseIdentity(
       || response.productionLineDefinitionId.length === 0
       || response.productionUnitId !== request.productionUnitId
       || response.productionUnitIdentity.value !== expectedIdentityValue
-      || response.actorId !== request.actorId
+      || response.actorId !== expectedActorId
       || response.isTerminal !== terminalExecutionStatuses.has(response.executionStatus)) {
     throw new Error('Production run response identity did not exactly match the submit request.');
   }
@@ -1993,8 +2048,8 @@ function isRuntimeSessionStatus(value: string): value is RuntimeSessionStatus {
   return runtimeSessionStatusTokens.has(value);
 }
 
-function isRuntimeCommandStatus(value: string): value is RuntimeCommandStatus {
-  return runtimeCommandStatusTokens.has(value);
+function isExecutionStatus(value: string): value is ExecutionStatus {
+  return executionStatusTokens.has(value);
 }
 
 const runtimeSessionStatusTokens = new Set<string>([
@@ -2010,10 +2065,9 @@ const runtimeSessionStatusTokens = new Set<string>([
   'Canceled'
 ]);
 
-const runtimeCommandStatusTokens = new Set<string>([
+const executionStatusTokens = new Set<string>([
   'Pending',
-  'Accepted',
-  'InProgress',
+  'Running',
   'Completed',
   'Failed',
   'TimedOut',

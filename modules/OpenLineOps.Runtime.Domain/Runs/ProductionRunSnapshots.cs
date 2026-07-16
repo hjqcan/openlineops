@@ -19,8 +19,11 @@ public sealed record OperationRunSnapshot(
     int CompletedStepCount,
     int CommandCount,
     int IncidentCount,
+    Guid? RecoveryDecisionId,
+    OperationExecutionEvidence? ExecutionEvidence,
     IReadOnlyDictionary<string, ProductionContextValue> Outputs,
-    IReadOnlyDictionary<ResourceRequirement, long> FencingTokens);
+    IReadOnlyDictionary<ResourceRequirement, long> FencingTokens,
+    IReadOnlyDictionary<string, string> SourceOperationRunBindings);
 
 public sealed record RouteDecisionSnapshot(
     string SourceOperationRunId,
@@ -51,6 +54,9 @@ public sealed record ProductionRunSnapshot(
     string? SafeStopReason,
     DateTimeOffset? SafeStopRequestedAtUtc,
     DateTimeOffset? SafeStopAcknowledgedAtUtc,
+    string? ScrapRequestedBy,
+    string? ScrapReason,
+    DateTimeOffset? ScrapRequestedAtUtc,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset LastTransitionAtUtc,
     DateTimeOffset? StartedAtUtc,

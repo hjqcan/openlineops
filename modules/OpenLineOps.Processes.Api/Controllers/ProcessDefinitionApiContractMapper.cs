@@ -80,7 +80,9 @@ internal static class ProcessDefinitionApiContractMapper
                 .Select(issue => new ProcessGraphValidationIssueResponse(
                     issue.Severity,
                     issue.Code,
-                    issue.Message))
+                    issue.Message,
+                    issue.TargetKind,
+                    issue.TargetId))
                 .ToArray());
     }
 

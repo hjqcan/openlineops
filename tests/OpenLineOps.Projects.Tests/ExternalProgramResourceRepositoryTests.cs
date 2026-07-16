@@ -196,6 +196,41 @@ public sealed class ExternalProgramResourceRepositoryTests : IDisposable
         ExternalProgramResourceValidator.ValidateDefinition(request);
     }
 
+    [Fact]
+    public void DefinitionAllowsCanonicalProductionInputSource()
+    {
+        var request = ExecutableRequest("Production input") with
+        {
+            InputMappings =
+            [
+                .. ExecutableRequest("Production input").InputMappings,
+                new ExternalProgramInputMapping("$production.inspection.limit", "limit")
+            ]
+        };
+
+        ExternalProgramResourceValidator.ValidateDefinition(request);
+    }
+
+    [Theory]
+    [InlineData("$production.")]
+    [InlineData("$production. input")]
+    [InlineData("$production.input ")]
+    [InlineData("$Production.input")]
+    public void DefinitionRejectsMalformedProductionInputSource(string source)
+    {
+        var request = ExecutableRequest("Invalid Production input") with
+        {
+            InputMappings =
+            [
+                .. ExecutableRequest("Invalid Production input").InputMappings,
+                new ExternalProgramInputMapping(source, "limit")
+            ]
+        };
+
+        Assert.Throws<ArgumentException>(() =>
+            ExternalProgramResourceValidator.ValidateDefinition(request));
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

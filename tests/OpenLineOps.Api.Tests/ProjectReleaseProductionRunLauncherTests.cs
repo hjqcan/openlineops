@@ -538,6 +538,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 stationSystemId,
                 "Fixed",
                 [])],
+            [],
             [new ProjectReleaseAuthorizedAction(
                 "move:action:1",
                 "move",

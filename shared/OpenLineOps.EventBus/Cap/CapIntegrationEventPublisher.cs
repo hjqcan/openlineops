@@ -7,17 +7,17 @@ namespace OpenLineOps.EventBus.Cap;
 
 public sealed class CapIntegrationEventPublisher : ITransactionalIntegrationEventPublisher
 {
-    private static readonly Action<ILogger, string, string, string, Exception?> LogIntegrationEventPublished =
-        LoggerMessage.Define<string, string, string>(
+    private static readonly Action<ILogger, string, string, Exception?> LogIntegrationEventPublished =
+        LoggerMessage.Define<string, string>(
             LogLevel.Information,
             new EventId(1, nameof(LogIntegrationEventPublished)),
-            "Published integration event {EventName} {Version} with payload {PayloadType}.");
+            "Published integration event {EventName} with payload {PayloadType}.");
 
-    private static readonly Action<ILogger, string, string, Exception?> LogIntegrationEventPublishFailed =
-        LoggerMessage.Define<string, string>(
+    private static readonly Action<ILogger, string, Exception?> LogIntegrationEventPublishFailed =
+        LoggerMessage.Define<string>(
             LogLevel.Error,
             new EventId(2, nameof(LogIntegrationEventPublishFailed)),
-            "Integration event publish failed for {EventName} {Version}.");
+            "Integration event publish failed for {EventName}.");
 
     private readonly ICapPublisher _capPublisher;
     private readonly IntegrationDtoConverterRegistry _dtoConverterRegistry;
@@ -76,7 +76,6 @@ public sealed class CapIntegrationEventPublisher : ITransactionalIntegrationEven
                 LogIntegrationEventPublished(
                     _logger,
                     descriptor.EventName,
-                    descriptor.Version,
                     payload.GetType().FullName ?? payload.GetType().Name,
                     null);
             }
@@ -85,7 +84,6 @@ public sealed class CapIntegrationEventPublisher : ITransactionalIntegrationEven
                 LogIntegrationEventPublishFailed(
                     _logger,
                     descriptor.EventName,
-                    descriptor.Version,
                     ex);
 
                 throw;

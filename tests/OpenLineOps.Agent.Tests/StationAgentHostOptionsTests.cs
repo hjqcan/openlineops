@@ -1,11 +1,17 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using Microsoft.Extensions.Configuration;
 
 namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationAgentHostOptionsTests : IDisposable
 {
+    private static readonly string ArtifactUploadToken = Convert.ToBase64String(
+            SHA256.HashData("station-agent-host-options"u8))
+        .TrimEnd('=')
+        .Replace('+', '-')
+        .Replace('/', '_');
     private readonly string _tempDirectory;
     private readonly string _trustedKeyPath;
     private readonly string _pythonRuntimePath;
@@ -54,6 +60,92 @@ public sealed class StationAgentHostOptionsTests : IDisposable
             StationAgentHostOptions.LeastPrivilegeIdentity,
             options.PythonScript.Sandbox.LeastPrivilegeIdentity);
         Assert.True(options.PythonScript.Sandbox.RequireLeastPrivilegeExecution);
+        Assert.Equal("station-system-1", options.StationSystemId);
+        Assert.Equal(TimeSpan.FromSeconds(5), options.HeartbeatInterval);
+    }
+
+    [Fact]
+    public void OptionsDiagnosticTextRedactsBrokerAndArtifactUploadCredentials()
+    {
+        var options = StationAgentHostOptions.Load(CreateConfiguration());
+
+        var diagnosticText = options.ToString();
+
+        Assert.DoesNotContain("station-secret", diagnosticText, StringComparison.Ordinal);
+        Assert.DoesNotContain(ArtifactUploadToken, diagnosticText, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", diagnosticText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InvalidArtifactUploadCredentialIsNotEchoedByStartupFailure()
+    {
+        var invalidSecret = ArtifactUploadToken + "=";
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:ArtifactUploadBearerToken"] = invalidSecret
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.DoesNotContain(invalidSecret, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("amqps://localhost:5671")]
+    [InlineData("amqps://agent-1@localhost:5671")]
+    [InlineData("amqps://agent-1:@localhost:5671")]
+    [InlineData("amqps://guest:secret@localhost:5671")]
+    [InlineData("amqps://GUEST:secret@localhost:5671")]
+    public void LoadRejectsTlsBrokerWithoutDedicatedCredentials(string brokerUri)
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:BrokerUri"] = brokerUri
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains("non-guest username", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadAllowsCredentiallessBrokerOnlyWhenTlsIsExplicitlyDisabled()
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:BrokerUri"] = "amqp://localhost:5672",
+            ["OpenLineOps:Agent:RequireBrokerTls"] = "false"
+        });
+
+        var options = StationAgentHostOptions.Load(configuration);
+
+        Assert.False(options.RequireBrokerTls);
+        Assert.Empty(options.BrokerUri.UserInfo);
+    }
+
+    [Theory]
+    [InlineData("OpenLineOps:Agent:AgentId", "agent 1")]
+    [InlineData("OpenLineOps:Agent:AgentId", "代理一")]
+    [InlineData("OpenLineOps:Agent:StationId", "station 1")]
+    [InlineData("OpenLineOps:Agent:StationId", "工站一")]
+    [InlineData("OpenLineOps:Agent:StationSystemId", null)]
+    [InlineData("OpenLineOps:Agent:StationSystemId", " station-system-1")]
+    [InlineData("OpenLineOps:Agent:HeartbeatInterval", null)]
+    [InlineData("OpenLineOps:Agent:HeartbeatInterval", "00:00:00.100")]
+    [InlineData("OpenLineOps:Agent:HeartbeatInterval", "00:00:11")]
+    public void LoadRejectsMissingOrInvalidPresenceIdentityAndHeartbeat(
+        string settingName,
+        string? value)
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            [settingName] = value
+        });
+
+        Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
     }
 
     [Theory]
@@ -170,7 +262,7 @@ public sealed class StationAgentHostOptionsTests : IDisposable
             () => StationAgentHostOptions.Load(configuration));
 
         Assert.Contains(
-            "fixed non-interactive RestrictedCurrentLowIntegrity policy",
+            "fixed non-interactive PerExecutionAppContainer policy",
             exception.Message,
             StringComparison.Ordinal);
     }
@@ -187,8 +279,11 @@ public sealed class StationAgentHostOptionsTests : IDisposable
         {
             ["OpenLineOps:Agent:AgentId"] = "agent-1",
             ["OpenLineOps:Agent:StationId"] = "station-1",
+            ["OpenLineOps:Agent:StationSystemId"] = "station-system-1",
+            ["OpenLineOps:Agent:HeartbeatInterval"] = "00:00:05",
             ["OpenLineOps:Agent:DataDirectory"] = Path.Combine(_tempDirectory, "data"),
-            ["OpenLineOps:Agent:BrokerUri"] = "amqps://localhost:5671",
+            ["OpenLineOps:Agent:BrokerUri"] =
+                "amqps://station-agent-1:station-secret@localhost:5671",
             ["OpenLineOps:Agent:PackageDistributionDirectory"] = Path.Combine(
                 _tempDirectory,
                 "packages"),
@@ -209,9 +304,9 @@ public sealed class StationAgentHostOptionsTests : IDisposable
             ["OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeLauncherExecutable"] =
                 StationAgentHostOptions.LeastPrivilegeLauncherExecutableFileName,
             ["OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeNoInteractivePrompt"] = "true",
-            ["OpenLineOps:Agent:ArtifactExchangeDirectory"] = Path.Combine(
-                _tempDirectory,
-                "artifact-exchange"),
+            ["OpenLineOps:Agent:CoordinatorBaseUri"] = "https://coordinator.test:7443/",
+            ["OpenLineOps:Agent:ArtifactUploadBearerToken"] = ArtifactUploadToken,
+            ["OpenLineOps:Agent:ArtifactUploadTimeout"] = "00:05:00",
             ["OpenLineOps:Agent:AllowedRestrictedExternalProgramHostAccounts:0"] =
                 "OPENLINEOPS\\vendor-host",
             ["OpenLineOps:Agent:ExternalProgramAppContainerProfileNamespace"] =

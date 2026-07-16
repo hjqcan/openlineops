@@ -624,14 +624,6 @@ public sealed class ProjectReleaseDeviceCommandRouteResolver : IProjectReleaseRu
         if (!string.Equals(
                 topologyBinding.ProviderKind,
                 ProjectReleaseRuntimeProviderKinds.Simulator,
-                StringComparison.Ordinal)
-            && !string.Equals(
-                topologyBinding.ProviderKind,
-                ProjectReleaseRuntimeProviderKinds.DeviceInstance,
-                StringComparison.Ordinal)
-            && !string.Equals(
-                topologyBinding.ProviderKind,
-                ProjectReleaseRuntimeProviderKinds.ExternalSystem,
                 StringComparison.Ordinal))
         {
             return null;

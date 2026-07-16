@@ -141,11 +141,15 @@ internal sealed class ApplicationAutomationTopologyEditor
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.SystemType is null && request.DisplayName is null && request.Metadata is null)
+        if (request.SystemType is null
+            && request.DisplayName is null
+            && request.RequiredCapabilityIds is null
+            && request.ProvidedCapabilityIds is null
+            && request.Metadata is null)
         {
             return Result.Failure<AutomationTopologyDetails>(ApplicationError.Validation(
                 "Topology.SystemUpdateRequired",
-                "At least one of SystemType, DisplayName, or Metadata must be supplied."));
+                "At least one mutable System property must be supplied."));
         }
 
         try
@@ -169,6 +173,12 @@ internal sealed class ApplicationAutomationTopologyEditor
                 id,
                 request.SystemType ?? system.SystemType,
                 request.DisplayName ?? system.DisplayName,
+                (request.RequiredCapabilityIds ?? system.RequiredCapabilities.Select(capability => capability.Value))
+                    .Select(capabilityId => new CapabilityContractId(capabilityId))
+                    .ToArray(),
+                (request.ProvidedCapabilityIds ?? system.ProvidedCapabilities.Select(capability => capability.Value))
+                    .Select(capabilityId => new CapabilityContractId(capabilityId))
+                    .ToArray(),
                 request.Metadata ?? system.Metadata);
             if (!result.Succeeded)
             {

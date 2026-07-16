@@ -1,3 +1,3 @@
 using OpenLineOps.LeastPrivilegeLauncher;
 
-return RestrictedCurrentProcessLauncher.Run(args, Console.Error);
+return AppContainerScriptWorkerLauncher.Run(args, Console.Error);

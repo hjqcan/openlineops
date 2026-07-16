@@ -30,6 +30,14 @@ public sealed record ProductionLineProductionUnitStateResponse(
 public sealed record ProductionLineStationStateResponse(
     string StationSystemId,
     string Status,
+    string? AgentId,
+    string? StationId,
+    Guid? AgentPresenceSessionId,
+    long? AgentPresenceSequence,
+    string? AgentPresenceState,
+    string AgentPresenceHealth,
+    DateTimeOffset? AgentPresenceLastSeenAtUtc,
+    double? AgentPresenceAgeSeconds,
     IReadOnlyCollection<ProductionLineQueuedMaterialResponse> Queue,
     IReadOnlyCollection<ProductionLineStationOperationStateResponse> ActiveOperations);
 

@@ -7,4 +7,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
+  </ItemGroup>
+
 </Project>

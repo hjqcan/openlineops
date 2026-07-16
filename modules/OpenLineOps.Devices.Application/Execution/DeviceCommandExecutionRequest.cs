@@ -5,6 +5,8 @@ namespace OpenLineOps.Devices.Application.Execution;
 public sealed record DeviceCommandExecutionRequest
 {
     public DeviceCommandExecutionRequest(
+        string projectId,
+        string applicationId,
         string providerKind,
         string providerKey,
         DeviceInstanceId deviceInstanceId,
@@ -15,6 +17,8 @@ public sealed record DeviceCommandExecutionRequest
         TimeSpan timeout,
         DevicePluginPackageIdentity? pluginPackage = null)
     {
+        ProjectId = Required(projectId, nameof(projectId));
+        ApplicationId = Required(applicationId, nameof(applicationId));
         ProviderKind = Required(providerKind, nameof(providerKind));
         ProviderKey = Required(providerKey, nameof(providerKey));
         DeviceInstanceId = deviceInstanceId ?? throw new ArgumentNullException(nameof(deviceInstanceId));
@@ -49,6 +53,10 @@ public sealed record DeviceCommandExecutionRequest
     }
 
     public string ProviderKind { get; }
+
+    public string ProjectId { get; }
+
+    public string ApplicationId { get; }
 
     public string ProviderKey { get; }
 

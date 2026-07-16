@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -45,6 +46,7 @@ public sealed class RuntimeReleaseIdentityTests
             missingField == "project" ? " " : "project.main",
             missingField == "application" ? " " : "application.main",
             missingField == "snapshot" ? " " : "snapshot.main",
+            new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.ResourceFences()));
     }
 

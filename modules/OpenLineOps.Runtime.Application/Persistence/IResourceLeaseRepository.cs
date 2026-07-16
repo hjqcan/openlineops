@@ -31,8 +31,32 @@ public interface IResourceLeaseRepository
 
     ValueTask HoldForRecoveryAsync(
         ProductionRunId runId,
-        string operationRunId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
         CancellationToken cancellationToken = default);
+
+    ValueTask ReleaseRecoveryHoldAsync(
+        ProductionRunId runId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class ResourceLeaseOwnershipException : InvalidOperationException
+{
+    public ResourceLeaseOwnershipException(
+        ProductionRunId runId,
+        string operationRunId,
+        string reason)
+        : base(
+            $"Resource leases for Production Run {runId}, Operation Run "
+            + $"'{operationRunId}' could not be held exactly: {reason}")
+    {
+        RunId = runId;
+        OperationRunId = operationRunId;
+    }
+
+    public ProductionRunId RunId { get; }
+
+    public string OperationRunId { get; }
 }
 
 public sealed record ResourceLeaseFenceValidationResult(

@@ -74,7 +74,10 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         Assert.Equal(signal.MessageId, publication.MessageId);
         Assert.Equal(signal.MessageId, publication.CorrelationId);
         Assert.Equal(
-            StationTransportRoute.Event("station.main", nameof(MaterialArrived)),
+            StationTransportRoute.Event(
+                "agent.main",
+                "station.main",
+                nameof(MaterialArrived)),
             publication.RoutingKey);
     }
 
@@ -270,6 +273,20 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
             coordinator.HandleAsync,
             rejected);
         Assert.Equal([(3UL, false)], rejected.Rejected);
+
+        var spoofedTarget = LeaseChange(43) with
+        {
+            MessageId = Guid.NewGuid(),
+            IdempotencyKey = "lease/job-main/station-system-spoof/43",
+            StationSystemId = "station-system.spoof"
+        };
+        var spoofedSettlement = new RecordingSettlement();
+        await processor.ProcessAsync(
+            Delivery(spoofedTarget, 4, redelivered: false),
+            IgnoreJobAsync,
+            coordinator.HandleAsync,
+            spoofedSettlement);
+        Assert.Equal([(4UL, false)], spoofedSettlement.Rejected);
     }
 
     public ValueTask DisposeAsync()
@@ -286,6 +303,7 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         new Uri("amqp://localhost"),
         "agent.main",
         "station.main",
+        "station-system.main",
         RequireTls: false);
 
     private static ResourceLeaseChanged LeaseChange(long token) => new(
@@ -293,6 +311,7 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         $"lease/job-main/station-system-main/{token}",
         "agent.main",
         "station.main",
+        "station-system.main",
         Guid.Parse("11111111-1111-1111-1111-111111111111"),
         Guid.Parse("22222222-2222-2222-2222-222222222222"),
         "operation.main@0001",
@@ -325,7 +344,7 @@ public sealed class StationMaterialAndLeaseMessageTests : IAsyncDisposable
         "coordinator.main",
         change.MessageId.ToString("D"),
         change.JobId.ToString("D"),
-        $"station.{change.AgentId}.{change.StationId}.resource-lease-changed",
+        StationTransportRoute.ResourceLeaseChanged(change.AgentId, change.StationId),
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(change, JsonOptions));
 

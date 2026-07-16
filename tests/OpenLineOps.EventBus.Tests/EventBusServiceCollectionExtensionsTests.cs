@@ -1,7 +1,9 @@
+using DotNetCore.CAP;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using OpenLineOps.Domain.Abstractions.EventBus;
 using OpenLineOps.EventBus.DependencyInjection;
 using OpenLineOps.Infrastructure.Data.Core.EventBus;
@@ -94,6 +96,22 @@ public sealed class EventBusServiceCollectionExtensionsTests
         Assert.Null(scope.ServiceProvider.GetService<IIntegrationEventTransactionCoordinator>());
 
         await StartPublicationValidatorAsync(serviceProvider);
+    }
+
+    [Fact]
+    public void AddOpenLineOpsEventBusUsesStableUnversionedCapStorageIsolationKey()
+    {
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsEventBus(BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:EventBus:PublicationMode"] = "PostCommit"
+        }));
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var capOptions = serviceProvider.GetRequiredService<IOptions<CapOptions>>().Value;
+
+        Assert.Equal("openlineops", capOptions.Version);
+        Assert.DoesNotMatch("^v[1-9][0-9]*$", capOptions.Version);
     }
 
     [Fact]

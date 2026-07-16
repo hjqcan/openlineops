@@ -1,3 +1,4 @@
+using Npgsql;
 using Testcontainers.PostgreSql;
 using Testcontainers.RabbitMq;
 
@@ -47,6 +48,8 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
 
     private readonly PostgreSqlContainer? _container;
     private readonly string? _externalConnectionString;
+    private string? _isolatedConnectionString;
+    private string? _schemaName;
 
     public PostgresContainerFixture()
     {
@@ -71,8 +74,9 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
         }
     }
 
-    public string ConnectionString =>
-        _externalConnectionString ?? _container!.GetConnectionString();
+    public string ConnectionString => _isolatedConnectionString
+        ?? throw new InvalidOperationException(
+            "PostgreSQL integration fixture has not been initialized.");
 
     public async Task InitializeAsync()
     {
@@ -85,10 +89,37 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
         {
             await _container.StartAsync().ConfigureAwait(false);
         }
+
+        var administrativeConnectionString =
+            _externalConnectionString ?? _container!.GetConnectionString();
+        _schemaName = $"olo_test_{Guid.NewGuid():N}";
+        await using var connection = new NpgsqlConnection(administrativeConnectionString);
+        await connection.OpenAsync().ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"CREATE SCHEMA {_schemaName};";
+        await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+        var builder = new NpgsqlConnectionStringBuilder(administrativeConnectionString)
+        {
+            SearchPath = _schemaName
+        };
+        _isolatedConnectionString = builder.ConnectionString;
     }
 
     public async Task DisposeAsync()
     {
+        if (_schemaName is not null && _isolatedConnectionString is not null)
+        {
+            var builder = new NpgsqlConnectionStringBuilder(_isolatedConnectionString)
+            {
+                SearchPath = null
+            };
+            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await connection.OpenAsync().ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA {_schemaName} CASCADE;";
+            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+
         if (_container is not null)
         {
             await _container.DisposeAsync().AsTask().ConfigureAwait(false);
@@ -127,10 +158,33 @@ internal sealed class RabbitMqIntegrationFactAttribute : FactAttribute
     }
 }
 
+[AttributeUsage(AttributeTargets.Method)]
+internal sealed class ProductionInfrastructureIntegrationFactAttribute : FactAttribute
+{
+    public ProductionInfrastructureIntegrationFactAttribute()
+    {
+        if (!PostgresIntegrationTestSettings.IsEnabled
+            || !RabbitMqIntegrationTestSettings.IsEnabled)
+        {
+            Skip = $"Set {PostgresIntegrationTestSettings.EnabledEnvironmentVariable}=1 and "
+                   + $"{RabbitMqIntegrationTestSettings.EnabledEnvironmentVariable}=1 to run "
+                   + "the combined production-infrastructure integration gate.";
+        }
+    }
+}
+
 [CollectionDefinition(Name)]
 public sealed class RabbitMqContainerGroup : ICollectionFixture<RabbitMqContainerFixture>
 {
     public const string Name = "rabbitmq-container";
+}
+
+[CollectionDefinition(Name)]
+public sealed class ProductionInfrastructureContainerGroup :
+    ICollectionFixture<PostgresContainerFixture>,
+    ICollectionFixture<RabbitMqContainerFixture>
+{
+    public const string Name = "production-infrastructure-containers";
 }
 
 public sealed class RabbitMqContainerFixture : IAsyncLifetime

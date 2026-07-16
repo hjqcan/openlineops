@@ -171,8 +171,15 @@ create runtime actions that were absent from the published Flow IR.
 `production/lines/<id>/line.json` is an independent Application resource. It
 contains one `ProductModelDefinition`, an entry Operation, Station-System-bound
 `OperationDefinition` nodes, `RouteTransition` edges, published Flow references,
+one `routeLayout` with an exact bounded integer position for every Operation,
 and optional external-program adapters. There is no duplicate Station
 definition: `stationSystemId` points directly at the canonical `StationSystem`.
+
+The route semantics and its layout use one atomic file replacement and one
+revision/ETag. Drag, Auto Arrange, Save All, external-change conflict handling,
+and Application copying therefore cannot produce a detached or stale layout.
+The strict reader rejects a missing layout, missing or extra Operation
+position, case ambiguity, duplicates, and coordinates outside `0..100000`.
 
 An external executable path is Application-relative under the line resource, or
 the adapter names an exact provider key. Production never starts it directly;

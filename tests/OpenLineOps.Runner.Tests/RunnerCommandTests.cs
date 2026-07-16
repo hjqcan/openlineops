@@ -317,30 +317,91 @@ public sealed class RunnerCommandTests
             or ExecutionStatus.TimedOut
             or ExecutionStatus.Canceled
             or ExecutionStatus.Rejected;
-        var failureCode = executionStatus == ExecutionStatus.Failed
-            ? "Runtime.OperationFailed"
+        var failureCode = terminal && executionStatus != ExecutionStatus.Completed
+            ? executionStatus == ExecutionStatus.Canceled
+                ? "Runtime.OperationCanceled"
+                : "Runtime.OperationFailed"
             : null;
-        var failureReason = executionStatus == ExecutionStatus.Failed
-            ? "Station operation failed."
+        var failureReason = terminal && executionStatus != ExecutionStatus.Completed
+            ? executionStatus == ExecutionStatus.Canceled
+                ? "Station operation was canceled."
+                : "Station operation failed."
+            : null;
+        var productionUnitId =
+            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New();
+        const string operationRunId = "operation.main@0001";
+        RuntimeSessionId? runtimeSessionId = terminal
+            ? new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000043"))
+            : null;
+        DateTimeOffset? completedAtUtc = terminal ? createdAt.AddSeconds(2) : null;
+        var executionEvidence = terminal
+            ? new OperationExecutionEvidence(
+                OperationExecutionEvidenceOrigin.Coordinator,
+                runtimeSessionId!.Value.Value,
+                RunId,
+                productionUnitId.Value,
+                "line.main",
+                definition.OperationId,
+                operationRunId,
+                operationAttempt: 1,
+                definition.StationSystemId,
+                definition.StationId.Value,
+                definition.ProcessDefinitionId.Value,
+                definition.ProcessVersionId.Value,
+                definition.ConfigurationSnapshotId.Value,
+                definition.RecipeSnapshotId.Value,
+                "product.main",
+                "serialNumber",
+                "UNIT-42",
+                "lot-a",
+                "carrier-a",
+                fixtureId: null,
+                deviceId: null,
+                "actor-a",
+                "project.line-a",
+                "application.main",
+                "snapshot.active",
+                "topology.main",
+                executionStatus switch
+                {
+                    ExecutionStatus.Completed => "Completed",
+                    ExecutionStatus.Canceled => "Canceled",
+                    _ => "Failed"
+                },
+                completedAtUtc!.Value,
+                [
+                    new OperationResourceFenceEvidence(
+                        ResourceKind.Station.ToString(),
+                        "station.main",
+                        10,
+                        completedAtUtc.Value.AddMinutes(1)),
+                    new OperationResourceFenceEvidence(
+                        ResourceKind.Slot.ToString(),
+                        "line-a/station-a/slot-a",
+                        11,
+                        completedAtUtc.Value.AddMinutes(1))
+                ],
+                [],
+                [],
+                [],
+                [])
             : null;
         var operation = new OperationRunSnapshot(
             definition,
-            "operation.main#1",
+            operationRunId,
             Attempt: 1,
             executionStatus,
             judgement,
-            terminal ? new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000043")) : null,
+            runtimeSessionId,
             terminal ? createdAt.AddSeconds(1) : null,
-            terminal ? createdAt.AddSeconds(2) : null,
+            completedAtUtc,
             failureCode,
             failureReason,
-            CompletedStepCount: terminal
-                ? executionStatus == ExecutionStatus.Completed ? 3 : 1
-                : 0,
-            CommandCount: terminal
-                ? executionStatus == ExecutionStatus.Completed ? 3 : 2
-                : 0,
-            IncidentCount: terminal && executionStatus == ExecutionStatus.Failed ? 1 : 0,
+            CompletedStepCount: 0,
+            CommandCount: 0,
+            IncidentCount: 0,
+            RecoveryDecisionId: null,
+            executionEvidence,
             Outputs: new Dictionary<string, ProductionContextValue>(StringComparer.Ordinal),
             FencingTokens: executionStatus == ExecutionStatus.Pending
                 ? new Dictionary<ResourceRequirement, long>()
@@ -348,7 +409,8 @@ public sealed class RunnerCommandTests
                 {
                     [definition.ResourceRequirements[0]] = 10,
                     [definition.ResourceRequirements[1]] = 11
-                });
+                },
+            SourceOperationRunBindings: new Dictionary<string, string>(StringComparer.Ordinal));
 
         return new ProductionRunSnapshot(
             new ProductionRunId(RunId),
@@ -357,7 +419,7 @@ public sealed class RunnerCommandTests
             "snapshot.active",
             "topology.main",
             "line.main",
-            OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New(),
+            productionUnitId,
             new ProductionUnitIdentity("product.main", "serialNumber", "UNIT-42"),
             "lot-a",
             "carrier-a",
@@ -374,6 +436,9 @@ public sealed class RunnerCommandTests
             SafeStopReason: null,
             SafeStopRequestedAtUtc: null,
             SafeStopAcknowledgedAtUtc: null,
+            ScrapRequestedBy: null,
+            ScrapReason: null,
+            ScrapRequestedAtUtc: null,
             createdAt,
             terminal ? createdAt.AddSeconds(2) : createdAt,
             terminal ? createdAt.AddSeconds(1) : null,
@@ -502,7 +567,8 @@ public sealed class RunnerCommandTests
                 "Main",
                 "topology.main",
                 ["process.main"],
-                "applications/application.main/application.main.oloapp")],
+                "applications/application.main/application.main.oloapp",
+                PluginPackageReferences: [])],
             [manifestSnapshot]);
 
         return new AutomationProjectWorkspaceDetails(
@@ -678,6 +744,11 @@ public sealed class RunnerCommandTests
             string? slotId = null,
             CancellationToken cancellationToken = default) => ValueTask.FromResult<
                 IReadOnlyCollection<ProductionRunPersistenceEntry>>([]);
+
+        public ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+            ProductionRunTerminalPageRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ProductionRunTerminalPage([], null));
 
         public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
             ListPendingCreatedOutboxAsync(

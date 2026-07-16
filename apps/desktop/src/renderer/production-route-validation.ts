@@ -8,15 +8,33 @@ import type {
   SaveProductionLineRequest,
   StationProfileResponse
 } from './contracts';
+import {
+  ROUTE_COORDINATE_MAXIMUM,
+  ROUTE_COORDINATE_MINIMUM
+} from './production-route-layout';
 
 export type ProductionDesignerProblemSeverity = 'Error' | 'Warning';
 export type ProductionDesignerProblemScope = 'Line' | 'Product' | 'Operation' | 'Transition';
+
+export const productionProblemFields = {
+  lineDefinitionId: 'line.definition-id',
+  lineDisplayName: 'line.display-name',
+  lineTopologyId: 'line.topology-id',
+  lineEntryOperationId: 'line.entry-operation-id',
+  productModelId: 'product.model-id',
+  productModelCode: 'product.model-code',
+  productIdentityInputKey: 'product.identity-input-key'
+} as const;
+
+export type ProductionDesignerProblemFieldLocator =
+  typeof productionProblemFields[keyof typeof productionProblemFields];
 
 export interface ProductionDesignerProblem {
   id: string;
   severity: ProductionDesignerProblemSeverity;
   scope: ProductionDesignerProblemScope;
   entityId: string;
+  fieldLocator: ProductionDesignerProblemFieldLocator | null;
   message: string;
 }
 
@@ -38,6 +56,7 @@ export function validateProductionLine(
     scope: ProductionDesignerProblemScope,
     entityId: string,
     message: string,
+    fieldLocator: ProductionDesignerProblemFieldLocator | null = null,
     severity: ProductionDesignerProblemSeverity = 'Error'
   ): void => {
     problems.push({
@@ -45,35 +64,63 @@ export function validateProductionLine(
       severity,
       scope,
       entityId,
+      fieldLocator,
       message
     });
   };
 
-  validatePortableId(line.lineDefinitionId, 'Line ID', 'Line', line.lineDefinitionId || 'line', add);
-  validateCanonicalText(line.displayName, 'Line display name', 'Line', line.lineDefinitionId || 'line', add);
-  validateCanonicalText(line.topologyId, 'Topology reference', 'Line', line.lineDefinitionId || 'line', add);
+  validatePortableId(
+    line.lineDefinitionId,
+    'Line ID',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineDefinitionId);
+  validateCanonicalText(
+    line.displayName,
+    'Line display name',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineDisplayName);
+  validateCanonicalText(
+    line.topologyId,
+    'Topology reference',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineTopologyId);
   validatePortableId(
     line.productModel.productModelId,
     'Product Model ID',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productModelId);
   validateCanonicalText(
     line.productModel.modelCode,
     'Product model code',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productModelCode);
   validateCanonicalText(
     line.productModel.identityInputKey,
     'Product identity input key',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productIdentityInputKey);
 
   if (context.topology && context.topology.topologyId !== line.topologyId) {
-    add('Line', line.lineDefinitionId, 'The line topology reference does not match this Application topology.');
+    add(
+      'Line',
+      line.lineDefinitionId,
+      'The line topology reference does not match this Application topology.',
+      productionProblemFields.lineTopologyId);
   }
+
+  validateRouteLayout(line, add);
 
   if (line.operations.length === 0) {
     add('Line', line.lineDefinitionId, 'A production line requires at least one Operation.');
@@ -139,9 +186,14 @@ export function validateProductionLine(
     'Entry Operation reference',
     'Line',
     line.lineDefinitionId,
-    add);
+    add,
+    productionProblemFields.lineEntryOperationId);
   if (!operationById.has(line.entryOperationId)) {
-    add('Line', line.lineDefinitionId, `Entry Operation '${line.entryOperationId}' does not exist.`);
+    add(
+      'Line',
+      line.lineDefinitionId,
+      `Entry Operation '${line.entryOperationId}' does not exist.`,
+      productionProblemFields.lineEntryOperationId);
   }
 
   for (const transition of line.transitions) {
@@ -152,7 +204,113 @@ export function validateProductionLine(
   validateOutgoingShapes(line.operations, line.transitions, add);
   validateRouteGraph(line, operationById, add);
   validateParallelGroups(line.transitions, add);
+  validateOperationInputMappings(line, operationById, add);
   return problems;
+}
+
+function validateOperationInputMappings(
+  line: SaveProductionLineRequest,
+  operationById: Map<string, ProductionOperationRequest>,
+  add: AddProblem
+): void {
+  const operationIds = new Set(operationById.keys());
+  const forward = line.transitions.filter(transition => (
+    transition.kind !== 'Rework' && transition.targetOperationId !== null));
+  const incoming = new Map<string, RouteTransitionRequest[]>();
+  const outgoing = new Map<string, RouteTransitionRequest[]>();
+  for (const transition of forward) {
+    const target = transition.targetOperationId!;
+    incoming.set(target, [...(incoming.get(target) ?? []), transition]);
+    outgoing.set(
+      transition.sourceOperationId,
+      [...(outgoing.get(transition.sourceOperationId) ?? []), transition]);
+  }
+  const definiteBefore = new Map<string, Set<string>>();
+  const indegrees = new Map<string, number>();
+  for (const operationId of operationIds) {
+    definiteBefore.set(operationId, new Set());
+    indegrees.set(operationId, incoming.get(operationId)?.length ?? 0);
+  }
+  const pending = [...indegrees.entries()]
+    .filter(([, degree]) => degree === 0)
+    .map(([operationId]) => operationId);
+  while (pending.length > 0) {
+    const operationId = pending.shift()!;
+    const incomingTransitions = incoming.get(operationId) ?? [];
+    if (incomingTransitions.length > 0) {
+      const predecessorSets = incomingTransitions.map(transition => new Set([
+        ...(definiteBefore.get(transition.sourceOperationId) ?? []),
+        transition.sourceOperationId
+      ]));
+      const isAndJoin = incomingTransitions.length >= 2
+        && incomingTransitions.every(transition => transition.kind === 'ParallelJoin')
+        && new Set(incomingTransitions.map(transition => transition.parallelGroupId)).size === 1;
+      const guaranteed = new Set(predecessorSets[0]);
+      for (const predecessorSet of predecessorSets.slice(1)) {
+        if (isAndJoin) {
+          for (const candidate of predecessorSet) {
+            guaranteed.add(candidate);
+          }
+        } else {
+          for (const candidate of [...guaranteed]) {
+            if (!predecessorSet.has(candidate)) {
+              guaranteed.delete(candidate);
+            }
+          }
+        }
+      }
+
+      definiteBefore.set(operationId, guaranteed);
+    }
+    for (const transition of outgoing.get(operationId) ?? []) {
+      const target = transition.targetOperationId!;
+      const degree = (indegrees.get(target) ?? 0) - 1;
+      indegrees.set(target, degree);
+      if (degree === 0) {
+        pending.push(target);
+      }
+    }
+  }
+
+  for (const operation of line.operations) {
+    const exact = new Set<string>();
+    const insensitive = new Set<string>();
+    for (const mapping of operation.inputMappings) {
+      validateCanonicalText(
+        mapping.targetInputKey,
+        'Production Context target input key',
+        'Operation',
+        operation.operationId,
+        add);
+      validateCanonicalText(
+        mapping.sourceOutputKey,
+        'Production Context source output key',
+        'Operation',
+        operation.operationId,
+        add);
+      const insensitiveKey = mapping.targetInputKey.toLocaleLowerCase('en-US');
+      if (exact.has(mapping.targetInputKey) || insensitive.has(insensitiveKey)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context target input key '${mapping.targetInputKey}' is duplicated or differs only by case.`);
+      }
+      exact.add(mapping.targetInputKey);
+      insensitive.add(insensitiveKey);
+      if (!operationById.has(mapping.sourceOperationId)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context source Operation '${mapping.sourceOperationId}' does not exist.`);
+      } else if (mapping.sourceOperationId === operation.operationId
+          || !definiteBefore.get(operation.operationId)?.has(mapping.sourceOperationId)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context source Operation '${mapping.sourceOperationId}' must definitely complete first; sibling-branch reads require an AND join.`);
+      }
+    }
+  }
 }
 
 function validateLineControllerAuthorization(
@@ -338,7 +496,7 @@ function validateOperationResources(
         ? (system !== undefined
             && isSystemWithinStation(system.systemId, operation.stationSystemId, topology))
           || (driver !== undefined
-            && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+            && ['Simulator', 'PluginCommand'].includes(
               driver.providerKind)
             && isSystemWithinStation(
               driver.ownerSystemId,
@@ -356,6 +514,40 @@ function validateOperationResources(
         'Operation',
         entityId,
         `Resource '${resource.bindingId}' does not resolve to an enabled target in Station '${operation.stationSystemId}'.`);
+    }
+  }
+}
+
+function validateRouteLayout(
+  line: SaveProductionLineRequest,
+  add: AddProblem
+): void {
+  validateUniqueIds(
+    line.routeLayout.operationPositions.map(position => position.operationId),
+    'Line',
+    'Route layout Operation IDs',
+    add);
+  const operationIds = new Set(line.operations.map(operation => operation.operationId));
+  const positionIds = new Set(line.routeLayout.operationPositions.map(position => position.operationId));
+  for (const operation of line.operations) {
+    if (!positionIds.has(operation.operationId)) {
+      add('Operation', operation.operationId, 'Route layout is missing this Operation position.');
+    }
+  }
+  for (const position of line.routeLayout.operationPositions) {
+    if (!operationIds.has(position.operationId)) {
+      add('Line', line.lineDefinitionId, `Route layout position '${position.operationId}' has no matching Operation.`);
+    }
+    if (!Number.isInteger(position.x)
+        || !Number.isInteger(position.y)
+        || position.x < ROUTE_COORDINATE_MINIMUM
+        || position.x > ROUTE_COORDINATE_MAXIMUM
+        || position.y < ROUTE_COORDINATE_MINIMUM
+        || position.y > ROUTE_COORDINATE_MAXIMUM) {
+      add(
+        'Operation',
+        position.operationId || line.lineDefinitionId,
+        `Route coordinates must be integers from ${ROUTE_COORDINATE_MINIMUM} through ${ROUTE_COORDINATE_MAXIMUM}.`);
     }
   }
 }
@@ -538,7 +730,11 @@ function validateRouteGraph(
   const forward = line.transitions.filter(transition => transition.kind !== 'Rework');
   const forwardOperations = forward.filter(transition => transition.targetOperationId !== null);
   if (forwardOperations.some(transition => transition.targetOperationId === line.entryOperationId)) {
-    add('Line', line.lineDefinitionId, 'The Entry Operation cannot have an incoming forward Route Transition.');
+    add(
+      'Line',
+      line.lineDefinitionId,
+      'The Entry Operation cannot have an incoming forward Route Transition.',
+      productionProblemFields.lineEntryOperationId);
   }
 
   if (operationById.has(line.entryOperationId)) {
@@ -707,13 +903,15 @@ function validatePortableId(
   label: string,
   scope: ProductionDesignerProblemScope,
   entityId: string,
-  add: AddProblem
+  add: AddProblem,
+  fieldLocator: ProductionDesignerProblemFieldLocator | null = null
 ): void {
   if (!isPortableId(value)) {
     add(
       scope,
       entityId,
-      `${label} must be a portable segment of at most 128 letters, digits, '.', '-' or '_' characters.`);
+      `${label} must be a portable segment of at most 128 letters, digits, '.', '-' or '_' characters.`,
+      fieldLocator);
   }
 }
 
@@ -722,10 +920,15 @@ function validateCanonicalText(
   label: string,
   scope: ProductionDesignerProblemScope,
   entityId: string,
-  add: AddProblem
+  add: AddProblem,
+  fieldLocator: ProductionDesignerProblemFieldLocator | null = null
 ): void {
   if (!isCanonicalText(value)) {
-    add(scope, entityId, `${label} must be non-empty without leading or trailing whitespace.`);
+    add(
+      scope,
+      entityId,
+      `${label} must be non-empty without leading or trailing whitespace.`,
+      fieldLocator);
   }
 }
 
@@ -745,7 +948,11 @@ function isPortableId(value: string): boolean {
     && !/^(COM|LPT)[1-9]$/.test(base);
 }
 
-function isCanonicalContextValue(kind: string, value: string): boolean {
+const int64Minimum = -9223372036854775808n;
+const int64Maximum = 9223372036854775807n;
+const decimalCoefficientMaximum = 79228162514264337593543950335n;
+
+export function isCanonicalContextValue(kind: string, value: string): boolean {
   if (!isCanonicalText(value)) {
     return false;
   }
@@ -756,15 +963,41 @@ function isCanonicalContextValue(kind: string, value: string): boolean {
       return value === 'true' || value === 'false';
     case 'WholeNumber':
       try {
-        return BigInt(value).toString() === value;
+        const integer = BigInt(value);
+        return integer.toString() === value
+          && integer >= int64Minimum
+          && integer <= int64Maximum;
       } catch {
         return false;
       }
-    case 'FixedPoint':
-      return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value);
-    case 'DateTimeUtc':
-      return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}\+00:00$/.test(value)
-        && !Number.isNaN(Date.parse(`${value.slice(0, 23)}Z`));
+    case 'FixedPoint': {
+      const match = /^(-?)(0|[1-9]\d*)(?:\.(\d*[1-9]))?$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const fraction = match[3] ?? '';
+      const coefficient = BigInt(`${match[2]}${fraction}`);
+      return fraction.length <= 28
+        && coefficient <= decimalCoefficientMaximum
+        && !(match[1] === '-' && coefficient === 0n);
+    }
+    case 'DateTimeUtc': {
+      const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})\+00:00$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const [year, month, day, hour, minute, second] = match
+        .slice(1, 7)
+        .map(Number);
+      const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return year >= 1
+        && month >= 1 && month <= 12
+        && day >= 1 && day <= daysInMonth[month - 1]
+        && hour <= 23
+        && minute <= 59
+        && second <= 59;
+    }
     default:
       return false;
   }
@@ -833,5 +1066,6 @@ type AddProblem = (
   scope: ProductionDesignerProblemScope,
   entityId: string,
   message: string,
+  fieldLocator?: ProductionDesignerProblemFieldLocator | null,
   severity?: ProductionDesignerProblemSeverity
 ) => void;

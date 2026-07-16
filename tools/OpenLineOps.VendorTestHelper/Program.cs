@@ -29,6 +29,8 @@ public static class Program
     private const int DefaultDelayMilliseconds = 300_000;
     private const int MaximumDelayMilliseconds = 3_600_000;
     private const int CancellationPollMilliseconds = 50;
+    private const string ForceChildPidPublicationFailureEnvironmentVariable =
+        "OPENLINEOPS_VENDOR_TEST_HELPER_FORCE_CHILD_PID_PUBLICATION_FAILURE";
 
     private static readonly UTF8Encoding Utf8WithoutBom = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly JsonSerializerOptions ResultJsonOptions = new(JsonSerializerDefaults.Web);
@@ -137,7 +139,19 @@ public static class Program
         Console.CancelKeyPress += cancellationHandler;
         try
         {
-            return await RunAsync(options, invocation, cancellationSource.Token).ConfigureAwait(false);
+            try
+            {
+                return await RunAsync(options, invocation, cancellationSource.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidOperationException)
+            {
+                await Console.Error.WriteLineAsync(
+                        $"Vendor helper execution failure: {exception.Message}")
+                    .ConfigureAwait(false);
+                return CrashExitCode;
+            }
         }
         finally
         {
@@ -441,10 +455,9 @@ public static class Program
         InvocationContext invocation,
         CancellationToken cancellationToken)
     {
-        await File.WriteAllTextAsync(
+        await WriteTextAtomicallyAsync(
                 Path.Combine(invocation.OutputDirectory, ProcessIdFileName),
                 Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom,
                 cancellationToken)
             .ConfigureAwait(false);
         await File.WriteAllTextAsync(
@@ -565,15 +578,25 @@ public static class Program
                           ?? throw new InvalidOperationException("Vendor helper child process could not be started.");
         var childStandardOutput = child.StandardOutput.ReadToEndAsync(CancellationToken.None);
         var childStandardError = child.StandardError.ReadToEndAsync(CancellationToken.None);
-        await File.WriteAllTextAsync(
-                Path.Combine(outputDirectory, ChildProcessIdFileName),
-                child.Id.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom,
-                cancellationToken)
-            .ConfigureAwait(false);
 
         try
         {
+            await Console.Error.WriteLineAsync(
+                    $"Vendor helper started child process {child.Id.ToString(CultureInfo.InvariantCulture)}.")
+                .ConfigureAwait(false);
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable(ForceChildPidPublicationFailureEnvironmentVariable),
+                    "1",
+                    StringComparison.Ordinal))
+            {
+                throw new IOException("Vendor helper simulated child PID publication failure.");
+            }
+
+            await WriteTextAtomicallyAsync(
+                    Path.Combine(outputDirectory, ChildProcessIdFileName),
+                    child.Id.ToString(CultureInfo.InvariantCulture),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return await WaitForDelayAsync(outputDirectory, delayMilliseconds, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -849,10 +872,10 @@ public static class Program
             args[1],
             "delayMilliseconds",
             MaximumDelayMilliseconds);
-        await File.WriteAllTextAsync(
+        await WriteTextAtomicallyAsync(
                 pidFile,
                 Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom)
+                CancellationToken.None)
             .ConfigureAwait(false);
         await Task.Delay(delayMilliseconds).ConfigureAwait(false);
         return 0;
@@ -885,6 +908,37 @@ public static class Program
 
         await Task.Delay(delayMilliseconds).ConfigureAwait(false);
         return 0;
+    }
+
+    private static async Task WriteTextAtomicallyAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var destinationPath = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(destinationPath)
+                        ?? throw new InvalidOperationException("Atomic output path has no parent directory.");
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                    temporaryPath,
+                    content,
+                    Utf8WithoutBom,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.Move(temporaryPath, destinationPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     private enum VendorTestMode

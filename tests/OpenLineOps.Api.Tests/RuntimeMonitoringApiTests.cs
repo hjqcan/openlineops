@@ -16,15 +16,15 @@ using OpenLineOps.Runtime.Domain.Targets;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class RuntimeMonitoringApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public RuntimeMonitoringApiTests(WebApplicationFactory<Program> factory)
+    public RuntimeMonitoringApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -195,7 +195,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         using var runningTargetDocument = await ReadJsonAsync(runningTargetResponse);
         var runningTarget = Assert.Single(
             runningTargetDocument.RootElement.GetProperty("items").EnumerateArray());
-        Assert.Equal("InProgress", runningTarget.GetProperty("commandStatus").GetString());
+        Assert.Equal("Running", runningTarget.GetProperty("commandStatus").GetString());
         Assert.False(runningTarget.GetProperty("isTerminal").GetBoolean());
         Assert.Equal(JsonValueKind.Null, runningTarget.GetProperty("failureReason").ValueKind);
 
@@ -286,7 +286,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.System
             && status.TargetId == "System.Main"
-            && status.CommandStatus == "InProgress"
+            && status.CommandStatus == "Running"
             && !status.IsTerminal);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.System
@@ -294,7 +294,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             && status.IsTerminal);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.SlotGroup
-            && status.CommandStatus == "InProgress"
+            && status.CommandStatus == "Running"
             && !status.IsTerminal);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.SlotGroup
@@ -302,7 +302,7 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             && status.IsTerminal);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.Slot
-            && status.CommandStatus == "InProgress"
+            && status.CommandStatus == "Running"
             && !status.IsTerminal);
         Assert.Contains(targetStatuses, status =>
             status.TargetKind == RuntimeTargetKinds.Slot
@@ -317,6 +317,8 @@ public sealed class RuntimeMonitoringApiTests : IClassFixture<WebApplicationFact
             .WithUrl(new Uri(_client.BaseAddress!, "/hubs/runtime-progress"), options =>
             {
                 options.Transports = HttpTransportType.LongPolling;
+                options.AccessTokenProvider = () =>
+                    Task.FromResult<string?>(ApiTestAuthentication.StandardToken);
                 options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
             })
             .Build();

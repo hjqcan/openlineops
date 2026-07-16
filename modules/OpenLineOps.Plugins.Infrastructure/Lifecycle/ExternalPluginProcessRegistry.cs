@@ -5,86 +5,37 @@ namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public sealed class ExternalPluginProcessRegistry : IExternalPluginProcessRegistry
 {
-    private readonly ConcurrentDictionary<string, IExternalPluginProcess> _processes = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<PluginPackageRuntimeIdentity, IExternalPluginProcess> _exactProcesses = new();
+    private readonly ConcurrentDictionary<PluginPackageExecutionIdentity, IExternalPluginProcess> _processes = [];
 
-    public void Register(string pluginId, IExternalPluginProcess process)
-    {
-        if (!IsCanonicalPluginId(pluginId))
-        {
-            throw new ArgumentException(
-                "Plugin id is required and must not contain surrounding whitespace.",
-                nameof(pluginId));
-        }
-
-        ArgumentNullException.ThrowIfNull(process);
-
-        _processes[pluginId] = process;
-    }
-
-    public void Register(PluginPackageRuntimeIdentity identity, IExternalPluginProcess process)
+    public void Register(PluginPackageExecutionIdentity identity, IExternalPluginProcess process)
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(process);
-        if (!identity.IsComplete)
+        if (!_processes.TryAdd(identity, process))
         {
-            throw new ArgumentException("Plugin package runtime identity must be complete.", nameof(identity));
+            throw new InvalidOperationException(
+                $"Plugin process '{identity.PluginId}' is already active for Project '{identity.ProjectId}', Application '{identity.ApplicationId}', and package SHA-256 '{identity.PackageIdentity.PackageContentSha256}'.");
         }
-
-        _exactProcesses[identity] = process;
-        Register(identity.PluginId, process);
     }
 
-    public bool TryGet(string pluginId, out IExternalPluginProcess process)
-    {
-        if (!IsCanonicalPluginId(pluginId))
-        {
-            process = null!;
-
-            return false;
-        }
-
-        return _processes.TryGetValue(pluginId, out process!);
-    }
-
-    public bool TryGet(PluginPackageRuntimeIdentity identity, out IExternalPluginProcess process)
+    public bool TryGet(
+        PluginPackageExecutionIdentity identity,
+        out IExternalPluginProcess process)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        if (!identity.IsComplete)
-        {
-            process = null!;
-            return false;
-        }
-
-        return _exactProcesses.TryGetValue(identity, out process!);
+        return _processes.TryGetValue(identity, out process!);
     }
 
-    public void Unregister(string pluginId, IExternalPluginProcess process)
-    {
-        if (!IsCanonicalPluginId(pluginId))
-        {
-            return;
-        }
-
-        ArgumentNullException.ThrowIfNull(process);
-
-        var entry = new KeyValuePair<string, IExternalPluginProcess>(pluginId, process);
-        ((ICollection<KeyValuePair<string, IExternalPluginProcess>>)_processes).Remove(entry);
-    }
-
-    public void Unregister(PluginPackageRuntimeIdentity identity, IExternalPluginProcess process)
+    public void Unregister(
+        PluginPackageExecutionIdentity identity,
+        IExternalPluginProcess process)
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(process);
-        var exactEntry = new KeyValuePair<PluginPackageRuntimeIdentity, IExternalPluginProcess>(identity, process);
-        ((ICollection<KeyValuePair<PluginPackageRuntimeIdentity, IExternalPluginProcess>>)_exactProcesses)
-            .Remove(exactEntry);
-        Unregister(identity.PluginId, process);
-    }
-
-    private static bool IsCanonicalPluginId(string? value)
-    {
-        return !string.IsNullOrWhiteSpace(value)
-            && string.Equals(value, value.Trim(), StringComparison.Ordinal);
+        var entry = new KeyValuePair<PluginPackageExecutionIdentity, IExternalPluginProcess>(
+            identity,
+            process);
+        ((ICollection<KeyValuePair<PluginPackageExecutionIdentity, IExternalPluginProcess>>)_processes)
+            .Remove(entry);
     }
 }

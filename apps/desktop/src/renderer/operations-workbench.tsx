@@ -5,6 +5,8 @@ import {
   Boxes,
   CircleDot,
   Factory,
+  Flag,
+  GitBranch,
   Hand,
   ListFilter,
   LockOpen,
@@ -38,6 +40,12 @@ import {
   type ProductionLineCarrierView,
   type ProductionLineStationView
 } from './production-line-runtime-view';
+import { canIssueProductionRunCommand } from './production-run-command-policy';
+import {
+  buildProductionRouteRuntimeProjection,
+  type ProductionRouteRuntimeMovement,
+  type ProductionRouteRuntimeProjection
+} from './production-route-runtime-projection';
 
 interface OperationsWorkbenchProps {
   activeRuns: ProductionRunReadModel[];
@@ -51,6 +59,7 @@ interface OperationsWorkbenchProps {
   projectId: string | null;
   applicationId: string | null;
   projectSnapshotId: string | null;
+  actorId: string;
   onFilterChanged(filter: keyof ProductionOperationsFilters, value: string): void;
   onRefresh(): Promise<void>;
   onOpenTopology(): void;
@@ -93,6 +102,7 @@ export function OperationsWorkbench({
   projectId,
   applicationId,
   projectSnapshotId,
+  actorId,
   onFilterChanged,
   onRefresh,
   onOpenTopology,
@@ -101,7 +111,6 @@ export function OperationsWorkbench({
 }: OperationsWorkbenchProps): React.ReactElement {
   const [selectedRunId, setSelectedRunId] = useState('');
   const [pendingCommand, setPendingCommand] = useState<OperatorProductionRunCommand | null>(null);
-  const [actorId, setActorId] = useState('desktop-operator');
   const [reason, setReason] = useState('');
   const [operationId, setOperationId] = useState('');
   const [recoveryOperationRunId, setRecoveryOperationRunId] = useState('');
@@ -276,10 +285,6 @@ export function OperationsWorkbench({
     if (!selectedRun || !pendingCommand || !pendingDefinition) {
       return;
     }
-    if (!isCanonical(actorId)) {
-      onMessage('Operator Actor ID is required and cannot start or end with whitespace.');
-      return;
-    }
     if (requiresReason(pendingCommand) && !isCanonical(reason)) {
       onMessage(`${pendingDefinition.label} requires a canonical operator reason.`);
       return;
@@ -326,7 +331,6 @@ export function OperationsWorkbench({
     setCommandBusy(true);
     try {
       const response = await commandProductionRun(selectedRun.productionRunId, pendingCommand, {
-        actorId,
         reason: reason || null,
         operationId: pendingCommand === 'Rework' ? operationId : null,
         recoveryDecision
@@ -360,8 +364,8 @@ export function OperationsWorkbench({
       return;
     }
     if (!existing) {
-      if (!isCanonical(actorId) || !isCanonical(emergencyReason)) {
-        onMessage('Emergency Stop requires a canonical Actor ID and operator reason.');
+      if (!isCanonical(emergencyReason)) {
+        onMessage('Emergency Stop requires an operator reason.');
         return;
       }
       if (emergencyConfirmation !== stationSystemId) {
@@ -378,7 +382,6 @@ export function OperationsWorkbench({
         projectId: existing.projectId,
         applicationId: existing.applicationId,
         projectSnapshotId: existing.projectSnapshotId,
-        actorId: existing.actorId,
         reason: existing.reason,
         requestedAtUtc: existing.requestedAtUtc
       } : {
@@ -387,7 +390,6 @@ export function OperationsWorkbench({
         projectId,
         applicationId,
         projectSnapshotId,
-        actorId,
         reason: emergencyReason,
         requestedAtUtc: new Date().toISOString()
       };
@@ -619,7 +621,7 @@ export function OperationsWorkbench({
                         type="button"
                         key={definition.command}
                         className={`${definition.tone} ${pendingCommand === definition.command ? 'selected' : ''}`}
-                        disabled={!canIssue(definition.command, selectedRun) || commandBusy}
+                        disabled={!canIssueProductionRunCommand(definition.command, selectedRun) || commandBusy}
                         onClick={() => {
                           setPendingCommand(definition.command);
                           setReason('');
@@ -637,7 +639,7 @@ export function OperationsWorkbench({
                 {pendingDefinition ? (
                   <div className={`operations-command-composer ${pendingDefinition.tone}`}>
                     <strong>{pendingDefinition.label} · confirmation</strong>
-                    <label><span>Actor ID</span><input value={actorId} onChange={event => setActorId(event.target.value)} data-testid="production-command-actor" /></label>
+                    <label><span>Authenticated Actor</span><input value={actorId} readOnly data-testid="production-command-actor" /></label>
                     {requiresReason(pendingDefinition.command) ? (
                       <label><span>Reason</span><input value={reason} onChange={event => setReason(event.target.value)} autoFocus data-testid="production-command-reason" /></label>
                     ) : null}
@@ -728,13 +730,17 @@ const RunListItem = memo(function RunListItem({
   onSelect(): void;
 }): React.ReactElement {
   const operation = currentOperation(run);
+  const routeProjection = buildProductionRouteRuntimeProjection(run);
+  const movement = routeProjection.currentMovements[0] ?? routeProjection.latestDecision;
   return (
     <button type="button" className={selected ? 'selected' : ''} onClick={onSelect} data-testid={`active-run-${run.productionRunId}`}>
       <span className={`operations-status-pip status-${statusTone(run.executionStatus, run.controlState)}`} />
       <span>
         <strong>{run.productionUnitIdentity.value}</strong>
         <small>{run.productionUnitIdentity.modelId}</small>
-        <em>{operation?.stationSystemId ?? 'Awaiting route'} · {operation?.operationId ?? run.entryOperationId}</em>
+        <em>{movement
+          ? compactRouteMovement(movement)
+          : `${operation?.stationSystemId ?? 'Awaiting route'} · ${operation?.operationId ?? run.entryOperationId}`}</em>
       </span>
       <span className="operations-run-axes">
         <b>{run.executionStatus}</b>
@@ -761,7 +767,12 @@ const StationCard = memo(function StationCard({
       <header>
         <span><Factory size={14} /><strong>{station.stationSystemId}</strong></span>
         <span className="operations-station-safety-actions">
-          <small>{station.status} · {station.activeOperations.length} active · {station.queue.length} queued</small>
+          <small>
+            {station.status} · {station.activeOperations.length} active · {station.queue.length} queued
+            {' · '}{station.agentId
+              ? `${station.agentId}/${station.stationId} ${station.agentPresenceHealth}`
+              : `Agent ${station.agentPresenceHealth}`}
+          </small>
           <button type="button" onClick={onEmergencyStop} title={`Emergency Stop ${station.stationSystemId}`} data-testid={`emergency-stop-${station.stationSystemId}`}>
             <ShieldAlert size={12} /> E-STOP
           </button>
@@ -886,6 +897,9 @@ function ProductLane({
 }
 
 function RunDetail({ run }: { run: ProductionRunReadModel }): React.ReactElement {
+  const routeProjection = useMemo(
+    () => buildProductionRouteRuntimeProjection(run),
+    [run]);
   return (
     <section className="operations-run-evidence">
       <header>
@@ -899,6 +913,7 @@ function RunDetail({ run }: { run: ProductionRunReadModel }): React.ReactElement
         <div><span>Disposition</span><strong>{run.disposition}</strong></div>
         <div><span>Control</span><strong>{run.controlState}</strong></div>
       </div>
+      <RouteRuntimeEvidence projection={routeProjection} entryOperationId={run.entryOperationId} />
       <div className="operations-operation-list">
         {run.operations.map(operation => (
           <div key={operation.operationRunId} className={`status-${statusTone(operation.executionStatus, run.controlState)}`}>
@@ -930,39 +945,138 @@ function RunDetail({ run }: { run: ProductionRunReadModel }): React.ReactElement
   );
 }
 
+function RouteRuntimeEvidence({
+  projection,
+  entryOperationId
+}: {
+  projection: ProductionRouteRuntimeProjection;
+  entryOperationId: string;
+}): React.ReactElement {
+  const currentMovementIds = new Set(projection.currentMovements.map(movement => movement.movementId));
+  return (
+    <section className="operations-route-runtime" data-testid="production-route-runtime">
+      <header>
+        <span><GitBranch size={12} /><strong>ROUTE MOVEMENT</strong></span>
+        <small>{projection.decisionTrail.length} persisted decision{projection.decisionTrail.length === 1 ? '' : 's'}</small>
+      </header>
+      <div className="operations-route-current">
+        {projection.currentMovements.map(movement => (
+          <RouteMovementSummary
+            key={movement.movementId}
+            movement={movement}
+            label={movement.transitionId ? 'CURRENT TRANSITION' : 'CURRENT FLOW'}
+          />
+        ))}
+        {projection.currentMovements.length === 0 && projection.latestDecision ? (
+          <RouteMovementSummary movement={projection.latestDecision} label="LATEST TRANSITION" />
+        ) : null}
+        {projection.currentMovements.length === 0 && !projection.latestDecision ? (
+          <div className="operations-route-awaiting">
+            <CircleDot size={12} />
+            <span><strong>ENTRY · {entryOperationId}</strong><small>No route decision has been persisted yet.</small></span>
+          </div>
+        ) : null}
+      </div>
+      {projection.decisionTrail.length > 0 ? (
+        <div className="operations-route-trail" data-testid="production-route-decision-trail">
+          {projection.decisionTrail.map((movement, index) => (
+            <article
+              key={movement.movementId}
+              className={`tone-${movement.tone}${currentMovementIds.has(movement.movementId) ? ' current' : ''}`}
+              data-testid={`production-route-decision-${movement.transitionId}`}
+              data-transition-id={movement.transitionId ?? ''}
+              data-flow-kind={movement.kind}
+            >
+              <i />
+              <span>
+                <small>
+                  {index === projection.decisionTrail.length - 1 ? 'LATEST · ' : ''}
+                  {movement.transitionId} · traversal {movement.traversal}
+                </small>
+                <strong>{routeMovementPath(movement)}</strong>
+                <em>{routeMovementStations(movement)}</em>
+              </span>
+              <span>
+                <b>{movement.sourceJudgement ?? 'Unknown'}</b>
+                <small>{movement.decidedAtUtc ? formatTimestamp(movement.decidedAtUtc) : movement.evidence}</small>
+              </span>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RouteMovementSummary({
+  movement,
+  label
+}: {
+  movement: ProductionRouteRuntimeMovement;
+  label: string;
+}): React.ReactElement {
+  const Icon = movement.kind === 'Terminal'
+    ? Flag
+    : movement.kind === 'Rework'
+      ? RotateCcw
+      : ArrowRight;
+  return (
+    <div
+      className={`operations-route-focus tone-${movement.tone}`}
+      data-testid="production-route-current-flow"
+      data-transition-id={movement.transitionId ?? ''}
+      data-flow-kind={movement.kind}
+      data-target-operation-id={movement.targetOperationId ?? ''}
+      data-terminal-disposition={movement.terminalDisposition ?? ''}
+    >
+      <Icon size={14} />
+      <span>
+        <small>{label}</small>
+        <strong>{routeMovementPath(movement)}</strong>
+        <em>{movement.transitionId
+          ? `${movement.transitionId} · traversal ${movement.traversal}`
+          : `${movement.kind} · ${movement.evidence}`}</em>
+      </span>
+      <b>{movement.kind === 'Terminal'
+        ? movement.terminalDisposition
+        : movement.sourceJudgement ?? movement.target?.executionStatus ?? 'Pending'}</b>
+    </div>
+  );
+}
+
+function routeMovementPath(movement: ProductionRouteRuntimeMovement): string {
+  const source = movement.source
+    ? `${movement.source.operationId} #${movement.source.attempt}`
+    : 'ENTRY';
+  const target = movement.terminalDisposition
+    ? `TERMINAL · ${movement.terminalDisposition}`
+    : movement.target
+      ? `${movement.target.operationId} #${movement.target.attempt}`
+      : movement.targetOperationId ?? 'Awaiting target';
+  return `${source} → ${target}`;
+}
+
+function routeMovementStations(movement: ProductionRouteRuntimeMovement): string {
+  const source = movement.source?.stationSystemId ?? 'line entry';
+  const target = movement.terminalDisposition
+    ? 'product disposition'
+    : movement.target?.stationSystemId ?? 'station pending';
+  return `${source} → ${target}`;
+}
+
+function compactRouteMovement(movement: ProductionRouteRuntimeMovement): string {
+  const source = movement.source?.stationSystemId ?? 'ENTRY';
+  const target = movement.terminalDisposition
+    ? `TERMINAL/${movement.terminalDisposition}`
+    : movement.target?.stationSystemId ?? movement.targetOperationId ?? 'Awaiting target';
+  return `${source} → ${target}`;
+}
+
 function currentOperation(run: ProductionRunReadModel): ProductionOperationRunReadModel | null {
   return run.operations.find(operation => operation.executionStatus === 'Running')
     ?? run.operations.find(operation => operation.executionStatus === 'Pending')
     ?? run.operations[run.operations.length - 1]
     ?? null;
-}
-
-function canIssue(command: OperatorProductionRunCommand, run: ProductionRunReadModel): boolean {
-  if (run.isTerminal) {
-    return false;
-  }
-  if (run.controlState === 'RecoveryRequired') {
-    switch (command) {
-      case 'Reconcile': return run.operations.some(operation => operation.executionStatus === 'Running');
-      case 'Retry': return run.operations.length > 0;
-      case 'Abort':
-      case 'Scrap': return true;
-      default: return false;
-    }
-  }
-  switch (command) {
-    case 'Pause': return run.controlState === 'Active';
-    case 'Continue': return run.controlState === 'Paused';
-    case 'Stop': return run.controlState !== 'StopRequested';
-    case 'Hold': return run.controlState === 'Active' || run.controlState === 'Paused';
-    case 'Release': return run.controlState === 'Held';
-    case 'Rework': return run.operations.length > 0 && run.controlState !== 'SafeStopped';
-    case 'SafeStop': return run.controlState !== 'SafeStopped';
-    case 'Reconcile':
-    case 'Retry':
-    case 'Abort': return false;
-    default: return true;
-  }
 }
 
 function requiresReason(command: OperatorProductionRunCommand): boolean {
@@ -1048,6 +1162,14 @@ function idleStationView(stationSystemId: string): ProductionLineStationView {
   return {
     stationSystemId,
     status: 'Idle',
+    agentId: null,
+    stationId: null,
+    agentPresenceSessionId: null,
+    agentPresenceSequence: null,
+    agentPresenceState: null,
+    agentPresenceHealth: 'NotApplicable',
+    agentPresenceLastSeenAtUtc: null,
+    agentPresenceAgeSeconds: null,
     queue: [],
     activeOperations: [],
     productionUnits: [],

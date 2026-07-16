@@ -215,6 +215,8 @@ public sealed class DevicesModuleDependencyInjectionTests
     private static DeviceCommandExecutionRequest CreateSimulatorRequest()
     {
         return new DeviceCommandExecutionRequest(
+            "project.main",
+            "application.main",
             ProjectReleaseRuntimeProviderKinds.Simulator,
             "simulator://scanner-01",
             new DeviceInstanceId("scanner-01"),
@@ -228,6 +230,8 @@ public sealed class DevicesModuleDependencyInjectionTests
     private static DeviceCommandExecutionRequest CreatePluginRequest()
     {
         return new DeviceCommandExecutionRequest(
+            "project.main",
+            "application.main",
             ProjectReleaseRuntimeProviderKinds.PluginCommand,
             "plugin://openlineops.scanner-driver/device.scanner:scan",
             new DeviceInstanceId("scanner-01"),

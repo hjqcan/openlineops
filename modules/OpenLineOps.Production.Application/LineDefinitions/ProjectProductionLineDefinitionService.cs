@@ -222,6 +222,8 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
         ArgumentNullException.ThrowIfNull(request.Operations);
         ArgumentNullException.ThrowIfNull(request.Transitions);
         ArgumentNullException.ThrowIfNull(request.LineControllerAuthorizations);
+        ArgumentNullException.ThrowIfNull(request.RouteLayout);
+        ArgumentNullException.ThrowIfNull(request.RouteLayout.OperationPositions);
         EnsureRequestItemsAreComplete(request);
 
         var productModel = ProductModelDefinition.Create(
@@ -238,7 +240,12 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
                 new OperationResourceBindingId(resource.BindingId),
                 resource.Kind,
                 resource.TopologyTargetId,
-                resource.Resolution))));
+                resource.Resolution)),
+            operation.InputMappings.Select(mapping => new OperationInputMapping(
+                mapping.TargetInputKey,
+                new OperationDefinitionId(mapping.SourceOperationId),
+                mapping.SourceOutputKey,
+                mapping.ExpectedValueKind))));
         var transitions = request.Transitions.Select(transition => RouteTransition.Create(
             new RouteTransitionId(transition.TransitionId),
             new OperationDefinitionId(transition.SourceOperationId),
@@ -271,6 +278,11 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
                 authorization.TargetBindingId,
                 authorization.TargetCapabilityId,
                 authorization.TargetAction));
+        var routeLayout = new ProductionRouteLayout(request.RouteLayout.OperationPositions.Select(position =>
+            new OperationCanvasPosition(
+                new OperationDefinitionId(position.OperationId),
+                position.X,
+                position.Y)));
         return ProductionLineDefinition.Restore(
             new ProductionLineDefinitionId(request.LineDefinitionId),
             request.DisplayName,
@@ -280,6 +292,7 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
             operations,
             transitions,
             lineControllerAuthorizations,
+            routeLayout,
             createdAtUtc,
             updatedAtUtc);
     }
@@ -288,9 +301,12 @@ public sealed class ProjectProductionLineDefinitionService : IProjectProductionL
     {
         if (request.Operations.Any(static operation => operation is null
                 || operation.Resources is null
-                || operation.Resources.Any(static resource => resource is null))
+                || operation.Resources.Any(static resource => resource is null)
+                || operation.InputMappings is null
+                || operation.InputMappings.Any(static mapping => mapping is null))
             || request.Transitions.Any(static transition => transition is null)
-            || request.LineControllerAuthorizations.Any(static authorization => authorization is null))
+            || request.LineControllerAuthorizations.Any(static authorization => authorization is null)
+            || request.RouteLayout.OperationPositions.Any(static position => position is null))
         {
             throw new ArgumentException(
                 "Production line semantic collections cannot contain null items.",

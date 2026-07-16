@@ -149,7 +149,7 @@ public static class RunnerEntrypoint
         services.AddScoped<RunnerCommand>();
     }
 
-    private static IConfigurationRoot BuildConfiguration(
+    internal static IConfigurationRoot BuildConfiguration(
         RunnerRunOptions options,
         string currentDirectory)
     {
@@ -174,6 +174,7 @@ public static class RunnerEntrypoint
             projectDirectory = currentDirectory;
         }
         var runnerDataDirectory = ProjectExecutionDataDirectory.ForProjectDirectory(projectDirectory);
+        var traceArtifactDirectory = Path.Combine(runnerDataDirectory, "trace-artifacts");
         var builder = new ConfigurationBuilder();
 
         AddJsonFiles(builder, baseDirectory, environmentName);
@@ -195,9 +196,12 @@ public static class RunnerEntrypoint
                     runnerDataDirectory,
                     "openlineops-traceability.sqlite"),
                 ["OpenLineOps:Traceability:ArtifactStorage:Provider"] = "FileSystem",
-                ["OpenLineOps:Traceability:ArtifactStorage:RootPath"] = Path.Combine(
+                ["OpenLineOps:Traceability:ArtifactStorage:RootPath"] = traceArtifactDirectory,
+                ["OpenLineOps:Devices:ExternalProgramHost:WorkspaceRootPath"] = Path.Combine(
                     runnerDataDirectory,
-                    "trace-artifacts")
+                    "external-program-workspaces"),
+                ["OpenLineOps:Devices:ExternalProgramHost:EvidenceRootPath"] =
+                    traceArtifactDirectory
             })
             .Build();
     }

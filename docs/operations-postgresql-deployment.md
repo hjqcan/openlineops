@@ -1,5 +1,10 @@
 # Operations PostgreSQL Deployment
 
+Coordinator HTTP authentication, role policies, HTTPS requirements, and Studio
+credential provisioning are defined in
+[`coordinator-api-security.md`](coordinator-api-security.md). A production host
+with an empty `OpenLineOps:Security:Callers` list intentionally refuses to start.
+
 This guide describes the server deployment profile for the Operations bounded context
 when alarms must be stored in PostgreSQL and integration events must be written through
 the CAP outbox.

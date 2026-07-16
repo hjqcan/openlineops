@@ -3,7 +3,7 @@
 This file is generated from `OpenLineOps.sln` NuGet restore metadata and the Electron desktop package lock.
 Run `powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1 -UpdateNotice` after dependency changes.
 
-Counts: NuGet 132, NPM 259, unique license values 16.
+Counts: NuGet 137, NPM 259, unique license values 16.
 
 ## Review Policy
 
@@ -91,6 +91,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | Microsoft.Extensions.Hosting.Abstractions | 10.0.0 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Hosting.Abstractions | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Hosting.WindowsServices | 10.0.9 | MIT | nuget:license:expression |
+| Microsoft.Extensions.Http | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.0 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.9 | MIT | nuget:license:expression |
@@ -123,13 +124,17 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | SharpZipLib | 1.4.2 | MIT | nuget:license:expression |
 | SourceGear.sqlite3 | 3.50.4.5 | LICENSE.txt | nuget:license:file |
 | System.CodeDom | 6.0.0 | MIT | nuget:license:expression |
+| System.Collections.Immutable | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.AttributedModel | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Convention | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Hosting | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Runtime | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.TypedParts | 9.0.0 | MIT | nuget:license:expression |
+| System.Diagnostics.DiagnosticSource | 10.0.9 | MIT | nuget:license:expression |
 | System.Diagnostics.EventLog | 10.0.9 | MIT | nuget:license:expression |
+| System.IO.Pipelines | 9.0.0 | MIT | nuget:license:expression |
+| System.Reflection.Metadata | 9.0.0 | MIT | nuget:license:expression |
 | System.ServiceProcess.ServiceController | 10.0.9 | MIT | nuget:license:expression |
 | System.Threading.RateLimiting | 8.0.0 | MIT | nuget:license:expression |
 | Testcontainers | 4.12.0 | MIT | nuget:license:expression |

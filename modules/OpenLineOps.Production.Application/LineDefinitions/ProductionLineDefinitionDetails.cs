@@ -9,6 +9,7 @@ public sealed record ProductionLineDefinitionDetails(
     IReadOnlyCollection<OperationDefinitionDetails> Operations,
     IReadOnlyCollection<RouteTransitionDetails> Transitions,
     IReadOnlyCollection<LineControllerAuthorizationDetails> LineControllerAuthorizations,
+    ProductionRouteLayoutDetails RouteLayout,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
@@ -25,13 +26,28 @@ public sealed record ProductModelDetails(
     string ModelCode,
     string IdentityInputKey);
 
+public sealed record ProductionRouteLayoutDetails(
+    IReadOnlyCollection<OperationCanvasPositionDetails> OperationPositions);
+
+public sealed record OperationCanvasPositionDetails(
+    string OperationId,
+    int X,
+    int Y);
+
 public sealed record OperationDefinitionDetails(
     string OperationId,
     string DisplayName,
     string StationSystemId,
     string FlowDefinitionId,
     string ConfigurationSnapshotId,
-    IReadOnlyCollection<OperationResourceBindingDetails> Resources);
+    IReadOnlyCollection<OperationResourceBindingDetails> Resources,
+    IReadOnlyCollection<OperationInputMappingDetails> InputMappings);
+
+public sealed record OperationInputMappingDetails(
+    string TargetInputKey,
+    string SourceOperationId,
+    string SourceOutputKey,
+    string ExpectedValueKind);
 
 public sealed record OperationResourceBindingDetails(
     string BindingId,

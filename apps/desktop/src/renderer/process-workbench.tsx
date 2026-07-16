@@ -43,10 +43,17 @@ import {
 } from './api';
 import { useEditorDocument } from './editor-workspace';
 import {
+  DraftTransitionDialog,
+  useDraftTransitionGuard
+} from './draft-transition-guard';
+import {
   readEditorConflictRevision,
-  type EditorDocumentConflict,
-  type EditorProblem
+  type EditorDocumentConflict
 } from './editor-workspace-model';
+import {
+  createProcessEditorProblems,
+  parseProcessProblemLocation
+} from './process-problem-location';
 
 type ProcessNodeKind = 'Start' | 'Command' | 'Decision' | 'Delay' | 'End' | 'Blockly' | 'PythonScript';
 type AddableProcessNodeKind = Exclude<ProcessNodeKind, 'Start'>;
@@ -454,7 +461,9 @@ export function ProcessWorkbench({
       setDraft(fromProcessDefinition(response.body));
       setConflict(null);
       onMessage(`Saved ${response.body.processDefinitionId}`);
-      await loadDefinitions();
+      await loadDefinitions().catch(error => {
+        onMessage(`Process list refresh failed after save: ${String(error)}`);
+      });
     } finally {
       setBusy(false);
     }
@@ -513,18 +522,19 @@ export function ProcessWorkbench({
     }
 
     setBusy(true);
-    setValidationReport(null);
     try {
       const response = await getProcessDefinition(summary.processDefinitionId, projectApplicationApiScope);
       if (!response.ok || !response.body) {
-        onMessage(`Process load failed: ${response.status} ${response.text}`);
-        return;
+        const message = `Process load failed: ${response.status} ${response.text}`;
+        onMessage(message);
+        throw new Error(message);
       }
 
       setSelectedDefinition(response.body);
       setEditingDefinitionId(response.body.processDefinitionId);
       setLoadedDefinitionStatus(response.body.status);
       setDraft(fromProcessDefinition(response.body));
+      setValidationReport(null);
       setConflict(null);
       onMessage(`${response.body.processDefinitionId} loaded`);
     } finally {
@@ -806,24 +816,49 @@ export function ProcessWorkbench({
     }));
   }, [mutateDraft]);
 
-  const editorProblems = useMemo<EditorProblem[]>(() => (validationReport?.issues ?? []).map(
-    (issue, index) => ({
-      id: `${issue.code}-${index + 1}`,
-      severity: issue.severity === 'Error' ? 'Error' : 'Warning',
-      message: issue.message,
-      targetId: draft.selectedNodeId || null
-    })), [draft.selectedNodeId, validationReport?.issues]);
+  const editorProblems = useMemo(
+    () => createProcessEditorProblems(validationReport?.issues ?? []),
+    [validationReport?.issues]);
   useEditorDocument({
     dirty: draft.dirty,
+    editRevision: draft,
     canSave: isBackendHealthy && !busy && !isLoadedDefinitionReadOnly,
     save: () => saveDraft(),
     revert: reloadDraft,
     focus: targetId => {
-      if (targetId && draft.nodes.some(node => node.nodeId === targetId)) selectNode(targetId);
+      const location = parseProcessProblemLocation(targetId);
+      if (!location) return;
+
+      if (location.targetKind === 'Node') {
+        if (draft.nodes.some(node => node.nodeId === location.targetId)) {
+          selectNode(location.targetId);
+        }
+        return;
+      }
+
+      if (location.targetKind === 'Transition') {
+        const transition = Array.from(document.querySelectorAll<HTMLElement>(
+          '[data-process-transition-id]'))
+          .find(element => element.dataset.processTransitionId === location.targetId);
+        transition?.focus();
+        transition?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+
+      document.querySelector<HTMLElement>('[data-testid="process-definition-id"]')?.focus();
     },
     problems: editorProblems,
     conflict
   });
+  const draftTransitionGuard = useDraftTransitionGuard({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && !isLoadedDefinitionReadOnly,
+    save: () => saveDraft(),
+    onError: onMessage
+  });
+  const currentDraftLabel = draft.displayName.trim()
+    || draft.processDefinitionId.trim()
+    || 'Untitled Flow';
 
   return (
     <section className="process-workbench">
@@ -837,7 +872,21 @@ export function ProcessWorkbench({
         </div>
 
         <div className="process-toolbar">
-          <button type="button" className="button ghost" onClick={resetDraft} title="New draft">
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() => draftTransitionGuard.request({
+              id: 'process:new',
+              title: 'Save changes before creating a Flow?',
+              detail: 'The current Flow has unsaved changes. Save them, discard them, or cancel and keep editing.',
+              currentDocumentLabel: currentDraftLabel,
+              targetLabel: 'a new Flow',
+              proceed: resetDraft
+            })}
+            disabled={busy || draftTransitionGuard.busy}
+            title="New draft"
+            data-testid="new-process-definition"
+          >
             <FilePlus2 size={16} />
             New
           </button>
@@ -970,9 +1019,15 @@ export function ProcessWorkbench({
               key={definition.processDefinitionId}
               className="definition-row"
               data-testid={`process-definition-${definition.processDefinitionId}`}
-              onClick={() => {
-                void loadExisting(definition);
-              }}
+              disabled={busy || draftTransitionGuard.busy}
+              onClick={() => draftTransitionGuard.request({
+                id: `process:open:${definition.processDefinitionId}`,
+                title: 'Save changes before opening another Flow?',
+                detail: 'Opening another Flow replaces the current editor draft.',
+                currentDocumentLabel: currentDraftLabel,
+                targetLabel: definition.displayName || definition.processDefinitionId,
+                proceed: () => loadExisting(definition)
+              })}
             >
               <span>{definition.displayName}</span>
               <strong>{definition.status}</strong>
@@ -1027,6 +1082,7 @@ export function ProcessWorkbench({
         />
 
       </div>
+      <DraftTransitionDialog controller={draftTransitionGuard} testIdPrefix="process-draft-transition" />
     </section>
   );
 }
@@ -1583,7 +1639,7 @@ function ProjectTargetPanel({
         <div className="project-target-empty">No topology targets available.</div>
       ) : (
         <div className="project-target-list">
-          {targets.slice(0, 8).map(target => (
+          {targets.map(target => (
             <button
               type="button"
               key={`${target.targetKind}-${target.targetId}`}
@@ -1856,7 +1912,12 @@ function TransitionEditor({
       </div>
       <div className="transition-grid">
         {transitions.map(transition => (
-          <div className="transition-row" key={transition.transitionId}>
+          <div
+            className="transition-row"
+            key={transition.transitionId}
+            data-process-transition-id={transition.transitionId}
+            tabIndex={-1}
+          >
             <input
               value={transition.transitionId}
               data-testid={`transition-id-${transition.transitionId}`}

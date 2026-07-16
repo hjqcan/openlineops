@@ -41,4 +41,11 @@ public interface IExternalProgramResourceService
         string resourceId,
         ExternalProgramProtocolTrialRequest request,
         CancellationToken cancellationToken = default);
+
+    Task<Result<ExternalProgramProtocolTrialResult>> TrialDefinitionAsync(
+        string projectId,
+        string applicationId,
+        SaveExternalProgramResourceRequest definition,
+        ExternalProgramProtocolTrialRequest request,
+        CancellationToken cancellationToken = default);
 }

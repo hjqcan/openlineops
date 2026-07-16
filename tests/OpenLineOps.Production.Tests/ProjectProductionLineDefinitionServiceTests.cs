@@ -65,6 +65,12 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             "Completed",
             Assert.Single(result.Value.Transitions, candidate =>
                 candidate.TerminalDisposition is not null).TerminalDisposition);
+        Assert.Equal(
+            [("operation.load", 120, 80), ("operation.test", 400, 80)],
+            result.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)));
         Assert.True(File.Exists(Path.Combine(
             fixture.Scope.ApplicationRootPath,
             "production",
@@ -79,6 +85,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.Equal(
             result.Value.Operations.SelectMany(operation => operation.Resources),
             restored.Value.Operations.SelectMany(operation => operation.Resources));
+        Assert.Equal(
+            result.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)),
+            restored.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)));
     }
 
     [Theory]
@@ -247,14 +262,16 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     "station.eol",
                     "flow.load",
                     "configuration.load",
-                    StationResources("load")),
+                    StationResources("load"),
+                    []),
                 new OperationDefinitionRequest(
                     "operation.test",
                     "External Program",
                     "station.eol",
                     "flow.test",
                     "configuration.test",
-                    StationResources("test"))
+                    StationResources("test"),
+                    [])
             ],
             [
                 new RouteTransitionRequest(
@@ -282,7 +299,12 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     null,
                     null)
             ],
-            []);
+            [],
+            new ProductionRouteLayoutRequest(
+            [
+                new OperationCanvasPositionRequest("operation.load", 120, 80),
+                new OperationCanvasPositionRequest("operation.test", 400, 80)
+            ]));
     }
 
     private static OperationResourceBindingRequest[] StationResources(string suffix) =>

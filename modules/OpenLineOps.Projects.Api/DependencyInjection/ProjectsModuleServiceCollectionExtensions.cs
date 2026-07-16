@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Projects.Api.HostedServices;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Api.Time;
 using OpenLineOps.Projects.Application.ExternalPrograms;
@@ -26,7 +27,11 @@ public static class ProjectsModuleServiceCollectionExtensions
         services.AddSingleton<InMemoryAutomationProjectRepository>();
         services.AddSingleton<IAutomationProjectRepository>(serviceProvider =>
             serviceProvider.GetRequiredService<InMemoryAutomationProjectRepository>());
-        services.TryAddSingleton<IAutomationProjectManifestStore, FileSystemAutomationProjectManifestStore>();
+        services.TryAddSingleton<FileSystemAutomationProjectManifestStore>();
+        services.TryAddSingleton<IAutomationProjectManifestStore>(serviceProvider =>
+            serviceProvider.GetRequiredService<FileSystemAutomationProjectManifestStore>());
+        services.TryAddSingleton<IProjectApplicationPluginPackageReferenceStore>(serviceProvider =>
+            serviceProvider.GetRequiredService<FileSystemAutomationProjectManifestStore>());
         services.TryAddSingleton<FileSystemProjectReleaseArtifactStore>();
         services.TryAddSingleton<IProjectReleaseArtifactStore>(serviceProvider =>
             serviceProvider.GetRequiredService<FileSystemProjectReleaseArtifactStore>());
@@ -57,6 +62,12 @@ public static class ProjectsModuleServiceCollectionExtensions
         services.AddScoped<IExternalProgramResourceService, ExternalProgramResourceService>();
         services.AddScoped<IAutomationProjectService, AutomationProjectService>();
         services.AddScoped<IAutomationProjectWorkspaceService, AutomationProjectWorkspaceService>();
+        services.AddSingleton(serviceProvider =>
+            ProjectsStartupWorkspaceOptions.FromConfiguration(
+                serviceProvider.GetRequiredService<IConfiguration>()));
+        // Projects are restored before the Runtime module's recovery, Rabbit inbox, and
+        // Coordinator hosted services because this module is registered first by the API host.
+        services.AddHostedService<ProjectsStartupWorkspaceHostedService>();
 
         return services;
     }

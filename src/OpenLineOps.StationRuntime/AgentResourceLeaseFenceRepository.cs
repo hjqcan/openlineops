@@ -106,7 +106,13 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
 
     public ValueTask HoldForRecoveryAsync(
         ProductionRunId runId,
-        string operationRunId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromException(ImmutableOperation());
+
+    public ValueTask ReleaseRecoveryHoldAsync(
+        ProductionRunId runId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
         CancellationToken cancellationToken = default) =>
         ValueTask.FromException(ImmutableOperation());
 

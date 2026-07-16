@@ -2,8 +2,8 @@ using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Application.Abstractions.Time;
-using ProductionExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
-using ProductionResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
+using ExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
+using ResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Agent.Application.StationJobs;
 
@@ -340,8 +340,8 @@ public sealed class StationJobCoordinator
         catch (OperationCanceledException) when (execution.CancellationToken.IsCancellationRequested)
         {
             result = new StationOperationExecutionResult(
-                ProductionExecutionStatus.Canceled,
-                ProductionResultJudgement.Aborted,
+                ExecutionStatus.Canceled,
+                ResultJudgement.Aborted,
                 "{}",
                 [],
                 [],
@@ -356,8 +356,8 @@ public sealed class StationJobCoordinator
         catch (Exception exception)
         {
             result = new StationOperationExecutionResult(
-                ProductionExecutionStatus.Failed,
-                ProductionResultJudgement.Unknown,
+                ExecutionStatus.Failed,
+                ResultJudgement.Unknown,
                 "{}",
                 [],
                 [],

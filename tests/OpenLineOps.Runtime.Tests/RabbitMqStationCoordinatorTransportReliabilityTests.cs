@@ -1,9 +1,12 @@
 using System.Text;
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Execution;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
+using OpenLineOps.Runtime.Infrastructure.Time;
 using OpenLineOps.Runtime.Infrastructure.Transport;
 
 namespace OpenLineOps.Runtime.Tests;
@@ -14,6 +17,21 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         new(2026, 7, 11, 9, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task DisposeAsyncIsIdempotentForDependencyInjectionAliases()
+    {
+        var transport = new RabbitMqStationCoordinatorTransport(
+            Options(),
+            new InMemoryStationJobCoordinationStore(),
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            new SystemClock(),
+            new FailOncePublicationTransport());
+
+        await transport.DisposeAsync();
+        await transport.DisposeAsync();
+    }
+
+    [Fact]
     public async Task ConfirmFailureEscapesSoTransactionalOutboxCanRetrySameMessage()
     {
         var publisher = new FailOncePublicationTransport();
@@ -22,6 +40,9 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         await using var transport = new RabbitMqStationCoordinatorTransport(
             options,
             store,
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            new SystemClock(),
             publisher);
         var request = JobRequest();
         Assert.True(await EnqueueAsync(store, request));
@@ -48,7 +69,9 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         var publication = publisher.Publications[1];
         Assert.Equal(request.MessageId, publication.MessageId);
         Assert.Equal(request.JobId, publication.CorrelationId);
-        Assert.Equal($"station.{request.AgentId}.{request.StationId}", publication.RoutingKey);
+        Assert.Equal(
+            StationTransportRoute.Job(request.AgentId, request.StationId),
+            publication.RoutingKey);
         Assert.Empty(await store.ListPendingAsync(10));
     }
 
@@ -56,7 +79,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     public async Task ResultInboxAckCrashRedeliveryPersistsCompletionExactlyOnce()
     {
         var store = new InMemoryStationJobCoordinationStore();
-        var processor = new StationResultDeliveryProcessor(store);
+        var processor = new StationResultDeliveryProcessor(
+            store,
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new SystemClock());
         var request = JobRequest();
         Assert.True(await EnqueueAsync(store, request));
         var accepted = Accepted(request);
@@ -93,6 +121,83 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     }
 
     [Fact]
+    public async Task MissingCentralArtifactReceiptRejectsCompletionBeforeInboxWrite()
+    {
+        var store = new InMemoryStationJobCoordinationStore();
+        var request = JobRequest();
+        Assert.True(await EnqueueAsync(store, request));
+        await store.RecordAcceptedAsync(Accepted(request));
+        var completion = Completion(request);
+        var settlement = new RecordingSettlement();
+        var processor = new StationResultDeliveryProcessor(
+            store,
+            new InMemoryAgentPresenceRepository(),
+            new RejectingReceiptVerifier(),
+            Options(),
+            new SystemClock());
+
+        await processor.ProcessAsync(
+            ResultDelivery(completion, deliveryTag: 4, redelivered: false),
+            settlement,
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
+
+        Assert.Null(await store.GetCompletionAsync(completion.IdempotencyKey));
+        Assert.Equal([(4UL, false)], settlement.Rejected);
+    }
+
+    [Fact]
+    public async Task PresenceInboxPersistsAuthorizedIdentityAndRejectsSpoofedStationSystem()
+    {
+        var presences = new InMemoryAgentPresenceRepository();
+        var processor = new StationResultDeliveryProcessor(
+            new InMemoryStationJobCoordinationStore(),
+            presences,
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new FixedClock(Now));
+        var sessionId = Guid.NewGuid();
+        var started = new AgentPresenceReported(
+            "agent.main",
+            "station.main",
+            "station-system.main",
+            sessionId,
+            1,
+            AgentPresenceState.Started,
+            Now.AddDays(1));
+        var accepted = new RecordingSettlement();
+
+        await processor.ProcessAsync(
+            PresenceDelivery(started, 5),
+            accepted,
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
+
+        Assert.Equal([5UL], accepted.Acknowledged);
+        var persisted = Assert.IsType<AgentPresenceSnapshot>(
+            await presences.GetAsync("agent.main", "station.main"));
+        Assert.Equal(Now, persisted.ReceivedAtUtc);
+        Assert.Equal(Now.AddDays(1), persisted.ObservedAtUtc);
+
+        var spoofed = started with
+        {
+            StationSystemId = "station-system.spoof",
+            SessionId = Guid.NewGuid()
+        };
+        var rejected = new RecordingSettlement();
+        await processor.ProcessAsync(
+            PresenceDelivery(spoofed, 6),
+            rejected,
+            IgnoreMaterialArrivalAsync,
+            IgnoreRecoveryRequiredAsync);
+
+        Assert.Equal([(6UL, false)], rejected.Rejected);
+        Assert.Equal("station-system.main", (await presences.GetAsync(
+            "agent.main",
+            "station.main"))!.StationSystemId);
+    }
+
+    [Fact]
     public async Task CompletionWithWrongEnvelopeIdentityIsRejectedBeforeInboxWrite()
     {
         var store = new InMemoryStationJobCoordinationStore();
@@ -106,7 +211,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         };
         var settlement = new RecordingSettlement();
 
-        await new StationResultDeliveryProcessor(store).ProcessAsync(
+        await new StationResultDeliveryProcessor(
+            store,
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new SystemClock()).ProcessAsync(
             delivery,
             settlement,
             IgnoreMaterialArrivalAsync,
@@ -147,7 +257,9 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         var publication = StationCoordinatorPublicationFactory.Create(Options(), change);
         Assert.Equal(request.JobId, publication.CorrelationId);
         Assert.Equal(
-            "station.agent.main.station.main.resource-lease-changed",
+            StationTransportRoute.ResourceLeaseChanged(
+                request.AgentId,
+                request.StationId),
             publication.RoutingKey);
     }
 
@@ -244,7 +356,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             Steps = [null!]
         };
         var settlement = new RecordingSettlement();
-        await new StationResultDeliveryProcessor(store).ProcessAsync(
+        await new StationResultDeliveryProcessor(
+            store,
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new SystemClock()).ProcessAsync(
             ResultDelivery(malformed, 30, redelivered: false),
             settlement,
             IgnoreMaterialArrivalAsync,
@@ -280,7 +397,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         for (var index = 0; index < invalidOutcomes.Length; index++)
         {
             var invalidSettlement = new RecordingSettlement();
-            await new StationResultDeliveryProcessor(store).ProcessAsync(
+            await new StationResultDeliveryProcessor(
+                store,
+                new InMemoryAgentPresenceRepository(),
+                ArtifactFreeReceiptVerifier.Instance,
+                Options(),
+                new SystemClock()).ProcessAsync(
                 ResultDelivery(
                     invalidOutcomes[index],
                     checked((ulong)(31 + index)),
@@ -335,7 +457,12 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     public async Task MaterialArrivalAckCrashRedeliveryUsesDurableHandlerIdempotency()
     {
         var store = new InMemoryStationJobCoordinationStore();
-        var processor = new StationResultDeliveryProcessor(store);
+        var processor = new StationResultDeliveryProcessor(
+            store,
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new SystemClock());
         var message = new MaterialArrived(
             Guid.NewGuid(),
             "material-arrival/plc/unit-001/scan-001",
@@ -387,7 +514,11 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     public async Task MaterialArrivalRejectsUppercaseUuidHashAndUnknownJsonPermanently()
     {
         var processor = new StationResultDeliveryProcessor(
-            new InMemoryStationJobCoordinationStore());
+            new InMemoryStationJobCoordinationStore(),
+            new InMemoryAgentPresenceRepository(),
+            ArtifactFreeReceiptVerifier.Instance,
+            Options(),
+            new SystemClock());
         var message = new MaterialArrived(
             Guid.NewGuid(),
             $"material-arrival/{Guid.NewGuid():D}",
@@ -520,7 +651,10 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         Assert.Equal(request.MessageId, publication.MessageId);
         Assert.Equal(request.MessageId, publication.CorrelationId);
         Assert.Equal(
-            "station.agent.main.station.main.emergency-stop",
+            StationTransportRoute.Safety(
+                request.AgentId,
+                request.StationId,
+                "emergency-stop"),
             publication.RoutingKey);
     }
 
@@ -528,7 +662,18 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
     {
         BrokerUri = "amqp://localhost",
         RequireTls = false,
-        CoordinatorId = "coordinator.main"
+        CoordinatorId = "coordinator.main",
+        Deployments =
+        [
+            new StationDeploymentOptions
+            {
+                ProjectId = "project.main",
+                ApplicationId = "application.main",
+                AgentId = "agent.main",
+                StationId = "station.main",
+                StationSystemId = "station-system.main"
+            }
+        ]
     };
 
     private static async Task DispatchPendingAsync(
@@ -675,6 +820,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         completion.MessageId.ToString("D"),
         completion.JobId.ToString("D"),
         StationTransportRoute.Event(
+            completion.AgentId,
             completion.StationId,
             nameof(StationJobCompleted)),
         redelivered,
@@ -712,7 +858,7 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             agentId,
             messageId.ToString("D"),
             requestId.ToString("D"),
-            StationTransportRoute.Event(stationId, routeSuffix),
+            StationTransportRoute.Event(agentId, stationId, routeSuffix),
             false,
             JsonSerializer.SerializeToUtf8Bytes(acknowledgement, JsonOptions()));
     }
@@ -729,9 +875,27 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
         message.MessageId.ToString("D"),
         message.MessageId.ToString("D"),
         StationTransportRoute.Event(
+            message.ProducerId,
             message.StationId,
             nameof(MaterialArrived)),
         redelivered,
+        JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions()));
+
+    private static StationCoordinatorTransportDelivery PresenceDelivery(
+        AgentPresenceReported message,
+        ulong deliveryTag) => new(
+        deliveryTag,
+        "application/json",
+        "utf-8",
+        nameof(AgentPresenceReported),
+        message.AgentId,
+        AgentPresenceContract.MessageId(message).ToString("D"),
+        message.SessionId.ToString("D"),
+        StationTransportRoute.Event(
+            message.AgentId,
+            message.StationId,
+            nameof(AgentPresenceReported)),
+        false,
         JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions()));
 
     private static JsonSerializerOptions JsonOptions() => new(JsonSerializerDefaults.Web);
@@ -801,6 +965,38 @@ public sealed class RabbitMqStationCoordinatorTransportReliabilityTests
             cancellationToken.ThrowIfCancellationRequested();
             Rejected.Add((deliveryTag, requeue));
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FixedClock(DateTimeOffset utcNow) : IClock
+    {
+        public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class ArtifactFreeReceiptVerifier : IStationArtifactReceiptVerifier
+    {
+        public static ArtifactFreeReceiptVerifier Instance { get; } = new();
+
+        public ValueTask VerifyAsync(
+            StationJobCompleted completion,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Empty(completion.Artifacts);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RejectingReceiptVerifier : IStationArtifactReceiptVerifier
+    {
+        public ValueTask VerifyAsync(
+            StationJobCompleted completion,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromException(
+                new StationArtifactReceiptRejectedException(
+                    "Central artifact receipt is missing."));
         }
     }
 }

@@ -83,7 +83,7 @@ internal sealed class BoundedContextScaffoldModel
 
         TableName = ToSnakeCase($"{ContextName}{AggregateName}");
         EventName = $"{ContextName}.{AggregateName}.Created";
-        AggregateSampleId = $"{ToKebabCase(ContextName)}.{ToKebabCase(AggregateName)}.sample.v1";
+        AggregateSampleId = $"{ToKebabCase(ContextName)}.{ToKebabCase(AggregateName)}.sample";
         AggregateDisplayName = $"{SplitPascalCase(AggregateName)} Sample";
         AggregatePluralName = $"{AggregateName}s";
         ContextRouteSegment = ToKebabCase(ContextName);

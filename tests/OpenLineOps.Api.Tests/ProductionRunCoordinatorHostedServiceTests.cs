@@ -147,6 +147,11 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
             }
         }
 
+        public ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+            ProductionRunTerminalPageRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ProductionRunTerminalPage([], null));
+
         public ValueTask<bool> TryAddAsync(
             ProductionRun run,
             ProductionRunExecutionPlan executionPlan,

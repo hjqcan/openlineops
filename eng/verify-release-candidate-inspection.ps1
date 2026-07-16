@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$FixtureIndexEntries = [System.Collections.Generic.List[object]]::new()
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -88,6 +89,43 @@ function Get-FixturePhysicalId {
     }
 }
 
+function Write-FixtureIndex {
+    $fixtureNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    $fixturePaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($entry in $FixtureIndexEntries) {
+        if (-not $fixtureNames.Add($entry.name)) {
+            throw "Fixture index contains duplicate logical name '$($entry.name)'."
+        }
+
+        if (-not $fixturePaths.Add($entry.relativeDirectory)) {
+            throw "Fixture index contains duplicate physical directory '$($entry.relativeDirectory)'."
+        }
+
+        $fixtureRoot = Join-Path $ResolvedWorkRoot $entry.relativeDirectory
+        Assert-DirectChildDirectory -Parent $ResolvedWorkRoot -Path $fixtureRoot
+        $expectedManifestRelativePath = "$($entry.relativeDirectory)/release-manifest.json"
+        if ($entry.manifestRelativePath -cne $expectedManifestRelativePath) {
+            throw "Fixture '$($entry.name)' has a non-canonical manifest path '$($entry.manifestRelativePath)'."
+        }
+
+        if (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "release-manifest.json") -PathType Leaf)) {
+            throw "Fixture '$($entry.name)' is missing release-manifest.json."
+        }
+    }
+
+    $index = [ordered]@{
+        schema = "openlineops.release-candidate-inspection-fixture-index"
+        schemaVersion = 1
+        fixtures = @($FixtureIndexEntries)
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $ResolvedWorkRoot "fixture-index.json"),
+        (($index | ConvertTo-Json -Depth 6) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
 function New-TestZip {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -106,12 +144,21 @@ function New-TestZip {
     try {
         foreach ($entryName in $Entries) {
             $entry = $archive.CreateEntry($entryName)
-            $writer = [System.IO.StreamWriter]::new($entry.Open())
-            try {
-                $writer.WriteLine("test content for $entryName")
+            if ([System.IO.Path]::GetExtension($entryName) -ceq ".exe") {
+                $fixtureExecutable = Join-Path $env:SystemRoot "System32/where.exe"
+                $bytes = [System.IO.File]::ReadAllBytes($fixtureExecutable)
+                $stream = $entry.Open()
+                try { $stream.Write($bytes, 0, $bytes.Length) }
+                finally { $stream.Dispose() }
             }
-            finally {
-                $writer.Dispose()
+            else {
+                $writer = [System.IO.StreamWriter]::new($entry.Open())
+                try {
+                    $writer.WriteLine("test content for $entryName")
+                }
+                finally {
+                    $writer.Dispose()
+                }
             }
         }
     }
@@ -130,6 +177,13 @@ function New-TestWindowsBundleZip {
         [string] $TamperPath,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
+        [switch] $OmitAgentStationSystemId,
+        [string] $AgentHeartbeatInterval = "00:00:05",
+        [string] $AgentBrokerUri = "amqps://localhost:5671",
+        [bool] $AgentRequireBrokerTls = $true,
+        [string] $AgentCoordinatorBaseUri = "https://localhost:7443/",
+        [string] $AgentArtifactUploadTimeout = "00:05:00",
+        [switch] $EmbedAgentArtifactUploadBearerToken,
         [string] $AgentSafetyExecutablePath = ""
     )
 
@@ -138,11 +192,17 @@ function New-TestWindowsBundleZip {
     foreach ($relativePath in $Files) {
         $path = Join-Path $stagingRoot $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+        if ([System.IO.Path]::GetExtension($relativePath) -ceq ".exe") {
+            Copy-Item `
+                -LiteralPath (Join-Path $env:SystemRoot "System32/where.exe") `
+                -Destination $path
+            continue
+        }
         $content = if ($relativePath -ceq "appsettings.json") {
             $pythonSandbox = [ordered]@{
                 RequireLeastPrivilegeExecution = $true
                 IsolationMode = "LeastPrivilegeIdentity"
-                LeastPrivilegeIdentity = "RestrictedCurrentLowIntegrity"
+                LeastPrivilegeIdentity = "PerExecutionAppContainer"
                 LeastPrivilegeLauncherExecutable = "OpenLineOps.LeastPrivilegeLauncher.exe"
                 LeastPrivilegeNoInteractivePrompt = $true
             }
@@ -152,6 +212,11 @@ function New-TestWindowsBundleZip {
             }
 
             $agentConfiguration = [ordered]@{
+                HeartbeatInterval = $AgentHeartbeatInterval
+                BrokerUri = $AgentBrokerUri
+                RequireBrokerTls = $AgentRequireBrokerTls
+                CoordinatorBaseUri = $AgentCoordinatorBaseUri
+                ArtifactUploadTimeout = $AgentArtifactUploadTimeout
                 RuntimeExecutablePath = "OpenLineOps.StationRuntime.exe"
                 PluginHostExecutablePath = "OpenLineOps.PluginHost.exe"
                 PythonScript = [ordered]@{
@@ -159,6 +224,13 @@ function New-TestWindowsBundleZip {
                     HostPythonRuntimeDllPath = ""
                     Sandbox = $pythonSandbox
                 }
+            }
+            if (-not $OmitAgentStationSystemId) {
+                $agentConfiguration["StationSystemId"] = ""
+            }
+            if ($EmbedAgentArtifactUploadBearerToken) {
+                $agentConfiguration["ArtifactUploadBearerToken"] =
+                    "embedded-release-template-secret"
             }
             if (-not $OmitAgentSafetyExecutablePath) {
                 $agentConfiguration["SafetyExecutablePath"] = $AgentSafetyExecutablePath
@@ -305,10 +377,10 @@ function Write-TestProvenance {
         version = $RecordedVersion
         generatedAtUtc = [System.DateTimeOffset]::UtcNow.ToString("O")
         source = [ordered]@{
-            available = $false
-            commit = $null
-            branch = $null
-            dirty = $null
+            available = $true
+            commit = "0123456789abcdef0123456789abcdef01234567"
+            branch = "fixture"
+            dirty = $false
         }
         build = [ordered]@{
             configuration = "Release"
@@ -513,6 +585,13 @@ function New-MinimalReleaseCandidate {
         [switch] $TamperAgentBundle,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
+        [switch] $OmitAgentStationSystemId,
+        [string] $AgentHeartbeatInterval = "00:00:05",
+        [string] $AgentBrokerUri = "amqps://localhost:5671",
+        [bool] $AgentRequireBrokerTls = $true,
+        [string] $AgentCoordinatorBaseUri = "https://localhost:7443/",
+        [string] $AgentArtifactUploadTimeout = "00:05:00",
+        [switch] $EmbedAgentArtifactUploadBearerToken,
         [string] $AgentSafetyExecutablePath = "",
         [switch] $SkipDependencyInventory,
         [switch] $SkipMetadataChecksums,
@@ -534,6 +613,17 @@ function New-MinimalReleaseCandidate {
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
         "eng/verify-staged-agent-bundle-e2e.ps1",
+        "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+        "eng/verify-staged-agent-evidence.ps1",
+        "eng/verify-production-closure-evidence.ps1",
+        "eng/verify-studio-two-agent-production-closure.ps1",
+        "eng/verify-studio-two-agent-production-evidence.ps1",
+        "eng/verify-studio-two-agent-production-evidence.tests.ps1",
+        "eng/verify-runner-staged-agent-e2e.ps1",
+        "eng/verify-runner-staged-agent-evidence.ps1",
+        "eng/verify-runner-staged-agent-evidence.tests.ps1",
+        "eng/verify-evidence-validation.tests.ps1",
+        "eng/evidence-validation-test-fixtures.ps1",
         "eng/verify-solution-project-coverage.ps1",
         "eng/inspect-ci-release-artifact.ps1",
         "eng/inspect-release-candidate.ps1",
@@ -547,9 +637,15 @@ function New-MinimalReleaseCandidate {
         "eng/sign-windows-package.ps1",
         "eng/verify-windows-signing-readiness.ps1",
         "docs/station-agent-deployment.md",
+        "docs/coordinator-deployment.md",
+        "docs/coordinator-api-security.md",
+        "docs/trace-projection-recovery.md",
+        "apps/desktop/scripts/production-closure-e2e.mjs",
         "docs/headless-runner.md"
     ) + $ExtraSourceEntries)
-    New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @("OpenLineOps.Api.dll")
+    New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @(
+        "OpenLineOps.Api.dll",
+        "appsettings.json")
     New-TestWindowsBundleZip `
         -Root $root `
         -Name "agent/agent-openlineops-win-x64-$version.zip" `
@@ -576,6 +672,13 @@ function New-MinimalReleaseCandidate {
         -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" }) `
         -ExposeRemovedAgentContainerSetting:$ExposeRemovedAgentContainerSetting `
         -OmitAgentSafetyExecutablePath:$OmitAgentSafetyExecutablePath `
+        -OmitAgentStationSystemId:$OmitAgentStationSystemId `
+        -AgentHeartbeatInterval $AgentHeartbeatInterval `
+        -AgentBrokerUri $AgentBrokerUri `
+        -AgentRequireBrokerTls $AgentRequireBrokerTls `
+        -AgentCoordinatorBaseUri $AgentCoordinatorBaseUri `
+        -AgentArtifactUploadTimeout $AgentArtifactUploadTimeout `
+        -EmbedAgentArtifactUploadBearerToken:$EmbedAgentArtifactUploadBearerToken `
         -AgentSafetyExecutablePath $AgentSafetyExecutablePath
     New-TestWindowsBundleZip `
         -Root $root `
@@ -594,11 +697,34 @@ function New-MinimalReleaseCandidate {
             [ordered]@{ role = "headless-runner"; relativePath = "OpenLineOps.Runner.exe" })
     $desktopEntries = @(
         "dist/index.html",
+        "dist-electron/main/api-credential-security.js",
+        "dist-electron/main/application-extension-import-security.js",
+        "dist-electron/main/backend-api-security.js",
+        "dist-electron/main/backend-process-handshake.js",
+        "dist-electron/main/local-sqlite-connection.js",
         "dist-electron/main/main.js",
-        "dist-electron/preload/preload.js",
+        "dist-electron/main/renderer-navigation-security.js",
+        "dist-electron/main/trace-artifact-save.js",
+        "dist-electron/main/trace-artifact-save-core.js",
+        "dist-electron/preload/preload.cjs",
         "package/win-unpacked/OpenLineOps.exe",
         "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
-        "package/win-unpacked/resources/app/package.json")
+        "package/win-unpacked/resources/app/package.json",
+        "package/win-unpacked/resources/app/dist/index.html",
+        "package/win-unpacked/resources/app/dist-electron/main/api-credential-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/application-extension-import-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/backend-api-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/backend-process-handshake.js",
+        "package/win-unpacked/resources/app/dist-electron/main/local-sqlite-connection.js",
+        "package/win-unpacked/resources/app/dist-electron/main/main.js",
+        "package/win-unpacked/resources/app/dist-electron/main/renderer-navigation-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save.js",
+        "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save-core.js",
+        "package/win-unpacked/resources/app/dist-electron/preload/preload.cjs",
+        "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+        "package/win-unpacked/resources/app/runtime/api/appsettings.json",
+        "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+        "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe")
     if ($BackslashDesktopEntry) {
         $desktopEntries[0] = "dist\index.html"
     }
@@ -634,6 +760,12 @@ function New-MinimalReleaseCandidate {
                 -Mutation $MetadataChecksumMutation
         }
     }
+
+    $FixtureIndexEntries.Add([ordered]@{
+        name = $Name
+        relativeDirectory = $fixturePhysicalId
+        manifestRelativePath = "$fixturePhysicalId/release-manifest.json"
+    }) | Out-Null
 
     return $root
 }
@@ -722,6 +854,47 @@ Assert-InspectionFails `
     -Root $configuredAgentSafetyExecutablePathRoot `
     -Name "configured-agent-safety-executable-path" `
     -ExpectedPattern "SafetyExecutablePath release template must be empty"
+
+$missingAgentStationSystemIdRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-station-system-id" `
+    -OmitAgentStationSystemId
+Assert-InspectionFails `
+    -Root $missingAgentStationSystemIdRoot `
+    -Name "missing-agent-station-system-id" `
+    -ExpectedPattern "StationSystemId release template must be present and empty"
+
+$invalidAgentHeartbeatRoot = New-MinimalReleaseCandidate `
+    -Name "invalid-agent-heartbeat" `
+    -AgentHeartbeatInterval "00:00:30"
+Assert-InspectionFails `
+    -Root $invalidAgentHeartbeatRoot `
+    -Name "invalid-agent-heartbeat" `
+    -ExpectedPattern "HeartbeatInterval release template must be exactly"
+
+$insecureAgentBrokerRoot = New-MinimalReleaseCandidate `
+    -Name "insecure-agent-broker" `
+    -AgentBrokerUri "amqp://guest:guest@localhost:5672" `
+    -AgentRequireBrokerTls $false
+Assert-InspectionFails `
+    -Root $insecureAgentBrokerRoot `
+    -Name "insecure-agent-broker" `
+    -ExpectedPattern "must use an amqps broker template without embedded placeholder credentials"
+
+$insecureAgentCoordinatorRoot = New-MinimalReleaseCandidate `
+    -Name "insecure-agent-coordinator" `
+    -AgentCoordinatorBaseUri "http://coordinator.internal:7443/"
+Assert-InspectionFails `
+    -Root $insecureAgentCoordinatorRoot `
+    -Name "insecure-agent-coordinator" `
+    -ExpectedPattern "must use a credential-free HTTPS CoordinatorBaseUri"
+
+$embeddedAgentArtifactTokenRoot = New-MinimalReleaseCandidate `
+    -Name "embedded-agent-artifact-token" `
+    -EmbedAgentArtifactUploadBearerToken
+Assert-InspectionFails `
+    -Root $embeddedAgentArtifactTokenRoot `
+    -Name "embedded-agent-artifact-token" `
+    -ExpectedPattern "must not embed ArtifactUploadBearerToken"
 
 $unsafePathRoot = New-MinimalReleaseCandidate -Name "unsafe-path" -ExtraSourceEntries @("../evil.txt")
 Assert-InspectionFails `
@@ -861,5 +1034,6 @@ Assert-InspectionFails `
     -Name "wrong-case-zip-entry" `
     -ExpectedPattern "missing expected entry: dist/index\.html"
 
+Write-FixtureIndex
 Write-Host "Release candidate inspection verification passed."
 exit 0

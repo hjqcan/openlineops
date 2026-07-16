@@ -123,7 +123,7 @@ public sealed record StationOperationCommandEvidence(
     string TargetId,
     string CapabilityId,
     string CommandName,
-    string Status,
+    ExecutionStatus ExecutionStatus,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,

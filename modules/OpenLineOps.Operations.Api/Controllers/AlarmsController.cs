@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using OpenLineOps.Api.Abstractions;
+using OpenLineOps.Operations.Api.Models;
 using OpenLineOps.Operations.Application.Contract.Alarms;
 using OpenLineOps.Operations.Application.Contract.Results;
 using OpenLineOps.Operations.Application.Contract.Services;
@@ -8,6 +9,7 @@ using OpenLineOps.Operations.Application.Contract.Services;
 namespace OpenLineOps.Operations.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Operations)]
 [Route(OpenLineOpsApiRoutes.OperationsAlarms)]
 public sealed class AlarmsController(IAlarmAppService appService)
@@ -57,11 +59,14 @@ public sealed class AlarmsController(IAlarmAppService appService)
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<OperationsApplicationResult>> Acknowledge(
         string id,
-        AcknowledgeAlarmRequest request,
+        AcknowledgeAlarmApiRequest request,
         CancellationToken cancellationToken)
     {
         var result = await appService
-            .AcknowledgeAsync(id, request, cancellationToken)
+            .AcknowledgeAsync(
+                id,
+                new AcknowledgeAlarmRequest(User.GetRequiredActorId()),
+                cancellationToken)
             .ConfigureAwait(false);
 
         return ToActionResult(result);
@@ -73,11 +78,14 @@ public sealed class AlarmsController(IAlarmAppService appService)
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<OperationsApplicationResult>> Resolve(
         string id,
-        ResolveAlarmRequest request,
+        ResolveAlarmApiRequest request,
         CancellationToken cancellationToken)
     {
         var result = await appService
-            .ResolveAsync(id, request, cancellationToken)
+            .ResolveAsync(
+                id,
+                new ResolveAlarmRequest(User.GetRequiredActorId(), request.ResolutionNote),
+                cancellationToken)
             .ConfigureAwait(false);
 
         return ToActionResult(result);

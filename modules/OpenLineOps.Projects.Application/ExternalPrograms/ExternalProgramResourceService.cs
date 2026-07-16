@@ -218,6 +218,42 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
             .ConfigureAwait(false);
     }
 
+    public async Task<Result<ExternalProgramProtocolTrialResult>> TrialDefinitionAsync(
+        string projectId,
+        string applicationId,
+        SaveExternalProgramResourceRequest definition,
+        ExternalProgramProtocolTrialRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Inputs);
+        var scope = await ResolveScopeAsync(projectId, applicationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (scope.IsFailure)
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(scope.Error);
+        }
+
+        if (definition.LaunchKind != ExternalProgramLaunchKind.Provider)
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(ApplicationError.Validation(
+                "Projects.ExternalProgramDefinitionTrialProviderRequired",
+                "An unsaved protocol trial is only available for Provider definitions without executable files."));
+        }
+
+        try
+        {
+            var resource = ExternalProgramResourceFactory.Create(definition, [], _clock.UtcNow);
+            return await _trialExecutor.ExecuteAsync(scope.Value, resource, request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsResourceException(exception))
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(InvalidResource(exception));
+        }
+    }
+
     private async ValueTask<ProjectApplicationWorkspaceScope> ResolveScopeValueAsync(
         string projectId,
         string applicationId,

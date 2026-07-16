@@ -2,6 +2,8 @@ using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Materials;
+using OpenLineOps.Runtime.Application.Persistence;
+using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -27,6 +29,175 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
 {
     private static readonly DateTimeOffset BaseTimeUtc =
         new(2026, 7, 10, 8, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task LostTraceProjectionRebuildsFromTerminalRunAndDurableEvidenceIdempotently()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-trace-rebuild-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var coordinationConnectionString =
+            $"Data Source={Path.Combine(root, "coordination.sqlite")};Mode=ReadWriteCreate;Cache=Shared";
+        var originalTraceConnectionString =
+            $"Data Source={Path.Combine(root, "trace-original.sqlite")};Mode=ReadWriteCreate;Cache=Shared";
+        var rebuiltTraceConnectionString =
+            $"Data Source={Path.Combine(root, "trace-rebuilt.sqlite")};Mode=ReadWriteCreate;Cache=Shared";
+        try
+        {
+            ProductionRunId runId;
+            ProductionUnitId productionUnitId;
+            string carrierId;
+            int frozenMaterialEvidenceCount;
+            JsonElement originalTraceJson;
+            using (var runtimeRepository = new SqliteRuntimeSessionRepository(
+                       coordinationConnectionString))
+            using (var materials = new SqliteProductionMaterialRepository(
+                       coordinationConnectionString))
+            using (var runs = new SqliteProductionRunRepository(coordinationConnectionString))
+            using (var originalTraceRepository = new SqliteTraceRecordRepository(
+                       originalTraceConnectionString))
+            {
+                var run = CreateRun();
+                runId = run.Id;
+                productionUnitId = run.ProductionUnitId;
+                carrierId = run.CarrierId!;
+                var unit = ProductionUnit.Register(
+                    run.ProductionUnitId,
+                    run.ProductionUnitIdentity.ModelId,
+                    run.ProductionUnitIdentity.InputKey,
+                    run.ProductionUnitIdentity.Value,
+                    new ProductionLotId(run.LotId!),
+                    run.ActorId,
+                    BaseTimeUtc.AddTicks(-1));
+                Assert.True(await materials.TryAddAsync(unit));
+                var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                    await materials.GetProductionUnitAsync(unit.Id));
+                Assert.True(await runs.TryAddAsync(
+                    run,
+                    CreateExecutionPlan(run),
+                    new ProductionRunAdmission(
+                        unitEntry.Aggregate.ToSnapshot(),
+                        unitEntry.Revision)));
+
+                var operation = StartOperation(run, out var sessionId);
+                var session = CreateRunningSession(run, operation, sessionId);
+                var command = StartCommand(session);
+                Assert.True(session.CompleteCommand(
+                    command.Id,
+                    "{\"outcome\":\"Passed\"}",
+                    BaseTimeUtc.AddSeconds(4),
+                    ResultJudgement.Passed).Succeeded);
+                Assert.True(session.CompleteStep(
+                    command.StepId,
+                    BaseTimeUtc.AddSeconds(5)).Succeeded);
+                Assert.True(session.Complete(BaseTimeUtc.AddSeconds(6)).Succeeded);
+                await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
+                Assert.True(run.CompleteOperation(
+                    operation.OperationRunId,
+                    ResultJudgement.Passed,
+                    new Dictionary<string, ProductionContextValue>
+                    {
+                        ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
+                    },
+                    1,
+                    1,
+                    0,
+                    session.CompletedAtUtc!.Value,
+                    FreezeSessionEvidence(run, operation, session)).Succeeded);
+                Assert.Equal(1, await runs.SaveAsync(run, 0));
+
+                var originalSubscriber = new ProductionRunTraceDomainEventSubscriber(
+                    new TraceRecordService(originalTraceRepository, new SystemClock()));
+                var terminalEvidence = Assert.Single(
+                    await runs.ListPendingTerminalOutboxAsync(1)).Evidence;
+                frozenMaterialEvidenceCount = terminalEvidence.MaterialTimeline.Count;
+                Assert.Equal(
+                    TraceRecordProjectionOutcome.Created,
+                    await originalSubscriber.ProjectAsync(terminalEvidence, default));
+                var originalTrace = Assert.IsType<TraceRecord>(
+                    await originalTraceRepository.GetByIdAsync(
+                        new StoredTraceRecordId(run.Id.Value)));
+                originalTraceJson = JsonSerializer.SerializeToElement(originalTrace);
+            }
+
+            using (var lateMaterials = new SqliteProductionMaterialRepository(
+                       coordinationConnectionString))
+            using (var lateRuns = new SqliteProductionRunRepository(
+                       coordinationConnectionString))
+            {
+                var lateChild = ProductionUnit.Register(
+                    ProductionUnitId.New(),
+                    "product.late-component",
+                    "serialNumber",
+                    "LATE-COMPONENT-001",
+                    null,
+                    "operator.late-evidence",
+                    BaseTimeUtc.AddSeconds(2));
+                Assert.True(await lateMaterials.TryAddAsync(lateChild));
+                var materialService = new ProductionMaterialService(lateMaterials, lateRuns);
+                Assert.True((await materialService.LinkGenealogyAsync(
+                    new LinkMaterialGenealogyCommand(
+                        MaterialGenealogyLinkId.New(),
+                        productionUnitId,
+                        lateChild.Id,
+                        "ComponentOf",
+                        "operation.late-evidence",
+                        "operator.late-evidence",
+                        BaseTimeUtc.AddSeconds(3)))).Succeeded);
+                var liveTimeline = await lateMaterials.ListTimelineAsync(
+                    ProductionMaterialTimelineQuery.UnionScope(
+                        productionUnitId,
+                        runId,
+                        new CarrierId(carrierId),
+                        BaseTimeUtc.AddSeconds(6)));
+                Assert.True(liveTimeline.Count > frozenMaterialEvidenceCount);
+                Assert.Contains(
+                    liveTimeline,
+                    entry => entry.Kind == ProductionMaterialEvidenceKind.Genealogy
+                        && entry.OccurredAtUtc < BaseTimeUtc.AddSeconds(6));
+            }
+
+            using var restartedRuns = new SqliteProductionRunRepository(
+                coordinationConnectionString);
+            using var rebuiltTraceRepository = new SqliteTraceRecordRepository(
+                rebuiltTraceConnectionString);
+            var rebuiltSubscriber = new ProductionRunTraceDomainEventSubscriber(
+                new TraceRecordService(rebuiltTraceRepository, new SystemClock()));
+            var rebuilder = new TraceProjectionRebuilder(restartedRuns, rebuiltSubscriber);
+
+            var firstRebuild = await rebuilder.RebuildAsync(1);
+            Assert.Equal(1, firstRebuild.ScannedRunCount);
+            Assert.Equal(1, firstRebuild.CreatedRecordCount);
+            Assert.Equal(0, firstRebuild.ExistingRecordCount);
+            var rebuiltTrace = Assert.IsType<TraceRecord>(
+                await rebuiltTraceRepository.GetByIdAsync(
+                    new StoredTraceRecordId(runId.Value)));
+            Assert.True(JsonElement.DeepEquals(
+                originalTraceJson,
+                JsonSerializer.SerializeToElement(rebuiltTrace)));
+
+            var repeatedRebuild = await rebuilder.RebuildAsync(1);
+            Assert.Equal(1, repeatedRebuild.ScannedRunCount);
+            Assert.Equal(0, repeatedRebuild.CreatedRecordCount);
+            Assert.Equal(1, repeatedRebuild.ExistingRecordCount);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            for (var attempt = 0; attempt < 10 && Directory.Exists(root); attempt++)
+            {
+                try
+                {
+                    Directory.Delete(root, recursive: true);
+                }
+                catch (IOException) when (attempt < 9)
+                {
+                    await Task.Delay(50);
+                }
+            }
+        }
+    }
 
     [Fact]
     public async Task ProductFailureKeepsCompletedExecutionAndNonconformingDisposition()
@@ -56,10 +227,11 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             1,
             1,
             0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
+            session.CompletedAtUtc!.Value,
+            FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -75,7 +247,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Empty(storedOperation.Incidents);
         Assert.Single(storedOperation.Outputs);
         var storedCommand = Assert.Single(storedOperation.Commands);
-        Assert.Equal(TraceCommandStatus.Completed, storedCommand.Status);
+        Assert.Equal(ExecutionStatus.Completed, storedCommand.ExecutionStatus);
         Assert.Equal(ResultJudgement.Failed, storedCommand.ResultJudgement);
         Assert.False(Assert.Single(storedOperation.Measurements).Passed);
         Assert.Equal(1, traceRepository.AddCount);
@@ -109,9 +281,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             1,
             1,
             0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
+            session.CompletedAtUtc!.Value,
+            FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -140,6 +313,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             command.Id,
             "Vendor process exited with code 7.",
             BaseTimeUtc.AddSeconds(4)).Succeeded);
+        Assert.True(session.FailStep(
+            command.StepId,
+            "Vendor process exited with code 7.",
+            BaseTimeUtc.AddSeconds(4)).Succeeded);
         Assert.True(session.Fail(
             BaseTimeUtc.AddSeconds(5),
             "Vendor.ProcessCrashed",
@@ -153,9 +330,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             0,
             1,
             1,
-            BaseTimeUtc.AddSeconds(6)).Succeeded);
+            session.CompletedAtUtc!.Value,
+            FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -166,7 +344,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Equal(ExecutionStatus.Failed, storedOperation.ExecutionStatus);
         Assert.Equal(ResultJudgement.Unknown, storedOperation.Judgement);
         Assert.Single(storedOperation.Incidents);
-        Assert.Equal(TraceCommandStatus.Failed, Assert.Single(storedOperation.Commands).Status);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(storedOperation.Commands).ExecutionStatus);
     }
 
     [Fact]
@@ -207,9 +385,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             1,
             1,
             0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
+            session.CompletedAtUtc!.Value,
+            FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -230,7 +409,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.True(run.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
         Assert.True(run.Cancel("Operator stopped before dispatch.", BaseTimeUtc.AddSeconds(2)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -271,9 +450,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             completedStepCount: 0,
             commandCount: 1,
             incidentCount: 0,
-            canceledAtUtc: canceledAtUtc).Succeeded);
+            canceledAtUtc: canceledAtUtc,
+            executionEvidence: FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -289,8 +469,8 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Equal(1, storedOperation.CommandCount);
         Assert.Equal(0, storedOperation.IncidentCount);
         var storedCommand = Assert.Single(storedOperation.Commands);
-        Assert.Equal(TraceCommandStatus.Canceled, storedCommand.Status);
-        Assert.Equal(ResultJudgement.Unknown, storedCommand.ResultJudgement);
+        Assert.Equal(ExecutionStatus.Canceled, storedCommand.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Aborted, storedCommand.ResultJudgement);
     }
 
     [Fact]
@@ -317,9 +497,10 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             completedStepCount: 0,
             commandCount: 0,
             incidentCount: 0,
-            canceledAtUtc: BaseTimeUtc.AddSeconds(5)).Succeeded);
+            canceledAtUtc: BaseTimeUtc.AddSeconds(5),
+            executionEvidence: FreezeSessionEvidence(run, operation, session)).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -332,6 +513,53 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             entry.Action == "ProductionRun.SafeStop.Acknowledged");
         Assert.Equal("system.station-safety", acknowledged.ActorId.Value);
         Assert.Equal(BaseTimeUtc.AddSeconds(4), acknowledged.OccurredAtUtc);
+    }
+
+    [Fact]
+    public async Task ActiveScrapTracePreservesRequestedAndFinalizedEvidence()
+    {
+        var runtimeRepository = new InMemoryRuntimeSessionRepository();
+        var traceRepository = new InMemoryTraceRecordRepository();
+        var subscriber = CreateSubscriber(runtimeRepository, traceRepository);
+        var run = CreateRun();
+        var operation = StartOperation(run, out var sessionId);
+        var session = CreateRunningSession(run, operation, sessionId);
+        const string reason = "Board was physically damaged during active execution.";
+        Assert.True(run.RequestScrap(
+            "operator.scrap",
+            reason,
+            BaseTimeUtc.AddSeconds(3)).Succeeded);
+        Assert.True(session.Cancel(BaseTimeUtc.AddSeconds(5), reason).Succeeded);
+        await runtimeRepository.SaveAsync(session, session.DomainEvents.ToArray());
+        Assert.True(run.RecordOperationCancellation(
+            operation.OperationRunId,
+            "Runtime.OperationCanceled",
+            reason,
+            completedStepCount: 0,
+            commandCount: 0,
+            incidentCount: 0,
+            canceledAtUtc: BaseTimeUtc.AddSeconds(5),
+            executionEvidence: FreezeSessionEvidence(run, operation, session)).Succeeded);
+        Assert.True(run.ResolveDispatchWave([operation.OperationRunId]).Succeeded);
+
+        await subscriber.HandleAsync(TerminalEvidence(run));
+
+        var trace = Assert.IsType<TraceRecord>(
+            await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
+        Assert.Equal(ExecutionStatus.Completed, trace.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Failed, trace.Judgement);
+        Assert.Equal(ProductDisposition.Scrapped, trace.Disposition);
+        Assert.Equal(ExecutionStatus.Canceled, Assert.Single(trace.Operations).ExecutionStatus);
+        var requested = Assert.Single(trace.AuditEntries, entry =>
+            entry.Action == "ProductionRun.Scrap.Requested");
+        Assert.Equal("operator.scrap", requested.ActorId.Value);
+        Assert.Contains(reason, requested.Detail, StringComparison.Ordinal);
+        Assert.Equal(BaseTimeUtc.AddSeconds(3), requested.OccurredAtUtc);
+        var finalized = Assert.Single(trace.AuditEntries, entry =>
+            entry.Action == "ProductionRun.Scrap.Finalized");
+        Assert.Equal("operator.scrap", finalized.ActorId.Value);
+        Assert.Contains(operation.OperationRunId, finalized.Detail, StringComparison.Ordinal);
+        Assert.Equal(BaseTimeUtc.AddSeconds(5), finalized.OccurredAtUtc);
     }
 
     [Fact]
@@ -360,7 +588,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             });
         Assert.True(run.ReconcileRecovery(decision).Succeeded);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -384,33 +612,28 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var materials = new InMemoryProductionMaterialRepository();
         var traceRepository = new InMemoryTraceRecordRepository();
         var service = new TraceRecordService(traceRepository, new SystemClock());
-        var subscriber = new ProductionRunTraceDomainEventSubscriber(
-            runtimeRepository,
-            stationJobs,
-            materials,
-            service);
+        var subscriber = new ProductionRunTraceDomainEventSubscriber(service);
         var run = CreateRun();
         var operation = StartOperation(run, out var sessionId);
         var stepId = Guid.NewGuid();
         var commandId = Guid.NewGuid();
         var outputs = TypedOutputs("Passed");
-        Assert.True(run.CompleteOperation(
-            operation.OperationRunId,
-            ResultJudgement.Passed,
-            new Dictionary<string, ProductionContextValue>
-            {
-                ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
-            },
-            1,
-            1,
-            0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
         var request = await PrimeStationResultInboxAsync(
             stationJobs,
             run,
             operation,
             sessionId);
-        await stationJobs.RecordCompletionAsync(new StationJobCompleted(
+        var dispatchRequest = CreateDispatchRequest(run, operation, sessionId);
+        var artifactReceipt = StationArtifactReceiptIdentity.Create(
+            request.AgentId,
+            request.StationId,
+            request.JobId,
+            "vendor-report.pdf",
+            "Report",
+            "application/pdf",
+            512,
+            new string('a', 64));
+        var completion = new StationJobCompleted(
             Guid.NewGuid(),
             request.JobId,
             request.IdempotencyKey,
@@ -446,7 +669,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                     operation.StationSystemId,
                     "test.external",
                     "ExecuteProgram",
-                    "Completed",
+                    ExecutionStatus.Completed,
                     BaseTimeUtc.AddSeconds(2),
                     BaseTimeUtc.AddSeconds(32),
                     BaseTimeUtc.AddSeconds(2),
@@ -461,16 +684,32 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                 new StationJobArtifact(
                     "vendor-report.pdf",
                     "Report",
-                    "sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    artifactReceipt.StorageKey,
+                    artifactReceipt.ReceiptId,
                     "application/pdf",
                     512,
                     new string('a', 64))
             ],
             null,
             null,
-            BaseTimeUtc.AddSeconds(7)));
+            BaseTimeUtc.AddSeconds(7));
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["test.outcome"] = new(ProductionContextValueKind.Text, "Passed")
+            },
+            1,
+            1,
+            0,
+            completion.CompletedAtUtc,
+            OperationExecutionEvidenceFactory.FromStationCompletion(
+                dispatchRequest,
+                completion)).Succeeded);
+        await stationJobs.RecordCompletionAsync(completion);
 
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -478,9 +717,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Equal(sessionId.Value, storedOperation.RuntimeSessionId?.Value);
         Assert.Equal(commandId, Assert.Single(storedOperation.Commands).RuntimeCommandId.Value);
         var artifact = Assert.Single(storedOperation.Artifacts);
-        Assert.Equal(
-            "sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            artifact.StorageKey);
+        Assert.Equal(artifactReceipt.StorageKey, artifact.StorageKey);
         Assert.Equal(new string('a', 64), artifact.Sha256);
     }
 
@@ -492,20 +729,9 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var materials = new InMemoryProductionMaterialRepository();
         var traceRepository = new InMemoryTraceRecordRepository();
         var subscriber = new ProductionRunTraceDomainEventSubscriber(
-            runtimeRepository,
-            stationJobs,
-            materials,
             new TraceRecordService(traceRepository, new SystemClock()));
         var run = CreateRun();
         var operation = StartOperation(run, out var sessionId);
-        Assert.True(run.CompleteOperation(
-            operation.OperationRunId,
-            ResultJudgement.Passed,
-            null,
-            0,
-            0,
-            0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
         var request = await PrimeStationResultInboxAsync(
             stationJobs,
             run,
@@ -543,20 +769,9 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var stationJobs = new InMemoryStationJobCoordinationStore();
         var traceRepository = new InMemoryTraceRecordRepository();
         var subscriber = new ProductionRunTraceDomainEventSubscriber(
-            runtimeRepository,
-            stationJobs,
-            new InMemoryProductionMaterialRepository(),
             new TraceRecordService(traceRepository, new SystemClock()));
         var run = CreateRun();
         var operation = StartOperation(run, out var sessionId);
-        Assert.True(run.CompleteOperation(
-            operation.OperationRunId,
-            ResultJudgement.Passed,
-            null,
-            0,
-            0,
-            0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
         var request = await PrimeStationResultInboxAsync(
             stationJobs,
             run,
@@ -599,9 +814,6 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             new InMemoryProductionRunRepository(materialStorage));
         var traceRepository = new InMemoryTraceRecordRepository();
         var subscriber = new ProductionRunTraceDomainEventSubscriber(
-            runtimeRepository,
-            stationJobs,
-            materials,
             new TraceRecordService(traceRepository, new SystemClock()));
         var run = CreateRun();
         var parentId = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnitId.New();
@@ -692,10 +904,17 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             1,
             1,
             0,
-            BaseTimeUtc.AddSeconds(7)).Succeeded);
+            session.CompletedAtUtc!.Value,
+            FreezeSessionEvidence(run, operation, session)).Succeeded);
 
+        var frozenTimeline = await materialStorage.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.UnionScope(
+                run.ProductionUnitId,
+                run.Id,
+                new CarrierId(run.CarrierId!),
+                run.CompletedAtUtc));
         materials.ResetTimelineQueries();
-        await subscriber.HandleAsync(run.ToSnapshot());
+        await subscriber.HandleAsync(TerminalEvidence(run, frozenTimeline));
 
         var trace = Assert.IsType<TraceRecord>(
             await traceRepository.GetByIdAsync(new StoredTraceRecordId(run.Id.Value)));
@@ -706,13 +925,8 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         Assert.Contains(trace.MaterialLocationTransitions, transition =>
             transition.MaterialKind == "Carrier" && transition.MaterialId == carrierId.Value);
         Assert.Equal("Reserved", Assert.Single(trace.SlotOccupancyTransitions).CurrentStatus);
-        Assert.Equal(1, materials.TimelineQueryCount);
-        var query = Assert.IsType<ProductionMaterialTimelineQuery>(materials.LastTimelineQuery);
-        Assert.Equal(ProductionMaterialTimelineQueryMode.UnionScope, query.Mode);
-        Assert.Equal(run.ProductionUnitId, query.ProductionUnitId);
-        Assert.Equal(run.Id, query.ProductionRunId);
-        Assert.Equal(carrierId, query.CarrierId);
-        Assert.Equal(run.CompletedAtUtc, query.ThroughUtc);
+        Assert.Equal(0, materials.TimelineQueryCount);
+        Assert.Null(materials.LastTimelineQuery);
     }
 
     private static JsonElement TypedOutputs(string? outcome = null)
@@ -790,11 +1004,7 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
         var service = new TraceRecordService(
             traceRepository,
             new SystemClock());
-        return new ProductionRunTraceDomainEventSubscriber(
-            runtimeRepository,
-            new InMemoryStationJobCoordinationStore(),
-            new InMemoryProductionMaterialRepository(),
-            service);
+        return new ProductionRunTraceDomainEventSubscriber(service);
     }
 
     private static ProductionRun CreateRun(bool includeTerminalRoutes = true)
@@ -846,6 +1056,25 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
             BaseTimeUtc,
             [operation],
             routeTransitions);
+    }
+
+    private static ProductionRunExecutionPlan CreateExecutionPlan(ProductionRun run)
+    {
+        var definition = Assert.Single(run.OperationDefinitions);
+        var process = new ExecutableRuntimeProcess(
+            definition.ProcessDefinitionId,
+            definition.ProcessVersionId,
+            []);
+        var operation = new OperationExecutionPlan(
+            definition.OperationId,
+            definition.StationSystemId,
+            definition.StationId,
+            definition.ConfigurationSnapshotId,
+            definition.RecipeSnapshotId,
+            process,
+            [],
+            definition.ResourceRequirements);
+        return new ProductionRunExecutionPlan(run.Id, [operation]);
     }
 
     private static OperationRun StartOperation(
@@ -903,13 +1132,60 @@ public sealed class ProductionRunTraceDomainEventSubscriberTests
                 run.ApplicationId,
                 run.ProjectSnapshotId,
                 run.TopologyId,
-                [new ResourceLeaseFenceEvidence(
-                    new ResourceRequirement(ResourceKind.Station, operation.StationSystemId),
-                    1,
-                    BaseTimeUtc.AddHours(1))]));
+                operation.FencingTokens
+                    .OrderBy(pair => pair.Key.CanonicalKey, StringComparer.Ordinal)
+                    .Select(pair => new ResourceLeaseFenceEvidence(
+                        pair.Key,
+                        pair.Value,
+                        BaseTimeUtc.AddHours(1)))));
         Assert.True(session.Start(BaseTimeUtc.AddSeconds(1)).Succeeded);
         return session;
     }
+
+    private static OperationExecutionEvidence FreezeSessionEvidence(
+        ProductionRun run,
+        OperationRun operation,
+        RuntimeSession session)
+        => OperationExecutionEvidenceFactory.FromRuntimeSession(
+            CreateDispatchRequest(run, operation, session.Id),
+            session);
+
+    private static StationOperationDispatchRequest CreateDispatchRequest(
+        ProductionRun run,
+        OperationRun operation,
+        RuntimeSessionId sessionId)
+    {
+        var runSnapshot = run.ToSnapshot();
+        var operationSnapshot = runSnapshot.Operations.Single(candidate =>
+            string.Equals(
+                candidate.OperationRunId,
+                operation.OperationRunId,
+                StringComparison.Ordinal));
+        var executionPlan = CreateExecutionPlan(run).Operations.Single(candidate =>
+            string.Equals(
+                candidate.Definition.OperationId,
+                operation.OperationId,
+                StringComparison.Ordinal));
+        var leases = operation.FencingTokens.Select(pair => new ResourceLease(
+            pair.Key,
+            run.Id,
+            operation.OperationRunId,
+            pair.Value,
+            BaseTimeUtc,
+            BaseTimeUtc.AddHours(1))).ToArray();
+        return new StationOperationDispatchRequest(
+            runSnapshot,
+            operationSnapshot,
+            executionPlan,
+            sessionId,
+            new Dictionary<string, ProductionContextValue>(),
+            leases);
+    }
+
+    private static ProductionRunTerminalEvidence TerminalEvidence(
+        ProductionRun run,
+        IReadOnlyCollection<ProductionMaterialTimelineEntry>? materialTimeline = null) =>
+        new(run.ToSnapshot(), materialTimeline ?? []);
 
     private static OpenLineOps.Runtime.Domain.Commands.RuntimeCommand StartCommand(RuntimeSession session)
     {

@@ -130,6 +130,24 @@ function Test-FileDoesNotContain {
     }
 }
 
+function Test-FileForbiddenPattern {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Pattern,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+
+    $resolved = Resolve-RepoPath $Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        Add-Failure "Cannot inspect missing file: $Path"
+        return
+    }
+
+    if (Select-String -LiteralPath $resolved -Pattern $Pattern -Quiet) {
+        Add-Failure $Message
+    }
+}
+
 function Test-ReleaseArtifacts {
     if ($SkipReleaseArtifacts) {
         Add-Warning "Release artifact verification skipped."
@@ -205,8 +223,37 @@ function Test-ReleaseArtifacts {
         -ArchivePattern "desktop-*.zip" `
         -RequiredEntries @(
             "package/win-unpacked/OpenLineOps.exe",
-            "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt") `
-        -SignedEntries @("package/win-unpacked/OpenLineOps.exe")
+            "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
+            "package/win-unpacked/resources/app/package.json",
+            "package/win-unpacked/resources/app/dist/index.html",
+            "dist-electron/main/api-credential-security.js",
+            "dist-electron/main/application-extension-import-security.js",
+            "dist-electron/main/backend-api-security.js",
+            "dist-electron/main/backend-process-handshake.js",
+            "dist-electron/main/local-sqlite-connection.js",
+            "dist-electron/main/renderer-navigation-security.js",
+            "dist-electron/main/trace-artifact-save.js",
+            "dist-electron/main/trace-artifact-save-core.js",
+            "dist-electron/preload/preload.cjs",
+            "package/win-unpacked/resources/app/dist-electron/main/api-credential-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/application-extension-import-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-api-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-process-handshake.js",
+            "package/win-unpacked/resources/app/dist-electron/main/local-sqlite-connection.js",
+            "package/win-unpacked/resources/app/dist-electron/main/main.js",
+            "package/win-unpacked/resources/app/dist-electron/main/renderer-navigation-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save-core.js",
+            "package/win-unpacked/resources/app/dist-electron/preload/preload.cjs",
+            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+            "package/win-unpacked/resources/app/runtime/api/appsettings.json",
+            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe") `
+        -SignedEntries @(
+            "package/win-unpacked/OpenLineOps.exe",
+            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe")
     Test-WindowsReleasePackage `
         -ResolvedArtifactsRoot $resolvedArtifactsRoot `
         -ArtifactKind "agent" `
@@ -335,7 +382,21 @@ $requiredFiles = @(
     ".github/ISSUE_TEMPLATE/plugin_request.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
     "eng/verify-ci-workflow-actions.ps1",
+    "eng/verify-ci-release-artifact-inspection.ps1",
+    "eng/verify-dotnet-package-vulnerabilities.ps1",
+    "eng/verify-dotnet-package-vulnerabilities.tests.ps1",
+    "eng/verify-release-staging-security.ps1",
     "eng/verify-staged-agent-bundle-e2e.ps1",
+    "eng/verify-staged-agent-evidence.ps1",
+    "eng/verify-production-closure-evidence.ps1",
+    "eng/verify-studio-two-agent-production-closure.ps1",
+    "eng/verify-studio-two-agent-production-evidence.ps1",
+    "eng/verify-studio-two-agent-production-evidence.tests.ps1",
+    "eng/verify-runner-staged-agent-e2e.ps1",
+    "eng/verify-runner-staged-agent-evidence.ps1",
+    "eng/verify-runner-staged-agent-evidence.tests.ps1",
+    "eng/verify-evidence-validation.tests.ps1",
+    "eng/evidence-validation-test-fixtures.ps1",
     "eng/verify-solution-project-coverage.ps1",
     "eng/inspect-ci-release-artifact.ps1",
     "eng/inspect-release-candidate.ps1",
@@ -343,6 +404,8 @@ $requiredFiles = @(
     "eng/verify-final-publication-preflight.ps1",
     "eng/write-publication-evidence.ps1",
     "eng/verify-publication-evidence.ps1",
+    "eng/write-production-integration-evidence.ps1",
+    "eng/verify-production-integration-evidence.ps1",
     "eng/verify-release-candidate-inspection.ps1",
     "eng/verify-open-source-metadata.ps1",
     "eng/verify-third-party-license-metadata.ps1",
@@ -371,11 +434,25 @@ Test-FileContains "LICENSE" "^MIT License" "LICENSE must contain MIT License tex
 Test-FileContains "THIRD-PARTY-NOTICES.md" "^# Third-Party Notices" "Third-party notices must be generated at the repository root."
 Test-FileContains "Directory.Build.props" "PackageLicenseExpression" ".NET projects must declare default license metadata."
 Test-FileContains "apps/desktop/package.json" '"license"\s*:\s*"MIT"' "Desktop package.json must declare MIT license metadata."
-Test-FileContains ".github/workflows/build.yml" "dotnet-version:\s*10\.0\.x" "CI must use .NET 10."
+Test-FileContains ".github/workflows/build.yml" "dotnet-version:\s*10\.0\.301" "CI must use the exact global.json .NET SDK."
 Test-FileContains ".github/workflows/build.yml" "Verify CI workflow actions" "CI must verify workflow action references."
 Test-FileContains ".github/workflows/build.yml" "Verify solution project coverage" "CI must verify every formal project is covered by the solution."
 Test-FileContains ".github/workflows/build.yml" "Verify open-source metadata" "CI must verify open-source metadata."
 Test-FileContains ".github/workflows/build.yml" "Verify third-party license metadata" "CI must verify third-party license metadata."
+Test-FileContains ".github/workflows/build.yml" "verify-dotnet-package-vulnerabilities\.ps1" "CI must run the fail-closed NuGet vulnerability audit."
+Test-FileContains ".github/workflows/build.yml" "verify-dotnet-package-vulnerabilities\.tests\.ps1" "CI must prove vulnerable NuGet JSON fails the build."
+Test-FileContains ".github/workflows/build.yml" "verify-release-staging-security\.ps1" "CI must regression-test release staging security boundaries."
+Test-FileContains ".github/workflows/build.yml" "verify-evidence-validation\.tests\.ps1" "CI must regression-test fail-closed publication evidence validation."
+Test-FileContains ".github/workflows/build.yml" "verify-production-closure-evidence\.ps1" "CI must independently scan sanitized production closure evidence before upload."
+Test-FileContains ".github/workflows/build.yml" "verify-studio-two-agent-production-closure\.ps1" "CI must run the packaged-to-two-staged-Agent production closure."
+Test-FileContains ".github/workflows/build.yml" "verify-studio-two-agent-production-evidence\.ps1" "CI must independently scan Studio two-Agent public evidence."
+Test-FileContains ".github/workflows/build.yml" "verify-runner-staged-agent-e2e\.ps1" "CI must run the staged Runner production closure."
+Test-FileContains ".github/workflows/build.yml" "verify-runner-staged-agent-evidence\.ps1" "CI must independently scan Runner public evidence."
+Test-FileContains ".github/workflows/build.yml" "write-production-integration-evidence\.ps1" "CI must bind the real integration TRX to its repository, commit, and run."
+Test-FileContains ".github/workflows/build.yml" "verify-production-integration-evidence\.ps1" "CI must regression-test strict integration evidence parsing."
+Test-FileContains ".github/workflows/build.yml" "actions/download-artifact@v8" "CI must download same-run candidate and integration proof artifacts with the pinned action."
+Test-FileContains ".github/workflows/build.yml" "needs:\s*" "The final publication job must declare explicit job dependencies."
+Test-FileContains ".github/workflows/build.yml" "production-integration" "The final publication job must depend on the real production integration gate."
 Test-FileContains ".github/workflows/build.yml" "Stage release artifacts" "CI must stage release artifacts."
 Test-FileContains ".github/workflows/build.yml" "Verify staged release manifest" "CI must verify staged release metadata."
 Test-FileContains ".github/workflows/build.yml" "Inspect release candidate" "CI must inspect the staged release candidate."
@@ -385,19 +462,29 @@ Test-FileContains ".github/workflows/build.yml" "Write publication evidence" "CI
 Test-FileContains ".github/workflows/build.yml" "Verify publication evidence" "CI must verify publication evidence behavior."
 Test-FileContains ".github/workflows/build.yml" "Verify final publication preflight" "CI must verify final publication preflight behavior."
 Test-FileContains ".github/workflows/build.yml" "Inspect CI release artifact bundle" "CI must inspect the release artifact bundle before upload."
+Test-FileContains ".github/workflows/build.yml" "Verify CI release artifact inspection" "CI must regression-test the CI release artifact inspector."
 Test-FileContains ".github/workflows/build.yml" "actions/upload-artifact@" "CI must upload validated release artifacts."
+Test-FileContains ".github/workflows/build.yml" "npm run test:api-credential-security" "CI must verify the local API credential and backend identity boundary."
+Test-FileContains ".github/workflows/build.yml" "npm run test:extension-import-security" "CI must verify the trusted Application extension ZIP import boundary."
+Test-FileContains ".github/workflows/build.yml" "npm run test:trace-artifact-save" "CI must verify Trace artifact hashing, session binding, and destination confinement."
+Test-FileContains ".github/workflows/build.yml" "npm run test:production-route-validation" "CI must verify the production route graph contract."
+Test-FileContains ".github/workflows/build.yml" "npm run test:production-route-layout" "CI must verify production route layout persistence and conflict handling."
 Test-FileContains ".github/workflows/build.yml" "npm run smoke:e2e" "CI must run the Electron smoke test."
 Test-FileContains ".github/workflows/build.yml" "npm audit --audit-level=high" "CI must run the desktop high-severity audit."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "Unexpected GitHub Action reference" "CI workflow action verification must reject unapproved action references."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "actions/upload-artifact@v7" "CI workflow action verification must require upload-artifact v7."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "if-no-files-found:\\s\*error" "CI workflow action verification must require missing artifact failures."
 Test-FileContains "eng/verify-ci-workflow-actions.ps1" "output/final-publication-preflight" "CI workflow action verification must require uploaded final publication preflight diagnostics."
-Test-FileContains "eng/verify-ci-workflow-actions.ps1" "verify-staged-agent-bundle-e2e.ps1" "CI workflow action verification must preserve the staged Agent bundle E2E gate."
+Test-FileContains "eng/verify-ci-workflow-actions.ps1" "verify-staged-agent-bundle-e2e" "CI workflow action verification must preserve the staged Agent bundle E2E gate."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "publication-evidence-verification" "CI release artifact inspection must verify publication evidence verification diagnostics."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "publication-preflight.json" "CI release artifact inspection must verify final publication preflight diagnostics."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "release-dependency-inventory.json" "CI release artifact inspection must verify dependency inventory metadata."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "release-metadata-checksums.sha256" "CI release artifact inspection must verify metadata checksums."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "ci-release-artifact-inspection.json" "CI release artifact inspection must write JSON evidence."
+Test-FileContains "eng/inspect-ci-release-artifact.ps1" "verify-staged-agent-evidence.ps1" "CI release artifact inspection must rerun strict staged Agent evidence validation."
+Test-FileContains "eng/inspect-ci-release-artifact.ps1" "verify-production-closure-evidence.ps1" "CI release artifact inspection must rerun strict production closure evidence validation."
+Test-FileContains "eng/inspect-ci-release-artifact.ps1" "verify-studio-two-agent-production-evidence.ps1" "CI release artifact inspection must rerun strict Studio two-Agent evidence validation."
+Test-FileContains "eng/inspect-ci-release-artifact.ps1" "verify-runner-staged-agent-evidence.ps1" "CI release artifact inspection must rerun strict Runner evidence validation."
 Test-FileContains ".github/workflows/build.yml" "output/ci-release-artifact-inspection" "CI must upload release artifact inspection diagnostics."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "RequirePublishable" "CI release artifact inspection must support final publishable enforcement."
 Test-FileContains "eng/inspect-ci-release-artifact.ps1" "inspect-release-candidate.ps1" "CI release artifact inspection must inspect the staged release candidate."
@@ -407,6 +494,15 @@ Test-FileContains "eng/verify-third-party-license-metadata.ps1" "package-lock.js
 Test-FileContains "eng/verify-third-party-license-metadata.ps1" "UpdateNotice" "Third-party license metadata verification must support regenerating THIRD-PARTY-NOTICES.md."
 Test-FileContains "eng/verify-third-party-license-metadata.ps1" "InventoryPath" "Third-party license metadata verification must support writing dependency inventory."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-dependency-inventory.json" "Release staging must generate dependency inventory metadata."
+Test-FileContains "eng/stage-release-artifacts.ps1" '\$safeArguments = Format-CommandArgumentsForLog -Arguments \$Arguments' "Release staging failures must redact sensitive child-process arguments."
+Test-FileForbiddenPattern "eng/stage-release-artifacts.ps1" 'Command failed with exit code \$\{exitCode\}: \$FilePath \$\(\$Arguments -join' "Release staging failures must never echo raw signing arguments."
+Test-FileContains "eng/stage-release-artifacts.ps1" "ls-files --cached" "Release source staging must enumerate only tracked Git paths."
+Test-FileContains "eng/stage-release-artifacts.ps1" "RequireCleanGitWorkTree" "Formal release staging must require a clean Git worktree."
+Test-FileContains "eng/stage-release-artifacts.ps1" "ExpectedGitCommit" "Formal release staging must bind source bytes to an expected Git commit."
+Test-FileContains "eng/verify-release-staging-security.ps1" "untracked-secret" "Release staging security regression must prove untracked files cannot enter source archives."
+Test-FileContains "eng/verify-release-staging-security.ps1" "requires a clean Git worktree" "Release staging security regression must prove formal publication rejects dirty trees."
+Test-FileContains "eng/verify-release-staging-security.ps1" "publication-password-sentinel" "Release staging security regression must prove removed password arguments cannot leak secrets."
+Test-FileContains "eng/verify-release-staging-security.ps1" "taskkill" "Release staging security regression must prove timed-out process trees are terminated."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-metadata-checksums.sha256" "Release staging must generate metadata checksums."
 Test-FileContains "eng/inspect-release-candidate.ps1" "RequireSignedWindowsArtifacts" "Release candidate inspection must enforce every shipped Windows executable signature."
 Test-FileContains "eng/inspect-release-candidate.ps1" "bundle-manifest.json" "Release candidate inspection must verify the Agent and Runner bundle manifests."
@@ -423,6 +519,8 @@ Test-FileContains "eng/inspect-release-candidate.ps1" "dependencyInventory" "Rel
 Test-FileContains "eng/inspect-release-candidate.ps1" "release-metadata-checksums.sha256" "Release candidate inspection must verify metadata checksums."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-ci-workflow-actions.ps1" "Release candidate inspection must require CI workflow action verification in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-staged-agent-bundle-e2e.ps1" "Release candidate inspection must require the staged Agent bundle E2E gate in the source archive."
+Test-FileContains "eng/inspect-release-candidate.ps1" "verify-studio-two-agent-production-closure.ps1" "Release candidate inspection must require the Studio two-Agent gate in the source archive."
+Test-FileContains "eng/inspect-release-candidate.ps1" "verify-runner-staged-agent-e2e.ps1" "Release candidate inspection must require the staged Runner gate in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "inspect-ci-release-artifact.ps1" "Release candidate inspection must require CI artifact bundle inspection in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "prepare-final-publication.ps1" "Release candidate inspection must require the final publication preparation script in the source archive."
 Test-FileContains "eng/inspect-release-candidate.ps1" "verify-final-publication-preflight.ps1" "Release candidate inspection must require the final publication preflight verification script in the source archive."
@@ -433,17 +531,31 @@ Test-FileContains "eng/prepare-final-publication.ps1" "ConfirmMitLicense is requ
 Test-FileContains "eng/prepare-final-publication.ps1" "SignWindowsPackages" "Final publication preparation must require signing every Windows deliverable."
 Test-FileContains "eng/prepare-final-publication.ps1" "RequireSignedWindowsArtifacts" "Final publication preparation must inspect all signed Windows deliverables."
 Test-FileContains "eng/prepare-final-publication.ps1" "RequirePublishable" "Final publication preparation must require publishable evidence."
-Test-FileContains "eng/verify-final-publication-preflight.ps1" "invalid-github-actions-url" "Final publication preflight verification must cover invalid GitHub Actions proof URLs."
+Test-FileContains "eng/prepare-final-publication.ps1" "ProductionIntegrationEvidencePath" "Final publication preparation must consume a bound production integration evidence file."
+Test-FileContains "eng/verify-final-publication-preflight.ps1" "production-integration-evidence" "Final publication preflight verification must cover missing or invalid production integration evidence."
 Test-FileContains "eng/verify-final-publication-preflight.ps1" "missing-signing-selector" "Final publication preflight verification must cover missing code-signing selectors."
 Test-FileContains "eng/verify-final-publication-preflight.ps1" "publication-preflight.json" "Final publication preflight verification must write JSON evidence."
 Test-FileContains "eng/verify-final-publication-preflight.ps1" "publication-preflight.md" "Final publication preflight verification must write Markdown evidence."
-Test-FileContains "eng/write-publication-evidence.ps1" "GitHubActionsRunUrl" "Publication evidence must record GitHub Actions proof."
+Test-FileContains "eng/write-publication-evidence.ps1" "ProductionIntegrationEvidencePath" "Publication evidence must be derived from a bound production integration evidence file."
 Test-FileContains "eng/write-publication-evidence.ps1" "ConfirmMitLicense" "Publication evidence must record final MIT license confirmation."
 Test-FileContains "eng/write-publication-evidence.ps1" "RequirePublishable" "Publication evidence must support a final publishable assertion."
 Test-FileContains "eng/write-publication-evidence.ps1" "release-candidate-inspection-verification" "Publication evidence must isolate child gate work directories."
 Test-FileContains "eng/write-publication-evidence.ps1" "publication-readiness-strict" "Publication evidence must isolate strict readiness work directories."
-Test-FileContains "eng/verify-publication-evidence.ps1" "invalid-github-actions-url" "Publication evidence verification must cover invalid GitHub Actions proof URLs."
+Test-FileContains "eng/write-publication-evidence.ps1" "verify-staged-agent-evidence.ps1" "Publication evidence generation must require strict staged Agent evidence."
+Test-FileContains "eng/write-publication-evidence.ps1" "verify-production-closure-evidence.ps1" "Publication evidence generation must require strict production closure evidence."
+Test-FileContains "eng/write-publication-evidence.ps1" "verify-studio-two-agent-production-evidence.ps1" "Publication evidence generation must require strict Studio two-Agent evidence."
+Test-FileContains "eng/write-publication-evidence.ps1" "verify-runner-staged-agent-evidence.ps1" "Publication evidence generation must require strict Runner evidence."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "station package contains zip traversal" "Evidence regression must reject Station package traversal."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "production summary missing recovery scenario" "Evidence regression must reject reduced production scenarios."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent once-only proof reduced" "Evidence regression must reject reduced once-only delivery proof."
+Test-FileContains "eng/verify-publication-evidence.ps1" "invalid-production-integration-evidence" "Publication evidence verification must reject invalid production integration evidence."
 Test-FileContains "eng/verify-publication-evidence.ps1" "RequirePublishable" "Publication evidence verification must cover final publishable assertions."
+Test-FileContains "eng/write-production-integration-evidence.ps1" "trx =" "Production integration evidence must bind the deterministic TRX."
+Test-FileContains "eng/write-production-integration-evidence.ps1" "CommitSha" "Production integration evidence must bind the tested commit."
+Test-FileContains "eng/verify-production-integration-evidence.ps1" "missing-required-test" "Production integration evidence regression must reject incomplete test suites."
+Test-FileForbiddenPattern "eng/prepare-final-publication.ps1" "GitHubActionsRunUrl" "Final publication must not retain the arbitrary GitHub Actions URL contract."
+Test-FileForbiddenPattern "eng/write-publication-evidence.ps1" "GitHubActionsRunUrl" "Publication evidence must not accept an arbitrary GitHub Actions URL."
+Test-FileForbiddenPattern "docs/release-packaging.md" "GitHubActionsRunUrl" "Release documentation must not teach the removed arbitrary URL proof contract."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "unsafe-path" "Release candidate inspection verification must cover unsafe archive paths."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "sensitive-source" "Release candidate inspection verification must cover sensitive source archive entries."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-provenance" "Release candidate inspection verification must cover bad provenance metadata."
@@ -464,8 +576,10 @@ Test-FileContains "eng/stage-release-artifacts.ps1" "OpenLineOps.LeastPrivilegeL
 Test-FileContains "eng/stage-release-artifacts.ps1" "SafetyExecutablePath must be empty in the release template" "Release staging must preserve a machine-specific empty safety actuator template."
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT" "Staged Agent E2E must force signed package execution through extracted release executables."
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "Agent application layer -> staged StationRuntime -> staged PluginHost" "Staged Agent E2E must prove the signed plugin process chain."
-Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childTokenRestricted" "Staged Agent E2E evidence must prove the Python child uses a restricted token."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childTokenIsAppContainer" "Staged Agent E2E evidence must prove the Python child uses an AppContainer token."
+Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childAppContainerSid" "Staged Agent E2E evidence must record the Python child package SID."
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childIntegrityRid" "Staged Agent E2E evidence must prove the Python child uses Low Integrity."
+Test-FileContains "apps/desktop/scripts/production-closure-e2e.mjs" "resetProductionClosureEvidence" "Packaged production closure E2E must remove stale run evidence before creating its single current summary."
 Test-FileContains "eng/stage-release-artifacts.ps1" "ZipArchive\]::new" "Release staging must create ZIP archives with explicit canonical entry names."
 Test-FileContains "eng/stage-release-artifacts.ps1" "non-canonical or out-of-order entry" "Release staging must verify every emitted ZIP entry path and order."
 Test-FileContains "eng/verify-publication-readiness.ps1" "Get-AuthenticodeSignature" "Publication readiness must enforce shipped Windows executable signatures."
@@ -473,7 +587,10 @@ Test-FileContains "apps/desktop/package.json" "package:win:ci" "Desktop package.
 Test-FileContains ".github/workflows/build.yml" "Verify Windows package signing readiness" "CI must verify shared Windows package signing readiness."
 Test-FileContains "eng/stage-release-artifacts.ps1" "SignWindowsPackages" "Release staging must expose one formal Windows package signing switch."
 Test-FileContains "eng/sign-windows-package.ps1" "signtool.exe" "Windows package signing script must use Windows signtool."
+Test-FileContains "eng/sign-windows-package.ps1" "Update-DesktopPackageContentManifest" "Windows package signing must regenerate the Desktop content manifest after signing."
 Test-FileContains "eng/verify-windows-signing-readiness.ps1" "missing certificate selector" "Windows package signing readiness verification must reject missing certificate selectors."
+Test-FileContains "eng/verify-windows-signing-readiness.ps1" "removed post-signing manifest regeneration" "Windows package signing readiness must mutation-test mandatory manifest regeneration."
+Test-FileContains "docs/release-packaging.md" "manifest regeneration failure fails the signing command" "Release docs must state that post-signing Desktop manifest regeneration is mandatory."
 Test-FileContains "eng/finalize-publication-metadata.ps1" "SecurityContact" "Publication finalization script must accept a security contact."
 Test-FileContains "eng/finalize-publication-metadata.ps1" "ConductContact" "Publication finalization script must accept a conduct contact."
 Test-FileContains ".github/workflows/build.yml" "Verify publication metadata finalization" "CI must verify publication metadata finalization."

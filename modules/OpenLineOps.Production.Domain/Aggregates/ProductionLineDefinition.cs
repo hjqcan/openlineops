@@ -19,6 +19,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
@@ -38,6 +39,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
                 nameof(lineControllerAuthorizations))
             .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
             .ToList();
+        RouteLayout = routeLayout ?? throw new ArgumentNullException(nameof(routeLayout));
         EnsureValidComposition();
         if (createdAtUtc.Offset != TimeSpan.Zero || updatedAtUtc.Offset != TimeSpan.Zero)
         {
@@ -68,6 +70,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
     public IReadOnlyCollection<LineControllerAuthorization> LineControllerAuthorizations =>
         _lineControllerAuthorizations.AsReadOnly();
 
+    public ProductionRouteLayout RouteLayout { get; }
+
     public DateTimeOffset CreatedAtUtc { get; }
 
     public DateTimeOffset UpdatedAtUtc { get; }
@@ -81,6 +85,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc)
     {
         return Restore(
@@ -92,6 +97,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             operations,
             transitions,
             lineControllerAuthorizations,
+            routeLayout,
             createdAtUtc,
             createdAtUtc);
     }
@@ -105,6 +111,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
     {
@@ -121,6 +128,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             operations,
             transitions,
             lineControllerAuthorizations,
+            routeLayout,
             createdAtUtc,
             updatedAtUtc);
     }
@@ -137,6 +145,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         EnsureUnique(
             _lineControllerAuthorizations.Select(authorization => authorization.Id.Value),
             "Line Controller authorization ids");
+        EnsureRouteLayoutMatchesOperations();
         if (_operations.All(operation => operation.Id != EntryOperationId))
         {
             throw new ArgumentException(
@@ -217,6 +226,103 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         EnsureEveryOperationCanComplete(forwardTransitions);
         EnsureReworkTransitionsAreBackwardAndBounded(forwardOperationTransitions);
         EnsureParallelForkJoinGroups(forwardOperationTransitions);
+        EnsureOperationInputMappings(forwardOperationTransitions);
+    }
+
+    private void EnsureOperationInputMappings(
+        IReadOnlyCollection<RouteTransition> forwardTransitions)
+    {
+        var operationIds = _operations.Select(static operation => operation.Id).ToHashSet();
+        var incoming = forwardTransitions.ToLookup(
+            static transition => transition.TargetOperationId!);
+        var outgoing = forwardTransitions.ToLookup(
+            static transition => transition.SourceOperationId);
+        var indegrees = _operations.ToDictionary(
+            static operation => operation.Id,
+            operation => incoming[operation.Id].Count());
+        var pending = new Queue<OperationDefinitionId>(
+            indegrees.Where(static pair => pair.Value == 0).Select(static pair => pair.Key));
+        var definiteBefore = _operations.ToDictionary(
+            static operation => operation.Id,
+            static _ => new HashSet<OperationDefinitionId>());
+        while (pending.TryDequeue(out var operationId))
+        {
+            var incomingTransitions = incoming[operationId].ToArray();
+            if (incomingTransitions.Length > 0)
+            {
+                var predecessorSets = incomingTransitions.Select(transition =>
+                {
+                    var completed = new HashSet<OperationDefinitionId>(
+                        definiteBefore[transition.SourceOperationId]);
+                    completed.Add(transition.SourceOperationId);
+                    return completed;
+                }).ToArray();
+                var isAndJoin = incomingTransitions.Length >= 2
+                    && incomingTransitions.All(static transition =>
+                        transition.Kind == RouteTransitionKind.ParallelJoin)
+                    && incomingTransitions.Select(static transition => transition.ParallelGroupId)
+                        .Distinct(StringComparer.Ordinal).Count() == 1;
+                var guaranteed = new HashSet<OperationDefinitionId>(predecessorSets[0]);
+                foreach (var predecessorSet in predecessorSets.Skip(1))
+                {
+                    if (isAndJoin)
+                    {
+                        guaranteed.UnionWith(predecessorSet);
+                    }
+                    else
+                    {
+                        guaranteed.IntersectWith(predecessorSet);
+                    }
+                }
+
+                definiteBefore[operationId] = guaranteed;
+            }
+
+            foreach (var transition in outgoing[operationId])
+            {
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
+                {
+                    pending.Enqueue(transition.TargetOperationId!);
+                }
+            }
+        }
+
+        foreach (var operation in _operations)
+        {
+            foreach (var mapping in operation.InputMappings)
+            {
+                if (!operationIds.Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} input {mapping.TargetInputKey} references missing source Operation {mapping.SourceOperationId}.");
+                }
+
+                if (mapping.SourceOperationId == operation.Id
+                    || !definiteBefore[operation.Id].Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} input {mapping.TargetInputKey} source {mapping.SourceOperationId} must definitely complete first; conditional bypasses and sibling-branch reads before an AND join are not allowed.");
+                }
+            }
+        }
+    }
+
+    private void EnsureRouteLayoutMatchesOperations()
+    {
+        var operationIds = _operations
+            .Select(operation => operation.Id.Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var positionIds = RouteLayout.OperationPositions
+            .Select(position => position.OperationId.Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (!operationIds.SequenceEqual(positionIds, StringComparer.Ordinal))
+        {
+            throw new ArgumentException(
+                "Production route layout must contain exactly one position for every Operation.");
+        }
     }
 
     private void EnsureOutgoingShapes()

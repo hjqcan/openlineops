@@ -14,7 +14,7 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), "openlineops-topology", Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public async Task RoundTripPersistsCurrentV1SystemsAndNestedLayoutContracts()
+    public async Task RoundTripPersistsCurrentSystemsAndNestedLayoutContracts()
     {
         var scope = CreateScope();
         var topology = CreateTopology();
@@ -113,6 +113,8 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             new AutomationSystemId("station.eol"),
             "station.final-test",
             "Final Test Station",
+            [],
+            [],
             new Dictionary<string, string> { ["line"] = "A" }).Succeeded);
         Assert.True(topology.UpdateSlot(
             new SlotDefinitionId("slot.1"),

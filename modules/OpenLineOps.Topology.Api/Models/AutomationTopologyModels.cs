@@ -22,6 +22,8 @@ public sealed record AddAutomationSystemRequest(
 public sealed record UpdateAutomationSystemRequest(
     string? SystemType,
     string? DisplayName,
+    IReadOnlyCollection<string>? RequiredCapabilityIds,
+    IReadOnlyCollection<string>? ProvidedCapabilityIds,
     IReadOnlyDictionary<string, string>? Metadata);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

@@ -4,10 +4,6 @@ public sealed class PluginsModuleOptions
 {
     public const string SectionName = "OpenLineOps:Plugins";
 
-    public string PackageRoot { get; set; } = string.Empty;
-
-    public string Activator { get; set; } = PluginActivators.ManifestOnly;
-
     public string EventLogProvider { get; set; } = PluginEventLogProviders.Sqlite;
 
     public string? EventLogConnectionString { get; set; }
@@ -24,20 +20,6 @@ public sealed class PluginsModuleOptions
 
     public string? ExternalHostArgumentsTemplate { get; set; }
 
-    public string ResolvePackageRoot()
-    {
-        if (string.IsNullOrWhiteSpace(PackageRoot))
-        {
-            return PluginPathDefaults.ResolveDefaultPluginPackageRoot();
-        }
-
-        return Path.IsPathRooted(PackageRoot)
-            ? Path.GetFullPath(PackageRoot)
-            : Path.GetFullPath(Path.Combine(
-                PluginPathDefaults.ResolveRepositoryRoot(),
-                PackageRoot));
-    }
-
     public string ResolveEventLogConnectionString()
     {
         if (!string.IsNullOrWhiteSpace(EventLogConnectionString))
@@ -48,26 +30,6 @@ public sealed class PluginsModuleOptions
         var databasePath = Path.GetFullPath(EventLogDatabasePath);
 
         return $"Data Source={databasePath}";
-    }
-}
-
-public static class PluginActivators
-{
-    public const string ManifestOnly = "ManifestOnly";
-    public const string AssemblyLoadContext = "AssemblyLoadContext";
-    public const string ExternalProcess = "ExternalProcess";
-
-    public static PluginActivator Parse(string? value)
-    {
-        return value switch
-        {
-            ManifestOnly => PluginActivator.ManifestOnly,
-            AssemblyLoadContext => PluginActivator.AssemblyLoadContext,
-            ExternalProcess => PluginActivator.ExternalProcess,
-            _ => throw new InvalidOperationException(
-                $"Unsupported plugin activator '{value}'. Expected exactly '{ManifestOnly}', "
-                + $"'{AssemblyLoadContext}', or '{ExternalProcess}'.")
-        };
     }
 }
 
@@ -86,39 +48,7 @@ public static class PluginEventLogProviders
     }
 }
 
-public enum PluginActivator
-{
-    ManifestOnly,
-    AssemblyLoadContext,
-    ExternalProcess
-}
-
 public enum PluginEventLogProvider
 {
     Sqlite
-}
-
-internal static class PluginPathDefaults
-{
-    public static string ResolveDefaultPluginPackageRoot()
-    {
-        return Path.Combine(ResolveRepositoryRoot(), "samples", "plugins");
-    }
-
-    public static string ResolveRepositoryRoot()
-    {
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            var samplesPlugins = Path.Combine(current.FullName, "samples", "plugins");
-            if (Directory.Exists(samplesPlugins))
-            {
-                return current.FullName;
-            }
-
-            current = current.Parent;
-        }
-
-        return Directory.GetCurrentDirectory();
-    }
 }

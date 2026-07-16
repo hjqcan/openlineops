@@ -29,6 +29,8 @@ public sealed class SqliteProductionRunRepository :
         _connectionString = RequireFileBackedConnectionString(connectionString);
     }
 
+    internal string ConnectionString => _connectionString;
+
     public async ValueTask<bool> TryAddAsync(
         ProductionRun run,
         ProductionRunExecutionPlan executionPlan,
@@ -132,13 +134,47 @@ public sealed class SqliteProductionRunRepository :
     {
         ArgumentNullException.ThrowIfNull(run);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
-
-        var documentJson = JsonSerializer.Serialize(
-            ProductionRunSnapshotMapper.ToSnapshot(run),
-            JsonOptions);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction(deferred: false);
+        var nextRevision = await SaveInTransactionAsync(
+                connection,
+                transaction,
+                run,
+                expectedRevision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return nextRevision;
+    }
+
+    internal static async ValueTask<long> SaveInTransactionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        long expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(run);
+        var documentJson = JsonSerializer.Serialize(
+            ProductionRunSnapshotMapper.ToSnapshot(run),
+            JsonOptions);
+        var terminalReplayRevision = await ValidateTerminalReplayAsync(
+                connection,
+                transaction,
+                run,
+                expectedRevision,
+                documentJson,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (terminalReplayRevision is not null)
+        {
+            return terminalReplayRevision.Value;
+        }
+
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         var nextRevision = checked(expectedRevision + 1);
@@ -206,16 +242,25 @@ public sealed class SqliteProductionRunRepository :
 
         if (run.IsTerminal)
         {
+            var terminalEvidence = await CaptureTerminalEvidenceAsync(
+                    connection,
+                    transaction,
+                    run,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await InsertTerminalEvidenceAsync(
+                    connection,
+                    transaction,
+                    terminalEvidence,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await InsertTerminalOutboxAsync(
                     connection,
                     transaction,
                     run,
-                    documentJson,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
         return nextRevision;
     }
@@ -323,6 +368,62 @@ public sealed class SqliteProductionRunRepository :
         }
 
         return runs;
+    }
+
+    public async ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+        ProductionRunTerminalPageRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = CreateConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = request.After is null
+            ? """
+                SELECT evidence.document_json, runs.last_transition_at_utc, runs.run_id
+                FROM production_runs AS runs
+                INNER JOIN production_run_terminal_evidence AS evidence
+                    ON evidence.run_id = runs.run_id
+                WHERE runs.execution_status IN ('Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected')
+                ORDER BY runs.last_transition_at_utc, runs.run_id
+                LIMIT $fetch_count;
+                """
+            : """
+                SELECT evidence.document_json, runs.last_transition_at_utc, runs.run_id
+                FROM production_runs AS runs
+                INNER JOIN production_run_terminal_evidence AS evidence
+                    ON evidence.run_id = runs.run_id
+                WHERE runs.execution_status IN ('Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected')
+                  AND (runs.last_transition_at_utc > $after_timestamp
+                    OR (runs.last_transition_at_utc = $after_timestamp AND runs.run_id > $after_run_id))
+                ORDER BY runs.last_transition_at_utc, runs.run_id
+                LIMIT $fetch_count;
+                """;
+        command.Parameters.AddWithValue("$fetch_count", request.PageSize + 1);
+        if (request.After is not null)
+        {
+            command.Parameters.AddWithValue(
+                "$after_timestamp",
+                FormatTimestamp(request.After.LastTransitionAtUtc));
+            command.Parameters.AddWithValue("$after_run_id", request.After.RunId.Value.ToString("D"));
+        }
+
+        var entries = new List<ProductionRunTerminalEvidence>(request.PageSize + 1);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            entries.Add(DeserializeTerminalEvidence(reader.GetString(0)));
+        }
+
+        var hasMore = entries.Count > request.PageSize;
+        var items = hasMore ? entries.Take(request.PageSize).ToArray() : entries.ToArray();
+        var next = hasMore
+            ? new ProductionRunTerminalCursor(
+                items[^1].Run.LastTransitionAtUtc,
+                items[^1].Run.RunId)
+            : null;
+        return new ProductionRunTerminalPage(items, next);
     }
 
     public async ValueTask<ProductionRunExecutionPlan?> GetByRunIdAsync(
@@ -453,9 +554,11 @@ public sealed class SqliteProductionRunRepository :
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT document_json, attempt_count, last_error
-            FROM production_run_terminal_outbox
-            ORDER BY occurred_at_utc, run_id
+            SELECT evidence.document_json, outbox.attempt_count, outbox.last_error
+            FROM production_run_terminal_outbox AS outbox
+            INNER JOIN production_run_terminal_evidence AS evidence
+                ON evidence.run_id = outbox.run_id
+            ORDER BY outbox.occurred_at_utc, outbox.run_id
             LIMIT $maximum_count;
             """;
         command.Parameters.AddWithValue("$maximum_count", maximumCount);
@@ -465,7 +568,7 @@ public sealed class SqliteProductionRunRepository :
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             items.Add(new ProductionRunTerminalOutboxItem(
-                DeserializeRun(reader.GetString(0)).ToSnapshot(),
+                DeserializeTerminalEvidence(reader.GetString(0)),
                 reader.GetInt32(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2)));
         }
@@ -520,7 +623,7 @@ public sealed class SqliteProductionRunRepository :
         }
     }
 
-    private async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken)
+    internal async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _schemaCreated) == 1)
         {
@@ -559,6 +662,10 @@ public sealed class SqliteProductionRunRepository :
                 CREATE INDEX IF NOT EXISTS ix_production_runs_recovery
                     ON production_runs(execution_status, last_transition_at_utc);
 
+                CREATE INDEX IF NOT EXISTS ix_production_runs_terminal_projection
+                    ON production_runs(last_transition_at_utc, run_id)
+                    WHERE execution_status IN ('Completed', 'Failed', 'TimedOut', 'Canceled', 'Rejected');
+
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_production_runs_active_unit
                     ON production_runs(production_unit_id)
                     WHERE execution_status IN ('Pending', 'Running');
@@ -575,13 +682,25 @@ public sealed class SqliteProductionRunRepository :
                     UNIQUE(product_model_id, identity_key, identity_value)
                 );
 
-                CREATE TABLE IF NOT EXISTS production_run_terminal_outbox (
+                CREATE TABLE IF NOT EXISTS production_run_terminal_evidence (
                     run_id TEXT NOT NULL PRIMARY KEY,
                     document_json TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES production_runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS production_run_terminal_outbox (
+                    run_id TEXT NOT NULL PRIMARY KEY,
                     occurred_at_utc TEXT NOT NULL,
                     attempt_count INTEGER NOT NULL,
                     last_error TEXT NULL,
-                    FOREIGN KEY (run_id) REFERENCES production_runs(run_id) ON DELETE CASCADE
+                    CHECK (
+                        (attempt_count = 0 AND last_error IS NULL)
+                        OR (attempt_count > 0
+                            AND last_error IS NOT NULL
+                            AND length(last_error) > 0
+                            AND last_error = trim(last_error))),
+                    FOREIGN KEY (run_id)
+                        REFERENCES production_run_terminal_evidence(run_id) ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_production_run_terminal_outbox_order
@@ -640,7 +759,7 @@ public sealed class SqliteProductionRunRepository :
         }
     }
 
-    private SqliteConnection CreateConnection()
+    internal SqliteConnection CreateConnection()
     {
         return new SqliteConnection(_connectionString);
     }
@@ -1062,6 +1181,151 @@ public sealed class SqliteProductionRunRepository :
         return ProductionMaterialSnapshotMapper.ToAggregate(snapshot);
     }
 
+    private static ProductionRunTerminalEvidence DeserializeTerminalEvidence(string documentJson)
+    {
+        var snapshot = JsonSerializer.Deserialize<PersistedProductionRunTerminalEvidence>(
+                documentJson,
+                JsonOptions)
+            ?? throw new InvalidDataException("Persisted terminal evidence document is empty.");
+        return ProductionRunTerminalEvidenceSnapshotMapper.ToAggregate(snapshot);
+    }
+
+    private static async ValueTask<ProductionRunTerminalEvidence> CaptureTerminalEvidenceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        CancellationToken cancellationToken)
+    {
+        var completedAtUtc = run.CompletedAtUtc
+            ?? throw new InvalidOperationException(
+                $"Terminal Production Run {run.Id} has no completion timestamp.");
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT document_json
+            FROM production_material_timeline
+            WHERE occurred_at_utc <= $through_utc
+              AND (production_run_id = $production_run_id
+                OR production_unit_id = $production_unit_id
+                OR genealogy_parent_unit_id = $production_unit_id
+                OR genealogy_child_unit_id = $production_unit_id
+                OR ($carrier_id IS NOT NULL AND carrier_id = $carrier_id))
+            ORDER BY occurred_at_utc, evidence_id;
+            """;
+        command.Parameters.AddWithValue("$through_utc", FormatTimestamp(completedAtUtc));
+        command.Parameters.AddWithValue("$production_run_id", run.Id.Value.ToString("D"));
+        command.Parameters.AddWithValue(
+            "$production_unit_id",
+            run.ProductionUnitId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$carrier_id", (object?)run.CarrierId ?? DBNull.Value);
+        var timeline = new List<ProductionMaterialTimelineEntry>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var snapshot = JsonSerializer.Deserialize<PersistedProductionMaterialTimelineEntry>(
+                    reader.GetString(0),
+                    JsonOptions)
+                ?? throw new InvalidDataException(
+                    "Persisted Production Material timeline document is empty.");
+            timeline.Add(ProductionMaterialSnapshotMapper.ToAggregate(snapshot));
+        }
+
+        return new ProductionRunTerminalEvidence(run.ToSnapshot(), timeline);
+    }
+
+    private static async ValueTask<long?> ValidateTerminalReplayAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRun run,
+        long expectedRevision,
+        string candidateDocumentJson,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT document_json, revision, execution_status
+            FROM production_runs
+            WHERE run_id = $run_id;
+            """;
+        command.Parameters.AddWithValue("$run_id", run.Id.Value.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        var storedDocumentJson = reader.GetString(0);
+        var storedRevision = reader.GetInt64(1);
+        var storedStatus = reader.GetString(2);
+        if (!IsTerminalStatus(storedStatus))
+        {
+            return null;
+        }
+
+        if (storedRevision != expectedRevision)
+        {
+            throw new ProductionRunConcurrencyException(run.Id, expectedRevision);
+        }
+
+        if (!CanonicalJsonEquals(storedDocumentJson, candidateDocumentJson))
+        {
+            throw new InvalidOperationException(
+                $"Terminal Production Run {run.Id} is immutable.");
+        }
+
+        return storedRevision;
+    }
+
+    private static async ValueTask InsertTerminalEvidenceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRunTerminalEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        var documentJson = JsonSerializer.Serialize(
+            ProductionRunTerminalEvidenceSnapshotMapper.ToSnapshot(evidence),
+            JsonOptions);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO production_run_terminal_evidence (run_id, document_json)
+            VALUES ($run_id, $document_json)
+            ON CONFLICT(run_id) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$run_id", evidence.RunId.Value.ToString("D"));
+        command.Parameters.AddWithValue("$document_json", documentJson);
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
+        {
+            return;
+        }
+
+        await using var existing = connection.CreateCommand();
+        existing.Transaction = transaction;
+        existing.CommandText =
+            "SELECT document_json FROM production_run_terminal_evidence WHERE run_id = $run_id;";
+        existing.Parameters.AddWithValue("$run_id", evidence.RunId.Value.ToString("D"));
+        var existingJson = await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+            as string;
+        if (!string.Equals(existingJson, documentJson, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Production Run {evidence.RunId} terminal evidence changed after it was frozen.");
+        }
+    }
+
+    private static bool IsTerminalStatus(string status) => status is
+        "Completed" or "Failed" or "TimedOut" or "Canceled" or "Rejected";
+
+    private static bool CanonicalJsonEquals(string left, string right)
+    {
+        using var leftDocument = JsonDocument.Parse(left);
+        using var rightDocument = JsonDocument.Parse(right);
+        return JsonElement.DeepEquals(leftDocument.RootElement, rightDocument.RootElement);
+    }
+
     private static SlotOccupancy DeserializeSlot(string documentJson)
     {
         var snapshot = JsonSerializer.Deserialize<PersistedSlotOccupancy>(documentJson, JsonOptions)
@@ -1073,7 +1337,6 @@ public sealed class SqliteProductionRunRepository :
         SqliteConnection connection,
         SqliteTransaction transaction,
         ProductionRun run,
-        string documentJson,
         CancellationToken cancellationToken)
     {
         var completedAtUtc = run.CompletedAtUtc
@@ -1084,20 +1347,17 @@ public sealed class SqliteProductionRunRepository :
         command.CommandText = """
             INSERT INTO production_run_terminal_outbox (
                 run_id,
-                document_json,
                 occurred_at_utc,
                 attempt_count,
                 last_error)
             VALUES (
                 $run_id,
-                $document_json,
                 $occurred_at_utc,
                 0,
                 NULL)
             ON CONFLICT(run_id) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$run_id", run.Id.Value.ToString("D"));
-        command.Parameters.AddWithValue("$document_json", documentJson);
         command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(completedAtUtc));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }

@@ -1,5 +1,6 @@
 using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Domain.Abstractions.Serialization;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -153,8 +154,8 @@ internal static class RuntimeMonitoringDomainEventMapper
         return new RuntimeCommandStatusChangedDomainEvent(
             sessionId,
             new RuntimeCommandId(document.EntityId!.Value),
-            ParseEnum<RuntimeCommandStatus>(document.FromStatus, nameof(document.FromStatus)),
-            ParseEnum<RuntimeCommandStatus>(document.ToStatus, nameof(document.ToStatus)),
+            ParseEnum<ExecutionStatus>(document.FromStatus, nameof(document.FromStatus)),
+            ParseEnum<ExecutionStatus>(document.ToStatus, nameof(document.ToStatus)),
             RequireText(document.Reason, nameof(document.Reason)));
     }
 

@@ -266,7 +266,8 @@ public sealed class AutomationProjectFileFormatTests : IDisposable
                     "Main Line",
                     TopologyId: null,
                     ProcessDefinitionIds: [],
-                    "applications/main-line/main-line.oloapp")
+                    "applications/main-line/main-line.oloapp",
+                    PluginPackageReferences: [])
             ],
             Snapshots: []);
     }

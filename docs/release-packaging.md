@@ -149,8 +149,12 @@ four distinct entry points at the archive root: `OpenLineOps.Agent.exe`,
 `RuntimeExecutablePath`, `PluginHostExecutablePath`, and Python
 `WorkerExecutablePath` bound exactly to those co-packaged executables, and
 binds the Python sandbox to that exact co-packaged launcher and the fixed
-`RestrictedCurrentLowIntegrity` identity. The service therefore cannot select
+`PerExecutionAppContainer` identity. The service therefore cannot select
 an unverified runtime, plugin host, worker, launcher, or identity elsewhere.
+The same signed launcher exposes one strict installer operation,
+`provision-python-runtime --runtime-dll <absolute-path>`, which an administrator
+runs after installing or updating Python. Normal worker launch only verifies
+that capability ACL and never edits the host Python installation.
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.
 
@@ -158,6 +162,7 @@ After staging and candidate inspection, run the extracted-bundle execution
 gate against the exact ZIP recorded in `artifacts/release/release-manifest.json`:
 
 ```powershell
+$env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
 ```
 
@@ -169,26 +174,70 @@ Station Runtime and Plugin Host. A second signed package runs through the
 staged Station Runtime and Python Script Worker. No Runtime, Plugin Host,
 Script Worker, or sample-plugin binary is selected from a source `bin`
 directory in this gate. Machine-readable evidence is written to
-`output/staged-agent-bundle-e2e/evidence.json`.
+`output/staged-agent-bundle-e2e/evidence.json`. RabbitMQ is mandatory; a missing
+or unreachable `OPENLINEOPS_RABBITMQ_URI` fails the gate and cannot produce a
+skipped success. The script finishes by running
+`eng/verify-staged-agent-evidence.ps1`, which validates the raw evidence hash,
+central authenticated Artifact transport and Operator retrieval, five required
+vendor artifacts, outage/reconnect once-only delivery, Agent identity, and
+process restart evidence. On success the gate removes extracted bundles,
+private token diagnostics, SQLite/runtime work, and raw process logs; the
+publishable root retains only `evidence.json`, its five hash-bound TRX files,
+and the hash-bound RabbitMQ evidence document.
 
 The staged Python process chain uses the exact launcher shipped in the archive.
-That launcher derives a restricted primary token from the current Agent token,
-sets mandatory Low integrity, and starts only the sibling Script Worker under
-the fixed `RestrictedCurrentLowIntegrity` identity. The signed Python package
-queries its own token; the gate accepts it only when `IsTokenRestricted` is
-true and the integrity RID is `4096`. No site-provisioned identity, custom
-launcher, argument template, `runas`, password prompt, or test-only
-`ExternalProcess` exception is part of this production proof. A full
-`OpenLineOps.Agent.exe` message-delivery run also requires RabbitMQ; the real
-RabbitMQ protocol and redelivery behavior run in the separate
-production-integration CI job.
+That launcher creates a unique AppContainer profile and package SID, copies
+only the sibling Script Worker payload into protected read-only profile
+content, grants a package-private runtime directory, supplies no network
+capability, and starts the Worker at Low integrity under the fixed
+`PerExecutionAppContainer` identity. The signed Python package queries its own
+token; the gate accepts it only when `TokenIsAppContainer` is true, its package
+SID is canonical, and the integrity RID is `4096`. Separate exact tests verify
+cross-profile access denial, network denial, kill-on-close descendant
+termination, profile deletion, and stale-profile recovery. No custom launcher,
+argument template, `runas`, password prompt, or test-only `ExternalProcess`
+exception is part of this production proof. The same staged gate executes the
+full `OpenLineOps.Agent.exe` message-delivery run against the supplied real
+RabbitMQ broker. The separate production-integration CI job proves the durable
+PostgreSQL Coordinator and RabbitMQ composition across Coordinator restart.
+
+The formal Windows production closure is one ordered chain. It uses the same
+staged release, PostgreSQL service, and RabbitMQ broker for the packaged Studio
+handoff, two distinct non-administrative Station Agent accounts, and the
+headless Runner:
+
+```powershell
+$env:OPENLINEOPS_POSTGRES_CONNECTION_STRING = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=<ephemeral-ci-password>"
+$env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-production-closure-evidence.ps1 -EvidenceRoot artifacts/production-closure-e2e -RequirePassed
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-evidence.ps1 -EvidenceRoot output/studio-two-agent-production-closure
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-agent-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-agent-evidence.ps1 -EvidenceRoot output/runner-staged-agent-e2e -RequirePassed
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-evidence-validation.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-evidence.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-agent-evidence.tests.ps1
+```
+
+The combined Studio command is the only formal packaged entry point: its
+one-shot private handoff is consumed by the exact two-Agent test and is deleted
+even on failure. Its public evidence proves distinct Windows SIDs, no
+administrative token, parallel resource leases and fencing tokens, Coordinator
+restart, three terminal unloads bound to PostgreSQL, vendor evidence, and
+bounded cleanup. The Runner evidence binds the staged Runner and Agent images,
+its exact one-Passed/zero-Skipped TRX, PostgreSQL, RabbitMQ, Agent SQLite, Trace,
+and process-tree cleanup. Each public root has its own fail-closed scanner and
+upload condition. Publication generation embeds the Studio evidence and
+manifest plus the Runner evidence and TRX; downloaded-bundle inspection reruns
+both strict validators and verifies source/embedded byte identity.
 
 The GitHub Actions workflow runs the full release staging script after the
 desktop production build, using `-SkipDesktopBuild` so the already-built
 Electron renderer and main-process outputs are packaged and validated. After
-the manifest/checksum verification and staged candidate inspection, CI runs the
-extracted Agent bundle E2E, release candidate inspection behavior verification,
-and the publication
+the manifest/checksum verification and staged candidate inspection, CI starts
+the Windows PostgreSQL and RabbitMQ services, then runs the extracted Agent
+bundle E2E, packaged-to-two-Agent closure, staged Runner closure, release
+candidate inspection behavior verification, and the publication
 readiness gate with `-AllowPendingExternal` so non-external release
 requirements are continuously checked while final external release inputs are
 still pending. After desktop smoke test and desktop audit pass, CI uploads the
@@ -232,10 +281,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.
 ```
 
 The script runs `dotnet publish` for the API, plugin host, script worker, and
-sample plugin; runs the desktop production build unless `-SkipDesktopBuild` is
+sample plugin artifact; runs the desktop production build unless `-SkipDesktopBuild` is
 provided; creates a Windows unpacked Electron package under
 `apps/desktop/release/desktop/win-unpacked` containing the IDE, a self-contained
-Windows API runtime, and the bundled sample plugin; optionally signs that
+Windows API runtime, and the Plugin Host; optionally signs that
 desktop, Agent, Station Runtime, and Runner packages when
 `-SignWindowsPackages` and certificate selector arguments
 are provided; creates zip artifacts under `artifacts/release`; and generates
@@ -244,11 +293,32 @@ are provided; creates zip artifacts under `artifacts/release`; and generates
 `release-metadata-checksums.sha256` with the required source and binary artifact
 kind gate enabled.
 
+The source archive is built from the path set returned by
+`git ls-files --cached`; the staging script never walks the repository and
+therefore never admits an untracked file. Current working-tree bytes are copied
+only for those tracked paths so a developer candidate can represent an
+uncommitted tracked edit, with `source.dirty` recorded in provenance. Sensitive
+tracked paths remain excluded. Formal publication additionally passes
+`-RequireCleanGitWorkTree -ExpectedGitCommit <full-object-id>`, which makes the
+archive, build, and `release-provenance.json` fail closed unless they remain
+bound to one clean commit. Tracked paths that traverse a symlink, junction, or
+other reparse point are rejected instead of dereferencing content outside the
+Git worktree, and formal staging rejects sparse or incomplete checkouts.
+
 By default, current desktop staging emits an unsigned, directly runnable
 `win-unpacked` package plus `dist`, `dist-electron`, and desktop metadata for
 diagnostics. `OpenLineOps.exe` starts its bundled API automatically, stores
 mutable databases under the current user profile, and requires neither a source
 checkout nor a separately installed .NET runtime.
+
+The sample-plugin release artifact is an importable example, not a globally
+installed or automatically discovered package. Studio installs a selected ZIP
+only into `applications/<application>/plugins/<portable-id>/` and commits its
+strict `.oloapp` reference. Release and publication gates resolve only those
+Application-owned references and revalidate every file hash. Headless API
+deployment must include `OpenLineOps.PluginHost` and configure
+`OpenLineOps:Plugins:ExternalHost:ExecutablePath`; provider trial fails closed
+when that executable is absent.
 Passing `-SignWindowsPackages` signs the unpacked desktop, Agent, and Runner
 package contents before archive
 and manifest generation when a real code-signing certificate is available. A
@@ -302,8 +372,16 @@ readiness folders. For the final release assertion, provide the external proof
 and require full publishability:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/write-publication-evidence.ps1 -ConfirmMitLicense -GitHubActionsRunUrl https://github.com/<owner>/<repository>/actions/runs/<run-id> -RequirePublishable
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/write-publication-evidence.ps1 -ConfirmMitLicense -ProductionIntegrationEvidencePath output/production-integration-evidence/integration-evidence.json -RequirePublishable
 ```
+
+`integration-evidence.json` must be generated by
+`eng/write-production-integration-evidence.ps1` from the adjacent
+`production-integration.trx` in the successful `production-integration` job.
+The strict contract binds the repository, clean release commit, workflow run,
+required real PostgreSQL/RabbitMQ test, zero-failure/zero-skip counters, and TRX
+size and SHA-256. A manually supplied GitHub Actions URL is not publication
+proof and is not accepted by any final publication entry point.
 
 The evidence behavior is covered by:
 
@@ -311,9 +389,10 @@ The evidence behavior is covered by:
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-publication-evidence.ps1
 ```
 
-This verification checks default evidence generation, MIT and GitHub Actions
-proof recording, invalid GitHub Actions URL rejection, and the
-`-RequirePublishable` final assertion behavior.
+This verification checks default evidence generation, MIT confirmation,
+same-run production-integration evidence and TRX binding, invalid or
+commit-mismatched evidence rejection, and the `-RequirePublishable` final
+assertion behavior.
 
 Open-source package metadata is covered by:
 
@@ -323,7 +402,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-open-source-metad
 
 This check validates root MIT license text, README license wording, default
 .NET package metadata in `Directory.Build.props`, and the desktop package
-license metadata in `package.json` and `package-lock.json`.
+license metadata in `package.json` and `package-lock.json`. It also inventories
+every tracked or untracked `package-lock.json` and fails unless each lock is an
+explicitly audited CI dependency surface. The repository currently has one
+Node dependency surface: `apps/desktop`.
 
 Third-party dependency license metadata is covered by:
 
@@ -352,7 +434,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-licen
 ```
 
 When the public repository URL and private reporting contacts are final, apply
-them with:
+them before attempting final publication:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/finalize-publication-metadata.ps1 -RepositoryUrl https://github.com/<owner>/<repository> -SecurityContact security@example.com -ConductContact conduct@example.com
@@ -361,6 +443,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/finalize-publication-met
 The script updates `SECURITY.md`, `CODE_OF_CONDUCT.md`, and
 `.github/ISSUE_TEMPLATE/config.yml`, then runs the strict publication readiness
 gate unless `-SkipReadinessGate` is supplied.
+
+Review those metadata changes, commit them, and run the required CI gates from
+that commit. The final preparation command must start from a completely clean
+worktree, including no untracked files. It captures the full HEAD object id and
+passes it to release staging; metadata finalization is re-run only as an
+idempotence check, and staging rejects the release if that check changes a
+tracked file. This ordering prevents a source ZIP or provenance record from
+describing content that was never committed.
 
 The finalization behavior is covered by a repeatable local and CI verification
 script:
@@ -379,11 +469,14 @@ the signed Windows candidates, run strict publication readiness, and require
 publishable evidence:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/prepare-final-publication.ps1 -Version 0.1.0 -RepositoryUrl https://github.com/<owner>/<repository> -SecurityContact security@example.com -ConductContact conduct@example.com -GitHubActionsRunUrl https://github.com/<owner>/<repository>/actions/runs/<run-id> -ConfirmMitLicense -CodeSigningCertificateThumbprint <thumbprint>
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/prepare-final-publication.ps1 -Version 0.1.0 -RepositoryUrl https://github.com/<owner>/<repository> -SecurityContact security@example.com -ConductContact conduct@example.com -ProductionIntegrationEvidencePath output/production-integration-evidence/integration-evidence.json -ConfirmMitLicense -CodeSigningCertificateThumbprint <thumbprint>
 ```
 
 Use `-PlanOnly` first to inspect the exact command chain without changing
-metadata or staging artifacts. The final publication preflight is safe to run in
+metadata or staging artifacts; plan mode may run from a developer worktree, but
+it still requires a structurally valid integration evidence file and its
+hash-bound sibling TRX for the current commit. The real command cannot run from
+a dirty worktree. The final publication preflight is safe to run in
 local development and CI because it only exercises validation and plan output.
 It writes `output/final-publication-preflight/publication-preflight.json` and
 `output/final-publication-preflight/publication-preflight.md` for CI artifact
@@ -391,6 +484,13 @@ diagnostics:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-final-publication-preflight.ps1
+```
+
+The tracked-source, commit-binding, signing-argument, log-redaction, and bounded
+RabbitMQ E2E process rules have a focused regression gate:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-staging-security.ps1
 ```
 
 ## Signing
@@ -406,18 +506,22 @@ Electron package and the staged Agent and Runner directories:
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-windows-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificateThumbprint <thumbprint>
 ```
 
-For PFX-based signing, pass `-CertificatePath` and either
-`-CertificatePassword` or `OPENLINEOPS_CODESIGN_PASSWORD`:
-
-```powershell
-$env:OPENLINEOPS_CODESIGN_PASSWORD = "<pfx-password>"
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/sign-windows-package.ps1 -PackageRoot apps/desktop/release/desktop/win-unpacked -CertificatePath C:\secure\openlineops-code-signing.pfx
-```
+Release staging and formal publication accept only a certificate already
+installed in the Windows certificate store, selected by
+`-CodeSigningCertificateThumbprint` or
+`-CodeSigningAutoSelectCertificate`. The staging/publication command chain has
+no certificate-password parameter and never places a signing password in a
+child-process argument vector. Certificate-file signing is not a formal
+publication path.
 
 The script signs `.exe`, `.dll`, and `.node` files with `signtool.exe`, applies
 an RFC 3161 timestamp, and verifies signatures unless `-SkipVerify` is supplied.
-Use `-PlanOnly` to inspect the files that would be signed without requiring
-`signtool.exe`.
+When `PackageRoot` is the unpacked Electron desktop package, the script then
+regenerates `openlineops-package-content.json` with the single canonical package
+content writer. This ordering is mandatory because Authenticode changes the
+signed file bytes; manifest regeneration failure fails the signing command.
+`-PlanOnly` returns before signing and never changes the manifest. Use it to
+inspect the files that would be signed without requiring `signtool.exe`.
 
 Release staging can call the same signing script before archive and manifest
 generation:
@@ -460,6 +564,9 @@ Required gates:
 - publication evidence report generation
 - publication evidence behavior verification
 - final publication preflight verification
+- release staging security verification for tracked-only source input, clean
+  commit binding, removed password arguments, redacted command failures, and
+  finite RabbitMQ E2E process cleanup
 - CI release artifact bundle inspection
 - CI release artifact bundle inspection report upload
 - sample plugin build
@@ -485,14 +592,17 @@ Optional gates:
   environment files out of the source archive.
 - Run default verification locally.
 - Keep public repository metadata synchronized with `hjqcan/openlineops`.
+- Finalize public metadata, review it, commit it, and verify the release
+  worktree has no tracked or untracked changes.
 - Build signed desktop, Agent, Station Runtime, and Runner packages with the
   real code-signing certificate.
 - Run the strict publication readiness gate after signed Windows release
   artifacts are final.
-- Prepare the final release with `eng/prepare-final-publication.ps1` once all
-  external publication inputs are available.
 - Run CI on the release branch.
-- Generate final publication evidence with `eng/write-publication-evidence.ps1 -ConfirmMitLicense -GitHubActionsRunUrl <run-url> -RequirePublishable`.
+- Prepare the final release with `eng/prepare-final-publication.ps1` from the
+  exact clean commit proven by the downloaded production-integration evidence
+  JSON and its hash-bound TRX.
+- Generate final publication evidence with `eng/write-publication-evidence.ps1 -ConfirmMitLicense -ProductionIntegrationEvidencePath output/production-integration-evidence/integration-evidence.json -RequirePublishable`.
 - Download and inspect the CI `openlineops-release-<run-number>` artifact with
   `eng/inspect-ci-release-artifact.ps1 -BundleRoot <downloaded-artifact-root>`.
 - Generate release notes from merged changes.

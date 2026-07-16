@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Text.Json;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
@@ -469,7 +468,12 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 "station-main",
                 1,
                 Now.AddHours(1))],
-            JsonSerializer.Serialize(new { mode = "spawn-child", pidFile }),
+            ProductionContextDocument.Write(new Dictionary<string, ProductionContextValue>(
+                StringComparer.Ordinal)
+            {
+                ["mode"] = new(ProductionContextValueKind.Text, "spawn-child"),
+                ["pidFile"] = new(ProductionContextValueKind.Text, pidFile)
+            }).GetRawText(),
             Now));
         job.Accept(Now);
         job.Start(Now);

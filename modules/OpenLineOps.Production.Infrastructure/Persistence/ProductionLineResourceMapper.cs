@@ -36,7 +36,12 @@ internal static class ProductionLineResourceMapper
                         resource.Id.Value,
                         resource.Kind.ToString(),
                         resource.TopologyTargetId,
-                        resource.Resolution.ToString())).ToArray()))
+                        resource.Resolution.ToString())).ToArray(),
+                    operation.InputMappings.Select(mapping => new OperationInputMappingDocument(
+                        mapping.TargetInputKey,
+                        mapping.SourceOperationId.Value,
+                        mapping.SourceOutputKey,
+                        mapping.ExpectedValueKind.ToString())).ToArray()))
                 .ToArray(),
             definition.Transitions
                 .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
@@ -69,6 +74,13 @@ internal static class ProductionLineResourceMapper
                     authorization.TargetCapabilityId,
                     authorization.TargetAction))
                 .ToArray(),
+            new ProductionRouteLayoutDocument(definition.RouteLayout.OperationPositions
+                .OrderBy(position => position.OperationId.Value, StringComparer.Ordinal)
+                .Select(position => new OperationCanvasPositionDocument(
+                    position.OperationId.Value,
+                    position.X,
+                    position.Y))
+                .ToArray()),
             definition.CreatedAtUtc,
             definition.UpdatedAtUtc);
     }
@@ -99,7 +111,14 @@ internal static class ProductionLineResourceMapper
                     resource.TopologyTargetId,
                     ParseExact<OperationResourceResolution>(
                         resource.Resolution,
-                        "Operation resource resolution"))))),
+                        "Operation resource resolution"))),
+                operation.InputMappings.Select(mapping => new OperationInputMapping(
+                    mapping.TargetInputKey,
+                    new OperationDefinitionId(mapping.SourceOperationId),
+                    mapping.SourceOutputKey,
+                    ParseExact<ProductionContextValueKind>(
+                        mapping.ExpectedValueKind,
+                        "Operation input mapping value kind"))))),
             document.Transitions.Select(transition => RouteTransition.Create(
                 new RouteTransitionId(transition.TransitionId),
                 new OperationDefinitionId(transition.SourceOperationId),
@@ -140,6 +159,11 @@ internal static class ProductionLineResourceMapper
                     authorization.TargetBindingId,
                     authorization.TargetCapabilityId,
                     authorization.TargetAction)),
+            new ProductionRouteLayout(document.RouteLayout.OperationPositions.Select(position =>
+                new OperationCanvasPosition(
+                    new OperationDefinitionId(position.OperationId),
+                    position.X,
+                    position.Y))),
             document.CreatedAtUtc,
             document.UpdatedAtUtc);
     }
@@ -169,6 +193,8 @@ internal static class ProductionLineResourceMapper
             || document.Operations is null
             || document.Transitions is null
             || document.LineControllerAuthorizations is null
+            || document.RouteLayout is null
+            || document.RouteLayout.OperationPositions is null
             || document.Operations.Any(static operation => operation is null
                 || string.IsNullOrWhiteSpace(operation.ConfigurationSnapshotId)
                 || !string.Equals(
@@ -181,7 +207,13 @@ internal static class ProductionLineResourceMapper
                     || string.IsNullOrWhiteSpace(resource.BindingId)
                     || string.IsNullOrWhiteSpace(resource.Kind)
                     || string.IsNullOrWhiteSpace(resource.TopologyTargetId)
-                    || string.IsNullOrWhiteSpace(resource.Resolution)))
+                    || string.IsNullOrWhiteSpace(resource.Resolution))
+                || operation.InputMappings is null
+                || operation.InputMappings.Any(static mapping => mapping is null
+                    || string.IsNullOrWhiteSpace(mapping.TargetInputKey)
+                    || string.IsNullOrWhiteSpace(mapping.SourceOperationId)
+                    || string.IsNullOrWhiteSpace(mapping.SourceOutputKey)
+                    || string.IsNullOrWhiteSpace(mapping.ExpectedValueKind)))
             || document.Transitions.Any(static transition => transition is null
                 || string.IsNullOrWhiteSpace(transition.Kind)
                 || (string.IsNullOrWhiteSpace(transition.TargetOperationId)
@@ -205,7 +237,9 @@ internal static class ProductionLineResourceMapper
                 || string.IsNullOrWhiteSpace(authorization.TargetSystemId)
                 || string.IsNullOrWhiteSpace(authorization.TargetBindingId)
                 || string.IsNullOrWhiteSpace(authorization.TargetCapabilityId)
-                || string.IsNullOrWhiteSpace(authorization.TargetAction)))
+                || string.IsNullOrWhiteSpace(authorization.TargetAction))
+            || document.RouteLayout.OperationPositions.Any(static position => position is null
+                || string.IsNullOrWhiteSpace(position.OperationId)))
         {
             throw new InvalidDataException(
                 "Production line resource must contain all required semantic collections.");

@@ -1,6 +1,10 @@
 import * as signalR from '@microsoft/signalr';
 import type { ApiResponse, EditorDocumentWriteOptions } from '../shared/desktop-api';
 import { desktop } from './desktop-bridge';
+import {
+  requireApiItemsResponse,
+  requireApiResponseBody
+} from './runtime-monitoring-refresh-model';
 import type {
   ActiveProductionRunsResponse,
   AddAutomationSystemRequest,
@@ -17,6 +21,7 @@ import type {
   AutomationTopologyResponse,
   AutomationTopologySummaryResponse,
   AutomationProjectWorkspaceResponse,
+  ApplicationExtensionPackageResponse,
   CreateAutomationTopologyRequest,
   CreateAutomationProjectWorkspaceRequest,
   CreateDeviceDefinitionRequest,
@@ -37,7 +42,6 @@ import type {
   ExternalProgramTrialResponse,
   HealthResponse,
   PlatformResponse,
-  ExternalPluginProcessEventResponse,
   LinkProjectTopologyRequest,
   OpenAutomationProjectWorkspaceRequest,
   ProcessDefinitionResponse,
@@ -51,9 +55,8 @@ import type {
   ProductionOperationsFilters,
   ProductionRunCommandRequest,
   ProductionRunReadModel,
+  ProductionUnitMaterialLifecycleResponse,
   ProductionUnitResponse,
-  PluginLifecycleRecordResponse,
-  PluginManagementOverviewResponse,
   ProjectReleaseProductionRunContextResponse,
   PublishConfigurationSnapshotRequest,
   PublishProjectSnapshotRequest,
@@ -101,7 +104,7 @@ export async function getHealth(): Promise<ApiResponse<HealthResponse>> {
 
 export async function listAutomationProjects(): Promise<AutomationProjectSummaryResponse[]> {
   const response = await desktop.apiRequest<AutomationProjectSummaryResponse[]>('/api/automation-projects');
-  return response.body ?? [];
+  return requireListResponse(response, 'List automation Projects');
 }
 
 export async function createAutomationProjectWorkspace(
@@ -253,7 +256,7 @@ export async function listAutomationTopologies(
 ): Promise<AutomationTopologySummaryResponse[]> {
   const response = await desktop.apiRequest<AutomationTopologySummaryResponse[]>(
     topologyCollectionPath(scope));
-  return response.body ?? [];
+  return requireListResponse(response, 'List automation topologies');
 }
 
 export async function getAutomationTopology(
@@ -533,7 +536,7 @@ export async function getStationStatuses(
 ): Promise<RuntimeStationStatus[]> {
   const response = await desktop.apiRequest<RuntimeStationStatusesResponse>(
     `/api/runtime/monitoring/stations?${runtimeMonitoringQuery(scope)}`);
-  return response.body?.items ?? [];
+  return requireApiItemsResponse(response, 'Load runtime Station projection');
 }
 
 export async function getTargetStatuses(
@@ -549,7 +552,9 @@ export async function getTargetStatuses(
   const responses = await Promise.all(paths.map(path =>
     desktop.apiRequest<RuntimeTargetStatusesResponse>(path)));
 
-  return responses.flatMap(response => response.body?.items ?? []);
+  return responses.flatMap((response, index) => requireApiItemsResponse(
+    response,
+    `Load runtime target projection (${index + 1}/${responses.length})`));
 }
 
 function runtimeMonitoringQuery(
@@ -573,7 +578,7 @@ function runtimeMonitoringQuery(
 export async function getAlarms(includeAcknowledged = false): Promise<RuntimeAlarm[]> {
   const response = await desktop.apiRequest<RuntimeAlarmsResponse>(
     `/api/runtime/monitoring/alarms?includeAcknowledged=${includeAcknowledged}`);
-  return response.body?.items ?? [];
+  return requireApiItemsResponse(response, 'Load runtime Alarm projection');
 }
 
 export async function getTimeline(
@@ -582,16 +587,16 @@ export async function getTimeline(
 ): Promise<RuntimeTimelineEntry[]> {
   const response = await desktop.apiRequest<RuntimeTimelineResponse>(
     `/api/runtime/monitoring/sessions/${sessionId}/timeline?${runtimeMonitoringQuery(scope)}`);
-  return response.body?.items ?? [];
+  return requireApiItemsResponse(response, 'Load runtime timeline projection');
 }
 
-export async function getTraceRecords(productionUnitIdentityValue?: string): Promise<TraceRecordQueryResponse | null> {
+export async function getTraceRecords(productionUnitIdentityValue?: string): Promise<TraceRecordQueryResponse> {
   const query = productionUnitIdentityValue
     ? `?productionUnitIdentityValue=${encodeURIComponent(productionUnitIdentityValue)}`
     : '';
   const response = await desktop.apiRequest<TraceRecordQueryResponse>(
     `/api/traceability/records${query}`);
-  return response.body;
+  return requireApiResponseBody(response, 'Load Trace projection');
 }
 
 export async function searchEngineeringTrace(
@@ -631,6 +636,14 @@ export async function getTraceRecord(traceRecordId: string): Promise<TraceRecord
   return response.body;
 }
 
+export async function getProductionUnitMaterialLifecycle(
+  productionUnitId: string
+): Promise<ProductionUnitMaterialLifecycleResponse | null> {
+  const response = await desktop.apiRequest<ProductionUnitMaterialLifecycleResponse>(
+    `/api/traceability/production-units/${encodeURIComponent(productionUnitId)}/material-lifecycle`);
+  return response.body;
+}
+
 export async function exportTraceRecord(
   traceRecordId: string
 ): Promise<TraceRecordExportPackageResponse | null> {
@@ -639,12 +652,12 @@ export async function exportTraceRecord(
   return response.body;
 }
 
-export async function acknowledgeAlarm(alarmId: string, acknowledgedBy: string): Promise<RuntimeAlarm | null> {
+export async function acknowledgeAlarm(alarmId: string): Promise<RuntimeAlarm | null> {
   const response = await desktop.apiRequest<RuntimeAlarm>(
     `/api/runtime/monitoring/alarms/${alarmId}/acknowledgements`,
     {
       method: 'POST',
-      body: { acknowledgedBy }
+      body: {}
     });
   return response.body;
 }
@@ -654,7 +667,7 @@ export async function listWorkspaces(
 ): Promise<WorkspaceResponse[]> {
   const response = await desktop.apiRequest<WorkspaceResponse[]>(
     `${engineeringPath(scope)}/workspaces`);
-  return response.body ?? [];
+  return requireListResponse(response, 'List engineering workspaces');
 }
 
 export async function createWorkspace(
@@ -674,7 +687,7 @@ export async function listEngineeringProjects(
 ): Promise<EngineeringProjectResponse[]> {
   const response = await desktop.apiRequest<EngineeringProjectResponse[]>(
     `${engineeringPath(scope)}/projects`);
-  return response.body ?? [];
+  return requireListResponse(response, 'List engineering projects');
 }
 
 export async function createEngineeringProject(
@@ -694,7 +707,7 @@ export async function listRecipes(
 ): Promise<RecipeResponse[]> {
   const response = await desktop.apiRequest<RecipeResponse[]>(
     `${engineeringPath(scope)}/recipes`);
-  return response.body ?? [];
+  return requireListResponse(response, 'List engineering recipes');
 }
 
 export async function createRecipe(
@@ -725,7 +738,7 @@ export async function listStationProfiles(
 ): Promise<StationProfileResponse[]> {
   const response = await desktop.apiRequest<StationProfileResponse[]>(
     `${engineeringPath(scope)}/station-profiles`);
-  return response.body ?? [];
+  return requireListResponse(response, 'List engineering Station Profiles');
 }
 
 export async function createStationProfile(
@@ -755,7 +768,7 @@ export async function publishConfigurationSnapshot(
 
 export async function listDeviceDefinitions(): Promise<DeviceDefinitionResponse[]> {
   const response = await desktop.apiRequest<DeviceDefinitionResponse[]>('/api/devices/definitions');
-  return response.body ?? [];
+  return requireListResponse(response, 'List device definitions');
 }
 
 export async function createDeviceDefinition(
@@ -771,7 +784,7 @@ export async function createDeviceDefinition(
 
 export async function listDeviceInstances(): Promise<DeviceInstanceResponse[]> {
   const response = await desktop.apiRequest<DeviceInstanceResponse[]>('/api/devices/instances');
-  return response.body ?? [];
+  return requireListResponse(response, 'List device instances');
 }
 
 export async function registerDeviceInstance(
@@ -829,43 +842,43 @@ export async function resetDeviceFault(
     });
 }
 
-export async function getPluginOverview(): Promise<PluginManagementOverviewResponse | null> {
-  const response = await desktop.apiRequest<PluginManagementOverviewResponse>('/api/plugins/overview');
-  return response.body;
+export async function listApplicationExtensions(
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ApplicationExtensionPackageResponse[]>> {
+  return desktop.apiRequest<ApplicationExtensionPackageResponse[]>(
+    applicationExtensionCollectionPath(scope));
 }
 
-export async function startPlugins(): Promise<ApiResponse<PluginLifecycleRecordResponse[]>> {
-  return desktop.apiRequest<PluginLifecycleRecordResponse[]>(
-    '/api/plugins/lifecycle/start',
-    {
-      method: 'POST'
-    });
+export async function importApplicationExtension(
+  scope: ProjectApplicationApiScope
+) {
+  return desktop.importApplicationExtension<ApplicationExtensionPackageResponse>(
+    scope.projectId,
+    scope.applicationId);
 }
 
-export async function stopPlugins(): Promise<ApiResponse<PluginLifecycleRecordResponse[]>> {
-  return desktop.apiRequest<PluginLifecycleRecordResponse[]>(
-    '/api/plugins/lifecycle/stop',
-    {
-      method: 'POST'
-    });
+export async function validateApplicationExtensions(
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ApplicationExtensionPackageResponse[]>> {
+  return desktop.apiRequest<ApplicationExtensionPackageResponse[]>(
+    `${applicationExtensionCollectionPath(scope)}/validate`,
+    { method: 'POST' });
 }
 
-export async function listPluginEvents(
-  pluginId?: string,
-  kind?: string,
-  take = 50
-): Promise<ExternalPluginProcessEventResponse[]> {
-  const query = toQueryString({ pluginId, kind, take });
-  const response = await desktop.apiRequest<ExternalPluginProcessEventResponse[]>(
-    `/api/plugins/process-events${query}`);
-  return response.body ?? [];
+export async function removeApplicationExtension(
+  pluginId: string,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<unknown>> {
+  return desktop.apiRequest(
+    `${applicationExtensionCollectionPath(scope)}/${encodeURIComponent(pluginId)}`,
+    { method: 'DELETE' });
 }
 
 export async function listProcessDefinitions(
   scope: ProjectApplicationApiScope
 ): Promise<ProcessDefinitionSummary[]> {
   const response = await desktop.apiRequest<ProcessDefinitionSummary[]>(processCollectionPath(scope));
-  return response.body ?? [];
+  return requireListResponse(response, 'List process definitions');
 }
 
 export async function listProductionLines(
@@ -873,7 +886,7 @@ export async function listProductionLines(
 ): Promise<ProductionLineSummaryResponse[]> {
   const response = await desktop.apiRequest<ProductionLineSummaryResponse[]>(
     productionLineCollectionPath(scope));
-  return response.body ?? [];
+  return requireListResponse(response, 'List production lines');
 }
 
 export async function getProductionLine(
@@ -916,7 +929,7 @@ export async function listExternalProgramResources(
 ): Promise<ExternalProgramResourceResponse[]> {
   const response = await desktop.apiRequest<ExternalProgramResourceResponse[]>(
     externalProgramCollectionPath(scope));
-  return response.body ?? [];
+  return requireListResponse(response, 'List external program resources');
 }
 
 export async function saveExternalProgramResource(
@@ -966,6 +979,16 @@ export async function trialExternalProgramResource(
   return desktop.apiRequest<ExternalProgramTrialResponse>(
     `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}/trial`,
     { method: 'POST', body: request });
+}
+
+export async function trialExternalProgramDefinition(
+  definition: SaveExternalProgramResourceRequest,
+  request: ExternalProgramTrialRequest,
+  scope: ProjectApplicationApiScope
+): Promise<ApiResponse<ExternalProgramTrialResponse>> {
+  return desktop.apiRequest<ExternalProgramTrialResponse>(
+    `${externalProgramCollectionPath(scope)}/trial`,
+    { method: 'POST', body: { definition, inputs: request.inputs } });
 }
 
 export async function deleteExternalProgramResource(
@@ -1061,7 +1084,7 @@ export async function listProcessBlocklyBlocks(
 ): Promise<ProcessBlocklyBlockDefinition[]> {
   const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
     processBlockCollectionPath(scope));
-  return response.body ?? [];
+  return requireListResponse(response, 'List Process Blockly blocks');
 }
 
 export async function listProcessBlocklyBlockVersions(
@@ -1070,7 +1093,7 @@ export async function listProcessBlocklyBlockVersions(
 ): Promise<ProcessBlocklyBlockDefinition[]> {
   const response = await desktop.apiRequest<ProcessBlocklyBlockDefinition[]>(
     `${processBlockCollectionPath(scope)}/${encodeURIComponent(blockType)}/versions`);
-  return response.body ?? [];
+  return requireListResponse(response, 'List Process Blockly block versions');
 }
 
 export async function registerProcessBlocklyBlock(
@@ -1151,6 +1174,17 @@ function externalProgramCollectionPath(scope: ProjectApplicationApiScope): strin
     + `/applications/${encodeURIComponent(scope.applicationId)}/external-programs`;
 }
 
+function applicationExtensionCollectionPath(scope: ProjectApplicationApiScope): string {
+  return `${projectApplicationPath(scope)}/extensions`;
+}
+
+function requireListResponse<T>(response: ApiResponse<T[]>, action: string): T[] {
+  if (!response.ok || response.body === null) {
+    throw new Error(`${action} failed: ${response.status} ${response.text}`.trimEnd());
+  }
+  return response.body;
+}
+
 function editorDocumentHeaders(write: EditorDocumentWriteOptions): Record<string, string> {
   if (write.force) {
     return {
@@ -1170,9 +1204,15 @@ function processBlockCollectionPath(scope: ProjectApplicationApiScope): string {
   return `${projectApplicationPath(scope)}/process-blocks`;
 }
 
-export function createRuntimeHubConnection(apiBaseUrl: string): signalR.HubConnection {
+export function createRuntimeHubConnection(
+  apiBaseUrl: string,
+  apiAccessToken: string
+): signalR.HubConnection {
   return new signalR.HubConnectionBuilder()
-    .withUrl(`${apiBaseUrl}/hubs/runtime-progress`)
+    .withUrl(`${apiBaseUrl}/hubs/runtime-progress`, {
+      accessTokenFactory: () => apiAccessToken,
+      transport: signalR.HttpTransportType.LongPolling
+    })
     .withAutomaticReconnect()
     .configureLogging(signalR.LogLevel.Warning)
     .build();

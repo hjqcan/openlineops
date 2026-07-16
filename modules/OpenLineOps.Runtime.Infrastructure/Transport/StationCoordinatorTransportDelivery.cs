@@ -1,6 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Application.Execution;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 
 namespace OpenLineOps.Runtime.Infrastructure.Transport;
@@ -75,7 +78,7 @@ public static class StationCoordinatorPublicationFactory
 
         return new StationCoordinatorPublication(
             options.JobExchange,
-            $"station.{request.AgentId}.{request.StationId}",
+            StationTransportRoute.Job(request.AgentId, request.StationId),
             nameof(StationJobRequested),
             options.CoordinatorId,
             request.MessageId,
@@ -92,7 +95,7 @@ public static class StationCoordinatorPublicationFactory
         StationMessageContract.Validate(change);
         return new StationCoordinatorPublication(
             options.JobExchange,
-            $"station.{change.AgentId}.{change.StationId}.resource-lease-changed",
+            StationTransportRoute.ResourceLeaseChanged(change.AgentId, change.StationId),
             nameof(ResourceLeaseChanged),
             options.CoordinatorId,
             change.MessageId,
@@ -192,7 +195,7 @@ public static class StationCoordinatorPublicationFactory
         byte priority,
         T request) => new(
             options.SafetyCommandExchange,
-            $"station.{agentId}.{stationId}.{routeSuffix}",
+            StationTransportRoute.Safety(agentId, stationId, routeSuffix),
             type,
             options.CoordinatorId,
             messageId,
@@ -225,9 +228,15 @@ public static class StationCoordinatorPublicationFactory
             : value;
 }
 
-public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore store)
+public sealed class StationResultDeliveryProcessor(
+    IStationJobCoordinationStore store,
+    IAgentPresenceRepository presenceRepository,
+    IStationArtifactReceiptVerifier artifactReceiptVerifier,
+    StationCoordinatorTransportOptions options,
+    IClock clock)
 {
     private static readonly JsonSerializerOptions JsonOptions = StrictJson();
+    private readonly StationPresenceIdentityRegistry _presenceIdentities = new(options);
 
     public async ValueTask ProcessAsync(
         StationCoordinatorTransportDelivery delivery,
@@ -246,6 +255,19 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             ValidateBaseEnvelope(delivery);
             switch (delivery.Type)
             {
+                case nameof(AgentPresenceReported):
+                    {
+                        var message = Deserialize<AgentPresenceReported>(delivery.Body);
+                        AgentPresenceContract.Validate(message);
+                        ValidatePresenceEnvelope(delivery, message);
+                        _presenceIdentities.Authorize(message);
+                        _ = await presenceRepository.RecordAsync(
+                                message,
+                                clock.UtcNow,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    }
                 case nameof(MaterialArrived):
                     {
                         var message = Deserialize<MaterialArrived>(delivery.Body);
@@ -320,6 +342,8 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
                                 "Station completion identity or evidence counts are inconsistent.");
                         }
 
+                        await artifactReceiptVerifier.VerifyAsync(message, cancellationToken)
+                            .ConfigureAwait(false);
                         await store.RecordCompletionAsync(message, cancellationToken).ConfigureAwait(false);
                         break;
                     }
@@ -418,7 +442,7 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             || !string.Equals(delivery.AppId, agentId, StringComparison.Ordinal)
             || !string.Equals(
                 delivery.RoutingKey,
-                StationTransportRoute.Event(stationId, type),
+                StationTransportRoute.Event(agentId, stationId, type),
                 StringComparison.Ordinal)
             || !Guid.TryParseExact(delivery.MessageId, "D", out var envelopeMessageId)
             || envelopeMessageId != messageId
@@ -450,6 +474,7 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
             || !string.Equals(
                 delivery.RoutingKey,
                 StationTransportRoute.Event(
+                    message.ProducerId,
                     message.StationId,
                     nameof(MaterialArrived)),
                 StringComparison.Ordinal)
@@ -467,8 +492,36 @@ public sealed class StationResultDeliveryProcessor(IStationJobCoordinationStore 
         }
     }
 
+    private static void ValidatePresenceEnvelope(
+        StationCoordinatorTransportDelivery delivery,
+        AgentPresenceReported message)
+    {
+        if (!string.Equals(delivery.Type, nameof(AgentPresenceReported), StringComparison.Ordinal)
+            || !string.Equals(delivery.AppId, message.AgentId, StringComparison.Ordinal)
+            || !string.Equals(
+                delivery.RoutingKey,
+                StationTransportRoute.Event(
+                    message.AgentId,
+                    message.StationId,
+                    nameof(AgentPresenceReported)),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                delivery.MessageId,
+                AgentPresenceContract.MessageId(message).ToString("D"),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                delivery.CorrelationId,
+                message.SessionId.ToString("D"),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Agent presence AMQP identity does not match its message body.");
+        }
+    }
+
     private static bool IsPermanent(Exception exception) => exception is JsonException
         or InvalidDataException
+        or StationArtifactReceiptRejectedException
         or ArgumentException
         or InvalidOperationException;
 }

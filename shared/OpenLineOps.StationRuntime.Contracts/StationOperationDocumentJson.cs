@@ -74,6 +74,8 @@ public static class StationOperationDocumentJson
             throw new InvalidDataException("Station operation inputs must be one JSON object.");
         }
 
+        _ = ProductionContextDocument.Read(request.Inputs);
+
         ValidateResourceFences(request.ResourceFences);
     }
 
@@ -313,7 +315,12 @@ public static class StationOperationDocumentJson
             RequireCanonical(command.TargetId, nameof(command.TargetId));
             RequireCanonical(command.CapabilityId, nameof(command.CapabilityId));
             RequireCanonical(command.CommandName, nameof(command.CommandName));
-            RequireToken(command.Status, nameof(command.Status));
+            if (command.ExecutionStatus is ExecutionStatus.Pending or ExecutionStatus.Running
+                || !Enum.IsDefined(command.ExecutionStatus))
+            {
+                throw new InvalidDataException(
+                    "Station command execution status must be terminal.");
+            }
             RequireUtc(command.CreatedAtUtc, nameof(command.CreatedAtUtc));
             RequireUtc(command.DeadlineAtUtc, nameof(command.DeadlineAtUtc));
             RequireOptionalUtc(command.AcceptedAtUtc, nameof(command.AcceptedAtUtc));
@@ -321,6 +328,25 @@ public static class StationOperationDocumentJson
             RequireOptionalUtc(command.CompletedAtUtc, nameof(command.CompletedAtUtc));
             RequireOptionalCanonical(command.ResultPayload, nameof(command.ResultPayload), 8 * 1024 * 1024);
             RequireOptionalCanonical(command.FailureReason, nameof(command.FailureReason), 4096);
+            var commandAxesAreValid = (command.ExecutionStatus, command.ResultJudgement) switch
+            {
+                (ExecutionStatus.Completed, ResultJudgement.Passed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Failed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Completed, ResultJudgement.NotApplicable) => true,
+                (ExecutionStatus.Canceled, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Failed, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.TimedOut, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.Rejected, ResultJudgement.Unknown) => true,
+                _ => false
+            };
+            if (!commandAxesAreValid
+                || (command.ExecutionStatus == ExecutionStatus.Completed)
+                    == (command.FailureReason is not null))
+            {
+                throw new InvalidDataException(
+                    "Station command execution status, judgement, and failure evidence are inconsistent.");
+            }
         }
     }
 

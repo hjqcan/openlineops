@@ -16,7 +16,4 @@ public sealed record AlarmRaisedDomainEvent(
     string Description,
     DateTimeOffset RaisedAtUtc)
     : DomainEvent(AlarmRaisedIntegrationDto.EventName),
-        IIntegrationEvent
-{
-    public string Version => AlarmRaisedIntegrationDto.Version;
-}
+        IIntegrationEvent;

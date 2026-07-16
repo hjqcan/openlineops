@@ -123,6 +123,10 @@ internal interface IExternalProgramHostIdentityReader
 
 internal sealed class WindowsExternalProgramHostIdentityReader : IExternalProgramHostIdentityReader
 {
+    [SupportedOSPlatform("windows")]
+    internal static TokenAccessLevels RequiredTokenAccess =>
+        TokenAccessLevels.Query | TokenAccessLevels.Duplicate;
+
     public ExternalProgramHostIdentity Read()
     {
         if (!OperatingSystem.IsWindows())
@@ -141,14 +145,31 @@ internal sealed class WindowsExternalProgramHostIdentityReader : IExternalProgra
     [SupportedOSPlatform("windows")]
     private static ExternalProgramHostIdentity ReadWindows()
     {
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        using var identity = WindowsIdentity.GetCurrent(RequiredTokenAccess);
         var sid = identity.User
                   ?? throw new InvalidOperationException("External program host identity has no SID.");
+        return CreateIdentity(
+            identity.Name,
+            sid,
+            identity.AuthenticationType,
+            () => new WindowsPrincipal(identity)
+                .IsInRole(WindowsBuiltInRole.Administrator));
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static ExternalProgramHostIdentity CreateIdentity(
+        string name,
+        SecurityIdentifier sid,
+        string? authenticationType,
+        Func<bool> administratorProbe)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(sid);
+        ArgumentNullException.ThrowIfNull(administratorProbe);
         var isAdministrator = false;
         try
         {
-            isAdministrator = new WindowsPrincipal(identity)
-                .IsInRole(WindowsBuiltInRole.Administrator);
+            isAdministrator = administratorProbe();
         }
         catch (System.Security.SecurityException)
         {
@@ -156,9 +177,9 @@ internal sealed class WindowsExternalProgramHostIdentityReader : IExternalProgra
         }
 
         return new ExternalProgramHostIdentity(
-            identity.Name,
+            name,
             sid.Value,
-            !string.IsNullOrWhiteSpace(identity.AuthenticationType)
+            !string.IsNullOrWhiteSpace(authenticationType)
             && !sid.IsWellKnown(WellKnownSidType.AnonymousSid),
             sid.IsWellKnown(WellKnownSidType.LocalSystemSid),
             isAdministrator);

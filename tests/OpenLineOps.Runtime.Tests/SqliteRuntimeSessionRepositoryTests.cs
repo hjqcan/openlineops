@@ -11,7 +11,6 @@ using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
-using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -86,7 +85,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
 
         var restoredCommand = Assert.Single(restored.Commands);
         Assert.Equal(command.Id, restoredCommand.Id);
-        Assert.Equal(RuntimeCommandStatus.Completed, restoredCommand.Status);
+        Assert.Equal(ExecutionStatus.Completed, restoredCommand.Status);
         Assert.Equal("{\"ok\":true}", restoredCommand.ResultPayload);
         Assert.Equal(ResultJudgement.Passed, restoredCommand.ResultJudgement);
         Assert.Equal(BaseTimeUtc.AddSeconds(6), restoredCommand.CompletedAtUtc);

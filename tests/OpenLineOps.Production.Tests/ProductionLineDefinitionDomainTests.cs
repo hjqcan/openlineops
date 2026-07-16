@@ -26,6 +26,54 @@ public sealed class ProductionLineDefinitionDomainTests
         Assert.Equal("operation.test", transition.TargetOperationId!.Value);
         Assert.Equal("station.eol", definition.Operations.Last().StationSystemId);
         Assert.Equal("configuration.flow.test", definition.Operations.Last().ConfigurationSnapshotId);
+        Assert.Equal(
+            ["operation.load", "operation.test"],
+            definition.RouteLayout.OperationPositions.Select(position => position.OperationId.Value));
+    }
+
+    [Fact]
+    public void CreateRejectsRouteLayoutMissingOrAddingAnOperation()
+    {
+        var operations = new[] { Operation("operation.load"), Operation("operation.test") };
+        var transitions = new[]
+        {
+            Sequence("load-test", "operation.load", "operation.test"),
+            Terminal("test-completed", "operation.test", TerminalDisposition.Completed)
+        };
+        var missing = Assert.Throws<ArgumentException>(() => Create(
+            "operation.load",
+            operations,
+            transitions,
+            routeLayout: new ProductionRouteLayout(
+            [
+                new OperationCanvasPosition(new OperationDefinitionId("operation.load"), 120, 80)
+            ])));
+        Assert.Contains("exactly one position", missing.Message, StringComparison.OrdinalIgnoreCase);
+
+        var extra = Assert.Throws<ArgumentException>(() => Create(
+            "operation.load",
+            operations,
+            transitions,
+            routeLayout: new ProductionRouteLayout(
+            [
+                new OperationCanvasPosition(new OperationDefinitionId("operation.load"), 120, 80),
+                new OperationCanvasPosition(new OperationDefinitionId("operation.test"), 400, 80),
+                new OperationCanvasPosition(new OperationDefinitionId("operation.extra"), 680, 80)
+            ])));
+        Assert.Contains("exactly one position", extra.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(-1, 0)]
+    [InlineData(0, -1)]
+    [InlineData(100001, 0)]
+    [InlineData(0, 100001)]
+    public void RouteLayoutRejectsCoordinatesOutsideExplicitBounds(int x, int y)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new OperationCanvasPosition(
+            new OperationDefinitionId("operation.load"),
+            x,
+            y));
     }
 
     [Theory]
@@ -43,7 +91,8 @@ public sealed class ProductionLineDefinitionDomainTests
             "station.eol",
             "flow.load",
             configurationSnapshotId!,
-            StationResources("invalid-configuration")));
+            StationResources("invalid-configuration"),
+            []));
     }
 
     [Fact]
@@ -84,7 +133,8 @@ public sealed class ProductionLineDefinitionDomainTests
                 new OperationResourceBindingId("resource.station"),
                 OperationResourceKind.Station,
                 "station.other",
-                OperationResourceResolution.Fixed)]));
+                OperationResourceResolution.Fixed)],
+            []));
 
         Assert.Contains("exactly one Fixed Station", exception.Message, StringComparison.Ordinal);
     }
@@ -191,6 +241,82 @@ public sealed class ProductionLineDefinitionDomainTests
     }
 
     [Fact]
+    public void ParallelBranchOutputCanFeedOperationAfterAndJoin()
+    {
+        var definition = Create(
+            "operation.start",
+            [
+                Operation("operation.start"),
+                Operation("operation.left"),
+                Operation("operation.right"),
+                Operation("operation.join"),
+                OperationWithInput("operation.finish", "operation.left")
+            ],
+            [
+                Parallel("fork-left", "operation.start", "operation.left", true),
+                Parallel("fork-right", "operation.start", "operation.right", true),
+                Parallel("join-left", "operation.left", "operation.join", false),
+                Parallel("join-right", "operation.right", "operation.join", false),
+                Sequence("join-finish", "operation.join", "operation.finish"),
+                Terminal("finish-completed", "operation.finish", TerminalDisposition.Completed)
+            ]);
+
+        var mapping = Assert.Single(definition.Operations.Single(operation =>
+            operation.Id.Value == "operation.finish").InputMappings);
+        Assert.Equal("operation.left", mapping.SourceOperationId.Value);
+    }
+
+    [Fact]
+    public void ParallelSiblingOutputCannotFeedSiblingBeforeJoin()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => Create(
+            "operation.start",
+            [
+                Operation("operation.start"),
+                Operation("operation.left"),
+                OperationWithInput("operation.right", "operation.left"),
+                Operation("operation.join")
+            ],
+            [
+                Parallel("fork-left", "operation.start", "operation.left", true),
+                Parallel("fork-right", "operation.start", "operation.right", true),
+                Parallel("join-left", "operation.left", "operation.join", false),
+                Parallel("join-right", "operation.right", "operation.join", false),
+                Terminal("join-completed", "operation.join", TerminalDisposition.Completed)
+            ]));
+
+        Assert.Contains("sibling-branch", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ConditionalBypassCannotFeedMergedOperation()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => Create(
+            "operation.inspect",
+            [
+                Operation("operation.inspect"),
+                Operation("operation.measured"),
+                Operation("operation.bypass"),
+                OperationWithInput("operation.merge", "operation.measured")
+            ],
+            [
+                Condition(
+                    "inspect-measured",
+                    "operation.inspect",
+                    "operation.measured",
+                    "inspection.route",
+                    ProductionContextValueKind.Text,
+                    "measure"),
+                Sequence("inspect-bypass", "operation.inspect", "operation.bypass"),
+                Sequence("measured-merge", "operation.measured", "operation.merge"),
+                Sequence("bypass-merge", "operation.bypass", "operation.merge"),
+                Terminal("merge-completed", "operation.merge", TerminalDisposition.Completed)
+            ]));
+
+        Assert.Contains("conditional bypass", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void JudgementBranchesMustBeUnique()
     {
         var exception = Assert.Throws<ArgumentException>(() => Create(
@@ -285,7 +411,25 @@ public sealed class ProductionLineDefinitionDomainTests
             "station.eol",
             resolvedFlowId,
             $"configuration.{resolvedFlowId}",
-            StationResources(id));
+            StationResources(id),
+            []);
+    }
+
+    private static OperationDefinition OperationWithInput(string id, string sourceOperationId)
+    {
+        var resolvedFlowId = $"flow.{id.Split('.').Last()}";
+        return OperationDefinition.Create(
+            new OperationDefinitionId(id),
+            id,
+            "station.eol",
+            resolvedFlowId,
+            $"configuration.{resolvedFlowId}",
+            StationResources(id),
+            [new OperationInputMapping(
+                "input.result",
+                new OperationDefinitionId(sourceOperationId),
+                "output.result",
+                ProductionContextValueKind.Text)]);
     }
 
     private static OperationResourceBinding[] StationResources(string suffix) =>
@@ -309,7 +453,8 @@ public sealed class ProductionLineDefinitionDomainTests
         string entryOperationId,
         IReadOnlyCollection<OperationDefinition> operations,
         IReadOnlyCollection<RouteTransition> transitions,
-        string lineDefinitionId = "line.main")
+        string lineDefinitionId = "line.main",
+        ProductionRouteLayout? routeLayout = null)
     {
         return ProductionLineDefinition.Create(
             new ProductionLineDefinitionId(lineDefinitionId),
@@ -323,6 +468,8 @@ public sealed class ProductionLineDefinitionDomainTests
             operations,
             transitions,
             [],
+            routeLayout ?? new ProductionRouteLayout(operations.Select((operation, index) =>
+                new OperationCanvasPosition(operation.Id, 120 + (index * 280), 80))),
             CreatedAtUtc);
     }
 

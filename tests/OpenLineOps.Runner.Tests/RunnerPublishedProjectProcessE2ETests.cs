@@ -3,8 +3,10 @@ extern alias api;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -14,8 +16,12 @@ using OpenLineOps.Runner;
 
 namespace OpenLineOps.Runner.Tests;
 
-public sealed class RunnerPublishedProjectProcessE2ETests
+public sealed partial class RunnerPublishedProjectProcessE2ETests
 {
+    private static readonly string ApiToken = CreateApiToken("standard");
+
+    private static readonly string SafetyApiToken = CreateApiToken("safety");
+
     [Fact]
     public async Task PublishedProjectRunsInASeparateProcessAndInvalidReleasesFailClosed()
     {
@@ -38,6 +44,9 @@ public sealed class RunnerPublishedProjectProcessE2ETests
             {
                 AllowAutoRedirect = false
             });
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                "Bearer",
+                ApiToken);
 
             var published = await PublishRunnableProjectAsync(
                 client,
@@ -278,8 +287,51 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 builder.UseSetting(
                     "OpenLineOps:Runtime:AgentTransport:DeploymentCatalogDirectory",
                     deploymentCatalogDirectory);
+                ConfigureApiCaller(
+                    builder,
+                    index: 0,
+                    credentialId: "runner-process-e2e",
+                    actorId: "runner.process.e2e",
+                    token: ApiToken,
+                    roles: ["Engineering", "Operator"]);
+                ConfigureApiCaller(
+                    builder,
+                    index: 1,
+                    credentialId: "runner-process-e2e-safety",
+                    actorId: "runner.process.e2e.safety",
+                    token: SafetyApiToken,
+                    roles: ["Safety"]);
             });
     }
+
+    private static void ConfigureApiCaller(
+        IWebHostBuilder builder,
+        int index,
+        string credentialId,
+        string actorId,
+        string token,
+        string[] roles)
+    {
+        var prefix = $"OpenLineOps:Security:Callers:{index}";
+        builder.UseSetting($"{prefix}:CredentialId", credentialId);
+        builder.UseSetting($"{prefix}:ActorId", actorId);
+        builder.UseSetting($"{prefix}:TokenSha256", Sha256(token));
+        for (var roleIndex = 0; roleIndex < roles.Length; roleIndex++)
+        {
+            builder.UseSetting($"{prefix}:Roles:{roleIndex}", roles[roleIndex]);
+        }
+    }
+
+    private static string CreateApiToken(string purpose) =>
+        Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"OpenLineOps.Runner.Tests:{purpose}")))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    private static string Sha256(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))
+            .ToLowerInvariant();
 
     private static async Task<PublishedRunnerProject> PublishRunnableProjectAsync(
         HttpClient client,
@@ -464,7 +516,8 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                                        topologyTargetId = "station.main",
                                        resolution = "Fixed"
                                    }
-                               }
+                               },
+                               inputMappings = Array.Empty<object>()
                            }
                         },
                        transitions = new[]
@@ -475,10 +528,23 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                                sourceOperationId = "operation.main",
                                targetOperationId = (string?)null,
                                terminalDisposition = "Completed",
-                               kind = "Sequence"
+                               kind = "Sequence",
+                               requiredJudgement = (string?)null,
+                               maxTraversals = (int?)null,
+                               parallelGroupId = (string?)null,
+                               outputKey = (string?)null,
+                               expectedOutputKind = (string?)null,
+                               expectedOutputValue = (string?)null
                            }
                        },
-                       lineControllerAuthorizations = Array.Empty<object>()
+                       lineControllerAuthorizations = Array.Empty<object>(),
+                       routeLayout = new
+                       {
+                           operationPositions = new[]
+                           {
+                               new { operationId = "operation.main", x = 120, y = 80 }
+                           }
+                       }
                    }))
         {
             await AssertStatusAsync(response, HttpStatusCode.Created);
@@ -737,10 +803,10 @@ public sealed class RunnerPublishedProjectProcessE2ETests
 
         startInfo.Environment["OpenLineOps__Runtime__Persistence__Provider"] = "InMemory";
         startInfo.Environment["OpenLineOps__Runtime__Coordination__Provider"] = "Sqlite";
-        startInfo.Environment["OpenLineOps__Runtime__Coordination__SqliteDatabasePath"] =
-            Path.Combine(
+        startInfo.Environment["OpenLineOps__Runtime__Coordination__ConnectionString"] =
+            $"Data Source={Path.Combine(
                 ProjectExecutionDataDirectory.ForProjectDirectory(workingDirectory),
-                "openlineops-production.sqlite");
+                "openlineops-production.sqlite")}";
         startInfo.Environment["OpenLineOps__Runtime__AgentTransport__Provider"] = "Disabled";
         startInfo.Environment["OpenLineOps__Runtime__StationExecution__Provider"] = "InProcess";
         startInfo.Environment["OpenLineOps__Devices__Persistence__Provider"] = "InMemory";
@@ -830,7 +896,6 @@ public sealed class RunnerPublishedProjectProcessE2ETests
                 "Traceability": { "Persistence": { "Provider": "InMemory" } },
                 "Devices": { "Persistence": { "Provider": "InMemory" } },
                 "Plugins": {
-                  "Activator": "ManifestOnly",
                   "EventLog": {
                     "Provider": "Sqlite",
                     "DatabasePath": "runner-plugin-events.sqlite"

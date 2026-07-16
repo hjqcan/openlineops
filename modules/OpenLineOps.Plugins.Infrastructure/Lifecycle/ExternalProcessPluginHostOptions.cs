@@ -2,10 +2,10 @@ namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public sealed class ExternalProcessPluginHostOptions
 {
-    public string ExecutablePath { get; set; } = "dotnet";
+    public string ExecutablePath { get; set; } = "OpenLineOps.PluginHost.exe";
 
     public string ArgumentsTemplate { get; set; } =
-        "\"{EntryAssemblyPath}\" --openlineops-plugin-host --manifest \"{ManifestPath}\"";
+        "--openlineops-plugin-host --manifest \"{ManifestPath}\" --entry \"{EntryAssemblyPath}\" --type \"{EntryType}\"";
 
     public TimeSpan StartupProbeDelay { get; set; } = TimeSpan.Zero;
 

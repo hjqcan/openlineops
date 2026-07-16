@@ -13,6 +13,7 @@ public static class ExternalProgramResourceContract
     public const string Schema = "openlineops.external-program-resource";
     public const string InvocationSchema = "openlineops.external-program-invocation";
     public const string ResourceIdProperty = "externalProgramResourceId";
+    public const string ProductionInputSourcePrefix = "$production.";
 
     private static readonly HashSet<string> SupportedInputSources = new(StringComparer.Ordinal)
     {
@@ -90,7 +91,30 @@ public static class ExternalProgramResourceContract
     }
 
     public static bool IsSupportedInputSource(string? source) =>
-        source is not null && SupportedInputSources.Contains(source);
+        source is not null
+        && (SupportedInputSources.Contains(source)
+            || TryGetProductionInputKey(source, out _));
+
+    public static bool TryGetProductionInputKey(
+        string? source,
+        [NotNullWhen(true)] out string? inputKey)
+    {
+        inputKey = null;
+        if (!IsCanonical(source)
+            || !source.StartsWith(ProductionInputSourcePrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var candidate = source[ProductionInputSourcePrefix.Length..];
+        if (!IsCanonical(candidate) || candidate.Length > 256)
+        {
+            return false;
+        }
+
+        inputKey = candidate;
+        return true;
+    }
 
     public static bool IsSupportedArgumentTemplate(
         string? template,

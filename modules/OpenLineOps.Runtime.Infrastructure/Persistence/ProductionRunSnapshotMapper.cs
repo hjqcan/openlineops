@@ -40,6 +40,9 @@ internal static class ProductionRunSnapshotMapper
             snapshot.SafeStopReason,
             snapshot.SafeStopRequestedAtUtc,
             snapshot.SafeStopAcknowledgedAtUtc,
+            snapshot.ScrapRequestedBy,
+            snapshot.ScrapReason,
+            snapshot.ScrapRequestedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -125,6 +128,9 @@ internal static class ProductionRunSnapshotMapper
             Optional(snapshot.SafeStopReason, "Safe Stop reason"),
             snapshot.SafeStopRequestedAtUtc,
             snapshot.SafeStopAcknowledgedAtUtc,
+            Optional(snapshot.ScrapRequestedBy, "Scrap actor"),
+            Optional(snapshot.ScrapReason, "Scrap reason"),
+            snapshot.ScrapRequestedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -259,6 +265,8 @@ internal static class ProductionRunSnapshotMapper
         operation.CompletedStepCount,
         operation.CommandCount,
         operation.IncidentCount,
+        operation.RecoveryDecisionId,
+        operation.ExecutionEvidence,
         operation.Outputs.Select(pair => new PersistedProductionContextValue(
             pair.Key,
             pair.Value.Kind.ToString(),
@@ -266,7 +274,13 @@ internal static class ProductionRunSnapshotMapper
         operation.FencingTokens.Select(pair => new PersistedFencingToken(
             pair.Key.Kind.ToString(),
             pair.Key.ResourceId,
-            pair.Value)).ToArray());
+            pair.Value)).ToArray(),
+        operation.SourceOperationRunBindings
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => new PersistedSourceOperationRunBinding(
+                pair.Key,
+                pair.Value))
+            .ToArray());
 
     private static PersistedRecoveryDecision ToSnapshot(ProductionRecoveryDecision decision) => new(
         decision.DecisionId,
@@ -354,6 +368,19 @@ internal static class ProductionRunSnapshotMapper
             throw new InvalidDataException("Persisted operation fencing resources must be unique.");
         }
 
+        var sourceBindingItems = Required(
+            operation.SourceOperationRunBindings,
+            "source Operation Run bindings");
+        var sourceBindings = sourceBindingItems.ToDictionary(
+            item => Text(item.OperationId, "source binding Operation id"),
+            item => Text(item.OperationRunId, "source binding Operation Run id"),
+            StringComparer.Ordinal);
+        if (sourceBindings.Count != sourceBindingItems.Length)
+        {
+            throw new InvalidDataException(
+                "Persisted source Operation Run binding keys must be unique.");
+        }
+
         return new OperationRunSnapshot(
             definition,
             Text(operation.OperationRunId, "Operation Run id"),
@@ -370,8 +397,11 @@ internal static class ProductionRunSnapshotMapper
             operation.CompletedStepCount,
             operation.CommandCount,
             operation.IncidentCount,
+            operation.RecoveryDecisionId,
+            operation.ExecutionEvidence,
             outputs,
-            fencingTokens);
+            fencingTokens,
+            sourceBindings);
     }
 
     private static void RequireCurrentSchema(PersistedProductionRun snapshot)
@@ -450,6 +480,9 @@ internal sealed record PersistedProductionRun(
     string? SafeStopReason,
     DateTimeOffset? SafeStopRequestedAtUtc,
     DateTimeOffset? SafeStopAcknowledgedAtUtc,
+    string? ScrapRequestedBy,
+    string? ScrapReason,
+    DateTimeOffset? ScrapRequestedAtUtc,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset LastTransitionAtUtc,
     DateTimeOffset? StartedAtUtc,
@@ -509,8 +542,11 @@ internal sealed record PersistedOperationRun(
     int CompletedStepCount,
     int CommandCount,
     int IncidentCount,
+    Guid? RecoveryDecisionId,
+    OperationExecutionEvidence? ExecutionEvidence,
     PersistedProductionContextValue[]? Outputs,
-    PersistedFencingToken[]? FencingTokens);
+    PersistedFencingToken[]? FencingTokens,
+    PersistedSourceOperationRunBinding[]? SourceOperationRunBindings);
 
 internal sealed record PersistedProductionContextValue(string? Key, string? Kind, string? Value);
 
@@ -518,6 +554,10 @@ internal sealed record PersistedFencingToken(
     string? ResourceKind,
     string? ResourceId,
     long FencingToken);
+
+internal sealed record PersistedSourceOperationRunBinding(
+    string? OperationId,
+    string? OperationRunId);
 
 internal sealed record PersistedRouteDecision(
     string? SourceOperationRunId,

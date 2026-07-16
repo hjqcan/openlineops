@@ -43,7 +43,9 @@ internal sealed class WindowsProcessJob : IDisposable
     private const uint JobObjectLimitProcessMemory = 0x00000100;
     private const uint JobObjectLimitJobMemory = 0x00000200;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectBasicAccountingInformation = 1;
     private const int JobObjectExtendedLimitInformation = 9;
+    private const uint TerminationExitCode = 0xC000013A;
 
     private readonly SafeJobHandle _handle;
 
@@ -82,6 +84,36 @@ internal sealed class WindowsProcessJob : IDisposable
         }
     }
 
+    public uint ActiveProcessCount
+    {
+        get
+        {
+            var length = Marshal.SizeOf<JobObjectBasicAccountingInformationData>();
+            var buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                if (!QueryInformationJobObject(
+                        _handle,
+                        JobObjectBasicAccountingInformation,
+                        buffer,
+                        checked((uint)length),
+                        out _))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not query the external-program Job Object.");
+                }
+
+                return Marshal.PtrToStructure<JobObjectBasicAccountingInformationData>(buffer)
+                    .ActiveProcesses;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+
     public void Assign(SafeProcessHandle processHandle)
     {
         ArgumentNullException.ThrowIfNull(processHandle);
@@ -98,6 +130,16 @@ internal sealed class WindowsProcessJob : IDisposable
                 Marshal.GetLastWin32Error(),
                 "Could not assign the suspended external program to its Job Object. "
                 + "The host may already belong to a Job Object that prohibits nested jobs.");
+        }
+    }
+
+    public void Terminate()
+    {
+        if (!_handle.IsClosed && !TerminateJobObject(_handle, TerminationExitCode))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not terminate the external-program Job Object.");
         }
     }
 
@@ -163,6 +205,19 @@ internal sealed class WindowsProcessJob : IDisposable
         SafeJobHandle job,
         SafeProcessHandle process);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(
+        SafeJobHandle job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(SafeJobHandle job, uint exitCode);
+
     private sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         private SafeJobHandle()
@@ -214,5 +269,18 @@ internal sealed class WindowsProcessJob : IDisposable
         public nuint JobMemoryLimit;
         public nuint PeakProcessMemoryUsed;
         public nuint PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicAccountingInformationData
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
     }
 }

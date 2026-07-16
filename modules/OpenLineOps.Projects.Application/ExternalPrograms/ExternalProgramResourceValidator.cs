@@ -58,6 +58,12 @@ public static class ExternalProgramResourceValidator
 
             Canonical(request.ProviderKind!, nameof(request.ProviderKind), 64);
             Canonical(request.ProviderKey!, nameof(request.ProviderKey), 256);
+            if (request.ProviderKind is not ("PluginCommand" or "ProcessCommandProvider"))
+            {
+                throw new ArgumentException(
+                    "Provider kind must be PluginCommand or ProcessCommandProvider.",
+                    nameof(request));
+            }
         }
         else
         {

@@ -45,6 +45,7 @@ public sealed class ProjectReleaseStationDeploymentSetTests
         "{}",
         [],
         [],
+        [],
         []);
 
     private static ProjectReleaseRouteTransition Transition(

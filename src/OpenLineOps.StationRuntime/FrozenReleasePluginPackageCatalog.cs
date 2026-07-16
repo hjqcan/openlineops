@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Infrastructure.Discovery;
 using OpenLineOps.Projects.Application.Releases;
@@ -11,12 +12,18 @@ internal sealed class FrozenReleasePluginPackageCatalog : IPluginPackageCatalog
         : StringComparison.Ordinal;
 
     private readonly PluginPackageDescriptor[] _packages;
+    private readonly string _projectId;
+    private readonly string _applicationId;
 
     private FrozenReleasePluginPackageCatalog(
         string packageRootPath,
+        string projectId,
+        string applicationId,
         PluginPackageDescriptor[] packages)
     {
         PackageRootPath = packageRootPath;
+        _projectId = projectId;
+        _applicationId = applicationId;
         _packages = packages;
     }
 
@@ -43,19 +50,43 @@ internal sealed class FrozenReleasePluginPackageCatalog : IPluginPackageCatalog
         }
 
         var packageRoot = Path.Combine(releaseRoot, "packages");
-        var discovered = (await new FileSystemPluginPackageCatalog(packageRoot)
-                .DiscoverAsync(cancellationToken)
-                .ConfigureAwait(false))
+        var packageDirectories = Directory.Exists(packageRoot)
+            ? Directory.EnumerateDirectories(packageRoot, "*", SearchOption.TopDirectoryOnly)
+                .Order(StringComparer.Ordinal)
+                .ToArray()
+            : [];
+        var discoveredPackages = new List<PluginPackageDescriptor>(packageDirectories.Length);
+        foreach (var packageDirectory in packageDirectories)
+        {
+            discoveredPackages.Add(await FileSystemPluginPackageInspector
+                .InspectAsync(packageDirectory, cancellationToken)
+                .ConfigureAwait(false));
+        }
+
+        var discovered = discoveredPackages
             .OrderBy(package => package.PackageContentSha256, StringComparer.Ordinal)
             .ToArray();
         ValidatePackages(release, releaseRoot, discovered);
-        return new FrozenReleasePluginPackageCatalog(packageRoot, discovered);
+        return new FrozenReleasePluginPackageCatalog(
+            packageRoot,
+            release.ProjectId,
+            release.ApplicationId,
+            discovered);
     }
 
     public ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
+        if (!string.Equals(scope.ProjectId, _projectId, StringComparison.Ordinal)
+            || !string.Equals(scope.ApplicationId, _applicationId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Frozen release plugin catalog cannot be used for another Project/Application scope.");
+        }
+
         return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(_packages);
     }
 

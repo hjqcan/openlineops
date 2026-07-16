@@ -80,7 +80,7 @@ public sealed class ProductionMaterialDependencyInjectionTests
                 [$"{StationCoordinatorTransportOptions.SectionName}:Provider"] =
                     StationCoordinatorTransportProviders.RabbitMq,
                 [$"{StationCoordinatorTransportOptions.SectionName}:BrokerUri"] =
-                    "amqps://localhost/openlineops",
+                    "amqps://coordinator-test:coordinator-test-secret@localhost/openlineops",
                 [$"{StationExecutionOptions.SectionName}:Provider"] = StationExecutionProviders.Agent
             })
             .Build();

@@ -13,7 +13,7 @@ permissions:
 jobs:
   verify:
     name: Verify
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     steps:
       - name: Checkout
@@ -27,9 +27,25 @@ jobs:
         shell: powershell
         run: ./eng/verify-ci-workflow-actions.tests.ps1
 
+      - name: Test publication evidence validators
+        shell: powershell
+        run: ./eng/verify-evidence-validation.tests.ps1
+
+      - name: Test Studio two-Agent evidence validator
+        shell: powershell
+        run: ./eng/verify-studio-two-agent-production-evidence.tests.ps1
+
+      - name: Test Runner staged-Agent evidence validator
+        shell: powershell
+        run: ./eng/verify-runner-staged-agent-evidence.tests.ps1
+
       - name: Reject version-suffixed implementations
         shell: powershell
         run: ./eng/verify-no-version-suffix-implementations.ps1
+
+      - name: Test version-suffix verifier
+        shell: powershell
+        run: ./eng/verify-no-version-suffix-implementations.tests.ps1
 
       - name: Reject technical-debt markers
         shell: powershell
@@ -42,7 +58,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
 
       - name: Verify solution project coverage
         shell: powershell
@@ -100,7 +116,16 @@ jobs:
         run: dotnet test OpenLineOps.sln --configuration Release --no-build -v minimal -m:1
 
       - name: Check .NET package vulnerabilities
-        run: dotnet list OpenLineOps.sln package --vulnerable --include-transitive
+        shell: powershell
+        run: ./eng/verify-dotnet-package-vulnerabilities.ps1
+
+      - name: Test .NET package vulnerability gate
+        shell: powershell
+        run: ./eng/verify-dotnet-package-vulnerabilities.tests.ps1
+
+      - name: Verify release staging security boundaries
+        shell: powershell
+        run: ./eng/verify-release-staging-security.ps1
 
       - name: Verify open-source metadata
         shell: powershell
@@ -120,6 +145,10 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Check desktop package vulnerabilities
+        working-directory: apps/desktop
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
       - name: Typecheck desktop
         working-directory: apps/desktop
         run: npm run typecheck
@@ -132,16 +161,69 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:editor-workspace
 
+      - name: Test resource draft transition guard
+        working-directory: apps/desktop
+        run: npm run test:draft-transition-guard
+
+      - name: Test Flow problem location
+        working-directory: apps/desktop
+        run: npm run test:process-problem-location
+
+      - name: Test Topology draft workspace
+        working-directory: apps/desktop
+        run: npm run test:topology-draft-workspace
+
+      - name: Test configuration draft workspace
+        working-directory: apps/desktop
+        run: npm run test:configuration-draft-workspace
+
+      - name: Test runtime monitoring fail-closed projection
+        working-directory: apps/desktop
+        run: npm run test:runtime-monitoring-fail-closed
+
+      - name: Test desktop API credential boundary
+        working-directory: apps/desktop
+        run: npm run test:api-credential-security
+
+      - name: Test Application extension import boundary
+        working-directory: apps/desktop
+        run: npm run test:extension-import-security
+
+      - name: Test verified Trace artifact save
+        working-directory: apps/desktop
+        run: npm run test:trace-artifact-save
+
+      - name: Test packaged runtime data binding
+        working-directory: apps/desktop
+        run: npm run test:runtime-data-binding
+
       - name: Test production route validation
         working-directory: apps/desktop
         run: npm run test:production-route-validation
+
+      - name: Test production route runtime projection
+        working-directory: apps/desktop
+        run: npm run test:production-route-runtime
+
+      - name: Test production route layout persistence
+        working-directory: apps/desktop
+        run: npm run test:production-route-layout
+
+      - name: Test production operator command policy
+        working-directory: apps/desktop
+        run: npm run test:production-command-policy
 
       - name: Build desktop
         working-directory: apps/desktop
         run: npm run build
 
+      - name: Smoke test desktop
+        working-directory: apps/desktop
+        run: npm run smoke:e2e
+
       - name: Restore self-contained Windows production hosts
         run: |
+          dotnet restore src/OpenLineOps.Api/OpenLineOps.Api.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.Agent/OpenLineOps.Agent.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj --runtime win-x64
@@ -153,12 +235,78 @@ jobs:
         shell: powershell
         run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
 
+      - name: Smoke test staged packaged desktop
+        working-directory: apps/desktop
+        timeout-minutes: 15
+        run: npm run smoke:e2e:packaged-existing
+
       - name: Verify staged release manifest
         run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 
       - name: Inspect release candidate
         shell: powershell
         run: ./eng/inspect-release-candidate.ps1
+
+      - name: Setup PostgreSQL for Windows production gates
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $serviceName = "postgresql-x64-17"
+          $service = Get-Service -Name $serviceName -ErrorAction Stop
+          if ($service.StartType -eq [System.ServiceProcess.ServiceStartMode]::Disabled) {
+            Set-Service -Name $serviceName -StartupType Manual
+          }
+          if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Start-Service -Name $serviceName
+          }
+
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(2)
+          $ready = $false
+          do {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $connectTask = $client.ConnectAsync("127.0.0.1", 5432)
+              $ready = $connectTask.Wait([TimeSpan]::FromSeconds(2)) -and $client.Connected
+            }
+            catch {
+              $ready = $false
+            }
+            finally {
+              $client.Dispose()
+            }
+
+            if (-not $ready) {
+              Start-Sleep -Seconds 2
+            }
+          } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+          if (-not $ready) {
+            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            throw "PostgreSQL did not become ready on 127.0.0.1:5432. Service status: $($service.Status)."
+          }
+
+          $psql = Join-Path $env:PGBIN "psql.exe"
+          if (-not (Test-Path -LiteralPath $psql -PathType Leaf)) {
+            throw "The GitHub Windows PostgreSQL client was not found under PGBIN."
+          }
+          $env:PGPASSWORD = "root"
+          $probe = & $psql `
+            --host 127.0.0.1 `
+            --port 5432 `
+            --username postgres `
+            --dbname postgres `
+            --no-password `
+            --tuples-only `
+            --no-align `
+            --command "SELECT 1;"
+          $probeText = (($probe | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -or $probeText -cne "1") {
+            throw "PostgreSQL SQL readiness probe failed."
+          }
+
+          $connectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=root;Timeout=5;Command Timeout=30;Pooling=false"
+          "OPENLINEOPS_POSTGRES_CONNECTION_STRING=$connectionString" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PostgreSQL is ready for the Windows production gates on 127.0.0.1:5432."
 
       - name: Setup RabbitMQ for staged Agent E2E
         shell: powershell
@@ -241,12 +389,84 @@ jobs:
 
       - name: Run staged Agent bundle E2E
         shell: powershell
+        timeout-minutes: 25
         run: |
           if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
             throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
           }
 
           ./eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Run packaged Studio two-Agent production closure
+        shell: powershell
+        timeout-minutes: 35
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
+            throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify sanitized production closure evidence
+        id: production_closure_evidence
+        if: ${{ always() && hashFiles('artifacts/production-closure-e2e/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-production-closure-evidence.ps1 -EvidenceRoot artifacts/production-closure-e2e -RequirePassed
+
+      - name: Verify sanitized Studio two-Agent evidence
+        id: studio_two_agent_evidence
+        if: ${{ always() && hashFiles('output/studio-two-agent-production-closure/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-studio-two-agent-production-evidence.ps1
+
+      - name: Run staged Runner production closure
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
+            throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-runner-staged-agent-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify sanitized Runner staged-Agent evidence
+        id: runner_staged_agent_evidence
+        if: ${{ always() && hashFiles('output/runner-staged-agent-e2e/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-runner-staged-agent-evidence.ps1 -RequirePassed
+
+      - name: Upload packaged production closure evidence
+        if: ${{ always() && steps.production_closure_evidence.outcome == 'success' && hashFiles('artifacts/production-closure-e2e/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-production-closure-${{ github.run_number }}
+          path: artifacts/production-closure-e2e
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Studio two-Agent production evidence
+        if: ${{ always() && steps.studio_two_agent_evidence.outcome == 'success' && hashFiles('output/studio-two-agent-production-closure/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-studio-two-agent-${{ github.run_number }}
+          path: output/studio-two-agent-production-closure
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Runner staged-Agent production evidence
+        if: ${{ always() && steps.runner_staged_agent_evidence.outcome == 'success' && hashFiles('output/runner-staged-agent-e2e/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-runner-staged-agent-${{ github.run_number }}
+          path: output/runner-staged-agent-e2e
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify release candidate inspection
         shell: powershell
@@ -264,55 +484,20 @@ jobs:
         shell: powershell
         run: ./eng/verify-publication-readiness.ps1 -AllowPendingExternal
 
-      - name: Write publication evidence
+      - name: Verify CI release artifact inspection
         shell: powershell
-        run: ./eng/write-publication-evidence.ps1
+        run: ./eng/verify-ci-release-artifact-inspection.ps1
 
-      - name: Verify publication evidence
-        shell: powershell
-        run: ./eng/verify-publication-evidence.ps1
-
-      - name: Verify final publication preflight
-        shell: powershell
-        run: ./eng/verify-final-publication-preflight.ps1
-
-      - name: Inspect CI release artifact bundle
-        shell: powershell
-        run: ./eng/inspect-ci-release-artifact.ps1
-
-      - name: Run packaged production closure E2E
-        working-directory: apps/desktop
-        run: npm run e2e:production-closure:packaged
-
-      - name: Upload packaged production closure evidence
-        if: ${{ always() && hashFiles('artifacts/production-closure-e2e/**') != '' }}
+      - name: Upload release candidate inputs
         uses: actions/upload-artifact@v7
         with:
-          name: openlineops-production-closure-${{ github.run_number }}
-          path: artifacts/production-closure-e2e
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Smoke test desktop
-        working-directory: apps/desktop
-        run: npm run smoke:e2e
-
-      - name: Check desktop package vulnerabilities
-        working-directory: apps/desktop
-        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
-
-      - name: Upload release artifacts
-        if: ${{ always() && hashFiles('artifacts/release/**') != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: openlineops-release-${{ github.run_number }}
+          name: openlineops-release-input-${{ github.run_number }}
           path: |
             artifacts/release
-            output/publication-evidence
-            output/publication-evidence-verification
-            output/final-publication-preflight
-            output/ci-release-artifact-inspection
             output/staged-agent-bundle-e2e
+            artifacts/production-closure-e2e
+            output/studio-two-agent-production-closure
+            output/runner-staged-agent-e2e
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -332,7 +517,87 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
 
       - name: Run real PostgreSQL and RabbitMQ integration gates
-        run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal
+        run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal --logger "trx;LogFileName=production-integration.trx" --results-directory output/production-integration-evidence
+
+      - name: Write production integration evidence
+        shell: pwsh
+        run: ./eng/write-production-integration-evidence.ps1 -TrxPath output/production-integration-evidence/production-integration.trx
+
+      - name: Verify production integration evidence writer
+        shell: pwsh
+        run: ./eng/verify-production-integration-evidence.ps1
+
+      - name: Upload production integration evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-production-integration-${{ github.run_number }}
+          path: output/production-integration-evidence
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publication-evidence:
+    name: Publication evidence and final artifact inspection
+    needs:
+      - verify
+      - production-integration
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+
+      - name: Download release candidate inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: openlineops-release-input-${{ github.run_number }}
+          path: .
+
+      - name: Download production integration evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: openlineops-production-integration-${{ github.run_number }}
+          path: output/production-integration-evidence
+
+      - name: Write publication evidence
+        shell: powershell
+        run: ./eng/write-publication-evidence.ps1 -ProductionIntegrationEvidencePath output/production-integration-evidence/integration-evidence.json
+
+      - name: Verify publication evidence
+        shell: powershell
+        run: ./eng/verify-publication-evidence.ps1
+
+      - name: Verify final publication preflight
+        shell: powershell
+        run: ./eng/verify-final-publication-preflight.ps1
+
+      - name: Inspect CI release artifact bundle
+        shell: powershell
+        run: ./eng/inspect-ci-release-artifact.ps1
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-release-${{ github.run_number }}
+          path: |
+            artifacts/release
+            output/publication-evidence
+            output/publication-evidence-verification
+            output/final-publication-preflight
+            output/ci-release-artifact-inspection
+            output/staged-agent-bundle-e2e
+            output/studio-two-agent-production-closure
+            output/runner-staged-agent-e2e
+            output/production-integration-evidence
+            artifacts/production-closure-e2e
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -58,7 +58,6 @@ public sealed class AggregateRootTests
 
         Assert.True(IntegrationEventDescriptorFactory.IsIntegrationEvent(domainEvent));
         Assert.Equal("Tests.InterfaceMarked", descriptor.EventName);
-        Assert.Equal("2.0.0", descriptor.Version);
         Assert.Same(domainEvent, descriptor.Payload);
         Assert.Equal(domainEvent.AggregateId.ToString(), descriptor.BuildHeaders()["aggregate-id"]);
     }
@@ -72,7 +71,7 @@ public sealed class AggregateRootTests
 
         Assert.True(IntegrationEventDescriptorFactory.IsIntegrationEvent(domainEvent));
         Assert.Equal("Tests.AttributeMarked", descriptor.EventName);
-        Assert.Equal("v3", descriptor.Version);
+        Assert.Same(domainEvent, descriptor.Payload);
     }
 
     [Fact]
@@ -85,7 +84,6 @@ public sealed class AggregateRootTests
 
         Assert.True(IntegrationEventDescriptorFactory.IsIntegrationEvent(domainEvent));
         Assert.Equal("Tests.OpenLineOps", descriptor.EventName);
-        Assert.Equal("v1", descriptor.Version);
         Assert.Same(domainEvent, descriptor.Payload);
         Assert.Equal(aggregateId.ToString(), descriptor.BuildHeaders()["aggregate-id"]);
     }
@@ -177,20 +175,15 @@ public sealed class AggregateRootTests
         : NetDevPack.Messaging.DomainEvent(aggregateId), IIntegrationEvent
     {
         public string EventName => "Tests.InterfaceMarked";
-
-        public string Version => "2.0.0";
     }
 
-    [IntegrationEvent("Tests.AttributeMarked", "v3")]
+    [IntegrationEvent("Tests.AttributeMarked")]
     private sealed class AttributeMarkedIntegrationEvent(Guid aggregateId)
         : NetDevPack.Messaging.DomainEvent(aggregateId);
 
     private sealed record OpenLineOpsIntegrationEvent(Guid AggregateId)
         : DomainEvent("Tests.OpenLineOps"),
-            IIntegrationEvent
-    {
-        public string Version => "v1";
-    }
+            IIntegrationEvent;
 
     private sealed record TestIntegrationDto(Guid AggregateId);
 

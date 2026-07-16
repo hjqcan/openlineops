@@ -122,6 +122,13 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                     new ConfigurationSnapshotId(configuration.ConfigurationSnapshotId),
                     new RecipeSnapshotId(configuration.RecipeSnapshotId),
                     executableResult.Value,
+                    operation.InputMappings.Select(mapping => new OperationInputMappingPlan(
+                        mapping.TargetInputKey,
+                        mapping.SourceOperationId,
+                        mapping.SourceOutputKey,
+                        ParseExact<ProductionContextValueKind>(
+                            mapping.ExpectedValueKind,
+                            "Operation input mapping value kind"))),
                     CreateResourceRequirements(
                         line.LineDefinitionId,
                         operation,

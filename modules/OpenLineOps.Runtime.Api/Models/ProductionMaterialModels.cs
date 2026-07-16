@@ -9,7 +9,6 @@ public sealed record RegisterProductionUnitApiRequest(
     string IdentityKey,
     string IdentityValue,
     string? LotId,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -17,7 +16,6 @@ public sealed record RegisterProductionLotApiRequest(
     string LotId,
     string ProductModelId,
     int? DeclaredQuantity,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -25,7 +23,6 @@ public sealed record RegisterProductionCarrierApiRequest(
     string CarrierId,
     string CarrierTypeId,
     int Capacity,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -33,7 +30,6 @@ public sealed record RegisterSlotOccupancyApiRequest(
     string LineId,
     string StationSystemId,
     string SlotId,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -45,12 +41,10 @@ public sealed record MaterialArrivalApiRequest(
     string StationId,
     string LineId,
     string StationSystemId,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ProductionUnitDispositionCommandApiRequest(
-    string ActorId,
     string? Reason,
     DateTimeOffset OccurredAtUtc);
 
@@ -58,7 +52,6 @@ public sealed record ProductionUnitDispositionCommandApiRequest(
 public sealed record MaterialTransferApiRequest(
     MaterialLocationApiRequest ExpectedLocation,
     MaterialLocationApiRequest Destination,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -67,7 +60,6 @@ public sealed record SlotOccupancyCommandApiRequest(
     string? MaterialId,
     MaterialLocationApiRequest? Destination,
     string? Reason,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -86,7 +78,6 @@ public sealed record LinkMaterialGenealogyApiRequest(
     Guid ChildProductionUnitId,
     string Relationship,
     string OperationId,
-    string ActorId,
     DateTimeOffset OccurredAtUtc);
 
 public sealed record MaterialLocationApiResponse(

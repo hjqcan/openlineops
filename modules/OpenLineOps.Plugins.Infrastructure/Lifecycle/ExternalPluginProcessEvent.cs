@@ -2,7 +2,10 @@ namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public sealed record ExternalPluginProcessEvent(
     ExternalPluginProcessEventKind Kind,
+    string ProjectId,
+    string ApplicationId,
     string PluginId,
+    string PackageContentSha256,
     string Message,
     DateTimeOffset OccurredAtUtc,
     string? Detail = null);

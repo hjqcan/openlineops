@@ -371,6 +371,7 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 station,
                 "Fixed",
                 [])],
+            [],
             [])).ToArray();
         var transitions = operations.Select((operation, index) =>
             new ProjectReleaseRouteTransition(

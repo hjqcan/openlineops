@@ -388,7 +388,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                     command.TargetId,
                     command.CapabilityId,
                     command.CommandName,
-                    command.Status,
+                    command.ExecutionStatus,
                     command.CreatedAtUtc,
                     command.DeadlineAtUtc,
                     command.AcceptedAtUtc,

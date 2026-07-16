@@ -5,6 +5,7 @@ using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
+using OpenLineOps.Traceability.Api.RuntimeIntegration;
 
 namespace OpenLineOps.PostgresIntegration.Tests;
 
@@ -300,6 +301,274 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
                 childOtherRunEvidenceId
             ],
             union.Select(entry => entry.EvidenceId).ToArray());
+    }
+
+    [PostgresIntegrationFact]
+    public async Task ProductLifecycleRebuildsAfterColdRestartAndScopesCarrierEvidenceToMembership()
+    {
+        await using var schema = await PostgresIsolatedSchema.CreateAsync(
+            fixture.ConnectionString,
+            "materiallifecycle");
+        var unique = Guid.NewGuid().ToString("N");
+        var unit = CreateUnit($"LIFECYCLE-{unique}");
+        var carrier = Carrier.Register(
+            new CarrierId($"lifecycle-carrier-{unique}"),
+            "lifecycle-tray",
+            4,
+            "integration-test",
+            BaseTimeUtc);
+        var carrierMaterial = MaterialReference.ForCarrier(carrier.Id);
+        var unitMaterial = MaterialReference.ForProductionUnit(unit.Id);
+        var lineId = $"lifecycle-line-{unique}";
+        var stationA = MaterialLocation.AtStation(lineId, "station-a");
+        var stationB = MaterialLocation.AtStation(lineId, "station-b");
+        var stationC = MaterialLocation.AtStation(lineId, "station-c");
+        var carrierPosition = MaterialLocation.OnCarrier(carrier.Id, "position-01");
+        var address = new SlotAddress(lineId, "station-b", "slot-carrier");
+        var slotLocation = MaterialLocation.InSlot(address);
+        var slot = SlotOccupancy.Register(address, BaseTimeUtc);
+
+        await using (var repository =
+            new PostgreSqlProductionMaterialRepository(schema.ConnectionString))
+        {
+            Assert.True(await repository.TryAddAsync(unit));
+            Assert.True(await repository.TryAddAsync(carrier));
+            Assert.True(await repository.TryAddAsync(slot));
+
+            var carrierEntry = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+                await repository.GetCarrierAsync(carrier.Id));
+            Assert.True(carrierEntry.Aggregate.Arrive(
+                stationA,
+                BaseTimeUtc.AddSeconds(1)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                carriers: [new CarrierUpdate(carrierEntry.Aggregate, carrierEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        carrierMaterial,
+                        null,
+                        null,
+                        stationA,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(1))
+                ]));
+
+            var unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                await repository.GetProductionUnitAsync(unit.Id));
+            Assert.True(unitEntry.Aggregate.Arrive(
+                stationA,
+                BaseTimeUtc.AddSeconds(2)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                productionUnits: [new ProductionUnitUpdate(unitEntry.Aggregate, unitEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        unitMaterial,
+                        null,
+                        null,
+                        stationA,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(2))
+                ]));
+
+            unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                await repository.GetProductionUnitAsync(unit.Id));
+            Assert.True(unitEntry.Aggregate.Transfer(
+                stationA,
+                carrierPosition,
+                BaseTimeUtc.AddSeconds(3)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                productionUnits: [new ProductionUnitUpdate(unitEntry.Aggregate, unitEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        unitMaterial,
+                        null,
+                        stationA,
+                        carrierPosition,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(3))
+                ]));
+
+            carrierEntry = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+                await repository.GetCarrierAsync(carrier.Id));
+            Assert.True(carrierEntry.Aggregate.Transfer(
+                stationA,
+                stationB,
+                BaseTimeUtc.AddSeconds(4)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                carriers: [new CarrierUpdate(carrierEntry.Aggregate, carrierEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        carrierMaterial,
+                        null,
+                        stationA,
+                        stationB,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(4))
+                ]));
+
+            var slotEntry = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
+                await repository.GetSlotAsync(address));
+            carrierEntry = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+                await repository.GetCarrierAsync(carrier.Id));
+            Assert.True(slotEntry.Aggregate.Reserve(
+                carrierMaterial,
+                BaseTimeUtc.AddSeconds(5)).Succeeded);
+            Assert.True(slotEntry.Aggregate.Load(
+                carrierMaterial,
+                BaseTimeUtc.AddSeconds(6)).Succeeded);
+            Assert.True(carrierEntry.Aggregate.Transfer(
+                stationB,
+                slotLocation,
+                BaseTimeUtc.AddSeconds(6)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                carriers: [new CarrierUpdate(carrierEntry.Aggregate, carrierEntry.Revision)],
+                slots: [new SlotOccupancyUpdate(slotEntry.Aggregate, slotEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        carrierMaterial,
+                        null,
+                        null,
+                        null,
+                        SlotOccupancyStatus.Available,
+                        SlotOccupancyStatus.Reserved,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(5)),
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        carrierMaterial,
+                        null,
+                        null,
+                        null,
+                        SlotOccupancyStatus.Reserved,
+                        SlotOccupancyStatus.Occupied,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(6)),
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        carrierMaterial,
+                        null,
+                        stationB,
+                        slotLocation,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(6))
+                ]));
+
+            unitEntry = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                await repository.GetProductionUnitAsync(unit.Id));
+            Assert.True(unitEntry.Aggregate.Transfer(
+                carrierPosition,
+                stationB,
+                BaseTimeUtc.AddSeconds(7)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                productionUnits: [new ProductionUnitUpdate(unitEntry.Aggregate, unitEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        unitMaterial,
+                        null,
+                        carrierPosition,
+                        stationB,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(7))
+                ]));
+
+            slotEntry = Assert.IsType<ProductionMaterialPersistenceEntry<SlotOccupancy>>(
+                await repository.GetSlotAsync(address));
+            carrierEntry = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+                await repository.GetCarrierAsync(carrier.Id));
+            Assert.True(slotEntry.Aggregate.Unload(
+                carrierMaterial,
+                BaseTimeUtc.AddSeconds(8)).Succeeded);
+            Assert.True(carrierEntry.Aggregate.Transfer(
+                slotLocation,
+                stationB,
+                BaseTimeUtc.AddSeconds(8)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                carriers: [new CarrierUpdate(carrierEntry.Aggregate, carrierEntry.Revision)],
+                slots: [new SlotOccupancyUpdate(slotEntry.Aggregate, slotEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.SlotOccupancy(
+                        Guid.NewGuid(),
+                        address,
+                        carrierMaterial,
+                        null,
+                        null,
+                        null,
+                        SlotOccupancyStatus.Occupied,
+                        SlotOccupancyStatus.Available,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(8)),
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        carrierMaterial,
+                        null,
+                        slotLocation,
+                        stationB,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(8))
+                ]));
+
+            carrierEntry = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+                await repository.GetCarrierAsync(carrier.Id));
+            Assert.True(carrierEntry.Aggregate.Transfer(
+                stationB,
+                stationC,
+                BaseTimeUtc.AddSeconds(9)).Succeeded);
+            await repository.CommitAsync(new ProductionMaterialCommit(
+                carriers: [new CarrierUpdate(carrierEntry.Aggregate, carrierEntry.Revision)],
+                timeline:
+                [
+                    ProductionMaterialTimelineEntry.Location(
+                        Guid.NewGuid(),
+                        carrierMaterial,
+                        null,
+                        stationB,
+                        stationC,
+                        "integration-test",
+                        BaseTimeUtc.AddSeconds(9))
+                ]));
+        }
+
+        await using var restarted =
+            new PostgreSqlProductionMaterialRepository(schema.ConnectionString);
+        var reader = new ProductionUnitMaterialLifecycleReader(restarted);
+        var result = await reader.GetAsync(unit.Id.Value);
+
+        Assert.True(result.IsSuccess, result.Error.Message);
+        Assert.Equal(BaseTimeUtc.AddSeconds(7), result.Value.ObservedThroughUtc);
+        Assert.Equal("StationQueue", result.Value.CurrentLocation?.Kind);
+        Assert.Equal("station-b", result.Value.CurrentLocation?.StationSystemId);
+        Assert.Null(result.Value.CurrentCarrierLocation);
+        var carrierLocations = result.Value.MaterialLocationTransitions
+            .Where(transition => transition.MaterialKind == "Carrier")
+            .ToArray();
+        Assert.Equal(2, carrierLocations.Length);
+        Assert.Equal(
+            [BaseTimeUtc.AddSeconds(4), BaseTimeUtc.AddSeconds(6)],
+            carrierLocations.Select(transition => transition.OccurredAtUtc).ToArray());
+        Assert.Equal(2, result.Value.SlotOccupancyTransitions.Count);
+        Assert.All(
+            result.Value.SlotOccupancyTransitions,
+            transition => Assert.True(transition.OccurredAtUtc < BaseTimeUtc.AddSeconds(7)));
+        Assert.DoesNotContain(
+            result.Value.MaterialLocationTransitions,
+            transition => transition.MaterialKind == "Carrier"
+                && transition.OccurredAtUtc is var occurredAtUtc
+                && (occurredAtUtc < BaseTimeUtc.AddSeconds(3)
+                    || occurredAtUtc >= BaseTimeUtc.AddSeconds(7)));
     }
 
     [PostgresIntegrationFact]

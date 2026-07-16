@@ -3,7 +3,15 @@ param(
 
     [string] $OutputRoot = "output/publication-evidence",
 
-    [string] $GitHubActionsRunUrl,
+    [string] $StagedAgentEvidenceRoot = "output/staged-agent-bundle-e2e",
+
+    [string] $ProductionClosureEvidenceRoot = "artifacts/production-closure-e2e",
+
+    [string] $StudioTwoAgentEvidenceRoot = "output/studio-two-agent-production-closure",
+
+    [string] $RunnerStagedAgentEvidenceRoot = "output/runner-staged-agent-e2e",
+
+    [string] $ProductionIntegrationEvidencePath,
 
     [switch] $ConfirmMitLicense,
 
@@ -14,8 +22,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Add-Type -AssemblyName System.Runtime.Serialization
+Add-Type -AssemblyName System.Xml.Linq
+
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $InternalFailures = New-Object System.Collections.Generic.List[string]
+$RequiredProductionIntegrationTest = "OpenLineOps.PostgresIntegration.Tests.PostgresRabbitMqProductionCoordinationIntegrationTests.DurableOutboxAndResultInboxSurviveCoordinatorRestartAcrossRealBroker"
+$StagedWindowsAgentRecoveryBoundary = "Published Windows Agent process, signed vendor helper, broker outage, durable SQLite Inbox/Outbox, presence TTL, and transport result-inbox restart"
+$DurableCoordinatorRecoveryBoundary = "PostgreSQL coordination store and RabbitMQ transport survive Coordinator transport/store cold restart exactly once"
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -67,6 +81,241 @@ function Write-Utf8NoBom {
         $Path,
         $Content,
         [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-JsonXmlPropertyName {
+    param([Parameter(Mandatory = $true)][System.Xml.Linq.XElement] $Element)
+
+    $encodedName = $Element.Attribute([System.Xml.Linq.XName]::Get("item"))
+    if ($null -ne $encodedName) {
+        return $encodedName.Value
+    }
+
+    return $Element.Name.LocalName
+}
+
+function Assert-NoDuplicateJsonProperties {
+    param(
+        [Parameter(Mandatory = $true)][System.Xml.Linq.XElement] $Element,
+        [Parameter(Mandatory = $true)][string] $JsonPath
+    )
+
+    $typeAttribute = $Element.Attribute([System.Xml.Linq.XName]::Get("type"))
+    $elementType = if ($null -eq $typeAttribute) { $null } else { $typeAttribute.Value }
+    if ($elementType -ceq "object") {
+        $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($child in @($Element.Elements())) {
+            $propertyName = Get-JsonXmlPropertyName $child
+            if (-not $names.Add($propertyName)) {
+                throw "Duplicate JSON property '$propertyName' at $JsonPath."
+            }
+
+            Assert-NoDuplicateJsonProperties -Element $child -JsonPath "$JsonPath.$propertyName"
+        }
+
+        return
+    }
+
+    if ($elementType -ceq "array") {
+        $index = 0
+        foreach ($child in @($Element.Elements())) {
+            Assert-NoDuplicateJsonProperties -Element $child -JsonPath "$JsonPath[$index]"
+            $index++
+        }
+    }
+}
+
+function Read-StrictJsonFile {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $rawJson = [System.IO.File]::ReadAllText($Path)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($rawJson)
+    $reader = [System.Runtime.Serialization.Json.JsonReaderWriterFactory]::CreateJsonReader(
+        $bytes,
+        [System.Xml.XmlDictionaryReaderQuotas]::Max)
+    try {
+        $document = [System.Xml.Linq.XDocument]::Load($reader)
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    Assert-NoDuplicateJsonProperties -Element $document.Root -JsonPath '$'
+    return $rawJson | ConvertFrom-Json
+}
+
+function Test-JsonInteger {
+    param(
+        [AllowNull()] $Value,
+        [long] $Minimum = 0
+    )
+
+    if ($null -eq $Value) {
+        return $false
+    }
+
+    $integerTypes = @(
+        [byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
+    if ($integerTypes -notcontains $Value.GetType()) {
+        return $false
+    }
+
+    return [decimal] $Value -ge [decimal] $Minimum
+}
+
+function Read-ProductionIntegrationTrx {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    if ((Get-Item -LiteralPath $Path).Length -gt 67108864) {
+        throw "Production integration TRX exceeds the 64 MiB verification limit."
+    }
+
+    $settings = [System.Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $reader = [System.Xml.XmlReader]::Create($Path, $settings)
+    try {
+        $document = [System.Xml.XmlDocument]::new()
+        $document.XmlResolver = $null
+        $document.Load($reader)
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    $counters = $document.SelectSingleNode(
+        "/*[local-name()='TestRun']/*[local-name()='ResultSummary']/*[local-name()='Counters']")
+    if ($null -eq $counters) {
+        throw "Production integration TRX is missing ResultSummary/Counters."
+    }
+
+    $values = [ordered]@{}
+    foreach ($mapping in @(
+            [pscustomobject]@{ Trx = "total"; Evidence = "total" },
+            [pscustomobject]@{ Trx = "executed"; Evidence = "executed" },
+            [pscustomobject]@{ Trx = "passed"; Evidence = "passed" },
+            [pscustomobject]@{ Trx = "failed"; Evidence = "failed" },
+            [pscustomobject]@{ Trx = "notExecuted"; Evidence = "skipped" })) {
+        $rawValue = $counters.GetAttribute($mapping.Trx)
+        $parsed = 0
+        if ([string]::IsNullOrWhiteSpace($rawValue) `
+            -or $rawValue -cnotmatch '^(?:0|[1-9][0-9]*)$' `
+            -or -not [int]::TryParse(
+                $rawValue,
+                [System.Globalization.NumberStyles]::None,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref] $parsed)) {
+            throw "Production integration TRX counter '$($mapping.Trx)' is not a canonical non-negative integer."
+        }
+
+        $values[$mapping.Evidence] = $parsed
+    }
+
+    if ($values.total -le 0 `
+        -or $values.executed -ne $values.total `
+        -or $values.passed -ne $values.total `
+        -or $values.failed -ne 0 `
+        -or $values.skipped -ne 0) {
+        throw "Production integration TRX does not prove that every test passed with zero failed or skipped tests."
+    }
+
+    $results = @($document.SelectNodes(
+            "/*[local-name()='TestRun']/*[local-name()='Results']/*[local-name()='UnitTestResult']"))
+    if ($results.Count -ne $values.total `
+        -or @($results | Where-Object { $_.GetAttribute("outcome") -cne "Passed" }).Count -ne 0) {
+        throw "Production integration TRX result records do not match its all-passed counters."
+    }
+
+    $requiredResults = @($results | Where-Object {
+            $_.GetAttribute("testName") -ceq $RequiredProductionIntegrationTest
+        })
+    if ($requiredResults.Count -ne 1) {
+        throw "Production integration TRX must contain exactly one Passed result for '$RequiredProductionIntegrationTest'."
+    }
+
+    return [pscustomobject] $values
+}
+
+function Test-ExactJsonProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string] $Description,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedProperties
+    )
+
+    if ($null -eq $Value -or $Value -isnot [pscustomobject]) {
+        $InternalFailures.Add("$Description must be a JSON object.") | Out-Null
+        return $false
+    }
+
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $expected = @($ExpectedProperties | Sort-Object)
+    $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual -CaseSensitive)
+    if ($difference.Count -ne 0) {
+        $InternalFailures.Add("$Description has missing, unexpected, or non-canonical properties.") | Out-Null
+        return $false
+    }
+
+    return $true
+}
+
+function Get-RepoRelativePath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $normalizedRoot = $RepoRoot.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $normalizedRoot + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.StartsWith(
+            $prefix,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "E2E evidence must remain under the repository root: $resolved"
+    }
+
+    return $resolved.Substring($prefix.Length).Replace('\', '/')
+}
+
+function Copy-E2eEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourcePath,
+        [Parameter(Mandatory = $true)][string] $EmbeddedName,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+        $InternalFailures.Add("Missing required $Description evidence at $SourcePath.") | Out-Null
+        return $null
+    }
+
+    $sourceFile = Get-Item -LiteralPath $SourcePath
+    if ($sourceFile.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+        $InternalFailures.Add("$Description evidence cannot be a reparse point.") | Out-Null
+        return $null
+    }
+
+    $embeddedDirectory = Join-Path $resolvedOutputRoot "e2e-evidence"
+    New-Item -ItemType Directory -Path $embeddedDirectory -Force | Out-Null
+    $embeddedPath = Join-Path $embeddedDirectory $EmbeddedName
+    Copy-Item -LiteralPath $SourcePath -Destination $embeddedPath -Force
+    $sourceHash = Get-FileSha256 $SourcePath
+    if ((Get-FileSha256 $embeddedPath) -cne $sourceHash) {
+        $InternalFailures.Add("Embedded $Description evidence hash does not match its source.") | Out-Null
+        return $null
+    }
+
+    return [ordered]@{
+        sourceRelativePath = Get-RepoRelativePath $SourcePath
+        embeddedRelativePath = "e2e-evidence/$EmbeddedName"
+        sizeBytes = $sourceFile.Length
+        sha256 = $sourceHash
+    }
 }
 
 function ConvertTo-CommandLine {
@@ -215,6 +464,17 @@ function Test-SignedInspectionFailure {
 
 $resolvedOutputRoot = Resolve-RepoPath $OutputRoot
 New-CleanDirectory $resolvedOutputRoot
+$resolvedStagedAgentEvidenceRoot = Resolve-RepoPath $StagedAgentEvidenceRoot
+$resolvedProductionClosureEvidenceRoot = Resolve-RepoPath $ProductionClosureEvidenceRoot
+$resolvedStudioTwoAgentEvidenceRoot = Resolve-RepoPath $StudioTwoAgentEvidenceRoot
+$resolvedRunnerStagedAgentEvidenceRoot = Resolve-RepoPath $RunnerStagedAgentEvidenceRoot
+$resolvedProductionIntegrationEvidencePath = if ([string]::IsNullOrWhiteSpace(
+        $ProductionIntegrationEvidencePath)) {
+    $null
+}
+else {
+    Resolve-RepoPath $ProductionIntegrationEvidencePath
+}
 $childWorkRoot = Join-Path $resolvedOutputRoot "work"
 $releaseCandidateInspectionWorkRoot = Join-Path $childWorkRoot "release-candidate-inspection"
 $releaseCandidateInspectionVerificationWorkRoot = Join-Path $childWorkRoot "release-candidate-inspection-verification"
@@ -227,6 +487,135 @@ $signedInspectionWorkRoot = Join-Path $childWorkRoot "signed-release-candidate-i
 $resolvedArtifactsRoot = Resolve-RepoPath $ArtifactsRoot
 $manifestPath = Join-Path $resolvedArtifactsRoot "release-manifest.json"
 $provenancePath = Join-Path $resolvedArtifactsRoot "release-provenance.json"
+
+$stagedAgentEvidencePath = Join-Path $resolvedStagedAgentEvidenceRoot "evidence.json"
+try {
+    & (Join-Path $PSScriptRoot "verify-staged-agent-evidence.ps1") `
+        -EvidenceRoot $resolvedStagedAgentEvidenceRoot `
+        -RequireSanitizedRoot
+}
+catch {
+    $InternalFailures.Add(
+        "Staged Agent evidence failed strict validation: $($_.Exception.Message)") | Out-Null
+}
+$stagedAgentDocument = $null
+if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
+    try {
+        $stagedAgentDocument = Get-Content -LiteralPath $stagedAgentEvidencePath -Raw |
+            ConvertFrom-Json
+        $allowedIdentityStrategies = @(
+            "temporary-standard-account",
+            "inherited-uac-filtered-token"
+        )
+        if ($stagedAgentDocument.schemaVersion -ne 1 `
+            -or $stagedAgentDocument.product -cne "OpenLineOps" `
+            -or $stagedAgentDocument.status -cne "passed" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.status -cne "passed" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
+            -or $allowedIdentityStrategies -cnotcontains $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.expiredOfflineDuringBrokerOutage -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.freshOnlineAfterReconnect -ne $true) {
+            $InternalFailures.Add("Staged Agent bundle E2E evidence is not a passed production transport closure.") | Out-Null
+        }
+    }
+    catch {
+        $InternalFailures.Add("Staged Agent bundle E2E evidence is invalid JSON: $($_.Exception.Message)") | Out-Null
+    }
+}
+$stagedAgentEvidence = Copy-E2eEvidence `
+    -SourcePath $stagedAgentEvidencePath `
+    -EmbeddedName "staged-agent-bundle.json" `
+    -Description "staged Agent bundle E2E"
+
+$productionSummaries = if (Test-Path -LiteralPath $resolvedProductionClosureEvidenceRoot -PathType Container) {
+    @(Get-ChildItem `
+        -LiteralPath $resolvedProductionClosureEvidenceRoot `
+        -Filter "summary.json" `
+        -File `
+        -Recurse)
+}
+else {
+    @()
+}
+$productionClosureEvidence = $null
+$productionClosureDocument = $null
+try {
+    & (Join-Path $PSScriptRoot "verify-production-closure-evidence.ps1") `
+        -EvidenceRoot $resolvedProductionClosureEvidenceRoot `
+        -RequirePassed
+}
+catch {
+    $InternalFailures.Add(
+        "Production closure evidence failed strict validation: $($_.Exception.Message)") | Out-Null
+}
+if ($productionSummaries.Count -ne 1) {
+    $InternalFailures.Add(
+        "Production closure evidence must contain exactly one summary.json; found $($productionSummaries.Count).") | Out-Null
+}
+else {
+    try {
+        $productionClosureDocument = Get-Content `
+            -LiteralPath $productionSummaries[0].FullName `
+            -Raw | ConvertFrom-Json
+        if ($productionClosureDocument.schema -cne "openlineops.production-closure-e2e" `
+            -or $productionClosureDocument.status -cne "passed" `
+            -or $productionClosureDocument.packagedBinaries.unchangedDuringRun -ne $true) {
+            $InternalFailures.Add("Packaged production closure E2E evidence is not passed and immutable.") | Out-Null
+        }
+    }
+    catch {
+        $InternalFailures.Add("Packaged production closure E2E evidence is invalid JSON: $($_.Exception.Message)") | Out-Null
+    }
+    $productionClosureEvidence = Copy-E2eEvidence `
+        -SourcePath $productionSummaries[0].FullName `
+        -EmbeddedName "production-closure.json" `
+        -Description "packaged production closure E2E"
+}
+
+$studioTwoAgentEvidencePath = Join-Path $resolvedStudioTwoAgentEvidenceRoot "evidence.json"
+$studioTwoAgentManifestPath = Join-Path $resolvedStudioTwoAgentEvidenceRoot "evidence-manifest.json"
+try {
+    & (Join-Path $PSScriptRoot "verify-studio-two-agent-production-evidence.ps1") `
+        -EvidenceRoot $resolvedStudioTwoAgentEvidenceRoot
+}
+catch {
+    $InternalFailures.Add(
+        "Studio two-Agent production evidence failed strict validation: $($_.Exception.Message)") | Out-Null
+}
+$studioTwoAgentEvidence = Copy-E2eEvidence `
+    -SourcePath $studioTwoAgentEvidencePath `
+    -EmbeddedName "studio-two-agent.json" `
+    -Description "Studio two-Agent production closure"
+$studioTwoAgentManifestEvidence = Copy-E2eEvidence `
+    -SourcePath $studioTwoAgentManifestPath `
+    -EmbeddedName "studio-two-agent-manifest.json" `
+    -Description "Studio two-Agent evidence manifest"
+
+$runnerStagedAgentEvidencePath = Join-Path $resolvedRunnerStagedAgentEvidenceRoot "evidence.json"
+$runnerStagedAgentTrxPath = Join-Path `
+    $resolvedRunnerStagedAgentEvidenceRoot `
+    "test-results/runner-staged-agent-e2e.trx"
+try {
+    & (Join-Path $PSScriptRoot "verify-runner-staged-agent-evidence.ps1") `
+        -EvidenceRoot $resolvedRunnerStagedAgentEvidenceRoot `
+        -RequirePassed
+}
+catch {
+    $InternalFailures.Add(
+        "Runner staged-Agent production evidence failed strict validation: $($_.Exception.Message)") | Out-Null
+}
+$runnerStagedAgentEvidence = Copy-E2eEvidence `
+    -SourcePath $runnerStagedAgentEvidencePath `
+    -EmbeddedName "runner-staged-agent.json" `
+    -Description "Runner staged-Agent production closure"
+$runnerStagedAgentTrxEvidence = Copy-E2eEvidence `
+    -SourcePath $runnerStagedAgentTrxPath `
+    -EmbeddedName "runner-staged-agent.trx" `
+    -Description "Runner staged-Agent exact-test TRX"
 
 $gates = @()
 $gates += Invoke-EvidenceCommand `
@@ -280,13 +669,6 @@ if (-not $ConfirmMitLicense) {
     $pendingExternal.Add("Final MIT license decision has not been explicitly confirmed for publication.") | Out-Null
 }
 
-if ([string]::IsNullOrWhiteSpace($GitHubActionsRunUrl)) {
-    $pendingExternal.Add("GitHub-hosted Windows CI proof URL has not been supplied.") | Out-Null
-}
-elseif ($GitHubActionsRunUrl -notmatch "^https://github\.com/[^/]+/[^/]+/actions/runs/\d+(/.*)?$") {
-    $InternalFailures.Add("GitHubActionsRunUrl must point to a GitHub Actions run URL.") | Out-Null
-}
-
 $pendingExternal = @($pendingExternal | Select-Object -Unique)
 
 $manifest = $null
@@ -304,6 +686,145 @@ if (Test-Path -LiteralPath $provenancePath -PathType Leaf) {
 else {
     $InternalFailures.Add("Missing release provenance at $provenancePath.") | Out-Null
 }
+
+$productionIntegrationDocument = $null
+$productionIntegrationEvidence = $null
+$productionIntegrationTrxEvidence = $null
+$productionIntegrationProofValid = $false
+if ($null -eq $resolvedProductionIntegrationEvidencePath) {
+    $pendingExternal += "Bound PostgreSQL/RabbitMQ production integration evidence has not been supplied."
+}
+elseif (-not (Test-Path -LiteralPath $resolvedProductionIntegrationEvidencePath -PathType Leaf)) {
+    $InternalFailures.Add(
+        "Production integration evidence does not exist: $resolvedProductionIntegrationEvidencePath") | Out-Null
+}
+else {
+    $proofFailureCount = $InternalFailures.Count
+    try {
+        $productionIntegrationDocument = Read-StrictJsonFile `
+            -Path $resolvedProductionIntegrationEvidencePath
+        $rootValid = Test-ExactJsonProperties `
+            -Value $productionIntegrationDocument `
+            -Description "Production integration evidence" `
+            -ExpectedProperties @(
+                "schemaVersion", "generatedAtUtc", "product", "repository", "commitSha",
+                "runId", "runUrl", "jobName", "testName", "conclusion", "counters", "trx")
+        $countersValid = Test-ExactJsonProperties `
+            -Value $productionIntegrationDocument.counters `
+            -Description "Production integration evidence counters" `
+            -ExpectedProperties @("total", "executed", "passed", "failed", "skipped")
+        $trxValid = Test-ExactJsonProperties `
+            -Value $productionIntegrationDocument.trx `
+            -Description "Production integration evidence TRX" `
+            -ExpectedProperties @("relativePath", "sizeBytes", "sha256")
+        if ($rootValid -and $countersValid -and $trxValid) {
+            $expectedRunUrl = "https://github.com/$($productionIntegrationDocument.repository)/actions/runs/$($productionIntegrationDocument.runId)"
+            if (-not (Test-JsonInteger -Value $productionIntegrationDocument.schemaVersion -Minimum 1) `
+                -or $productionIntegrationDocument.schemaVersion -ne 1 `
+                -or $productionIntegrationDocument.generatedAtUtc -isnot [string] `
+                -or $productionIntegrationDocument.generatedAtUtc -cne $productionIntegrationDocument.generatedAtUtc.Trim() `
+                -or $productionIntegrationDocument.product -isnot [string] `
+                -or $productionIntegrationDocument.product -cne "OpenLineOps" `
+                -or $productionIntegrationDocument.repository -isnot [string] `
+                -or $productionIntegrationDocument.repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' `
+                -or $productionIntegrationDocument.commitSha -isnot [string] `
+                -or $productionIntegrationDocument.commitSha -cnotmatch '^[0-9a-f]{40}$' `
+                -or $productionIntegrationDocument.runId -isnot [string] `
+                -or $productionIntegrationDocument.runId -cnotmatch '^[1-9][0-9]*$' `
+                -or $productionIntegrationDocument.runUrl -isnot [string] `
+                -or $productionIntegrationDocument.runUrl -cne $expectedRunUrl `
+                -or $productionIntegrationDocument.jobName -isnot [string] `
+                -or $productionIntegrationDocument.jobName -cne "production-integration" `
+                -or $productionIntegrationDocument.testName -isnot [string] `
+                -or $productionIntegrationDocument.testName -cne $RequiredProductionIntegrationTest `
+                -or $productionIntegrationDocument.conclusion -isnot [string] `
+                -or $productionIntegrationDocument.conclusion -cne "success" `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.counters.total -Minimum 1) `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.counters.executed) `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.counters.passed) `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.counters.failed) `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.counters.skipped) `
+                -or $productionIntegrationDocument.counters.executed -ne $productionIntegrationDocument.counters.total `
+                -or $productionIntegrationDocument.counters.passed -ne $productionIntegrationDocument.counters.total `
+                -or $productionIntegrationDocument.counters.failed -ne 0 `
+                -or $productionIntegrationDocument.counters.skipped -ne 0 `
+                -or $productionIntegrationDocument.trx.relativePath -isnot [string] `
+                -or $productionIntegrationDocument.trx.relativePath -cnotmatch '^(?!/)(?!.*\\)(?!.*(?:^|/)\.\.(?:/|$)).+/production-integration\.trx$' `
+                -or -not (Test-JsonInteger -Value $productionIntegrationDocument.trx.sizeBytes -Minimum 1) `
+                -or $productionIntegrationDocument.trx.sha256 -isnot [string] `
+                -or $productionIntegrationDocument.trx.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+                $InternalFailures.Add(
+                    "Production integration evidence does not satisfy the strict successful same-run contract.") | Out-Null
+            }
+
+            if ($null -eq $provenance `
+                -or $provenance.source.available -isnot [bool] `
+                -or $provenance.source.available -ne $true `
+                -or $provenance.source.dirty -isnot [bool] `
+                -or $provenance.source.dirty -ne $false `
+                -or $provenance.source.commit -isnot [string] `
+                -or $provenance.source.commit -cne $productionIntegrationDocument.commitSha) {
+                $InternalFailures.Add(
+                    "Production integration evidence commit does not match a clean release provenance source.") | Out-Null
+            }
+
+            $githubContext = @(
+                $env:GITHUB_REPOSITORY,
+                $env:GITHUB_SHA,
+                $env:GITHUB_RUN_ID,
+                $env:GITHUB_SERVER_URL)
+            if (@($githubContext | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 `
+                -and ($env:GITHUB_REPOSITORY -cne $productionIntegrationDocument.repository `
+                    -or $env:GITHUB_SHA -cne $productionIntegrationDocument.commitSha `
+                    -or $env:GITHUB_RUN_ID -cne $productionIntegrationDocument.runId `
+                    -or $env:GITHUB_SERVER_URL -cne "https://github.com")) {
+                $InternalFailures.Add(
+                    "Production integration evidence does not match the current GitHub Actions repository, commit, and run.") | Out-Null
+            }
+
+            $resolvedTrxPath = Resolve-RepoPath $productionIntegrationDocument.trx.relativePath
+            if ([System.IO.Path]::GetDirectoryName($resolvedTrxPath) -cne `
+                    [System.IO.Path]::GetDirectoryName($resolvedProductionIntegrationEvidencePath) `
+                -or -not (Test-Path -LiteralPath $resolvedTrxPath -PathType Leaf) `
+                -or (Get-Item -LiteralPath $resolvedTrxPath).Length -ne `
+                    [long] $productionIntegrationDocument.trx.sizeBytes `
+                -or (Get-FileSha256 $resolvedTrxPath) -cne `
+                    $productionIntegrationDocument.trx.sha256) {
+                $InternalFailures.Add(
+                    "Production integration TRX path, size, or SHA-256 does not match its evidence.") | Out-Null
+            }
+            else {
+                $trxSummary = Read-ProductionIntegrationTrx -Path $resolvedTrxPath
+                foreach ($counterName in @("total", "executed", "passed", "failed", "skipped")) {
+                    if ($trxSummary.$counterName -ne $productionIntegrationDocument.counters.$counterName) {
+                        $InternalFailures.Add(
+                            "Production integration TRX counter '$counterName' does not match its JSON evidence.") | Out-Null
+                    }
+                }
+
+                $productionIntegrationTrxEvidence = Copy-E2eEvidence `
+                    -SourcePath $resolvedTrxPath `
+                    -EmbeddedName "production-integration.trx" `
+                    -Description "production integration TRX"
+            }
+        }
+    }
+    catch {
+        $InternalFailures.Add(
+            "Production integration evidence is invalid JSON or data: $($_.Exception.Message)") | Out-Null
+    }
+
+    $productionIntegrationEvidence = Copy-E2eEvidence `
+        -SourcePath $resolvedProductionIntegrationEvidencePath `
+        -EmbeddedName "production-integration.json" `
+        -Description "production integration"
+    $productionIntegrationProofValid = `
+        $InternalFailures.Count -eq $proofFailureCount `
+        -and $null -ne $productionIntegrationEvidence `
+        -and $null -ne $productionIntegrationTrxEvidence
+}
+
+$pendingExternal = @($pendingExternal | Select-Object -Unique)
 
 $artifactKinds = @()
 $artifactCount = 0
@@ -338,8 +859,12 @@ $evidence = [ordered]@{
         confirmedForPublication = [bool] $ConfirmMitLicense
     }
     githubActions = [ordered]@{
-        runUrl = $GitHubActionsRunUrl
-        proofSupplied = -not [string]::IsNullOrWhiteSpace($GitHubActionsRunUrl)
+        repository = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.repository } else { $null }
+        commitSha = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.commitSha } else { $null }
+        runId = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.runId } else { $null }
+        runUrl = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.runUrl } else { $null }
+        productionIntegrationConclusion = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.conclusion } else { $null }
+        proofSupplied = $productionIntegrationProofValid
     }
     release = [ordered]@{
         product = if ($null -ne $manifest) { $manifest.product } else { $null }
@@ -349,6 +874,29 @@ $evidence = [ordered]@{
         provenanceGeneratedAtUtc = if ($null -ne $provenance) { $provenance.generatedAtUtc } else { $null }
         artifactCount = $artifactCount
         artifactKinds = $artifactKinds
+    }
+    e2eEvidence = [ordered]@{
+        stagedAgentBundle = $stagedAgentEvidence
+        productionClosure = $productionClosureEvidence
+        studioTwoAgent = $studioTwoAgentEvidence
+        studioTwoAgentManifest = $studioTwoAgentManifestEvidence
+        runnerStagedAgent = $runnerStagedAgentEvidence
+        runnerStagedAgentTrx = $runnerStagedAgentTrxEvidence
+        productionIntegration = $productionIntegrationEvidence
+        productionIntegrationTrx = $productionIntegrationTrxEvidence
+        recoveryComposition = [ordered]@{
+            stagedWindowsAgentBoundary = $StagedWindowsAgentRecoveryBoundary
+            durableCoordinatorRecoveryBoundary = $DurableCoordinatorRecoveryBoundary
+            productionIntegrationWorkflowJob = "production-integration"
+            productionIntegrationTest = $RequiredProductionIntegrationTest
+            proofRepository = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.repository } else { $null }
+            proofCommitSha = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.commitSha } else { $null }
+            proofRunId = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.runId } else { $null }
+            proofRunUrl = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.runUrl } else { $null }
+            productionIntegrationConclusion = if ($null -ne $productionIntegrationDocument) { $productionIntegrationDocument.conclusion } else { $null }
+            releaseManifestSha256 = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Get-FileSha256 $manifestPath } else { $null }
+            proofSupplied = $productionIntegrationProofValid
+        }
     }
     pendingExternal = $pendingExternal
     internalFailures = @($InternalFailures)
@@ -367,6 +915,13 @@ $markdown.Add("- Product: OpenLineOps") | Out-Null
 $markdown.Add("- Publishable: $publishable") | Out-Null
 $markdown.Add("- Release version: $($evidence.release.version)") | Out-Null
 $markdown.Add("- Artifact kinds: $($artifactKinds -join ', ')") | Out-Null
+$markdown.Add("- Staged Agent E2E SHA-256: $($stagedAgentEvidence.sha256)") | Out-Null
+$markdown.Add("- Production closure SHA-256: $($productionClosureEvidence.sha256)") | Out-Null
+$markdown.Add("- Studio two-Agent closure SHA-256: $($studioTwoAgentEvidence.sha256)") | Out-Null
+$markdown.Add("- Runner staged-Agent closure SHA-256: $($runnerStagedAgentEvidence.sha256)") | Out-Null
+$markdown.Add("- Durable Coordinator recovery CI gate: $($evidence.e2eEvidence.recoveryComposition.productionIntegrationTest)") | Out-Null
+$markdown.Add("- Bound CI run: $($evidence.githubActions.runUrl)") | Out-Null
+$markdown.Add("- Bound CI commit: $($evidence.githubActions.commitSha)") | Out-Null
 $markdown.Add("") | Out-Null
 $markdown.Add("## Pending External Items") | Out-Null
 if ($pendingExternal.Count -eq 0) {

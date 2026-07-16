@@ -9,6 +9,7 @@ public sealed record RabbitMqStationTransportOptions(
     Uri BrokerUri,
     string AgentId,
     string StationId,
+    string StationSystemId,
     string JobExchange = "openlineops.station.jobs",
     string EventExchange = "openlineops.station.events",
     ushort PrefetchCount = 8,
@@ -21,12 +22,15 @@ public sealed class RabbitMqStationTransport :
     IAsyncDisposable
 {
     private readonly RabbitMqStationTransportOptions _options;
-    private readonly ConnectionFactory _factory;
+    private readonly ConnectionFactory _publisherFactory;
+    private readonly ConnectionFactory _receiverFactory;
     private readonly IStationAgentConfirmedPublicationTransport? _publicationTransport;
     private readonly StationJobDeliveryProcessor _deliveryProcessor;
-    private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _publisherConnectionGate = new(1, 1);
+    private readonly SemaphoreSlim _receiverConnectionGate = new(1, 1);
     private readonly SemaphoreSlim _publishGate = new(1, 1);
-    private IConnection? _connection;
+    private IConnection? _publisherConnection;
+    private IConnection? _receiverConnection;
     private IChannel? _publisherChannel;
     private IChannel? _receiverChannel;
 
@@ -38,6 +42,7 @@ public sealed class RabbitMqStationTransport :
         ArgumentNullException.ThrowIfNull(options.BrokerUri);
         _ = Required(options.AgentId, nameof(options.AgentId));
         _ = Required(options.StationId, nameof(options.StationId));
+        _ = Required(options.StationSystemId, nameof(options.StationSystemId));
         _ = Required(options.JobExchange, nameof(options.JobExchange));
         _ = Required(options.EventExchange, nameof(options.EventExchange));
         if (options.BrokerUri.Scheme is not ("amqp" or "amqps"))
@@ -67,14 +72,14 @@ public sealed class RabbitMqStationTransport :
         _options = options;
         _publicationTransport = publicationTransport;
         _deliveryProcessor = new StationJobDeliveryProcessor(options);
-        _factory = new ConnectionFactory
-        {
-            Uri = options.BrokerUri,
-            ClientProvidedName = $"OpenLineOps.Agent/{options.AgentId}/{options.StationId}",
-            AutomaticRecoveryEnabled = true,
-            TopologyRecoveryEnabled = true,
-            ConsumerDispatchConcurrency = options.MaximumConcurrentJobs
-        };
+        _publisherFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Agent.Publisher/{options.AgentId}/{options.StationId}",
+            consumerDispatchConcurrency: 1);
+        _receiverFactory = CreateFactory(
+            options,
+            $"OpenLineOps.Agent.Receiver/{options.AgentId}/{options.StationId}",
+            options.MaximumConcurrentJobs);
     }
 
     public async ValueTask PublishAsync(
@@ -171,18 +176,25 @@ public sealed class RabbitMqStationTransport :
             await _publisherChannel.DisposeAsync().ConfigureAwait(false);
         }
 
-        if (_connection is not null)
+        if (_receiverConnection is not null)
         {
-            await _connection.DisposeAsync().ConfigureAwait(false);
+            await _receiverConnection.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_publisherConnection is not null)
+        {
+            await _publisherConnection.DisposeAsync().ConfigureAwait(false);
         }
 
         _publishGate.Dispose();
-        _connectionGate.Dispose();
+        _receiverConnectionGate.Dispose();
+        _publisherConnectionGate.Dispose();
     }
 
     private async ValueTask<IChannel> GetPublisherChannelAsync(CancellationToken cancellationToken)
     {
-        var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await GetPublisherConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
         if (_publisherChannel is { IsOpen: true })
         {
             return _publisherChannel;
@@ -218,7 +230,8 @@ public sealed class RabbitMqStationTransport :
 
     private async ValueTask<IChannel> GetReceiverChannelAsync(CancellationToken cancellationToken)
     {
-        var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await GetReceiverConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
         if (_receiverChannel is { IsOpen: true })
         {
             return _receiverChannel;
@@ -254,7 +267,7 @@ public sealed class RabbitMqStationTransport :
         await _receiverChannel.QueueBindAsync(
                 queueName,
                 _options.JobExchange,
-                $"station.{_options.AgentId}.{_options.StationId}",
+                StationTransportRoute.Job(_options.AgentId, _options.StationId),
                 arguments: null,
                 noWait: false,
                 cancellationToken)
@@ -262,7 +275,9 @@ public sealed class RabbitMqStationTransport :
         await _receiverChannel.QueueBindAsync(
                 queueName,
                 _options.JobExchange,
-                $"station.{_options.AgentId}.{_options.StationId}.resource-lease-changed",
+                StationTransportRoute.ResourceLeaseChanged(
+                    _options.AgentId,
+                    _options.StationId),
                 arguments: null,
                 noWait: false,
                 cancellationToken)
@@ -276,38 +291,84 @@ public sealed class RabbitMqStationTransport :
         return _receiverChannel;
     }
 
-    private async ValueTask<IConnection> GetConnectionAsync(CancellationToken cancellationToken)
+    private async ValueTask<IConnection> GetPublisherConnectionAsync(
+        CancellationToken cancellationToken)
     {
-        if (_connection is { IsOpen: true })
+        if (_publisherConnection is { IsOpen: true })
         {
-            return _connection;
+            return _publisherConnection;
         }
 
-        await _connectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _publisherConnectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_connection is { IsOpen: true })
+            if (_publisherConnection is { IsOpen: true })
             {
-                return _connection;
+                return _publisherConnection;
             }
 
-            if (_connection is not null)
+            if (_publisherConnection is not null)
             {
-                await _connection.DisposeAsync().ConfigureAwait(false);
+                await _publisherConnection.DisposeAsync().ConfigureAwait(false);
             }
 
-            _connection = await _factory.CreateConnectionAsync(cancellationToken)
+            _publisherConnection = await _publisherFactory
+                .CreateConnectionAsync(cancellationToken)
                 .ConfigureAwait(false);
-            return _connection;
+            return _publisherConnection;
         }
         finally
         {
-            _connectionGate.Release();
+            _publisherConnectionGate.Release();
         }
     }
 
+    private async ValueTask<IConnection> GetReceiverConnectionAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_receiverConnection is { IsOpen: true })
+        {
+            return _receiverConnection;
+        }
+
+        await _receiverConnectionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_receiverConnection is { IsOpen: true })
+            {
+                return _receiverConnection;
+            }
+
+            if (_receiverConnection is not null)
+            {
+                await _receiverConnection.DisposeAsync().ConfigureAwait(false);
+            }
+
+            _receiverConnection = await _receiverFactory
+                .CreateConnectionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return _receiverConnection;
+        }
+        finally
+        {
+            _receiverConnectionGate.Release();
+        }
+    }
+
+    private static ConnectionFactory CreateFactory(
+        RabbitMqStationTransportOptions options,
+        string clientProvidedName,
+        ushort consumerDispatchConcurrency) => new()
+        {
+            Uri = options.BrokerUri,
+            ClientProvidedName = clientProvidedName,
+            AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true,
+            ConsumerDispatchConcurrency = consumerDispatchConcurrency
+        };
+
     private string QueueName() =>
-        $"openlineops.station.{_options.AgentId}.{_options.StationId}.jobs";
+        StationTransportRoute.JobQueue(_options.AgentId, _options.StationId);
 
     private static StationTransportDelivery ToDelivery(BasicDeliverEventArgs delivery) => new(
         delivery.DeliveryTag,

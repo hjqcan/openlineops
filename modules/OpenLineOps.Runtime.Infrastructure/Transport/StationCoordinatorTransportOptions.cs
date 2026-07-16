@@ -41,7 +41,44 @@ public sealed class StationCoordinatorTransportOptions
                 $"{SectionName}:BrokerUri must use amqps when RequireTls is true.");
         }
 
+        if (RequireTls)
+        {
+            ValidateProductionCredentials(uri);
+        }
+
         return uri;
+    }
+
+    private static void ValidateProductionCredentials(Uri uri)
+    {
+        var separator = uri.UserInfo.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0 || separator == uri.UserInfo.Length - 1)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:BrokerUri must include a dedicated non-guest username and non-empty password when RequireTls is true.");
+        }
+
+        string userName;
+        string password;
+        try
+        {
+            userName = Uri.UnescapeDataString(uri.UserInfo[..separator]);
+            password = Uri.UnescapeDataString(uri.UserInfo[(separator + 1)..]);
+        }
+        catch (UriFormatException exception)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:BrokerUri contains invalid escaped credentials.",
+                exception);
+        }
+
+        if (string.IsNullOrWhiteSpace(userName)
+            || string.Equals(userName, "guest", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(password))
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:BrokerUri must include a dedicated non-guest username and non-empty password when RequireTls is true.");
+        }
     }
 }
 

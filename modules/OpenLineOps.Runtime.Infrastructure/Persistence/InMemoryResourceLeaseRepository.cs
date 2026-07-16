@@ -12,6 +12,30 @@ public sealed class InMemoryResourceLeaseRepository(IClock clock) : IResourceLea
     private readonly Dictionary<ResourceRequirement, ResourceLease> _leases = [];
     private readonly Dictionary<ResourceRequirement, long> _fencingTokens = [];
 
+    internal object CoordinationGate => _gate;
+
+    internal Dictionary<ResourceRequirement, ResourceLease> CaptureCoordinationSnapshot()
+    {
+        lock (_gate)
+        {
+            return new Dictionary<ResourceRequirement, ResourceLease>(_leases);
+        }
+    }
+
+    internal void RestoreCoordinationSnapshot(
+        IReadOnlyDictionary<ResourceRequirement, ResourceLease> snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (_gate)
+        {
+            _leases.Clear();
+            foreach (var pair in snapshot)
+            {
+                _leases.Add(pair.Key, pair.Value);
+            }
+        }
+    }
+
     public ValueTask<IReadOnlyCollection<ResourceLease>> ListAsync(
         CancellationToken cancellationToken = default)
     {
@@ -148,7 +172,8 @@ public sealed class InMemoryResourceLeaseRepository(IClock clock) : IResourceLea
                         lease.OperationRunId,
                         operationRunId,
                         StringComparison.Ordinal)
-                    && lease.FencingToken == claim.FencingToken)
+                    && lease.FencingToken == claim.FencingToken
+                    && lease.ExpiresAtUtc != DateTimeOffset.MaxValue)
                 {
                     _leases.Remove(claim.Resource);
                 }
@@ -158,20 +183,89 @@ public sealed class InMemoryResourceLeaseRepository(IClock clock) : IResourceLea
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask HoldForRecoveryAsync(
+    public ValueTask ReleaseRecoveryHoldAsync(
         ProductionRunId runId,
-        string operationRunId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
         CancellationToken cancellationToken = default)
     {
+        var expected = ProductionRunLeaseHoldSet.Create(leaseHolds);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            foreach (var pair in _leases.Where(pair =>
-                         pair.Value.ProductionRunId == runId
-                         && string.Equals(
-                             pair.Value.OperationRunId,
-                             operationRunId,
-                             StringComparison.Ordinal)).ToArray())
+            var owned = _leases
+                .Where(pair => pair.Value.ProductionRunId == runId
+                               && expected.ContainsOperation(pair.Value.OperationRunId))
+                .ToArray();
+            if (!expected.MatchesExactly(owned.Select(static pair =>
+                    new ProductionRunLeaseHoldClaim(
+                        pair.Value.OperationRunId,
+                        pair.Key,
+                        pair.Value.FencingToken))))
+            {
+                throw expected.OwnershipException(
+                    runId,
+                    owned.Length == 0
+                        ? "no current recovery-held lease rows are owned by the Production Run"
+                        : "the complete current recovery-held owner set differs from the supplied fencing claims");
+            }
+
+            var invalid = owned.FirstOrDefault(pair =>
+                pair.Value.ExpiresAtUtc != DateTimeOffset.MaxValue
+                || !_fencingTokens.TryGetValue(pair.Key, out var currentToken)
+                || currentToken != pair.Value.FencingToken);
+            if (invalid.Value is not null)
+            {
+                throw expected.OwnershipException(
+                    runId,
+                    $"{invalid.Key.CanonicalKey} is not an exact current recovery hold");
+            }
+
+            foreach (var pair in owned)
+            {
+                _leases.Remove(pair.Key);
+            }
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask HoldForRecoveryAsync(
+        ProductionRunId runId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
+        CancellationToken cancellationToken = default)
+    {
+        var expected = ProductionRunLeaseHoldSet.Create(leaseHolds);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var owned = _leases
+                .Where(pair => pair.Value.ProductionRunId == runId
+                    && expected.ContainsOperation(pair.Value.OperationRunId))
+                .ToArray();
+            if (!expected.MatchesExactly(owned.Select(static pair =>
+                    new ProductionRunLeaseHoldClaim(
+                        pair.Value.OperationRunId,
+                        pair.Key,
+                        pair.Value.FencingToken))))
+            {
+                throw expected.OwnershipException(
+                    runId,
+                    owned.Length == 0
+                        ? "no current lease rows are owned by the Production Run"
+                        : "a supplied durable Operation Run lease set differs from its fencing claims");
+            }
+
+            var stale = owned.FirstOrDefault(pair =>
+                !_fencingTokens.TryGetValue(pair.Key, out var currentToken)
+                || currentToken != pair.Value.FencingToken);
+            if (stale.Value is not null)
+            {
+                throw expected.OwnershipException(
+                    runId,
+                    $"the permanent fence for {stale.Key.CanonicalKey} is stale");
+            }
+
+            foreach (var pair in owned)
             {
                 var lease = pair.Value;
                 _leases[pair.Key] = new ResourceLease(

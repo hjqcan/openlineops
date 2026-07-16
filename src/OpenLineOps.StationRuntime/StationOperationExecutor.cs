@@ -21,6 +21,7 @@ using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -87,7 +88,14 @@ internal static class StationOperationExecutor
         try
         {
             var startedPlugins = await lifecycle
-                .StartAsync(scope.ServiceProvider, cancellationToken)
+                .StartAsync(
+                    new ProjectApplicationWorkspaceScope(
+                        release.ProjectId,
+                        release.ApplicationId,
+                        release.SourceRootPath,
+                        release.ApplicationProjectRelativePath),
+                    scope.ServiceProvider,
+                    cancellationToken)
                 .ConfigureAwait(false);
             ValidatePluginLifecycle(
                 pluginCatalog.Packages,
@@ -110,6 +118,7 @@ internal static class StationOperationExecutor
                         new ConfigurationSnapshotId(request.ConfigurationSnapshotId),
                         new RecipeSnapshotId(request.RecipeSnapshotId),
                         process,
+                        ProductionContextDocument.Read(request.Inputs),
                         CreateTraceMetadata(request)),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -429,8 +438,6 @@ internal static class StationOperationExecutor
             .AddEnvironmentVariables()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OpenLineOps:Plugins:PackageRoot"] = pluginCatalog.PackageRootPath,
-                ["OpenLineOps:Plugins:Activator"] = PluginActivators.ExternalProcess,
                 ["OpenLineOps:Plugins:EventLog:Provider"] = PluginEventLogProviders.Sqlite,
                 ["OpenLineOps:Plugins:EventLog:DatabasePath"] = Path.Combine(
                     root,

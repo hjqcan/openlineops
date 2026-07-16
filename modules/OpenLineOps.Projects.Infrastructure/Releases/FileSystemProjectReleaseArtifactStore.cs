@@ -1454,6 +1454,9 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                         operation.BlockVersionIds,
                         nameof(operation.BlockVersionIds)),
                     resources,
+                    NormalizeOperationInputMappings(
+                        operation.InputMappings,
+                        operation.OperationId),
                     authorizedActions);
             })
             .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
@@ -1605,6 +1608,40 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 nameof(resources));
         }
 
+        return normalized;
+    }
+
+    private static ProjectReleaseOperationInputMapping[] NormalizeOperationInputMappings(
+        IReadOnlyCollection<ProjectReleaseOperationInputMapping>? inputMappings,
+        string operationId)
+    {
+        var normalized = (inputMappings
+                ?? throw new ArgumentException(
+                    $"Production operation {operationId} input mappings are required.",
+                    nameof(inputMappings)))
+            .Select(mapping =>
+            {
+                if (mapping is null)
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operationId} input mappings cannot contain null.",
+                        nameof(inputMappings));
+                }
+
+                return new ProjectReleaseOperationInputMapping(
+                    RequireProductionValue(mapping.TargetInputKey, nameof(mapping.TargetInputKey)),
+                    RequireProductionValue(mapping.SourceOperationId, nameof(mapping.SourceOperationId)),
+                    RequireProductionValue(mapping.SourceOutputKey, nameof(mapping.SourceOutputKey)),
+                    RequireExactToken(
+                        mapping.ExpectedValueKind,
+                        ["Text", "Boolean", "WholeNumber", "FixedPoint", "DateTimeUtc"],
+                        "Operation input mapping value kind"));
+            })
+            .OrderBy(mapping => mapping.TargetInputKey, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            normalized.Select(mapping => mapping.TargetInputKey),
+            $"Production operation {operationId} input keys");
         return normalized;
     }
 
@@ -2154,6 +2191,93 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         }
 
         ValidateParallelGroups(forwardOperations, transitions);
+        ValidateOperationInputMappings(
+            operations,
+            forwardOperations);
+    }
+
+    private static void ValidateOperationInputMappings(
+        IReadOnlyCollection<ProjectReleaseOperation> operations,
+        IReadOnlyCollection<ProjectReleaseRouteTransition> forwardTransitions)
+    {
+        var operationIds = operations.Select(operation => operation.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        var incoming = forwardTransitions.ToLookup(
+            transition => transition.TargetOperationId!,
+            StringComparer.Ordinal);
+        var outgoing = forwardTransitions.ToLookup(
+            transition => transition.SourceOperationId,
+            StringComparer.Ordinal);
+        var indegrees = operations.ToDictionary(
+            operation => operation.OperationId,
+            operation => incoming[operation.OperationId].Count(),
+            StringComparer.Ordinal);
+        var pending = new Queue<string>(
+            indegrees.Where(static pair => pair.Value == 0).Select(static pair => pair.Key));
+        var definiteBefore = operations.ToDictionary(
+            operation => operation.OperationId,
+            _ => new HashSet<string>(StringComparer.Ordinal),
+            StringComparer.Ordinal);
+        while (pending.TryDequeue(out var operationId))
+        {
+            var incomingTransitions = incoming[operationId].ToArray();
+            if (incomingTransitions.Length > 0)
+            {
+                var predecessorSets = incomingTransitions.Select(transition =>
+                {
+                    var completed = new HashSet<string>(
+                        definiteBefore[transition.SourceOperationId],
+                        StringComparer.Ordinal);
+                    completed.Add(transition.SourceOperationId);
+                    return completed;
+                }).ToArray();
+                var isAndJoin = incomingTransitions.Length >= 2
+                    && incomingTransitions.All(static transition => transition.Kind == "ParallelJoin")
+                    && incomingTransitions.Select(static transition => transition.ParallelGroupId)
+                        .Distinct(StringComparer.Ordinal).Count() == 1;
+                var guaranteed = new HashSet<string>(predecessorSets[0], StringComparer.Ordinal);
+                foreach (var predecessorSet in predecessorSets.Skip(1))
+                {
+                    if (isAndJoin)
+                    {
+                        guaranteed.UnionWith(predecessorSet);
+                    }
+                    else
+                    {
+                        guaranteed.IntersectWith(predecessorSet);
+                    }
+                }
+
+                definiteBefore[operationId] = guaranteed;
+            }
+
+            foreach (var transition in outgoing[operationId])
+            {
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
+                {
+                    pending.Enqueue(transition.TargetOperationId!);
+                }
+            }
+        }
+
+        foreach (var operation in operations)
+        {
+            foreach (var mapping in operation.InputMappings)
+            {
+                if (!operationIds.Contains(mapping.SourceOperationId)
+                    || string.Equals(
+                        mapping.SourceOperationId,
+                        operation.OperationId,
+                        StringComparison.Ordinal)
+                    || !definiteBefore[operation.OperationId].Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operation.OperationId} input {mapping.TargetInputKey} source {mapping.SourceOperationId} must definitely complete first; conditional bypasses and sibling-branch reads before an AND join are not allowed.",
+                        nameof(operations));
+                }
+            }
+        }
     }
 
     private static void ValidateParallelGroups(

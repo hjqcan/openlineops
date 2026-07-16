@@ -135,7 +135,7 @@ public sealed record CreateTraceCommandRequest(
     string? TargetId,
     string? TargetCapabilityId,
     string? CommandName,
-    string? Status,
+    string? ExecutionStatus,
     string? ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
@@ -156,7 +156,8 @@ public sealed record CreateMeasurementRecordRequest(
     string? ActionId,
     string? TargetKind,
     string? TargetId,
-    string? CommandStatus,
+    string? CommandExecutionStatus,
+    string? CommandResultJudgement,
     bool? Passed,
     DateTimeOffset MeasuredAtUtc);
 
