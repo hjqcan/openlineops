@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 
@@ -456,6 +458,129 @@ public sealed class LeastPrivilegeLauncherContractTests
     }
 
     [Fact]
+    public async Task LauncherRejectsRuntimeAssetDirectoryJunctionBeforeReadingExternalFile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var runtimeIdentifier = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.X86 => "win-x86",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException(
+                "The test requires a supported Windows architecture.")
+        };
+        var bundleRoot = LauncherBundleRoot();
+        var nativeRoot = Path.Combine(
+            bundleRoot,
+            "runtimes",
+            runtimeIdentifier,
+            "native");
+        var nativeAsset = Assert.Single(Directory.EnumerateFiles(nativeRoot));
+        var backupRoot = nativeRoot + ".backup-" + Guid.NewGuid().ToString("N");
+        var externalRoot = Path.Combine(
+            Path.GetTempPath(),
+            "OpenLineOps.Tests",
+            "LauncherPayloadJunction",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(externalRoot);
+        var externalAsset = Path.Combine(externalRoot, Path.GetFileName(nativeAsset));
+        File.Copy(nativeAsset, externalAsset);
+        var expectedExternalBytes = await File.ReadAllBytesAsync(externalAsset);
+        Directory.Move(nativeRoot, backupRoot);
+        try
+        {
+            CreateDirectoryJunction(nativeRoot, externalRoot);
+            LauncherResult result;
+            await using (var lockedExternalAsset = new FileStream(
+                             externalAsset,
+                             FileMode.Open,
+                             FileAccess.Read,
+                             FileShare.None,
+                             bufferSize: 1,
+                             FileOptions.Asynchronous))
+            {
+                result = await RunWithEmptyInputAsync();
+            }
+
+            Assert.Equal(78, result.ExitCode);
+            Assert.Equal(string.Empty, result.StandardOutput);
+            Assert.Contains(
+                "Python Script Worker payload directory cannot be a reparse point",
+                result.StandardError,
+                StringComparison.Ordinal);
+            Assert.Equal(expectedExternalBytes, await File.ReadAllBytesAsync(externalAsset));
+        }
+        finally
+        {
+            if (Directory.Exists(nativeRoot))
+            {
+                Directory.Delete(nativeRoot, recursive: false);
+            }
+            if (Directory.Exists(backupRoot))
+            {
+                Directory.Move(backupRoot, nativeRoot);
+            }
+            if (Directory.Exists(externalRoot))
+            {
+                Directory.Delete(externalRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task LauncherRejectsNonObjectRuntimeTargetMetadata()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var dependenciesPath = Path.Combine(
+            LauncherBundleRoot(),
+            "OpenLineOps.ScriptWorker.deps.json");
+        var original = await File.ReadAllBytesAsync(dependenciesPath);
+        var root = JsonNode.Parse(original)?.AsObject()
+                   ?? throw new InvalidDataException(
+                       "The test Script Worker dependency manifest is invalid.");
+        var runtimeTargetName = root["runtimeTarget"]?["name"]?.GetValue<string>()
+                                ?? throw new InvalidDataException(
+                                    "The test Script Worker runtime target is missing.");
+        var target = root["targets"]?[runtimeTargetName]?.AsObject()
+                     ?? throw new InvalidDataException(
+                         "The test Script Worker target is missing.");
+        var runtimeTargets = target
+            .Select(library => library.Value?["runtimeTargets"])
+            .OfType<JsonObject>()
+            .First();
+        var assetName = runtimeTargets.First().Key;
+        runtimeTargets[assetName] = "invalid-runtime-target";
+
+        LauncherResult result;
+        try
+        {
+            await File.WriteAllTextAsync(
+                dependenciesPath,
+                root.ToJsonString(JsonOptions));
+            result = await RunWithEmptyInputAsync();
+        }
+        finally
+        {
+            await File.WriteAllBytesAsync(dependenciesPath, original);
+        }
+
+        Assert.Equal(78, result.ExitCode);
+        Assert.Equal(string.Empty, result.StandardOutput);
+        Assert.Contains(
+            "dependency manifest contains an invalid runtime target asset",
+            result.StandardError,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ConcurrentWorkersUseDistinctAppContainersAndKillDescendants()
     {
         if (!OperatingSystem.IsWindows())
@@ -481,6 +606,18 @@ public sealed class LeastPrivilegeLauncherContractTests
             "HostilePath",
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(hostilePath);
+        var launcherBundleRoot = LauncherBundleRoot();
+        var unrelatedAssemblyPath = Path.Combine(
+            launcherBundleRoot,
+            "OpenLineOps.Agent.Tests.dll");
+        var unrelatedDataRoot = Path.Combine(launcherBundleRoot, "data");
+        Assert.False(File.Exists(unrelatedAssemblyPath));
+        Assert.False(Directory.Exists(unrelatedDataRoot));
+        await File.WriteAllTextAsync(unrelatedAssemblyPath, "not-a-worker-dependency");
+        Directory.CreateDirectory(unrelatedDataRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(unrelatedDataRoot, "sentinel.txt"),
+            "must-not-be-copied");
         Environment.SetEnvironmentVariable("PATH", hostilePath);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -489,6 +626,18 @@ public sealed class LeastPrivilegeLauncherContractTests
             first = await StartAndCaptureProfileAsync(
                 ExistingMarkers(trustedParent),
                 trustedParent);
+            var firstContentRoot = Path.GetFullPath(Path.Combine(
+                first.RuntimeRoot,
+                "..",
+                "content"));
+            Assert.True(File.Exists(Path.Combine(
+                firstContentRoot,
+                "OpenLineOps.ScriptWorker.dll")));
+            Assert.True(File.Exists(Path.Combine(firstContentRoot, "PythonScript.dll")));
+            Assert.False(File.Exists(Path.Combine(
+                firstContentRoot,
+                "OpenLineOps.Agent.Tests.dll")));
+            Assert.False(Directory.Exists(Path.Combine(firstContentRoot, "data")));
             var anchorPath = Path.Combine(first.RuntimeRoot, "host-anchor.txt");
             await File.WriteAllTextAsync(anchorPath, "host-owned");
 
@@ -611,6 +760,11 @@ public sealed class LeastPrivilegeLauncherContractTests
             if (first is not null)
             {
                 await StopLauncherAsync(first);
+            }
+            File.Delete(unrelatedAssemblyPath);
+            if (Directory.Exists(unrelatedDataRoot))
+            {
+                Directory.Delete(unrelatedDataRoot, recursive: true);
             }
             Directory.Delete(hostilePath, recursive: true);
         }
@@ -1360,7 +1514,9 @@ public sealed class LeastPrivilegeLauncherContractTests
             "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT");
         if (string.IsNullOrWhiteSpace(stagedBundleRoot))
         {
-            return AppContext.BaseDirectory;
+            return Path.Combine(
+                AppContext.BaseDirectory,
+                "least-privilege-launcher-bundle");
         }
         if (char.IsWhiteSpace(stagedBundleRoot[0])
             || char.IsWhiteSpace(stagedBundleRoot[^1])

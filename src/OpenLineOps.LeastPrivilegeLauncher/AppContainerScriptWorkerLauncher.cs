@@ -533,71 +533,314 @@ internal static class AppContainerScriptWorkerLauncher
             sourceRoot,
             "OpenLineOps.ScriptWorker.runtimeconfig.json");
         var frameworkDependent = File.Exists(runtimeConfig);
-        var sourceFiles = frameworkDependent
-            ? Directory.EnumerateFiles(sourceRoot, "*.dll", SearchOption.TopDirectoryOnly)
-                .Concat(new[]
-                {
-                    sourceWorkerPath,
-                    Path.Combine(sourceRoot, "OpenLineOps.ScriptWorker.deps.json"),
-                    runtimeConfig
-                })
-            : new[] { sourceWorkerPath };
+        var payload = frameworkDependent
+            ? ResolveFrameworkDependentPayload(
+                sourceRoot,
+                sourceWorkerPath,
+                runtimeConfig)
+            : [new WorkerPayloadFile(sourceWorkerPath, WorkerFileName)];
 
-        foreach (var sourcePath in sourceFiles
-                     .Select(Path.GetFullPath)
-                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var file in payload)
         {
-            if (!File.Exists(sourcePath))
-            {
-                throw new FileNotFoundException(
-                    "The Python Script Worker payload is incomplete.",
-                    sourcePath);
-            }
+            var destinationPath = CanonicalPayloadPath(contentRoot, file.RelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
             CopyPayloadFile(
-                sourcePath,
-                Path.Combine(contentRoot, Path.GetFileName(sourcePath)));
+                file.SourcePath,
+                destinationPath);
+        }
+    }
+
+    private static WorkerPayloadFile[] ResolveFrameworkDependentPayload(
+        string sourceRoot,
+        string sourceWorkerPath,
+        string runtimeConfig)
+    {
+        var dependenciesPath = Path.Combine(
+            sourceRoot,
+            "OpenLineOps.ScriptWorker.deps.json");
+        var payload = new Dictionary<string, WorkerPayloadFile>(
+            StringComparer.OrdinalIgnoreCase);
+
+        AddPayloadFile(payload, sourceRoot, sourceWorkerPath, WorkerFileName);
+        AddPayloadFile(
+            payload,
+            sourceRoot,
+            dependenciesPath,
+            Path.GetFileName(dependenciesPath));
+        AddPayloadFile(
+            payload,
+            sourceRoot,
+            runtimeConfig,
+            Path.GetFileName(runtimeConfig));
+
+        RejectFileReparsePoint(dependenciesPath, "Python Script Worker dependency manifest");
+        using var stream = new FileStream(
+            dependenciesPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 16_384,
+            FileOptions.SequentialScan);
+        using var document = JsonDocument.Parse(stream, new JsonDocumentOptions
+        {
+            AllowTrailingCommas = false,
+            CommentHandling = JsonCommentHandling.Disallow,
+            MaxDepth = 64
+        });
+        var root = document.RootElement;
+        var runtimeTargetName = RequiredString(
+            RequiredProperty(root, "runtimeTarget"),
+            "name");
+        var targets = RequiredProperty(root, "targets");
+        if (targets.ValueKind != JsonValueKind.Object
+            || !targets.TryGetProperty(runtimeTargetName, out var target)
+            || target.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                "The Python Script Worker dependency manifest has no runtime target.");
         }
 
-        if (!frameworkDependent)
+        foreach (var library in target.EnumerateObject())
+        {
+            if (library.Value.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException(
+                    "The Python Script Worker dependency manifest contains an invalid library.");
+            }
+            AddFlattenedAssets(payload, sourceRoot, library.Value, "runtime");
+            AddFlattenedAssets(payload, sourceRoot, library.Value, "native");
+            AddResourceAssets(payload, sourceRoot, library.Value);
+            AddCurrentRuntimeAssets(payload, sourceRoot, library.Value);
+        }
+
+        return payload.Values.ToArray();
+    }
+
+    private static void AddFlattenedAssets(
+        IDictionary<string, WorkerPayloadFile> payload,
+        string sourceRoot,
+        JsonElement library,
+        string groupName)
+    {
+        if (!library.TryGetProperty(groupName, out var assets))
+        {
+            return;
+        }
+        RequireObject(assets, groupName);
+        foreach (var asset in assets.EnumerateObject())
+        {
+            var fileName = Path.GetFileName(CanonicalManifestAsset(asset.Name));
+            AddPayloadFile(payload, sourceRoot, fileName, fileName);
+        }
+    }
+
+    private static void AddResourceAssets(
+        IDictionary<string, WorkerPayloadFile> payload,
+        string sourceRoot,
+        JsonElement library)
+    {
+        if (!library.TryGetProperty("resources", out var assets))
+        {
+            return;
+        }
+        RequireObject(assets, "resources");
+        foreach (var asset in assets.EnumerateObject())
+        {
+            var relativePath = CanonicalManifestAsset(asset.Name);
+            var parent = Path.GetDirectoryName(relativePath)
+                         ?? throw new InvalidDataException(
+                             "A Python Script Worker resource has no culture directory.");
+            var culture = Path.GetFileName(parent);
+            var destination = Path.Combine(culture, Path.GetFileName(relativePath));
+            AddPayloadFile(payload, sourceRoot, destination, destination);
+        }
+    }
+
+    private static void AddCurrentRuntimeAssets(
+        IDictionary<string, WorkerPayloadFile> payload,
+        string sourceRoot,
+        JsonElement library)
+    {
+        if (!library.TryGetProperty("runtimeTargets", out var assets))
+        {
+            return;
+        }
+        RequireObject(assets, "runtimeTargets");
+        var currentRuntimeIdentifier = CurrentWindowsRuntimeIdentifier();
+        foreach (var asset in assets.EnumerateObject())
+        {
+            if (asset.Value.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException(
+                    "The Python Script Worker dependency manifest contains an invalid runtime target asset.");
+            }
+            if (!string.Equals(
+                    RequiredString(asset.Value, "rid"),
+                    currentRuntimeIdentifier,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var relativePath = CanonicalManifestAsset(asset.Name);
+            AddPayloadFile(payload, sourceRoot, relativePath, relativePath);
+        }
+    }
+
+    private static void AddPayloadFile(
+        IDictionary<string, WorkerPayloadFile> payload,
+        string sourceRoot,
+        string sourcePath,
+        string relativeDestinationPath)
+    {
+        var canonicalSource = Path.IsPathFullyQualified(sourcePath)
+            ? Path.GetFullPath(sourcePath)
+            : CanonicalPayloadPath(sourceRoot, sourcePath);
+        var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot));
+        if (!canonicalSource.StartsWith(
+                canonicalRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(canonicalSource))
+        {
+            throw new FileNotFoundException(
+                "The Python Script Worker payload is incomplete.",
+                canonicalSource);
+        }
+        RejectPayloadDirectoryReparsePoints(canonicalRoot, canonicalSource);
+
+        var relativePath = CanonicalRelativePayloadPath(relativeDestinationPath);
+        var file = new WorkerPayloadFile(canonicalSource, relativePath);
+        if (payload.TryGetValue(relativePath, out var existing))
+        {
+            if (!string.Equals(
+                    existing.SourcePath,
+                    file.SourcePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Python Script Worker payload assets collide at '{relativePath}'.");
+            }
+            return;
+        }
+        payload.Add(relativePath, file);
+    }
+
+    private static void RejectPayloadDirectoryReparsePoints(
+        string sourceRoot,
+        string sourcePath)
+    {
+        RejectReparsePoint(sourceRoot, "Python Script Worker payload root");
+        var parent = Path.GetDirectoryName(sourcePath)
+                     ?? throw new InvalidDataException(
+                         "A Python Script Worker payload asset has no parent directory.");
+        var relativeParent = Path.GetRelativePath(sourceRoot, parent);
+        if (string.Equals(relativeParent, ".", StringComparison.Ordinal))
         {
             return;
         }
 
-        foreach (var sourceDirectory in Directory.EnumerateDirectories(
-                     sourceRoot,
-                     "*",
-                     SearchOption.TopDirectoryOnly))
+        var current = sourceRoot;
+        foreach (var segment in relativeParent.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
         {
-            CopyPayloadDirectory(
-                sourceDirectory,
-                Path.Combine(contentRoot, Path.GetFileName(sourceDirectory)));
+            current = Path.Combine(current, segment);
+            RejectReparsePoint(current, "Python Script Worker payload directory");
         }
     }
 
-    private static void CopyPayloadDirectory(string sourceDirectory, string destinationDirectory)
+    private static string CanonicalManifestAsset(string value)
     {
-        RejectReparsePoint(sourceDirectory, "Python Script Worker payload directory");
-        Directory.CreateDirectory(destinationDirectory);
-        foreach (var sourceFile in Directory.EnumerateFiles(
-                     sourceDirectory,
-                     "*",
-                     SearchOption.TopDirectoryOnly))
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Contains('\\', StringComparison.Ordinal)
+            || value[0] == '/')
         {
-            CopyPayloadFile(
-                sourceFile,
-                Path.Combine(destinationDirectory, Path.GetFileName(sourceFile)));
+            throw new InvalidDataException(
+                "The Python Script Worker dependency manifest contains a non-canonical asset path.");
         }
-
-        foreach (var childDirectory in Directory.EnumerateDirectories(
-                     sourceDirectory,
-                     "*",
-                     SearchOption.TopDirectoryOnly))
+        var segments = value.Split('/');
+        if (segments.Any(segment => string.IsNullOrWhiteSpace(segment)
+                                    || segment is "." or ".."))
         {
-            CopyPayloadDirectory(
-                childDirectory,
-                Path.Combine(destinationDirectory, Path.GetFileName(childDirectory)));
+            throw new InvalidDataException(
+                "The Python Script Worker dependency manifest contains a non-canonical asset path.");
+        }
+        return Path.Combine(segments);
+    }
+
+    private static string CanonicalRelativePayloadPath(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidDataException(
+                "The Python Script Worker payload contains a non-canonical relative path.");
+        }
+        var segments = value.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.None);
+        if (segments.Any(segment => string.IsNullOrWhiteSpace(segment)
+                                    || segment is "." or ".."))
+        {
+            throw new InvalidDataException(
+                "The Python Script Worker payload contains a non-canonical relative path.");
+        }
+        return Path.Combine(segments);
+    }
+
+    private static string CanonicalPayloadPath(string root, string relativePath)
+    {
+        var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var path = Path.GetFullPath(Path.Combine(canonicalRoot, relativePath));
+        if (!path.StartsWith(
+                canonicalRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "A Python Script Worker payload asset escapes its bundle root.");
+        }
+        return path;
+    }
+
+    private static JsonElement RequiredProperty(JsonElement parent, string name)
+    {
+        if (parent.ValueKind != JsonValueKind.Object
+            || !parent.TryGetProperty(name, out var value))
+        {
+            throw new InvalidDataException(
+                $"The Python Script Worker dependency manifest omits '{name}'.");
+        }
+        return value;
+    }
+
+    private static string RequiredString(JsonElement parent, string name)
+    {
+        var value = RequiredProperty(parent, name);
+        if (value.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            throw new InvalidDataException(
+                $"The Python Script Worker dependency manifest has an invalid '{name}'.");
+        }
+        return value.GetString()!;
+    }
+
+    private static void RequireObject(JsonElement value, string name)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                $"The Python Script Worker dependency manifest has an invalid '{name}'.");
         }
     }
+
+    private static string CurrentWindowsRuntimeIdentifier() =>
+        RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.X86 => "win-x86",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException(
+                "The Python Script Worker does not support this Windows architecture.")
+        };
 
     private static void CopyPayloadFile(string sourcePath, string destinationPath)
     {
@@ -844,6 +1087,10 @@ internal static class AppContainerScriptWorkerLauncher
         string RuntimeRoot,
         string RuntimeDll,
         string CapabilitySid);
+
+    private sealed record WorkerPayloadFile(
+        string SourcePath,
+        string RelativePath);
 
     private sealed record ActiveProfileMarker(
         string ProfileName,

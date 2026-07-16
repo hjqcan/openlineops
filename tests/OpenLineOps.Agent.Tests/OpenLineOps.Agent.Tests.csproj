@@ -47,4 +47,48 @@
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <Target Name="StageLeastPrivilegeLauncherTestBundle"
+          AfterTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PropertyGroup>
+      <_LauncherOutputDir>$(MSBuildProjectDirectory)\..\..\src\OpenLineOps.LeastPrivilegeLauncher\bin\$(Configuration)\$(TargetFramework)\</_LauncherOutputDir>
+      <_ScriptWorkerOutputDir>$(MSBuildProjectDirectory)\..\..\src\OpenLineOps.ScriptWorker\bin\$(Configuration)\$(TargetFramework)\</_ScriptWorkerOutputDir>
+      <_LauncherTestBundleDir>$(TargetDir)least-privilege-launcher-bundle\</_LauncherTestBundleDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ContentProtection.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ProcessIsolation.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.exe" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.deps.json" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.runtimeconfig.json" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)*.dll"
+                                   Exclude="$(_ScriptWorkerOutputDir)OpenLineOps.ContentProtection.dll;$(_ScriptWorkerOutputDir)OpenLineOps.ProcessIsolation.dll;$(_ScriptWorkerOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.exe" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.deps.json" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.runtimeconfig.json" />
+      <_LauncherTestBundleResource Include="$(_ScriptWorkerOutputDir)**\*.resources.dll" />
+      <_LauncherTestBundleWinX64 Include="$(_ScriptWorkerOutputDir)runtimes\win-x64\**\*" />
+      <_LauncherTestBundleWinX86 Include="$(_ScriptWorkerOutputDir)runtimes\win-x86\**\*" />
+      <_LauncherTestBundleWinArm64 Include="$(_ScriptWorkerOutputDir)runtimes\win-arm64\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(_LauncherTestBundleDir)" />
+    <MakeDir Directories="$(_LauncherTestBundleDir)" />
+    <Copy SourceFiles="@(_LauncherTestBundleRootFile)"
+          DestinationFolder="$(_LauncherTestBundleDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleResource)"
+          DestinationFiles="@(_LauncherTestBundleResource->'$(_LauncherTestBundleDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinX64)"
+          DestinationFiles="@(_LauncherTestBundleWinX64->'$(_LauncherTestBundleDir)runtimes\win-x64\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinX86)"
+          DestinationFiles="@(_LauncherTestBundleWinX86->'$(_LauncherTestBundleDir)runtimes\win-x86\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinArm64)"
+          DestinationFiles="@(_LauncherTestBundleWinArm64->'$(_LauncherTestBundleDir)runtimes\win-arm64\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>
