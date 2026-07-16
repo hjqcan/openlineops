@@ -7,6 +7,8 @@ namespace OpenLineOps.Agent.Tests;
 
 internal static class AppContainerPythonRuntimeTestSupport
 {
+    private const int MaximumFileAliasDepth = 16;
+
     private static readonly Lazy<string> RuntimeDllPath = new(
         CreateRuntimeCopy,
         LazyThreadSafetyMode.ExecutionAndPublication);
@@ -62,7 +64,7 @@ internal static class AppContainerPythonRuntimeTestSupport
             {
                 Directory.Delete(destinationRoot, recursive: true);
             }
-            CopyDirectory(sourceRoot, destinationRoot, relativePath: string.Empty);
+            MaterializeRuntimeTree(sourceRoot, destinationRoot);
             if (!File.Exists(destinationDll) || !HasStandardLibrary(destinationRoot))
             {
                 throw new InvalidDataException(
@@ -196,15 +198,36 @@ internal static class AppContainerPythonRuntimeTestSupport
                 "AppContainer tests require an installed Python runtime DLL.");
     }
 
+    internal static void MaterializeRuntimeTree(string sourceRoot, string destinationRoot) =>
+        MaterializeRuntimeTree(
+            sourceRoot,
+            destinationRoot,
+            File.GetAttributes,
+            path => File.ResolveLinkTarget(path, returnFinalTarget: false));
+
+    internal static void MaterializeRuntimeTree(
+        string sourceRoot,
+        string destinationRoot,
+        Func<string, FileAttributes> getAttributes,
+        Func<string, FileSystemInfo?> resolveFileLinkTarget) =>
+        CopyDirectory(
+            Path.GetFullPath(sourceRoot),
+            Path.GetFullPath(destinationRoot),
+            relativePath: string.Empty,
+            getAttributes,
+            resolveFileLinkTarget);
+
     private static void CopyDirectory(
         string sourceRoot,
         string destinationRoot,
-        string relativePath)
+        string relativePath,
+        Func<string, FileAttributes> getAttributes,
+        Func<string, FileSystemInfo?> resolveFileLinkTarget)
     {
         var source = relativePath.Length == 0
             ? sourceRoot
             : Path.Combine(sourceRoot, relativePath);
-        if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)
+        if ((getAttributes(source) & FileAttributes.ReparsePoint) != 0)
         {
             throw new InvalidDataException(
                 $"The test Python runtime cannot contain a reparse directory: '{source}'.");
@@ -213,12 +236,12 @@ internal static class AppContainerPythonRuntimeTestSupport
         Directory.CreateDirectory(destinationRoot);
         foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly))
         {
-            if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new InvalidDataException(
-                    $"The test Python runtime cannot contain a reparse file: '{file}'.");
-            }
-            File.Copy(file, Path.Combine(destinationRoot, Path.GetFileName(file)));
+            CopyRuntimeFile(
+                sourceRoot,
+                file,
+                Path.Combine(destinationRoot, Path.GetFileName(file)),
+                getAttributes,
+                resolveFileLinkTarget);
         }
 
         foreach (var directory in Directory.EnumerateDirectories(
@@ -244,7 +267,131 @@ internal static class AppContainerPythonRuntimeTestSupport
             CopyDirectory(
                 sourceRoot,
                 Path.Combine(destinationRoot, Path.GetFileName(directory)),
-                childRelativePath);
+                childRelativePath,
+                getAttributes,
+                resolveFileLinkTarget);
+        }
+    }
+
+    private static void CopyRuntimeFile(
+        string sourceRoot,
+        string sourcePath,
+        string destinationPath,
+        Func<string, FileAttributes> getAttributes,
+        Func<string, FileSystemInfo?> resolveFileLinkTarget)
+    {
+        var sourceAttributes = getAttributes(sourcePath);
+        var materializedSource = (sourceAttributes & FileAttributes.ReparsePoint) == 0
+            ? sourcePath
+            : ResolveContainedRuntimeFileAlias(
+                sourceRoot,
+                sourcePath,
+                getAttributes,
+                resolveFileLinkTarget);
+        File.Copy(materializedSource, destinationPath);
+    }
+
+    private static string ResolveContainedRuntimeFileAlias(
+        string sourceRoot,
+        string aliasPath,
+        Func<string, FileAttributes> getAttributes,
+        Func<string, FileSystemInfo?> resolveFileLinkTarget)
+    {
+        var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot));
+        var current = Path.GetFullPath(aliasPath);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var depth = 0; ; depth++)
+        {
+            EnsureContainedRuntimePath(canonicalRoot, current);
+            RejectReparseDirectoryTraversal(canonicalRoot, current, getAttributes);
+            if (!File.Exists(current))
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime contains a dangling file alias: '{aliasPath}'.");
+            }
+
+            var attributes = getAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) == 0)
+            {
+                return current;
+            }
+            if (!visited.Add(current))
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime contains a cyclic file alias: '{aliasPath}'.");
+            }
+            if (depth >= MaximumFileAliasDepth)
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime file alias exceeds {MaximumFileAliasDepth} links: "
+                    + $"'{aliasPath}'.");
+            }
+
+            FileSystemInfo? target;
+            try
+            {
+                target = resolveFileLinkTarget(current);
+            }
+            catch (IOException exception)
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime contains an unsupported reparse file: '{current}'.",
+                    exception);
+            }
+            if (target is not FileInfo)
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime contains an unsupported reparse file: '{current}'.");
+            }
+
+            current = Path.GetFullPath(target.FullName);
+        }
+    }
+
+    private static void EnsureContainedRuntimePath(string sourceRoot, string path)
+    {
+        var relativePath = Path.GetRelativePath(sourceRoot, path);
+        if (Path.IsPathFullyQualified(relativePath)
+            || string.Equals(relativePath, "..", StringComparison.Ordinal)
+            || relativePath.StartsWith(
+                $"..{Path.DirectorySeparatorChar}",
+                StringComparison.Ordinal)
+            || relativePath.StartsWith(
+                $"..{Path.AltDirectorySeparatorChar}",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"The test Python runtime file alias cannot leave its runtime root: '{path}'.");
+        }
+    }
+
+    private static void RejectReparseDirectoryTraversal(
+        string sourceRoot,
+        string path,
+        Func<string, FileAttributes> getAttributes)
+    {
+        if ((getAttributes(sourceRoot) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                $"The test Python runtime cannot contain a reparse directory: '{sourceRoot}'.");
+        }
+
+        var relativePath = Path.GetRelativePath(sourceRoot, path);
+        var components = relativePath.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        var current = sourceRoot;
+        for (var index = 0; index < components.Length - 1; index++)
+        {
+            current = Path.Combine(current, components[index]);
+            if (!Directory.Exists(current)
+                || (getAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"The test Python runtime file alias cannot traverse a reparse directory: "
+                    + $"'{current}'.");
+            }
         }
     }
 }

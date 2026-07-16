@@ -31,6 +31,7 @@ public sealed class WindowsContentAccessAuthorizerTests
         try
         {
             WindowsContentAccessAuthorizer.GrantReadExecute(root, readerSid);
+            WindowsContentAccessAuthorizer.VerifyReadExecute(root, readerSid);
 
             AssertDirectoryRule(
                 root,
@@ -53,6 +54,71 @@ public sealed class WindowsContentAccessAuthorizerTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
+    public void ReadExecuteAuthorizationStabilizesInheritedOnlyRulesAcrossTheTree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var parent = CreateRoot();
+        var root = Path.Combine(parent, "inherited-content");
+        var readerSid = WindowsAppContainerIdentity.EnsureCapabilitySid(
+            WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var identity = new SecurityIdentifier(readerSid);
+        var parentSecurity = FileSystemAclExtensions.GetAccessControl(
+            new DirectoryInfo(parent));
+        parentSecurity.AddAccessRule(new FileSystemAccessRule(
+            identity,
+            FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        FileSystemAclExtensions.SetAccessControl(
+            new DirectoryInfo(parent),
+            parentSecurity);
+        var childDirectory = Path.Combine(root, "runtime");
+        var childFile = Path.Combine(childDirectory, "inherited.bin");
+        Directory.CreateDirectory(childDirectory);
+        File.WriteAllText(childFile, "content");
+        try
+        {
+            var rootSecurity = FileSystemAclExtensions.GetAccessControl(
+                new DirectoryInfo(root));
+            Assert.Empty(FindExplicitAllowRules(rootSecurity, readerSid));
+            Assert.Contains(
+                rootSecurity
+                    .GetAccessRules(
+                        includeExplicit: false,
+                        includeInherited: true,
+                        typeof(SecurityIdentifier))
+                    .Cast<FileSystemAccessRule>(),
+                rule => rule.AccessControlType == AccessControlType.Allow
+                        && identity.Equals(rule.IdentityReference));
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                WindowsContentAccessAuthorizer.VerifyReadExecute(root, readerSid));
+
+            Assert.Contains("effective access", exception.Message, StringComparison.Ordinal);
+
+            WindowsContentAccessAuthorizer.GrantReadExecute(root, readerSid);
+            WindowsContentAccessAuthorizer.VerifyReadExecute(root, readerSid);
+
+            AssertDirectoryRule(root, readerSid, FileSystemRights.ReadAndExecute);
+            AssertDirectoryRule(
+                childDirectory,
+                readerSid,
+                FileSystemRights.ReadAndExecute);
+            AssertFileRule(childFile, readerSid, FileSystemRights.ReadAndExecute);
+        }
+        finally
+        {
+            Directory.Delete(parent, recursive: true);
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
     public void WorkspaceAuthorizationGrantsModifyThroughStableHandles()
     {
         if (!OperatingSystem.IsWindows())
@@ -62,15 +128,21 @@ public sealed class WindowsContentAccessAuthorizerTests
 
         var root = CreateRoot();
         var childFile = Path.Combine(root, "result.json");
+        var createdAfterAuthorization = Path.Combine(root, "created-after-authorization.json");
         File.WriteAllText(childFile, "{}");
         var readerSid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
         try
         {
             WindowsContentAccessAuthorizer.GrantWorkspaceModify(root, readerSid);
+            File.WriteAllText(createdAfterAuthorization, "{}");
 
             AssertDirectoryRule(root, readerSid, FileSystemRights.Modify);
             AssertFileRule(childFile, readerSid, FileSystemRights.Modify);
+            AssertInheritedFileRule(
+                createdAfterAuthorization,
+                readerSid,
+                FileSystemRights.Modify);
         }
         finally
         {
@@ -379,6 +451,7 @@ public sealed class WindowsContentAccessAuthorizerTests
         FileSystemRights expectedRights)
     {
         var security = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
+        Assert.False(security.AreAccessRulesProtected);
         var rule = Assert.Single(FindExplicitAllowRules(security, readerSid));
         Assert.Equal(expectedRights, rule.FileSystemRights & expectedRights);
         Assert.True((rule.FileSystemRights & FileSystemRights.Synchronize) != 0);
@@ -395,7 +468,33 @@ public sealed class WindowsContentAccessAuthorizerTests
         FileSystemRights expectedRights)
     {
         var security = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        Assert.False(security.AreAccessRulesProtected);
         var rule = Assert.Single(FindExplicitAllowRules(security, readerSid));
+        Assert.Equal(expectedRights, rule.FileSystemRights & expectedRights);
+        Assert.True((rule.FileSystemRights & FileSystemRights.Synchronize) != 0);
+        Assert.Equal(InheritanceFlags.None, rule.InheritanceFlags);
+        Assert.Equal(PropagationFlags.None, rule.PropagationFlags);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertInheritedFileRule(
+        string path,
+        string readerSid,
+        FileSystemRights expectedRights)
+    {
+        var security = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        Assert.False(security.AreAccessRulesProtected);
+        Assert.Empty(FindExplicitAllowRules(security, readerSid));
+        var identity = new SecurityIdentifier(readerSid);
+        var rule = Assert.Single(
+            security
+                .GetAccessRules(
+                    includeExplicit: false,
+                    includeInherited: true,
+                    typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>(),
+            rule => rule.AccessControlType == AccessControlType.Allow
+                    && identity.Equals(rule.IdentityReference));
         Assert.Equal(expectedRights, rule.FileSystemRights & expectedRights);
         Assert.True((rule.FileSystemRights & FileSystemRights.Synchronize) != 0);
         Assert.Equal(InheritanceFlags.None, rule.InheritanceFlags);

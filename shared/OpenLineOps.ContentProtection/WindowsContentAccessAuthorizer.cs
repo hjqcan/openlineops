@@ -146,6 +146,16 @@ public static class WindowsContentAccessAuthorizer
                 boundaryHandle,
                 identity,
                 rights,
+                grantDirectoryBeforeChildren: false,
+                depth: 0,
+                ref entryCount);
+
+            entryCount = 0;
+            AuthorizeDirectory(
+                boundaryHandle,
+                identity,
+                rights,
+                grantDirectoryBeforeChildren: true,
                 depth: 0,
                 ref entryCount);
         }
@@ -370,6 +380,7 @@ public static class WindowsContentAccessAuthorizer
         SafeFileHandle directory,
         SecurityIdentifier identity,
         FileSystemRights rights,
+        bool grantDirectoryBeforeChildren,
         int depth,
         ref int entryCount)
     {
@@ -380,6 +391,11 @@ public static class WindowsContentAccessAuthorizer
         }
 
         RegisterEntry(ref entryCount);
+        if (grantDirectoryBeforeChildren)
+        {
+            GrantHandleAccess(directory, identity, rights, isDirectory: true);
+        }
+
         foreach (var entry in EnumerateDirectory(directory))
         {
             if ((entry.Attributes & FileAttributeReparsePoint) != 0)
@@ -416,6 +432,7 @@ public static class WindowsContentAccessAuthorizer
                     child,
                     identity,
                     rights,
+                    grantDirectoryBeforeChildren,
                     checked(depth + 1),
                     ref entryCount);
             }
@@ -426,7 +443,10 @@ public static class WindowsContentAccessAuthorizer
             }
         }
 
-        GrantHandleAccess(directory, identity, rights, isDirectory: true);
+        if (!grantDirectoryBeforeChildren)
+        {
+            GrantHandleAccess(directory, identity, rights, isDirectory: true);
+        }
     }
 
     [SupportedOSPlatform("windows")]
@@ -687,7 +707,7 @@ public static class WindowsContentAccessAuthorizer
             .OfType<QualifiedAce>()
             .Where(ace =>
                 ace.AceQualifier == AceQualifier.AccessAllowed
-                && (ace.AceFlags & AceFlags.InheritOnly) == 0
+                && (ace.AceFlags & (AceFlags.InheritOnly | AceFlags.Inherited)) == 0
                 && identity.Equals(ace.SecurityIdentifier))
             .ToArray();
         var allowedAccess = allowedRules.Aggregate(
@@ -700,6 +720,7 @@ public static class WindowsContentAccessAuthorizer
             .Any(ace =>
                 ace.AceQualifier == AceQualifier.AccessAllowed
                 && identity.Equals(ace.SecurityIdentifier)
+                && (ace.AceFlags & AceFlags.Inherited) == 0
                 && (ace.AceFlags & AceFlags.ContainerInherit) != 0
                 && (ace.AceFlags & AceFlags.ObjectInherit) != 0
                 && (ExpandFileGenericAccess(unchecked((uint)ace.AccessMask))
