@@ -135,6 +135,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-third-party-license-metadata.ps1
 
+      - name: Test third-party license metadata determinism
+        shell: powershell
+        run: ./eng/verify-third-party-license-metadata.tests.ps1
+
       - name: Smoke test release manifest tool
         run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --help
 

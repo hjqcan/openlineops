@@ -67,6 +67,12 @@ $cases = @(
         ExpectedFailure = "vulnerable package JSON fails the build"
     },
     [pscustomobject]@{
+        Name = "third-party inventory determinism regression"
+        Search = "./eng/verify-third-party-license-metadata.tests.ps1"
+        Replacement = "Write-Host 'third-party inventory determinism regression disabled'"
+        ExpectedFailure = "dependency inventory is invariant to SDK auto-referenced publish tools"
+    },
+    [pscustomobject]@{
         Name = "release staging security regression"
         Search = "./eng/verify-release-staging-security.ps1"
         Replacement = "Write-Host 'release staging security disabled'"

@@ -392,6 +392,10 @@ Test-ContentContains `
     -Message "Workflow must run regression tests proving vulnerable package JSON fails the build."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "eng/verify-third-party-license-metadata\.tests\.ps1" `
+    -Message "Workflow must prove third-party dependency inventory is invariant to SDK auto-referenced publish tools."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "eng/verify-release-staging-security\.ps1" `
     -Message "Workflow must regression-test tracked-only release staging, clean provenance, credential redaction, and finite process-tree cleanup."
 Test-ContentContains `
