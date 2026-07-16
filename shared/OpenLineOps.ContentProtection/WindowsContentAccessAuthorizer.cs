@@ -142,22 +142,19 @@ public static class WindowsContentAccessAuthorizer
             }
 
             var entryCount = 0;
+            RejectInheritedBoundaryAccess(boundaryHandle, identity);
             AuthorizeDirectory(
                 boundaryHandle,
                 identity,
                 rights,
-                grantDirectoryBeforeChildren: false,
                 depth: 0,
                 ref entryCount);
-
-            entryCount = 0;
-            AuthorizeDirectory(
+            VerifyHandleAccess(
                 boundaryHandle,
                 identity,
                 rights,
-                grantDirectoryBeforeChildren: true,
-                depth: 0,
-                ref entryCount);
+                isDirectory: true,
+                requireExplicitAccess: true);
         }
         finally
         {
@@ -211,12 +208,19 @@ public static class WindowsContentAccessAuthorizer
             }
 
             var entryCount = 0;
+            RejectInheritedBoundaryAccess(boundaryHandle, identity);
             VerifyDirectory(
                 boundaryHandle,
                 identity,
                 rights,
                 depth: 0,
                 ref entryCount);
+            VerifyHandleAccess(
+                boundaryHandle,
+                identity,
+                rights,
+                isDirectory: true,
+                requireExplicitAccess: true);
         }
         finally
         {
@@ -380,7 +384,6 @@ public static class WindowsContentAccessAuthorizer
         SafeFileHandle directory,
         SecurityIdentifier identity,
         FileSystemRights rights,
-        bool grantDirectoryBeforeChildren,
         int depth,
         ref int entryCount)
     {
@@ -391,11 +394,6 @@ public static class WindowsContentAccessAuthorizer
         }
 
         RegisterEntry(ref entryCount);
-        if (grantDirectoryBeforeChildren)
-        {
-            GrantHandleAccess(directory, identity, rights, isDirectory: true);
-        }
-
         foreach (var entry in EnumerateDirectory(directory))
         {
             if ((entry.Attributes & FileAttributeReparsePoint) != 0)
@@ -432,7 +430,6 @@ public static class WindowsContentAccessAuthorizer
                     child,
                     identity,
                     rights,
-                    grantDirectoryBeforeChildren,
                     checked(depth + 1),
                     ref entryCount);
             }
@@ -443,10 +440,7 @@ public static class WindowsContentAccessAuthorizer
             }
         }
 
-        if (!grantDirectoryBeforeChildren)
-        {
-            GrantHandleAccess(directory, identity, rights, isDirectory: true);
-        }
+        GrantHandleAccess(directory, identity, rights, isDirectory: true);
     }
 
     [SupportedOSPlatform("windows")]
@@ -494,7 +488,12 @@ public static class WindowsContentAccessAuthorizer
             {
                 RejectMultipleLinks(child);
                 RegisterEntry(ref entryCount);
-                VerifyHandleAccess(child, identity, rights, isDirectory: false);
+                VerifyHandleAccess(
+                    child,
+                    identity,
+                    rights,
+                    isDirectory: false,
+                    requireExplicitAccess: false);
                 continue;
             }
 
@@ -506,7 +505,12 @@ public static class WindowsContentAccessAuthorizer
                 ref entryCount);
         }
 
-        VerifyHandleAccess(directory, identity, rights, isDirectory: true);
+        VerifyHandleAccess(
+            directory,
+            identity,
+            rights,
+            isDirectory: true,
+            requireExplicitAccess: false);
     }
 
     [SupportedOSPlatform("windows")]
@@ -671,7 +675,12 @@ public static class WindowsContentAccessAuthorizer
                 new Win32Exception(Marshal.GetLastWin32Error()));
         }
 
-        VerifyHandleAccess(handle, identity, rights, isDirectory);
+        VerifyHandleAccess(
+            handle,
+            identity,
+            rights,
+            isDirectory,
+            requireExplicitAccess: false);
     }
 
     [SupportedOSPlatform("windows")]
@@ -679,7 +688,8 @@ public static class WindowsContentAccessAuthorizer
         SafeFileHandle handle,
         SecurityIdentifier identity,
         FileSystemRights rights,
-        bool isDirectory)
+        bool isDirectory,
+        bool requireExplicitAccess)
     {
         var descriptor = ReadBoundedSecurityDescriptor(handle, isDirectory);
         var discretionaryAcl = descriptor.DiscretionaryAcl
@@ -707,7 +717,8 @@ public static class WindowsContentAccessAuthorizer
             .OfType<QualifiedAce>()
             .Where(ace =>
                 ace.AceQualifier == AceQualifier.AccessAllowed
-                && (ace.AceFlags & (AceFlags.InheritOnly | AceFlags.Inherited)) == 0
+                && (ace.AceFlags & AceFlags.InheritOnly) == 0
+                && (!requireExplicitAccess || (ace.AceFlags & AceFlags.Inherited) == 0)
                 && identity.Equals(ace.SecurityIdentifier))
             .ToArray();
         var allowedAccess = allowedRules.Aggregate(
@@ -720,7 +731,7 @@ public static class WindowsContentAccessAuthorizer
             .Any(ace =>
                 ace.AceQualifier == AceQualifier.AccessAllowed
                 && identity.Equals(ace.SecurityIdentifier)
-                && (ace.AceFlags & AceFlags.Inherited) == 0
+                && (!requireExplicitAccess || (ace.AceFlags & AceFlags.Inherited) == 0)
                 && (ace.AceFlags & AceFlags.ContainerInherit) != 0
                 && (ace.AceFlags & AceFlags.ObjectInherit) != 0
                 && (ExpandFileGenericAccess(unchecked((uint)ace.AccessMask))
@@ -729,6 +740,26 @@ public static class WindowsContentAccessAuthorizer
         {
             throw new InvalidDataException(
                 "Content authorization ACL does not grant the requested effective access.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RejectInheritedBoundaryAccess(
+        SafeFileHandle boundary,
+        SecurityIdentifier identity)
+    {
+        var descriptor = ReadBoundedSecurityDescriptor(boundary, isDirectory: true);
+        var inheritedAccess = descriptor.DiscretionaryAcl!
+            .OfType<QualifiedAce>()
+            .Any(ace =>
+                ace.AceQualifier == AceQualifier.AccessAllowed
+                && (ace.AceFlags & AceFlags.Inherited) != 0
+                && identity.Equals(ace.SecurityIdentifier)
+                && ExpandFileGenericAccess(unchecked((uint)ace.AccessMask)) != 0);
+        if (inheritedAccess)
+        {
+            throw new InvalidDataException(
+                "Content authorization boundary cannot inherit access for the target identity.");
         }
     }
 
