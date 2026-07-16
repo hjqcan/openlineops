@@ -241,22 +241,79 @@ public sealed class StationMaterialArrivalLocalIpcClient(
                 "Material arrival IPC request exceeds its configured maximum size.");
         }
 
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(connectTimeout);
         while (true)
         {
             try
             {
-                return await ReportOnceAsync(payload, deadline.Token).ConfigureAwait(false);
+                return await ReportOnceAsync(
+                        payload,
+                        connectTimeout,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
             catch (IOException) when (!cancellationToken.IsCancellationRequested)
             {
-                if (deadline.IsCancellationRequested)
-                {
-                    throw new TimeoutException(
-                        "Material arrival IPC did not complete before its connection deadline.");
-                }
+                // A complete request may already be durable when its acknowledgement
+                // connection drops. Reconnect under a fresh connection deadline and
+                // submit the same idempotency key again.
+                await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
 
+    private async ValueTask<StationMaterialArrivalLocalIpcResponse> ReportOnceAsync(
+        ReadOnlyMemory<byte> payload,
+        TimeSpan connectTimeout,
+        CancellationToken cancellationToken)
+    {
+        await using var pipe = await ConnectPipeAsync(connectTimeout, cancellationToken)
+            .ConfigureAwait(false);
+        await StationMaterialArrivalLocalIpcServer
+            .WriteFrameAsync(pipe, payload, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Once the complete request frame has been handed to the Agent, package
+        // verification, durable persistence, and acknowledgement are governed only
+        // by the caller and Host lifetimes. A connection deadline must never cancel
+        // an accepted hardware/material submission.
+        var responsePayload = await StationMaterialArrivalLocalIpcServer
+            .ReadFrameAsync(pipe, 4096, cancellationToken)
+            .ConfigureAwait(false);
+        return JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
+                   responsePayload,
+                   JsonOptions)
+               ?? throw new InvalidDataException("Material arrival IPC response is null.");
+    }
+
+    private async ValueTask<NamedPipeClientStream> ConnectPipeAsync(
+        TimeSpan connectTimeout,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(connectTimeout);
+        while (true)
+        {
+            var pipe = new NamedPipeClientStream(
+                ".",
+                _pipeName,
+                PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            try
+            {
+                await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
+                return pipe;
+            }
+            catch (OperationCanceledException) when (
+                deadline.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested)
+            {
+                await pipe.DisposeAsync().ConfigureAwait(false);
+                throw new TimeoutException(
+                    "Material arrival IPC did not connect before its connection deadline.");
+            }
+            catch (IOException) when (!cancellationToken.IsCancellationRequested)
+            {
+                await pipe.DisposeAsync().ConfigureAwait(false);
                 try
                 {
                     await Task.Delay(RetryDelay, deadline.Token).ConfigureAwait(false);
@@ -266,38 +323,14 @@ public sealed class StationMaterialArrivalLocalIpcClient(
                     && !cancellationToken.IsCancellationRequested)
                 {
                     throw new TimeoutException(
-                        "Material arrival IPC did not complete before its connection deadline.");
+                        "Material arrival IPC did not connect before its connection deadline.");
                 }
             }
-            catch (OperationCanceledException) when (
-                deadline.IsCancellationRequested
-                && !cancellationToken.IsCancellationRequested)
+            catch
             {
-                throw new TimeoutException(
-                    "Material arrival IPC did not complete before its connection deadline.");
+                await pipe.DisposeAsync().ConfigureAwait(false);
+                throw;
             }
         }
-    }
-
-    private async ValueTask<StationMaterialArrivalLocalIpcResponse> ReportOnceAsync(
-        ReadOnlyMemory<byte> payload,
-        CancellationToken cancellationToken)
-    {
-        await using var pipe = new NamedPipeClientStream(
-            ".",
-            _pipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await pipe.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        await StationMaterialArrivalLocalIpcServer
-            .WriteFrameAsync(pipe, payload, cancellationToken)
-            .ConfigureAwait(false);
-        var responsePayload = await StationMaterialArrivalLocalIpcServer
-            .ReadFrameAsync(pipe, 4096, cancellationToken)
-            .ConfigureAwait(false);
-        return JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
-                   responsePayload,
-                   JsonOptions)
-               ?? throw new InvalidDataException("Material arrival IPC response is null.");
     }
 }

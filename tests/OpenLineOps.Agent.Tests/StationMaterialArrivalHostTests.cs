@@ -17,6 +17,8 @@ namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
 {
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 14, 0, 0, TimeSpan.Zero);
     private readonly string _root = Path.Combine(
@@ -159,6 +161,149 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         {
             deploymentGate.Release();
             await host.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task CompleteRequestCanWaitBeyondClientConnectionDeadlineForAcknowledgement()
+    {
+        var pipeName = $"openlineops-material-client-deadline-{Guid.NewGuid():N}";
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.delayed-acknowledgement",
+            Now);
+        var requestReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAcknowledgement = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var serverPipe = CreateTestPipe(pipeName);
+        var waitForConnection = serverPipe.WaitForConnectionAsync(safety.Token);
+        var server = Task.Run(async () =>
+        {
+            await waitForConnection;
+            var payload = await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+                serverPipe,
+                64 * 1024,
+                safety.Token);
+            var submitted = JsonSerializer.Deserialize<StationMaterialArrivalSignal>(
+                payload,
+                JsonOptions);
+            Assert.Equal(signal.MessageId, submitted?.MessageId);
+            requestReceived.TrySetResult();
+            await releaseAcknowledgement.Task.WaitAsync(safety.Token);
+            await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
+                serverPipe,
+                JsonSerializer.SerializeToUtf8Bytes(
+                    new
+                    {
+                        messageId = signal.MessageId,
+                        accepted = true,
+                        replayed = false,
+                        failureCode = (string?)null
+                    }),
+                safety.Token);
+        }, safety.Token);
+
+        var connectTimeout = TimeSpan.FromMilliseconds(200);
+        var responseTask = new StationMaterialArrivalLocalIpcClient(
+                new StationMaterialArrivalLocalIpcOptions(pipeName))
+            .ReportAsync(signal, connectTimeout, safety.Token)
+            .AsTask();
+        try
+        {
+            await requestReceived.Task.WaitAsync(safety.Token);
+            using (var deadlineCrossed = new CancellationTokenSource(
+                       TimeSpan.FromTicks(connectTimeout.Ticks * 3)))
+            {
+                await WaitForCancellationAsync(deadlineCrossed.Token);
+            }
+
+            Assert.False(responseTask.IsCompleted);
+            releaseAcknowledgement.TrySetResult();
+
+            var response = await responseTask.WaitAsync(safety.Token);
+            Assert.True(response.Accepted);
+            Assert.False(response.Replayed);
+            Assert.Equal(signal.MessageId, response.MessageId);
+        }
+        finally
+        {
+            releaseAcknowledgement.TrySetResult();
+            await server;
+        }
+    }
+
+    [Fact]
+    public async Task ClientFailsWhenNoServerConnectsBeforeDeadline()
+    {
+        var pipeName = $"openlineops-material-missing-{Guid.NewGuid():N}";
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.missing-server",
+            Now);
+        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            new StationMaterialArrivalLocalIpcClient(
+                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                .ReportAsync(signal, TimeSpan.FromMilliseconds(200), safety.Token)
+                .AsTask());
+    }
+
+    [Fact]
+    public async Task CallerCancellationRemainsAuthoritativeWhileWaitingForAcknowledgement()
+    {
+        var pipeName = $"openlineops-material-caller-cancel-{Guid.NewGuid():N}";
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.caller-cancel",
+            Now);
+        var requestReceived = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseServer = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var caller = new CancellationTokenSource();
+        await using var serverPipe = CreateTestPipe(pipeName);
+        var waitForConnection = serverPipe.WaitForConnectionAsync(safety.Token);
+        var server = Task.Run(async () =>
+        {
+            await waitForConnection;
+            await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+                serverPipe,
+                64 * 1024,
+                safety.Token);
+            requestReceived.TrySetResult();
+            await releaseServer.Task.WaitAsync(safety.Token);
+        }, safety.Token);
+
+        var responseTask = new StationMaterialArrivalLocalIpcClient(
+                new StationMaterialArrivalLocalIpcOptions(pipeName))
+            .ReportAsync(signal, TimeSpan.FromSeconds(5), caller.Token)
+            .AsTask();
+        try
+        {
+            await requestReceived.Task.WaitAsync(safety.Token);
+            caller.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => responseTask);
+        }
+        finally
+        {
+            releaseServer.TrySetResult();
+            await server;
         }
     }
 
