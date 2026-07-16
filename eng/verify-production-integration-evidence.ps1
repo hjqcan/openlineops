@@ -199,3 +199,4 @@ if ($contextExitCode -eq 0 -or $contextOutput -cnotmatch "GITHUB_REPOSITORY does
 Write-Host "Case 'github-context-mismatch' passed."
 
 Write-Host "Production integration evidence regression tests passed."
+exit 0
