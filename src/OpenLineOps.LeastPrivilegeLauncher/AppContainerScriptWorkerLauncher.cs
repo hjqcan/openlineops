@@ -526,9 +526,11 @@ internal static class AppContainerScriptWorkerLauncher
 
     private static void CopyWorkerPayload(string sourceWorkerPath, string contentRoot)
     {
-        var sourceRoot = Path.GetDirectoryName(sourceWorkerPath)
-                         ?? throw new InvalidDataException(
-                             "The co-packaged Python Script Worker has no parent directory.");
+        var sourceRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+            Path.GetDirectoryName(sourceWorkerPath)
+            ?? throw new InvalidDataException(
+                "The co-packaged Python Script Worker has no parent directory.")));
+        RejectPayloadDirectoryReparsePoints(sourceRoot, Path.GetFullPath(sourceWorkerPath));
         var runtimeConfig = Path.Combine(
             sourceRoot,
             "OpenLineOps.ScriptWorker.runtimeconfig.json");

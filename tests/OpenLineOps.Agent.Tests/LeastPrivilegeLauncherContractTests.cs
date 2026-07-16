@@ -479,7 +479,8 @@ public sealed class LeastPrivilegeLauncherContractTests
             "runtimes",
             runtimeIdentifier,
             "native");
-        var nativeAsset = Assert.Single(Directory.EnumerateFiles(nativeRoot));
+        var nativeAssets = Directory.EnumerateFiles(nativeRoot).ToArray();
+        Assert.NotEmpty(nativeAssets);
         var backupRoot = nativeRoot + ".backup-" + Guid.NewGuid().ToString("N");
         var externalRoot = Path.Combine(
             Path.GetTempPath(),
@@ -487,8 +488,13 @@ public sealed class LeastPrivilegeLauncherContractTests
             "LauncherPayloadJunction",
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(externalRoot);
-        var externalAsset = Path.Combine(externalRoot, Path.GetFileName(nativeAsset));
-        File.Copy(nativeAsset, externalAsset);
+        foreach (var nativeAsset in nativeAssets)
+        {
+            File.Copy(
+                nativeAsset,
+                Path.Combine(externalRoot, Path.GetFileName(nativeAsset)));
+        }
+        var externalAsset = Path.Combine(externalRoot, Path.GetFileName(nativeAssets[0]));
         var expectedExternalBytes = await File.ReadAllBytesAsync(externalAsset);
         Directory.Move(nativeRoot, backupRoot);
         try

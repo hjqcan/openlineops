@@ -89,6 +89,9 @@
     <Copy SourceFiles="@(_LauncherTestBundleWinArm64)"
           DestinationFiles="@(_LauncherTestBundleWinArm64->'$(_LauncherTestBundleDir)runtimes\win-arm64\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <FileWrites Include="$(_LauncherTestBundleDir)**\*" />
+    </ItemGroup>
   </Target>
 
 </Project>
