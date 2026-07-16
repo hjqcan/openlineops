@@ -64,7 +64,6 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                     new StationMaterialArrivalLocalIpcOptions(pipeName))
                 .ReportAsync(signal, TimeSpan.FromSeconds(5));
             Assert.True(response.Accepted);
-            Assert.False(response.Replayed);
             Assert.Equal(signal.MessageId, response.MessageId);
             await WaitUntilAsync(() => offlinePublisher.AttemptCount == 1);
             await host.StopAsync();
@@ -105,6 +104,62 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         Assert.Equal(1, reader.GetInt32(0));
         Assert.False(reader.IsDBNull(1));
         Assert.True(reader.IsDBNull(2));
+    }
+
+    [Fact]
+    public async Task CompleteFrameCanWaitBeyondRequestFrameDeadlineWithoutCancelingSubmission()
+    {
+        Directory.CreateDirectory(_root);
+        var package = await BuildSignedPackageAsync();
+        var databasePath = Path.Combine(_root, "delayed-deployment.sqlite");
+        var pipeName = $"openlineops-material-delay-{Guid.NewGuid():N}";
+        var requestFrameTimeout = TimeSpan.FromMilliseconds(100);
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.delayed-deployment",
+            Now);
+        var deploymentGate = new DeploymentResolutionGate();
+        var publisher = new HostPublisher(fail: false);
+        using var host = CreateHost(
+            databasePath,
+            pipeName,
+            package,
+            new MutableClock(Now.AddSeconds(1)),
+            publisher,
+            deploymentGate.Decorate,
+            requestFrameTimeout);
+
+        await host.StartAsync();
+        try
+        {
+            var responseTask = new StationMaterialArrivalLocalIpcClient(
+                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                .ReportAsync(signal, TimeSpan.FromSeconds(5))
+                .AsTask();
+            await deploymentGate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            using (var deadlineCrossed = new CancellationTokenSource(
+                       TimeSpan.FromTicks(requestFrameTimeout.Ticks * 3)))
+            {
+                await WaitForCancellationAsync(deadlineCrossed.Token);
+            }
+
+            Assert.False(deploymentGate.CancellationObserved);
+            deploymentGate.Release();
+
+            var response = await responseTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(response.Accepted);
+            Assert.False(response.Replayed);
+            Assert.Equal(signal.MessageId, response.MessageId);
+        }
+        finally
+        {
+            deploymentGate.Release();
+            await host.StopAsync();
+        }
     }
 
     [Fact]
@@ -184,7 +239,10 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         string pipeName,
         PackageFixture package,
         MutableClock clock,
-        HostPublisher publisher)
+        HostPublisher publisher,
+        Func<IStationMaterialArrivalDeploymentProvider,
+            IStationMaterialArrivalDeploymentProvider>? decorateDeployment = null,
+        TimeSpan? requestFrameTimeout = null)
     {
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddSingleton(clock);
@@ -202,19 +260,22 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                     ["host-test-signing"] = package.PublicKeyPem
                 })));
         builder.Services.AddSingleton<IStationMaterialArrivalDeploymentProvider>(serviceProvider =>
-            new SignedStationMaterialArrivalDeploymentProvider(
+        {
+            var provider = new SignedStationMaterialArrivalDeploymentProvider(
                 new SignedStationMaterialArrivalDeploymentOptions(
                     "agent.main",
                     "station.main",
                     package.PackagePath,
                     package.ContentSha256),
-                serviceProvider.GetRequiredService<SignedStationPackageInstaller>()));
+                serviceProvider.GetRequiredService<SignedStationPackageInstaller>());
+            return decorateDeployment?.Invoke(provider) ?? provider;
+        });
         builder.Services.AddSingleton<StationMaterialArrivalReporter>();
         builder.Services.AddSingleton<IStationAgentMessagePublisher>(publisher);
         builder.Services.AddSingleton<StationMaterialArrivalOutboxDispatcher>();
         builder.Services.AddSingleton(new StationMaterialArrivalLocalIpcOptions(
             pipeName,
-            ConnectionTimeout: TimeSpan.FromMilliseconds(200)));
+            RequestFrameTimeout: requestFrameTimeout ?? TimeSpan.FromMilliseconds(200)));
         builder.Services.AddSingleton<StationMaterialArrivalLocalIpcServer>();
         builder.Services.AddHostedService<StationMaterialArrivalWorker>();
         return builder.Build();
@@ -269,6 +330,20 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         }
     }
 
+    private static async Task WaitForCancellationAsync(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var canceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            static state => ((TaskCompletionSource)state!).TrySetResult(),
+            canceled);
+        await canceled.Task;
+    }
+
     private sealed record PackageFixture(
         string PackagePath,
         string ContentSha256,
@@ -277,6 +352,44 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
     private sealed class MutableClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class DeploymentResolutionGate
+    {
+        private readonly TaskCompletionSource _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _cancellationObserved;
+
+        public Task Entered => _entered.Task;
+
+        public bool CancellationObserved => Volatile.Read(ref _cancellationObserved) == 1;
+
+        public IStationMaterialArrivalDeploymentProvider Decorate(
+            IStationMaterialArrivalDeploymentProvider inner) =>
+            new GatedDeploymentProvider(this, inner);
+
+        public void Release() => _released.TrySetResult();
+
+        private sealed class GatedDeploymentProvider(
+            DeploymentResolutionGate gate,
+            IStationMaterialArrivalDeploymentProvider inner) :
+            IStationMaterialArrivalDeploymentProvider
+        {
+            public async ValueTask<VerifiedStationMaterialArrivalDeployment> GetCurrentAsync(
+                CancellationToken cancellationToken = default)
+            {
+                gate._entered.TrySetResult();
+                using var registration = cancellationToken.Register(
+                    static state => Interlocked.Exchange(
+                        ref ((DeploymentResolutionGate)state!)._cancellationObserved,
+                        1),
+                    gate);
+                await gate._released.Task.WaitAsync(cancellationToken);
+                return await inner.GetCurrentAsync(cancellationToken);
+            }
+        }
     }
 
     private sealed class HostPublisher(bool fail) : IStationAgentMessagePublisher

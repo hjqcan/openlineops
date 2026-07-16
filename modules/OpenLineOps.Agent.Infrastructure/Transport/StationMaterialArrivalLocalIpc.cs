@@ -9,22 +9,22 @@ namespace OpenLineOps.Agent.Infrastructure.Transport;
 public sealed record StationMaterialArrivalLocalIpcOptions(
     string PipeName,
     int MaximumRequestBytes = 64 * 1024,
-    TimeSpan ConnectionTimeout = default)
+    TimeSpan RequestFrameTimeout = default)
 {
-    public TimeSpan ResolveConnectionTimeout()
+    public TimeSpan ResolveRequestFrameTimeout()
     {
-        if (ConnectionTimeout == default)
+        if (RequestFrameTimeout == default)
         {
             return TimeSpan.FromSeconds(5);
         }
 
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
-            ConnectionTimeout,
+            RequestFrameTimeout,
             TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(
-            ConnectionTimeout,
+            RequestFrameTimeout,
             TimeSpan.FromMinutes(1));
-        return ConnectionTimeout;
+        return RequestFrameTimeout;
     }
 }
 
@@ -51,7 +51,7 @@ public sealed class StationMaterialArrivalLocalIpcServer(
         : throw new ArgumentOutOfRangeException(
             nameof(options),
             "Material arrival IPC maximum request bytes must be within 1..1048576.");
-    private readonly TimeSpan _connectionTimeout = options.ResolveConnectionTimeout();
+    private readonly TimeSpan _requestFrameTimeout = options.ResolveRequestFrameTimeout();
     private readonly StationMaterialArrivalReporter _reporter =
         reporter ?? throw new ArgumentNullException(nameof(reporter));
 
@@ -67,7 +67,7 @@ public sealed class StationMaterialArrivalLocalIpcServer(
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                // The connected local caller exceeded the strict frame-processing deadline.
+                // The connected local caller exceeded the strict request-frame deadline.
             }
             catch (IOException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -89,22 +89,16 @@ public sealed class StationMaterialArrivalLocalIpcServer(
         Stream pipe,
         CancellationToken cancellationToken)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(_connectionTimeout);
-        var connectionToken = deadline.Token;
         Guid messageId = Guid.Empty;
         StationMaterialArrivalLocalIpcResponse response;
         try
         {
-            var payload = await ReadFrameAsync(
-                    pipe,
-                    _maximumRequestBytes,
-                    connectionToken)
+            var payload = await ReadRequestFrameAsync(pipe, cancellationToken)
                 .ConfigureAwait(false);
             var signal = JsonSerializer.Deserialize<StationMaterialArrivalSignal>(payload, JsonOptions)
                 ?? throw new InvalidDataException("Material arrival IPC request is null.");
             messageId = signal.MessageId;
-            var added = await _reporter.ReportAsync(signal, connectionToken)
+            var added = await _reporter.ReportAsync(signal, cancellationToken)
                 .ConfigureAwait(false);
             response = new StationMaterialArrivalLocalIpcResponse(
                 signal.MessageId,
@@ -137,13 +131,23 @@ public sealed class StationMaterialArrivalLocalIpcServer(
             await WriteFrameAsync(
                     pipe,
                     JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions),
-                    connectionToken)
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (IOException)
         {
             // The local caller disconnected after submission; the durable outbox remains authoritative.
         }
+    }
+
+    private async ValueTask<byte[]> ReadRequestFrameAsync(
+        Stream pipe,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_requestFrameTimeout);
+        return await ReadFrameAsync(pipe, _maximumRequestBytes, deadline.Token)
+            .ConfigureAwait(false);
     }
 
     internal static async ValueTask<byte[]> ReadFrameAsync(
