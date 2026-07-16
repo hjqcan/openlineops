@@ -1023,9 +1023,10 @@ async function main() {
   }
   await waitForExpression(
     `(() => document.querySelector('[data-testid="production-dirty-state"]')?.textContent?.trim() === 'Saved'`
-      + ` && document.querySelector('[data-testid="production-operation-node-operation-1"]')?.style.transform === ${JSON.stringify(`translate(${arrangedPosition.x}px, ${arrangedPosition.y}px)`)})()`,
+      + ` && document.querySelector('[data-testid="production-operation-node-operation-1"]')?.style.transform === ${JSON.stringify(`translate(${arrangedPosition.x}px, ${arrangedPosition.y}px)`)}`
+      + ' && document.querySelector(\'[data-testid="new-production-line"]\')?.disabled === false)()',
     15000,
-    'auto-arranged route save to settle before editing the persisted Line');
+    'auto-arranged route save and command state to settle before editing the persisted Line');
   const productionGuardSavedName = `Guard Saved Line ${Date.now().toString(36)}`;
   await setInputByTestId('production-line-name', productionGuardSavedName);
   await waitForExpression(
@@ -2580,6 +2581,9 @@ async function clickByTestId(testId) {
     const element = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
     if (!element) {
       throw new Error('Missing element: ${testId}');
+    }
+    if (element instanceof HTMLButtonElement && element.disabled) {
+      throw new Error('Button is disabled: ${testId}');
     }
     if (element instanceof HTMLElement) {
       element.click();
