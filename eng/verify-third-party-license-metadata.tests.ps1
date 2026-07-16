@@ -351,3 +351,4 @@ finally {
 }
 
 Write-Host "Third-party license metadata determinism regression tests passed."
+exit 0

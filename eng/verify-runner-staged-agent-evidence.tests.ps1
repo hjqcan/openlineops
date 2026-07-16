@@ -402,3 +402,4 @@ finally {
 }
 
 Write-Host "Runner staged-Agent evidence validator mutation tests passed."
+exit 0

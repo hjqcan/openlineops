@@ -434,3 +434,4 @@ if ([string]::IsNullOrWhiteSpace($failure) -or $failure -notmatch "only its two 
 Write-Host "Mutation rejected: unknown public directory"
 
 Write-Host "Studio two-Agent evidence mutation tests passed."
+exit 0

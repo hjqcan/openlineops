@@ -497,3 +497,4 @@ Assert-DesktopManifestMatchesPackage -Root $packageRoot
 
 Write-Host "Windows package signing readiness verification passed."
 Write-Host "Package fixture: $packageRoot"
+exit 0

@@ -396,3 +396,4 @@ Write-Host " - Source staging copied only Git-index tracked paths and excluded a
 Write-Host " - Final publication rejected dirty Git state and bound staging to a full commit."
 Write-Host " - Formal file/password signing parameters are absent and command logs redact secret-shaped arguments."
 Write-Host " - Staged Agent RabbitMQ verification has a finite timeout and behavior-verified taskkill process-tree cleanup."
+exit 0

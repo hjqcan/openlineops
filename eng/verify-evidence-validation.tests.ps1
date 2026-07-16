@@ -846,3 +846,4 @@ Invoke-ExpectedFailure `
     -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 
 Write-Host "Evidence validation mutation tests passed."
+exit 0

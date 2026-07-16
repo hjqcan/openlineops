@@ -83,3 +83,4 @@ Invoke-Case -Name "invalid-json" -Json '{' -CommandExitCode 0 -ExpectedExitCode 
 Invoke-Case -Name "command-failure" -Json $cleanJson -CommandExitCode 23 -ExpectedExitCode 1 -ExpectedPattern "exit code 23"
 
 Write-Host ".NET package vulnerability audit regression tests passed."
+exit 0

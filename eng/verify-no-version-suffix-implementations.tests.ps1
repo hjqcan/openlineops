@@ -150,3 +150,4 @@ finally {
 }
 
 Write-Host "Version-suffix verifier mutation tests passed."
+exit 0
