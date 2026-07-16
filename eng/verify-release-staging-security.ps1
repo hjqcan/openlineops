@@ -90,8 +90,49 @@ function Invoke-Git {
 function Invoke-PowerShellProcess {
     param(
         [Parameter(Mandatory = $true)][string] $ScriptPath,
-        [Parameter(Mandatory = $true)][string[]] $Arguments
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][hashtable] $GitHubEnvironment
     )
+
+    $requiredGitHubVariables = @(
+        "GITHUB_REPOSITORY",
+        "GITHUB_SHA",
+        "GITHUB_RUN_ID",
+        "GITHUB_SERVER_URL")
+    $unexpectedVariables = @($GitHubEnvironment.Keys | Where-Object {
+            $requiredGitHubVariables -cnotcontains $_
+        })
+    $missingVariables = @($requiredGitHubVariables | Where-Object {
+            -not $GitHubEnvironment.ContainsKey($_) `
+                -or [string]::IsNullOrWhiteSpace([string] $GitHubEnvironment[$_])
+        })
+    if ($unexpectedVariables.Count -ne 0 -or $missingVariables.Count -ne 0) {
+        throw "Synthetic PowerShell child requires exactly the repository, commit, run, and server GitHub environment tuple."
+    }
+
+    $githubVariableNames = @(
+        @([Environment]::GetEnvironmentVariables(
+                [EnvironmentVariableTarget]::Process).Keys | Where-Object {
+                $_ -like "GITHUB_*"
+            }) +
+        $requiredGitHubVariables |
+            Sort-Object -Unique)
+    $previousGitHubEnvironment = @{}
+    foreach ($name in $githubVariableNames) {
+        $previousGitHubEnvironment[$name] = [Environment]::GetEnvironmentVariable(
+            $name,
+            [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            $null,
+            [EnvironmentVariableTarget]::Process)
+    }
+    foreach ($name in $requiredGitHubVariables) {
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            [string] $GitHubEnvironment[$name],
+            [EnvironmentVariableTarget]::Process)
+    }
 
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -101,6 +142,18 @@ function Invoke-PowerShellProcess {
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        foreach ($name in $githubVariableNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $null,
+                [EnvironmentVariableTarget]::Process)
+        }
+        foreach ($name in $githubVariableNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $previousGitHubEnvironment[$name],
+                [EnvironmentVariableTarget]::Process)
+        }
     }
 
     return [pscustomobject]@{
@@ -305,11 +358,19 @@ $publicationArguments = @(
     "-ProductionIntegrationEvidencePath", $publicationEvidencePath,
     "-ConfirmMitLicense",
     "-CodeSigningCertificateThumbprint", "00112233445566778899AABBCCDDEEFF00112233")
+$publicationGitHubEnvironment = @{
+    GITHUB_REPOSITORY = $publicationEvidence.repository
+    GITHUB_SHA = $publicationEvidence.commitSha
+    GITHUB_RUN_ID = $publicationEvidence.runId
+    GITHUB_SERVER_URL = "https://github.com"
+}
 $dirtyPublication = Invoke-PowerShellProcess `
     -ScriptPath (Join-Path $publicationEng "prepare-final-publication.ps1") `
-    -Arguments $publicationArguments
+    -Arguments $publicationArguments `
+    -GitHubEnvironment $publicationGitHubEnvironment
 if ($dirtyPublication.ExitCode -eq 0 `
-    -or $dirtyPublication.Text -notmatch "requires a clean Git worktree") {
+    -or $dirtyPublication.Text -notmatch "requires a clean Git worktree" `
+    -or $dirtyPublication.Text -match "does not match the current GitHub Actions") {
     Write-Host $dirtyPublication.Text
     throw "Formal publication did not fail closed on an untracked worktree change."
 }
@@ -318,7 +379,8 @@ $removedPasswordInvocation = Invoke-PowerShellProcess `
     -ScriptPath (Join-Path $publicationEng "prepare-final-publication.ps1") `
     -Arguments ($publicationArguments + @(
         "-CodeSigningCertificatePassword",
-        "publication-password-sentinel"))
+        "publication-password-sentinel")) `
+    -GitHubEnvironment $publicationGitHubEnvironment
 if ($removedPasswordInvocation.ExitCode -eq 0 `
     -or $removedPasswordInvocation.Text -notmatch "CodeSigningCertificatePassword" `
     -or $removedPasswordInvocation.Text -match "publication-password-sentinel") {
