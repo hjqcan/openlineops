@@ -12,7 +12,9 @@ $ValidRepositoryUrl = "https://github.com/openlineops/openlineops"
 $ValidSecurityContact = "security@openlineops.example"
 $ValidConductContact = "conduct@openlineops.example"
 $ValidProductionIntegrationEvidencePath = $null
+$FixtureGitHubEnvironment = $null
 $RequiredProductionIntegrationTest = "OpenLineOps.PostgresIntegration.Tests.PostgresRabbitMqProductionCoordinationIntegrationTests.DurableOutboxAndResultInboxSurviveCoordinatorRestartAcrossRealBroker"
+. (Join-Path $PSScriptRoot "github-fixture-process.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -72,23 +74,18 @@ function Invoke-Prepare {
         [Parameter(Mandatory = $true)][string[]] $Arguments
     )
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $PrepareScript @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($null -eq $exitCode) {
-            $exitCode = 0
-        }
+    if ($null -eq $FixtureGitHubEnvironment) {
+        throw "Final publication preflight fixture GitHub environment has not been initialized."
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $result = Invoke-GitHubFixturePowerShellProcess `
+        -ScriptPath $PrepareScript `
+        -Arguments $Arguments `
+        -GitHubEnvironment $FixtureGitHubEnvironment
 
     return [pscustomobject]@{
         Name = $Name
-        ExitCode = $exitCode
-        Text = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)
+        ExitCode = $result.ExitCode
+        Text = $result.Text
     }
 }
 
@@ -137,6 +134,12 @@ New-CleanDirectory $ResolvedWorkRoot
 $currentCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $currentCommit -cnotmatch '^[0-9a-f]{40,64}$') {
     throw "Final publication preflight could not resolve the current Git commit."
+}
+$FixtureGitHubEnvironment = @{
+    GITHUB_REPOSITORY = "openlineops/openlineops"
+    GITHUB_SHA = $currentCommit
+    GITHUB_RUN_ID = "123456789"
+    GITHUB_SERVER_URL = "https://github.com"
 }
 
 $integrationEvidenceRoot = Join-Path $ResolvedWorkRoot "production-integration"

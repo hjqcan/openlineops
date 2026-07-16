@@ -18,6 +18,8 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $EvidenceScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "write-publication-evidence.ps1"))
+. (Join-Path $PSScriptRoot "github-fixture-process.ps1")
+. (Join-Path $PSScriptRoot "publication-evidence-case-contract.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -57,24 +59,13 @@ function New-CleanDirectory {
 function Invoke-EvidenceCase {
     param(
         [Parameter(Mandatory = $true)][string] $Name,
-        [string[]] $Arguments = @()
+        [string[]] $Arguments = @(),
+        [Parameter(Mandatory = $true)][hashtable] $GitHubEnvironment
     )
 
-    $physicalName = switch ($Name) {
-        "default" { "c/d" }
-        "confirmed-proof" { "c/c" }
-        "invalid-production-integration-evidence" { "c/i" }
-        "invalid-production-integration-trx" { "c/t" }
-        "require-publishable" { "c/p" }
-        default { throw "Evidence case '$Name' does not have a bounded physical directory name." }
-    }
+    $physicalName = Get-PublicationEvidenceCaseRelativeDirectory -Name $Name
     $outputRoot = Join-Path $ResolvedWorkRoot $physicalName
-    $command = @(
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        $EvidenceScript,
+    $scriptArguments = @(
         "-ArtifactsRoot",
         $ResolvedArtifactsRoot,
         "-OutputRoot",
@@ -89,27 +80,16 @@ function Invoke-EvidenceCase {
         $ResolvedRunnerStagedAgentEvidenceRoot
     ) + $Arguments
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # Expected-negative cases deliberately write diagnostics to stderr. Capture
-        # those diagnostics without letting PowerShell promote them to a parent
-        # NativeCommandError before the case result can be inspected.
-        $ErrorActionPreference = "Continue"
-        $output = & powershell @command 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($null -eq $exitCode) {
-        $exitCode = 0
-    }
+    $result = Invoke-GitHubFixturePowerShellProcess `
+        -ScriptPath $EvidenceScript `
+        -Arguments $scriptArguments `
+        -GitHubEnvironment $GitHubEnvironment
 
     return [pscustomobject]@{
         Name = $Name
-        ExitCode = $exitCode
+        ExitCode = $result.ExitCode
         OutputRoot = $outputRoot
-        Text = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)
+        Text = $result.Text
     }
 }
 
@@ -281,7 +261,15 @@ function New-ProductionIntegrationEvidenceFixture {
         $evidencePath,
         (($document | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
         [System.Text.UTF8Encoding]::new($false))
-    return $evidencePath
+    return [pscustomobject]@{
+        EvidencePath = $evidencePath
+        GitHubEnvironment = @{
+            GITHUB_REPOSITORY = [string] $document.repository
+            GITHUB_SHA = [string] $document.commitSha
+            GITHUB_RUN_ID = [string] $document.runId
+            GITHUB_SERVER_URL = "https://github.com"
+        }
+    }
 }
 
 function Assert-E2eEvidenceHashes {
@@ -343,16 +331,19 @@ $ResolvedProductionClosureEvidenceRoot = Resolve-RepoPath $ProductionClosureEvid
 $ResolvedStudioTwoAgentEvidenceRoot = Resolve-RepoPath $StudioTwoAgentEvidenceRoot
 $ResolvedRunnerStagedAgentEvidenceRoot = Resolve-RepoPath $RunnerStagedAgentEvidenceRoot
 New-CleanDirectory $ResolvedWorkRoot
-$validIntegrationEvidencePath = New-ProductionIntegrationEvidenceFixture `
+$validIntegrationFixture = New-ProductionIntegrationEvidenceFixture `
     -Root (Join-Path $ResolvedWorkRoot "integration-proof-source/valid")
-$wrongCommitEvidencePath = New-ProductionIntegrationEvidenceFixture `
+$wrongCommitFixture = New-ProductionIntegrationEvidenceFixture `
     -Root (Join-Path $ResolvedWorkRoot "integration-proof-source/wrong-commit") `
     -WrongCommit
-$invalidTrxEvidencePath = New-ProductionIntegrationEvidenceFixture `
+$invalidTrxFixture = New-ProductionIntegrationEvidenceFixture `
     -Root (Join-Path $ResolvedWorkRoot "integration-proof-source/invalid-trx") `
     -InvalidTrx
 
-$defaultCase = Invoke-EvidenceCase -Name "default" -Arguments @()
+$defaultCase = Invoke-EvidenceCase `
+    -Name "default" `
+    -Arguments @() `
+    -GitHubEnvironment $validIntegrationFixture.GitHubEnvironment
 Assert-ExitCode -Case $defaultCase -ExpectedExitCode 0
 $defaultEvidence = Read-EvidenceJson $defaultCase
 Assert-E2eEvidenceHashes -Case $defaultCase -Evidence $defaultEvidence
@@ -378,7 +369,8 @@ Assert-GateCommandContains -Evidence $defaultEvidence -GateName "signed release 
 
 $confirmedCase = Invoke-EvidenceCase `
     -Name "confirmed-proof" `
-    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $validIntegrationEvidencePath)
+    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $validIntegrationFixture.EvidencePath) `
+    -GitHubEnvironment $validIntegrationFixture.GitHubEnvironment
 Assert-ExitCode -Case $confirmedCase -ExpectedExitCode 0
 $confirmedEvidence = Read-EvidenceJson $confirmedCase
 Assert-E2eEvidenceHashes -Case $confirmedCase -Evidence $confirmedEvidence
@@ -398,7 +390,8 @@ Assert-PendingDoesNotContain -Evidence $confirmedEvidence -Pattern "Bound Postgr
 
 $invalidProofCase = Invoke-EvidenceCase `
     -Name "invalid-production-integration-evidence" `
-    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $wrongCommitEvidencePath)
+    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $wrongCommitFixture.EvidencePath) `
+    -GitHubEnvironment $wrongCommitFixture.GitHubEnvironment
 if ($invalidProofCase.ExitCode -eq 0) {
     Write-Host $invalidProofCase.Text
     throw "Mismatched production integration evidence should fail publication evidence generation."
@@ -412,7 +405,8 @@ if (-not (@($invalidProofEvidence.internalFailures) | Where-Object { $_ -match "
 
 $invalidTrxCase = Invoke-EvidenceCase `
     -Name "invalid-production-integration-trx" `
-    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $invalidTrxEvidencePath)
+    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $invalidTrxFixture.EvidencePath) `
+    -GitHubEnvironment $invalidTrxFixture.GitHubEnvironment
 if ($invalidTrxCase.ExitCode -eq 0) {
     Write-Host $invalidTrxCase.Text
     throw "Semantically invalid production integration TRX should fail publication evidence generation."
@@ -428,7 +422,8 @@ if (-not (@($invalidTrxEvidence.internalFailures) | Where-Object {
 
 $publishableCase = Invoke-EvidenceCase `
     -Name "require-publishable" `
-    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $validIntegrationEvidencePath, "-RequirePublishable")
+    -Arguments @("-ConfirmMitLicense", "-ProductionIntegrationEvidencePath", $validIntegrationFixture.EvidencePath, "-RequirePublishable") `
+    -GitHubEnvironment $validIntegrationFixture.GitHubEnvironment
 $publishableEvidence = Read-EvidenceJson $publishableCase
 Assert-E2eEvidenceHashes -Case $publishableCase -Evidence $publishableEvidence
 if ($confirmedEvidence.publishable -eq $true) {

@@ -31,6 +31,7 @@ function New-FixtureRoot {
     $root = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path (Join-Path $root "modules/OpenLineOps.Sample") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $root "eng") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/main") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $root "tests/OpenLineOps.Agent.Tests") -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $root "modules/OpenLineOps.Sample/CurrentContract.cs") -Value @'
 namespace OpenLineOps.Sample;
@@ -47,6 +48,9 @@ $gitMode = "--porcelain=v1"
 '@
     Set-Content -LiteralPath (Join-Path $root "tests/OpenLineOps.Agent.Tests/LeastPrivilegeLauncherContractTests.cs") -Value @'
 const string PowerShellPath = "WindowsPowerShell" + "v1.0" + "powershell.exe";
+'@
+    Set-Content -LiteralPath (Join-Path $root "apps/desktop/src/main/windows-system-tools.ts") -Value @'
+const windowsPowerShellExecutableRelativePath = ['System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'];
 '@
 
     return $root
@@ -116,6 +120,11 @@ try {
         -Name "default version literal" `
         -RelativePath "shared/OpenLineOps.Sample/VersionedDefault.cs" `
         -Content 'public sealed class VersionedDefault(string version = "v4");' `
+        -ExpectedFailure "Forbidden internal version literal"
+    Invoke-Mutation `
+        -Name "external tool literal exemption remains narrow" `
+        -RelativePath "apps/desktop/src/main/windows-system-tools.ts" `
+        -Content "const schemaVersion = 'v1.0';" `
         -ExpectedFailure "Forbidden internal version literal"
     Invoke-Mutation `
         -Name "versioned topic literal" `

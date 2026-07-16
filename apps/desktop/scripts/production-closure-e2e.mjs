@@ -10,6 +10,10 @@ import {
   delay,
   ElectronCdpHarness
 } from './electron-cdp-harness.mjs';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-powershell-host.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -1684,7 +1688,10 @@ async function runRecoveryScenario() {
     'recovery vendor parent and child');
   const backend = await harness.evaluate('window.openlineopsDesktop.getBackendStatus()');
   assert(Number.isInteger(backend.pid) && backend.pid > 0, 'Packaged backend PID is unavailable.');
-  await execFileAsync('taskkill.exe', ['/PID', String(backend.pid), '/F'], { windowsHide: true });
+  await execFileAsync(
+    windowsSystemExecutablePath('taskkill.exe'),
+    ['/PID', String(backend.pid), '/F'],
+    { windowsHide: true });
   await harness.waitFor(
     '(async () => (await window.openlineopsDesktop.getBackendStatus()).health === "Unreachable")()',
     20_000,
@@ -2148,10 +2155,15 @@ async function listVendorProcesses() {
     + "@{Name='processName';Expression={$_.Name}},"
     + "@{Name='commandLine';Expression={$_.CommandLine}}); "
     + 'if ($items.Count -eq 0) { Write-Output \'[]\' } else { $items | ConvertTo-Json -Compress -Depth 3 }';
+  const powerShellHost = createWindowsPowerShellHost();
   const { stdout } = await execFileAsync(
-    'powershell.exe',
+    powerShellHost.executablePath,
     ['-NoProfile', '-NonInteractive', '-Command', command],
-    { windowsHide: true, maxBuffer: 1024 * 1024 });
+    {
+      env: powerShellHost.environment,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    });
   const parsed = JSON.parse(stdout.trim() || '[]');
   const projectNeedle = projectPath.toLowerCase();
   return (Array.isArray(parsed) ? parsed : [parsed])

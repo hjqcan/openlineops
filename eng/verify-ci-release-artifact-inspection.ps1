@@ -7,6 +7,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot "github-fixture-process.ps1")
+. (Join-Path $PSScriptRoot "publication-evidence-case-contract.ps1")
 $InspectorScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "inspect-ci-release-artifact.ps1"))
 $CandidateVerificationScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "verify-release-candidate-inspection.ps1"))
 $ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
@@ -20,6 +22,12 @@ $ExpectedGateNames = @(
     "publication readiness with pending external allowed",
     "strict publication readiness",
     "signed release candidate inspection")
+$FixtureGitHubEnvironment = @{
+    GITHUB_REPOSITORY = "openlineops/openlineops"
+    GITHUB_SHA = "0123456789abcdef0123456789abcdef01234567"
+    GITHUB_RUN_ID = "123456789"
+    GITHUB_SERVER_URL = "https://github.com"
+}
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -438,13 +446,20 @@ function Write-BundleEvidence {
         -Value (New-PublicationEvidence -Manifest $manifest -Root $Root -E2eEvidence $e2eEvidence)
     Write-Utf8NoBom -Path (Join-Path $evidenceRoot "publication-evidence.md") -Content "# Fixture publication evidence`r`n"
 
-    foreach ($caseName in @("default", "confirmed-proof", "invalid-production-integration-evidence", "require-publishable")) {
-        $caseRoot = Join-Path $Root "output/publication-evidence-verification/$caseName"
-        $failures = if ($caseName -ceq "invalid-production-integration-evidence") {
-            @("Production integration evidence commit does not match a clean release provenance source.")
-        }
-        else {
-            @()
+    foreach ($case in (Get-PublicationEvidenceCaseContract)) {
+        $caseRoot = Join-Path `
+            $Root `
+            ("output/publication-evidence-verification/" + $case.RelativeDirectory)
+        $failures = switch ($case.Name) {
+            "invalid-production-integration-evidence" {
+                @("Production integration evidence commit does not match a clean release provenance source.")
+            }
+            "invalid-production-integration-trx" {
+                @("Production integration TRX result records do not match its all-passed counters.")
+            }
+            default {
+                @()
+            }
         }
 
         Write-Json `
@@ -502,24 +517,14 @@ function Invoke-Inspection {
     $script:FixtureInspectionOrdinal++
     $inspectionRoot = Join-Path $ResolvedWorkRoot (
         "i/{0:D2}" -f $script:FixtureInspectionOrdinal)
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $output = & powershell `
-            -NoProfile `
-            -ExecutionPolicy Bypass `
-            -File $InspectorScript `
-            -BundleRoot $Root `
-            -WorkRoot $inspectionRoot 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $result = Invoke-GitHubFixturePowerShellProcess `
+        -ScriptPath $InspectorScript `
+        -Arguments @("-BundleRoot", $Root, "-WorkRoot", $inspectionRoot) `
+        -GitHubEnvironment $FixtureGitHubEnvironment
 
     return [pscustomobject]@{
-        ExitCode = $exitCode
-        Text = ($output | Out-String)
+        ExitCode = $result.ExitCode
+        Text = $result.Text
     }
 }
 

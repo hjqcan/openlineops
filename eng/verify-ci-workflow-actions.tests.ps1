@@ -91,6 +91,18 @@ $cases = @(
         ExpectedFailure = "publication evidence validator mutation tests"
     },
     [pscustomobject]@{
+        Name = "GitHub fixture host regression deletion"
+        Search = "      - name: Test GitHub fixture PowerShell host`n        shell: powershell`n        run: ./eng/github-fixture-process.tests.ps1`n"
+        Replacement = ""
+        ExpectedFailure = "trusted GitHub fixture PowerShell host regression"
+    },
+    [pscustomobject]@{
+        Name = "GitHub fixture host regression rename"
+        Search = "./eng/github-fixture-process.tests.ps1"
+        Replacement = "./eng/github-fixture-process-smoke.ps1"
+        ExpectedFailure = "trusted GitHub fixture PowerShell host regression"
+    },
+    [pscustomobject]@{
         Name = "Studio evidence validator mutation regression"
         Search = "./eng/verify-studio-two-agent-production-evidence.tests.ps1"
         Replacement = "Write-Host 'Studio evidence mutation regression disabled'"

@@ -48,6 +48,7 @@ import {
   verifyCredentialPathProtection
 } from './api-credential-security.js';
 import { createLocalSqliteConnectionString } from './local-sqlite-connection.js';
+import { windowsSystemExecutablePath } from './windows-system-tools.js';
 import {
   ensurePackagedRuntimeDataBinding,
   ensureCanonicalDesktopUserDataDirectory,
@@ -941,10 +942,13 @@ async function terminateBackendProcessTree(
     return;
   }
   if (process.platform === 'win32') {
-    const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-      encoding: 'utf8',
-      windowsHide: true
-    });
+    const result = spawnSync(
+      windowsSystemExecutablePath('taskkill.exe'),
+      ['/pid', String(child.pid), '/t', '/f'],
+      {
+        encoding: 'utf8',
+        windowsHide: true
+      });
     try {
       await waitForBackendProcessExit(child, 10000);
     } catch (error) {

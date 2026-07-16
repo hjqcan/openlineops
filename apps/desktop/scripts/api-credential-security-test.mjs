@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -18,6 +19,10 @@ import {
   verifyCredentialPathProtection
 } from '../dist-electron/main/api-credential-security.js';
 import { createLocalSqliteConnectionString } from '../dist-electron/main/local-sqlite-connection.js';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-powershell-host.mjs';
 
 const sourceUrl = new URL('../src/main/main.ts', import.meta.url);
 const source = await readFile(sourceUrl, 'utf8');
@@ -189,6 +194,46 @@ test(
     });
   });
 
+test(
+  'Windows ACL hosts ignore inherited PowerShell module path pollution',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    await withCredentialFixture(async ({ directory, tokenPath }) => {
+      const pollutedModulePath = await createRejectedPowerShellSecurityModule(directory);
+      const savedModulePathEntries = Object.entries(process.env)
+        .filter(([name]) => name.toUpperCase() === 'PSMODULEPATH');
+      removeEnvironmentVariableCaseInsensitively('PSModulePath');
+      process.env.pSmOdUlEpAtH = [
+        pollutedModulePath,
+        path.join(
+          process.env.ProgramFiles ?? 'C:\\Program Files',
+          'PowerShell',
+          '7',
+          'Modules')
+      ].join(path.delimiter);
+      try {
+        assertInheritedWindowsPowerShellModulePathIsRejected(directory);
+        protectCredentialPath(directory, true);
+        await writeFile(tokenPath, randomBytes(32).toString('base64url'), {
+          flag: 'wx',
+          mode: 0o600
+        });
+        protectCredentialPath(tokenPath, false);
+        verifyCredentialPathProtection(directory, true);
+        verifyCredentialPathProtection(tokenPath, false);
+
+        const userSid = currentWindowsUserSid();
+        assertExactWindowsAcl(await readWindowsAcl(directory), userSid, true);
+        assertExactWindowsAcl(await readWindowsAcl(tokenPath), userSid, false);
+      } finally {
+        removeEnvironmentVariableCaseInsensitively('PSModulePath');
+        for (const [name, value] of savedModulePathEntries) {
+          process.env[name] = value;
+        }
+      }
+    });
+  });
+
 test('external credential verification leaves ACL, contents, and timestamps unchanged', async () => {
   await withCredentialFixture(async ({ directory, tokenPath }) => {
     protectCredentialPath(directory, true);
@@ -211,6 +256,49 @@ test('external credential verification leaves ACL, contents, and timestamps unch
   });
 });
 
+async function createRejectedPowerShellSecurityModule(root) {
+  const moduleRoot = path.join(root, 'polluted-modules');
+  const moduleDirectory = path.join(moduleRoot, 'Microsoft.PowerShell.Security');
+  await mkdir(moduleDirectory, { recursive: true });
+  await writeFile(
+    path.join(moduleDirectory, 'Microsoft.PowerShell.Security.psd1'),
+    String.raw`@{
+RootModule = 'Missing.Security.Commands.dll'
+ModuleVersion = '999.0.0'
+GUID = '7a3167f6-20d7-4934-94a6-24a6b45d5737'
+CmdletsToExport = @('Get-Acl')
+FunctionsToExport = @()
+AliasesToExport = @()
+}`,
+    'utf8');
+  return moduleRoot;
+}
+
+function assertInheritedWindowsPowerShellModulePathIsRejected(targetPath) {
+  const powerShellHost = createWindowsPowerShellHost();
+  const result = spawnSync(
+    powerShellHost.executablePath,
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$ErrorActionPreference = 'Stop'; Get-Acl -LiteralPath $env:OPENLINEOPS_TEST_ACL_PATH | Out-Null"
+    ],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        OPENLINEOPS_TEST_ACL_PATH: targetPath
+      }
+    });
+  assert.notEqual(
+    result.status,
+    0,
+    'The test module path must reproduce the inherited Windows PowerShell module collision.');
+}
+
 async function withCredentialFixture(action) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'openlineops-api-credential-acl-'));
   try {
@@ -224,7 +312,7 @@ async function withCredentialFixture(action) {
 }
 
 function runIcacls(targetPath, arguments_) {
-  const result = spawnSync('icacls.exe', [targetPath, ...arguments_], {
+  const result = spawnSync(windowsSystemExecutablePath('icacls.exe'), [targetPath, ...arguments_], {
     encoding: 'utf8',
     windowsHide: true
   });
@@ -235,7 +323,7 @@ function runIcacls(targetPath, arguments_) {
 }
 
 function currentWindowsUserSid() {
-  const result = spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], {
+  const result = spawnSync(windowsSystemExecutablePath('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
     encoding: 'utf8',
     windowsHide: true
   });
@@ -275,8 +363,11 @@ $rules = @($acl.GetAccessRules(
   rules = $rules
 } | ConvertTo-Json -Depth 5 -Compress
 `;
+  const host = createWindowsPowerShellHost({
+    OPENLINEOPS_TEST_ACL_PATH: targetPath
+  });
   const result = spawnSync(
-    'powershell.exe',
+    host.executablePath,
     [
       '-NoLogo',
       '-NoProfile',
@@ -287,13 +378,18 @@ $rules = @($acl.GetAccessRules(
     {
       encoding: 'utf8',
       windowsHide: true,
-      env: {
-        ...process.env,
-        OPENLINEOPS_TEST_ACL_PATH: targetPath
-      }
+      env: host.environment
     });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout.trim());
+}
+
+function removeEnvironmentVariableCaseInsensitively(variableName) {
+  for (const name of Object.keys(process.env)) {
+    if (name.toUpperCase() === variableName.toUpperCase()) {
+      delete process.env[name];
+    }
+  }
 }
 
 function assertExactWindowsAcl(acl, userSid, directory) {

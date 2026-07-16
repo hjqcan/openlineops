@@ -9,6 +9,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import electronPath from 'electron';
 import { buildSampleExtensionArchive } from './build-sample-extension-archive.mjs';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-powershell-host.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
@@ -2432,7 +2436,7 @@ async function killProcessTreeByPid(pid) {
     throw new Error('Electron security smoke requires Windows process-tree termination.');
   }
   await new Promise((resolve, reject) => {
-    const child = spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], {
+    const child = spawn(windowsSystemExecutablePath('taskkill.exe'), ['/pid', String(pid), '/t', '/f'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true
     });
@@ -2453,7 +2457,7 @@ async function isWindowsProcessRunning(pid) {
   }
   return new Promise((resolve, reject) => {
     const child = spawn(
-      'tasklist.exe',
+      windowsSystemExecutablePath('tasklist.exe'),
       ['/fi', `PID eq ${pid}`, '/fo', 'csv', '/nh'],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -2497,8 +2501,9 @@ async function waitForNoPluginHostProcesses() {
 
 async function countPluginHostProcesses() {
   return new Promise((resolve, reject) => {
+    const powerShellHost = createWindowsPowerShellHost();
     const child = spawn(
-      'powershell.exe',
+      powerShellHost.executablePath,
       [
         '-NoLogo',
         '-NoProfile',
@@ -2508,7 +2513,11 @@ async function countPluginHostProcesses() {
           + '($_.Name -ieq "dotnet.exe" -or $_.Name -ieq "OpenLineOps.PluginHost.exe") '
           + '-and $_.CommandLine -like "*--openlineops-plugin-host*" }).Count'
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      {
+        env: powerShellHost.environment,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
     let output = '';
     let errorOutput = '';
     child.stdout.on('data', chunk => { output += chunk.toString(); });

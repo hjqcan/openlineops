@@ -6,6 +6,10 @@ import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-powershell-host.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -79,10 +83,15 @@ async function waitForApiChildProcess(electronPid, timeoutMs) {
       '| Select-Object -First 1 -ExpandProperty ProcessId;',
       'if ($candidate) { Write-Output $candidate }'
     ].join(' ');
+    const powerShellHost = createWindowsPowerShellHost();
     const { stdout } = await execFileAsync(
-      'powershell.exe',
+      powerShellHost.executablePath,
       ['-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf8', windowsHide: true });
+      {
+        encoding: 'utf8',
+        env: powerShellHost.environment,
+        windowsHide: true
+      });
     const value = stdout.trim();
     if (/^[1-9][0-9]*$/u.test(value)) {
       return Number(value);
@@ -117,10 +126,15 @@ async function waitForProcessToDisappear(pid, timeoutMs) {
 
 async function processExists(pid) {
   const script = `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($process) { Write-Output present }`;
+  const powerShellHost = createWindowsPowerShellHost();
   const { stdout } = await execFileAsync(
-    'powershell.exe',
+    powerShellHost.executablePath,
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', windowsHide: true });
+    {
+      encoding: 'utf8',
+      env: powerShellHost.environment,
+      windowsHide: true
+    });
   return stdout.trim() === 'present';
 }
 
@@ -130,7 +144,7 @@ async function terminateKnownProcessTree(pid) {
     return;
   }
   await execFileAsync(
-    'taskkill.exe',
+    windowsSystemExecutablePath('taskkill.exe'),
     ['/pid', String(pid), '/t', '/f'],
     { encoding: 'utf8', windowsHide: true }).catch(() => undefined);
 }

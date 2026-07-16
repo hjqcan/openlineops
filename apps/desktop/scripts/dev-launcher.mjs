@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import electronPath from 'electron';
+import { windowsSystemExecutablePath } from './windows-powershell-host.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
@@ -87,7 +88,7 @@ function terminateKnownProcessTree(child) {
     return;
   }
   if (process.platform === 'win32') {
-    spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+    spawnSync(windowsSystemExecutablePath('taskkill.exe'), ['/pid', String(child.pid), '/t', '/f'], {
       stdio: 'ignore',
       windowsHide: true
     });

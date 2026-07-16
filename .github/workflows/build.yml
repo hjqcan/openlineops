@@ -31,6 +31,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-evidence-validation.tests.ps1
 
+      - name: Test GitHub fixture PowerShell host
+        shell: powershell
+        run: ./eng/github-fixture-process.tests.ps1
+
       - name: Test Studio two-Agent evidence validator
         shell: powershell
         run: ./eng/verify-studio-two-agent-production-evidence.tests.ps1

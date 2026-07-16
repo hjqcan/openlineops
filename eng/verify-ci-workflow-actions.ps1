@@ -145,6 +145,13 @@ Test-ContentContains `
     -Message "Workflow must run publication evidence validator mutation tests."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Test GitHub fixture PowerShell host\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*run:\s*\./eng/github-fixture-process\.tests\.ps1\s*$' `
+    -Message "Workflow must run the trusted GitHub fixture PowerShell host regression."
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Test GitHub fixture PowerShell host"
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "verify-studio-two-agent-production-evidence\.tests\.ps1" `
     -Message "Workflow must run Studio two-Agent evidence validator mutation tests."
 Test-ContentContains `

@@ -41,6 +41,11 @@ $InternalImplementationRoots = @(
     "tests/",
     "tools/"
 )
+$AllowedExternalVersionLiteralPaths = @(
+    "apps/desktop/src/main/windows-system-tools.ts",
+    "eng/github-fixture-process.ps1",
+    "tests/OpenLineOps.Agent.Tests/LeastPrivilegeLauncherContractTests.cs"
+)
 
 $Failures = [System.Collections.Generic.List[string]]::new()
 $gitDirectory = Join-Path $RepoRoot ".git"
@@ -107,9 +112,9 @@ foreach ($relativePath in $trackedFiles) {
         }
 
         $isAllowedExternalVersionLiteral =
-            $portablePath.Equals(
-                "tests/OpenLineOps.Agent.Tests/LeastPrivilegeLauncherContractTests.cs",
-                [System.StringComparison]::OrdinalIgnoreCase) -and
+            $AllowedExternalVersionLiteralPaths.Where({
+                $portablePath.Equals($_, [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0 -and
             $line -match "WindowsPowerShell.*['`"]v1\.0['`"].*powershell\.exe"
         if ($isInternalImplementation -and $line -match '(?i)(?:["'']v[1-9][0-9]*(?:\.[0-9]+)*["'']|[A-Za-z0-9](?:[._/-])v[1-9][0-9]*(?:["'']|[._/-]))') {
             if (-not $isAllowedExternalVersionLiteral) {

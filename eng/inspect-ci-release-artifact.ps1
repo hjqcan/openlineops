@@ -14,6 +14,7 @@ Add-Type -AssemblyName System.Runtime.Serialization
 Add-Type -AssemblyName System.Xml.Linq
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot "publication-evidence-case-contract.ps1")
 $Failures = New-Object System.Collections.Generic.List[string]
 $ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
 $RequiredProductionIntegrationTest = "OpenLineOps.PostgresIntegration.Tests.PostgresRabbitMqProductionCoordinationIntegrationTests.DurableOutboxAndResultInboxSurviveCoordinatorRestartAcrossRealBroker"
@@ -1292,14 +1293,17 @@ if ($null -ne $evidence) {
     }
 }
 
-foreach ($caseName in @("default", "confirmed-proof", "invalid-production-integration-evidence", "require-publishable")) {
-    $caseRoot = Join-Path $publicationEvidenceVerificationRoot $caseName
+foreach ($case in (Get-PublicationEvidenceCaseContract)) {
+    $caseRoot = Join-Path $publicationEvidenceVerificationRoot $case.RelativeDirectory
     Test-RequiredDirectory $caseRoot | Out-Null
     Test-RequiredFile (Join-Path $caseRoot "publication-evidence.json") | Out-Null
     Test-RequiredFile (Join-Path $caseRoot "publication-evidence.md") | Out-Null
 }
 
-$defaultVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "default/publication-evidence.json")
+$defaultVerificationRoot = Join-Path `
+    $publicationEvidenceVerificationRoot `
+    (Get-PublicationEvidenceCaseRelativeDirectory -Name "default")
+$defaultVerification = Read-JsonFile (Join-Path $defaultVerificationRoot "publication-evidence.json")
 if ($null -ne $defaultVerification) {
     Test-PublicationEvidenceDocument `
         -Evidence $defaultVerification `
@@ -1309,7 +1313,10 @@ if ($null -ne $defaultVerification) {
     }
 }
 
-$confirmedVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "confirmed-proof/publication-evidence.json")
+$confirmedVerificationRoot = Join-Path `
+    $publicationEvidenceVerificationRoot `
+    (Get-PublicationEvidenceCaseRelativeDirectory -Name "confirmed-proof")
+$confirmedVerification = Read-JsonFile (Join-Path $confirmedVerificationRoot "publication-evidence.json")
 if ($null -ne $confirmedVerification) {
     Test-PublicationEvidenceDocument `
         -Evidence $confirmedVerification `
@@ -1323,7 +1330,10 @@ if ($null -ne $confirmedVerification) {
     }
 }
 
-$invalidProofVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "invalid-production-integration-evidence/publication-evidence.json")
+$invalidProofVerificationRoot = Join-Path `
+    $publicationEvidenceVerificationRoot `
+    (Get-PublicationEvidenceCaseRelativeDirectory -Name "invalid-production-integration-evidence")
+$invalidProofVerification = Read-JsonFile (Join-Path $invalidProofVerificationRoot "publication-evidence.json")
 if ($null -ne $invalidProofVerification) {
     Test-PublicationEvidenceDocument `
         -Evidence $invalidProofVerification `
@@ -1333,7 +1343,25 @@ if ($null -ne $invalidProofVerification) {
     }
 }
 
-$requirePublishableVerification = Read-JsonFile (Join-Path $publicationEvidenceVerificationRoot "require-publishable/publication-evidence.json")
+$invalidTrxVerificationRoot = Join-Path `
+    $publicationEvidenceVerificationRoot `
+    (Get-PublicationEvidenceCaseRelativeDirectory -Name "invalid-production-integration-trx")
+$invalidTrxVerification = Read-JsonFile (Join-Path $invalidTrxVerificationRoot "publication-evidence.json")
+if ($null -ne $invalidTrxVerification) {
+    Test-PublicationEvidenceDocument `
+        -Evidence $invalidTrxVerification `
+        -Description "Invalid production integration TRX publication evidence verification"
+    if (-not (@($invalidTrxVerification.internalFailures) | Where-Object {
+                $_ -cmatch "TRX result records do not match its all-passed counters"
+            })) {
+        Add-Failure "Invalid production integration TRX verification must record the expected semantic failure."
+    }
+}
+
+$requirePublishableVerificationRoot = Join-Path `
+    $publicationEvidenceVerificationRoot `
+    (Get-PublicationEvidenceCaseRelativeDirectory -Name "require-publishable")
+$requirePublishableVerification = Read-JsonFile (Join-Path $requirePublishableVerificationRoot "publication-evidence.json")
 if ($null -ne $requirePublishableVerification) {
     Test-PublicationEvidenceDocument `
         -Evidence $requirePublishableVerification `

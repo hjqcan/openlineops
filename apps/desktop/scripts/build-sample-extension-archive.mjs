@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import process from 'node:process';
+import { createWindowsPowerShellHost } from './windows-powershell-host.mjs';
 
 export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHost = false } = {}) {
   const workingRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'openlineops-extension-e2e-'));
@@ -44,8 +46,12 @@ export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHo
         repoRoot);
     }
 
+    const powerShellHost = createWindowsPowerShellHost({
+      OPENLINEOPS_EXTENSION_SOURCE: packageRoot,
+      OPENLINEOPS_EXTENSION_ARCHIVE: archivePath
+    });
     await run(
-      'powershell.exe',
+      powerShellHost.executablePath,
       [
         '-NoLogo',
         '-NoProfile',
@@ -56,10 +62,7 @@ export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHo
           + '-DestinationPath $env:OPENLINEOPS_EXTENSION_ARCHIVE -CompressionLevel Optimal'
       ],
       repoRoot,
-      {
-        OPENLINEOPS_EXTENSION_SOURCE: packageRoot,
-        OPENLINEOPS_EXTENSION_ARCHIVE: archivePath
-      });
+      powerShellHost.environment);
 
     const archive = await fs.stat(archivePath);
     if (!archive.isFile() || archive.size === 0) {
@@ -77,11 +80,11 @@ export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHo
   }
 }
 
-async function run(command, args, cwd, extraEnvironment = {}) {
+async function run(command, args, cwd, environment = process.env) {
   await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, ...extraEnvironment },
+      env: environment,
       stdio: 'inherit',
       windowsHide: true
     });

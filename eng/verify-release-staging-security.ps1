@@ -7,6 +7,7 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $StageScript = Join-Path $PSScriptRoot "stage-release-artifacts.ps1"
 $PrepareScript = Join-Path $PSScriptRoot "prepare-final-publication.ps1"
 $RabbitMqScript = Join-Path $PSScriptRoot "verify-staged-agent-rabbitmq-e2e.ps1"
+. (Join-Path $PSScriptRoot "github-fixture-process.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -84,81 +85,6 @@ function Invoke-Git {
     }
     if ($exitCode -ne 0) {
         throw "Git command failed in release staging regression: $($output -join [Environment]::NewLine)"
-    }
-}
-
-function Invoke-PowerShellProcess {
-    param(
-        [Parameter(Mandatory = $true)][string] $ScriptPath,
-        [Parameter(Mandatory = $true)][string[]] $Arguments,
-        [Parameter(Mandatory = $true)][hashtable] $GitHubEnvironment
-    )
-
-    $requiredGitHubVariables = @(
-        "GITHUB_REPOSITORY",
-        "GITHUB_SHA",
-        "GITHUB_RUN_ID",
-        "GITHUB_SERVER_URL")
-    $unexpectedVariables = @($GitHubEnvironment.Keys | Where-Object {
-            $requiredGitHubVariables -cnotcontains $_
-        })
-    $missingVariables = @($requiredGitHubVariables | Where-Object {
-            -not $GitHubEnvironment.ContainsKey($_) `
-                -or [string]::IsNullOrWhiteSpace([string] $GitHubEnvironment[$_])
-        })
-    if ($unexpectedVariables.Count -ne 0 -or $missingVariables.Count -ne 0) {
-        throw "Synthetic PowerShell child requires exactly the repository, commit, run, and server GitHub environment tuple."
-    }
-
-    $githubVariableNames = @(
-        @([Environment]::GetEnvironmentVariables(
-                [EnvironmentVariableTarget]::Process).Keys | Where-Object {
-                $_ -like "GITHUB_*"
-            }) +
-        $requiredGitHubVariables |
-            Sort-Object -Unique)
-    $previousGitHubEnvironment = @{}
-    foreach ($name in $githubVariableNames) {
-        $previousGitHubEnvironment[$name] = [Environment]::GetEnvironmentVariable(
-            $name,
-            [EnvironmentVariableTarget]::Process)
-        [Environment]::SetEnvironmentVariable(
-            $name,
-            $null,
-            [EnvironmentVariableTarget]::Process)
-    }
-    foreach ($name in $requiredGitHubVariables) {
-        [Environment]::SetEnvironmentVariable(
-            $name,
-            [string] $GitHubEnvironment[$name],
-            [EnvironmentVariableTarget]::Process)
-    }
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1)
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        foreach ($name in $githubVariableNames) {
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $null,
-                [EnvironmentVariableTarget]::Process)
-        }
-        foreach ($name in $githubVariableNames) {
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $previousGitHubEnvironment[$name],
-                [EnvironmentVariableTarget]::Process)
-        }
-    }
-
-    return [pscustomobject]@{
-        ExitCode = $exitCode
-        Text = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)
     }
 }
 
@@ -364,7 +290,7 @@ $publicationGitHubEnvironment = @{
     GITHUB_RUN_ID = $publicationEvidence.runId
     GITHUB_SERVER_URL = "https://github.com"
 }
-$dirtyPublication = Invoke-PowerShellProcess `
+$dirtyPublication = Invoke-GitHubFixturePowerShellProcess `
     -ScriptPath (Join-Path $publicationEng "prepare-final-publication.ps1") `
     -Arguments $publicationArguments `
     -GitHubEnvironment $publicationGitHubEnvironment
@@ -375,7 +301,7 @@ if ($dirtyPublication.ExitCode -eq 0 `
     throw "Formal publication did not fail closed on an untracked worktree change."
 }
 
-$removedPasswordInvocation = Invoke-PowerShellProcess `
+$removedPasswordInvocation = Invoke-GitHubFixturePowerShellProcess `
     -ScriptPath (Join-Path $publicationEng "prepare-final-publication.ps1") `
     -Arguments ($publicationArguments + @(
         "-CodeSigningCertificatePassword",

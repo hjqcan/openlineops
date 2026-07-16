@@ -1,13 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, lstatSync } from 'node:fs';
 import process from 'node:process';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-system-tools.js';
 
 const systemSid = 'S-1-5-18';
 const administratorsSid = 'S-1-5-32-544';
 const aclPathEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_PATH';
 const aclUserSidEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_USER_SID';
 const aclPathKindEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_PATH_KIND';
-
 const protectWindowsCredentialPathScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $path = [Environment]::GetEnvironmentVariable('OPENLINEOPS_CREDENTIAL_ACL_PATH', 'Process')
@@ -16,8 +19,9 @@ $directory = [Environment]::GetEnvironmentVariable('OPENLINEOPS_CREDENTIAL_ACL_P
 $item = Get-Item -LiteralPath $path -Force
 if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 31 }
 if ($item.PSIsContainer -ne $directory) { exit 32 }
+$icaclsPath = Join-Path ([Environment]::GetEnvironmentVariable('SystemRoot', 'Process')) 'System32\icacls.exe'
 
-& icacls.exe $path '/inheritance:r' | Out-Null
+& $icaclsPath $path '/inheritance:r' | Out-Null
 if ($LASTEXITCODE -ne 0) { exit 41 }
 
 $acl = Get-Acl -LiteralPath $path
@@ -28,7 +32,7 @@ $existingSids = @($acl.GetAccessRules(
     $_.IdentityReference.Value
   } | Sort-Object -Unique)
 foreach ($sidValue in $existingSids) {
-  & icacls.exe $path '/remove' ('*' + $sidValue) | Out-Null
+  & $icaclsPath $path '/remove' ('*' + $sidValue) | Out-Null
   if ($LASTEXITCODE -ne 0) { exit 42 }
 }
 
@@ -39,7 +43,7 @@ $grantArguments = @(
   ('*' + $userSidValue + ':' + $rights),
   ('*S-1-5-18:' + $rights),
   ('*S-1-5-32-544:' + $rights))
-& icacls.exe @grantArguments | Out-Null
+& $icaclsPath @grantArguments | Out-Null
 if ($LASTEXITCODE -ne 0) { exit 43 }
 `;
 
@@ -141,10 +145,15 @@ function assertCredentialPathType(targetPath: string, directory: boolean): void 
 }
 
 function currentWindowsUserSid(): string {
-  const identity = spawnSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], {
-    encoding: 'utf8',
-    windowsHide: true
-  });
+  const host = createWindowsPowerShellHost();
+  const identity = spawnSync(
+    windowsSystemExecutablePath('whoami.exe'),
+    ['/user', '/fo', 'csv', '/nh'],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: host.environment
+    });
   const userSid = identity.status === 0
     ? identity.stdout.match(/S-\d-(?:\d+-)+\d+/)?.[0]
     : undefined;
@@ -162,8 +171,13 @@ function runWindowsAclScript(
   userSid: string,
   operation: 'protection' | 'verification'): void {
   const encodedScript = Buffer.from(script, 'utf16le').toString('base64');
+  const host = createWindowsPowerShellHost({
+    [aclPathEnvironmentVariable]: targetPath,
+    [aclUserSidEnvironmentVariable]: userSid,
+    [aclPathKindEnvironmentVariable]: directory ? 'directory' : 'file'
+  });
   const result = spawnSync(
-    'powershell.exe',
+    host.executablePath,
     [
       '-NoLogo',
       '-NoProfile',
@@ -174,12 +188,7 @@ function runWindowsAclScript(
     {
       encoding: 'utf8',
       windowsHide: true,
-      env: {
-        ...process.env,
-        [aclPathEnvironmentVariable]: targetPath,
-        [aclUserSidEnvironmentVariable]: userSid,
-        [aclPathKindEnvironmentVariable]: directory ? 'directory' : 'file'
-      }
+      env: host.environment
     });
   if (result.status !== 0) {
     const detail = [result.error?.message, result.stderr, result.stdout]
