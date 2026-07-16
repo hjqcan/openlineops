@@ -26,6 +26,10 @@ import {
 
 const sourceUrl = new URL('../src/main/main.ts', import.meta.url);
 const source = await readFile(sourceUrl, 'utf8');
+const credentialSecuritySourceUrl = new URL(
+  '../src/main/api-credential-security.ts',
+  import.meta.url);
+const credentialSecuritySource = await readFile(credentialSecuritySourceUrl, 'utf8');
 
 test('external credential mode is structurally read-only and fail-closed', () => {
   const provision = section(
@@ -140,6 +144,35 @@ test('packaged backend receives an explicit path-safe Production coordination co
     /absolute filesystem path/);
 });
 
+test('Windows credential ACL implementation pins ownership to the current user SID', () => {
+  const protection = section(
+    credentialSecuritySource,
+    'const protectWindowsCredentialPathScript',
+    'const verifyWindowsCredentialPathScript');
+  const verification = section(
+    credentialSecuritySource,
+    'const verifyWindowsCredentialPathScript',
+    'export function protectCredentialPath');
+  const setOwner = protection.indexOf("'/setowner'");
+  const removeInheritance = protection.indexOf("'/inheritance:r'");
+  assert.notEqual(setOwner, -1, 'Protection must explicitly assign the numeric user SID owner.');
+  assert.ok(
+    setOwner < removeInheritance,
+    'Protection must claim current-user ownership before replacing the inherited DACL.');
+  assert.match(
+    protection,
+    /& \$icaclsPath \$path '\/setowner' \('\*' \+ \$userSidValue\)/u,
+    'Owner assignment must use the fixed system icacls host and the numeric current-user SID.');
+  assert.match(
+    verification,
+    /\[System\.String\]::Equals\([\s\S]*?\$ownerSid,[\s\S]*?\$userSidValue,[\s\S]*?\[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{ exit 24 \}/u,
+    'Verification must require the current-user SID as the exact owner.');
+  assert.doesNotMatch(
+    verification,
+    /\.Contains\(\$ownerSid\)/u,
+    'DACL principals must never be reused as an owner allow-list.');
+});
+
 test('managed credential paths receive exact private permissions', async () => {
   await withCredentialFixture(async ({ directory, tokenPath }) => {
     protectCredentialPath(directory, true);
@@ -176,6 +209,32 @@ test(
         protectCredentialPath(directory, true);
       }
 
+      verifyCredentialPathProtection(directory, true);
+      assertExactWindowsAcl(await readWindowsAcl(directory), currentWindowsUserSid(), true);
+    });
+  });
+
+test(
+  'Windows verification rejects Administrators ownership and protection repairs it',
+  { skip: process.platform !== 'win32' },
+  async context => {
+    await withCredentialFixture(async ({ directory }) => {
+      protectCredentialPath(directory, true);
+      const mutation = invokeIcacls(
+        directory,
+        ['/setowner', '*S-1-5-32-544']);
+      if (mutation.status !== 0) {
+        context.skip(
+          'The current Windows token cannot assign the Administrators group as owner.');
+        return;
+      }
+
+      assert.equal((await readWindowsAcl(directory)).ownerSid, 'S-1-5-32-544');
+      assert.throws(
+        () => verifyCredentialPathProtection(directory, true),
+        /API credential ACL verification failed/);
+
+      protectCredentialPath(directory, true);
       verifyCredentialPathProtection(directory, true);
       assertExactWindowsAcl(await readWindowsAcl(directory), currentWindowsUserSid(), true);
     });
@@ -312,14 +371,18 @@ async function withCredentialFixture(action) {
 }
 
 function runIcacls(targetPath, arguments_) {
-  const result = spawnSync(windowsSystemExecutablePath('icacls.exe'), [targetPath, ...arguments_], {
-    encoding: 'utf8',
-    windowsHide: true
-  });
+  const result = invokeIcacls(targetPath, arguments_);
   assert.equal(
     result.status,
     0,
     `icacls failed (${result.status}): ${result.stderr || result.stdout}`);
+}
+
+function invokeIcacls(targetPath, arguments_) {
+  return spawnSync(windowsSystemExecutablePath('icacls.exe'), [targetPath, ...arguments_], {
+    encoding: 'utf8',
+    windowsHide: true
+  });
 }
 
 function currentWindowsUserSid() {

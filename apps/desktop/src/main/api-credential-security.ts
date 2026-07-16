@@ -6,8 +6,6 @@ import {
   windowsSystemExecutablePath
 } from './windows-system-tools.js';
 
-const systemSid = 'S-1-5-18';
-const administratorsSid = 'S-1-5-32-544';
 const aclPathEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_PATH';
 const aclUserSidEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_USER_SID';
 const aclPathKindEnvironmentVariable = 'OPENLINEOPS_CREDENTIAL_ACL_PATH_KIND';
@@ -20,6 +18,9 @@ $item = Get-Item -LiteralPath $path -Force
 if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 31 }
 if ($item.PSIsContainer -ne $directory) { exit 32 }
 $icaclsPath = Join-Path ([Environment]::GetEnvironmentVariable('SystemRoot', 'Process')) 'System32\icacls.exe'
+
+& $icaclsPath $path '/setowner' ('*' + $userSidValue) | Out-Null
+if ($LASTEXITCODE -ne 0) { exit 40 }
 
 & $icaclsPath $path '/inheritance:r' | Out-Null
 if ($LASTEXITCODE -ne 0) { exit 41 }
@@ -58,10 +59,6 @@ if ($item.PSIsContainer -ne $directory) { exit 32 }
 
 $acl = Get-Acl -LiteralPath $path
 if (-not $acl.AreAccessRulesProtected) { exit 21 }
-$allowed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-[void] $allowed.Add($userSidValue)
-[void] $allowed.Add('S-1-5-18')
-[void] $allowed.Add('S-1-5-32-544')
 $ownerSid = $acl.Owner
 try {
   $ownerSid = ([System.Security.Principal.NTAccount]::new($acl.Owner)).Translate(
@@ -69,7 +66,16 @@ try {
 } catch {
   $ownerSid = ([System.Security.Principal.SecurityIdentifier]::new($acl.Owner)).Value
 }
-if (-not $allowed.Contains($ownerSid)) { exit 24 }
+if (-not [System.String]::Equals(
+  $ownerSid,
+  $userSidValue,
+  [System.StringComparison]::OrdinalIgnoreCase)) { exit 24 }
+
+$allowedAccessSids = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase)
+[void] $allowedAccessSids.Add($userSidValue)
+[void] $allowedAccessSids.Add('S-1-5-18')
+[void] $allowedAccessSids.Add('S-1-5-32-544')
 
 $expectedInheritance = if ($directory) {
   [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -84,15 +90,15 @@ $rules = $acl.GetAccessRules(
 foreach ($rule in $rules) {
   $sid = $rule.IdentityReference.Value
   if ($rule.IsInherited) { exit 25 }
-  if (-not $allowed.Contains($sid)) { exit 22 }
+  if (-not $allowedAccessSids.Contains($sid)) { exit 22 }
   if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { exit 26 }
   if ($rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { exit 27 }
   if ($rule.InheritanceFlags -ne $expectedInheritance) { exit 28 }
   if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) { exit 29 }
   if (-not $seen.Add($sid)) { exit 30 }
 }
-if ($seen.Count -ne $allowed.Count) { exit 23 }
-foreach ($sid in $allowed) {
+if ($seen.Count -ne $allowedAccessSids.Count) { exit 23 }
+foreach ($sid in $allowedAccessSids) {
   if (-not $seen.Contains($sid)) { exit 23 }
 }
 `;
