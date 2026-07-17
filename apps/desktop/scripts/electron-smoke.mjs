@@ -1444,6 +1444,11 @@ async function main() {
     })()`,
     45000,
     'formal project snapshot runtime to open the topology Monitor view');
+  const completedProductionRunId = await waitForExpression(
+    `(() => document.body.innerText.match(
+      /Production run Completed: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/u)?.[1] ?? '')()`,
+    15000,
+    'completed Production Run identity to remain visible in the runtime output');
   const productionUnit = await expectApiStatus(
     `/api/production-units/${encodeURIComponent(productionUnitId)}`,
     {},
@@ -1505,18 +1510,36 @@ async function main() {
   await clickByTestId('cancel-emergency-stop');
   await captureSmokeScreenshot('line-operations.png');
 
-  const traceRecordsAfterRuns = await expectApiStatus(
-    `/api/traceability/records?projectId=${encodeURIComponent(openedProject.projectId)}`,
-    {},
-    200,
-    'query trace records after the production run');
-  if (traceRecordsAfterRuns.body?.totalCount !== 1
-    || !traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
-    || traceRecordsAfterRuns.body?.items?.[0]?.traceRecordId
-      !== traceRecordsAfterRuns.body?.items?.[0]?.productionRunId
-    || traceRecordsAfterRuns.body?.items?.[0]?.operationCount < 2) {
+  const traceRecordsPath = `/api/traceability/records?projectId=${encodeURIComponent(openedProject.projectId)}`;
+  const traceRecordsDeadline = Date.now() + 30000;
+  let traceRecordsAfterRuns = null;
+  while (Date.now() < traceRecordsDeadline) {
+    traceRecordsAfterRuns = await apiRequest(traceRecordsPath);
+    const traceRecord = traceRecordsAfterRuns.body?.items?.[0];
+    if (traceRecordsAfterRuns.status === 200
+        && traceRecordsAfterRuns.body?.totalCount === 1
+        && traceRecordsAfterRuns.body?.items?.length === 1
+        && traceRecord?.productionRunId === completedProductionRunId
+        && traceRecord.traceRecordId === completedProductionRunId
+        && traceRecord.operationCount >= 2) {
+      break;
+    }
+    await delay(200);
+  }
+  const traceRecordAfterRun = traceRecordsAfterRuns?.body?.items?.[0];
+  if (traceRecordsAfterRuns?.status !== 200
+    || traceRecordsAfterRuns.body?.totalCount !== 1
+    || traceRecordsAfterRuns.body?.items?.length !== 1
+    || traceRecordAfterRun?.productionRunId !== completedProductionRunId
+    || traceRecordAfterRun?.traceRecordId !== completedProductionRunId
+    || !(traceRecordAfterRun?.operationCount >= 2)) {
     throw new Error(
-      `Expected one production run to create exactly one Operation trace record: ${JSON.stringify(traceRecordsAfterRuns.body)}`);
+      `Expected Production Run ${completedProductionRunId} to project exactly one Operation trace record: `
+      + JSON.stringify({
+        status: traceRecordsAfterRuns?.status ?? null,
+        body: traceRecordsAfterRuns?.body ?? null,
+        text: traceRecordsAfterRuns?.text ?? null
+      }));
   }
 
   await clickByTestId('nav-trace');
@@ -2709,7 +2732,14 @@ async function dragElementByTestId(testId, deltaX, deltaY) {
     }
     if (${JSON.stringify(attachEvidence)}) {
       window.__openlineopsLast3DDrag = [];
-      for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+      for (const eventName of [
+        'pointerdown',
+        'gotpointercapture',
+        'pointermove',
+        'pointerup',
+        'pointercancel',
+        'lostpointercapture'
+      ]) {
         element.addEventListener(eventName, event => {
           window.__openlineopsLast3DDrag.push({
             eventName,
@@ -2755,7 +2785,8 @@ async function dragElementByTestId(testId, deltaX, deltaY) {
       y: startY,
       button: 'left',
       buttons: 1,
-      clickCount: 1
+      clickCount: 1,
+      pointerType: 'mouse'
     });
     await delay(50);
     pointerDownState = await evaluate(`(() => {
@@ -2771,7 +2802,39 @@ async function dragElementByTestId(testId, deltaX, deltaY) {
     })()`);
     if (pointerDownState.events.some(event => event.eventName === 'pointerdown')
         && pointerDownState.captured) {
-      break;
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: startX + deltaX / 8,
+        y: startY + deltaY / 8,
+        button: 'left',
+        buttons: 1,
+        pointerType: 'mouse'
+      });
+      try {
+        await waitForExpression(
+          '(window.__openlineopsLast3DDrag ?? []).some(event => event.eventName === "pointermove")',
+          2000,
+          'captured 3D pointer to receive its first pressed move');
+        pointerDownState = await evaluate(`(() => {
+          const element = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
+          const events = window.__openlineopsLast3DDrag ?? [];
+          const pointerDown = events.find(event => event.eventName === 'pointerdown') ?? null;
+          return {
+            events,
+            captured: pointerDown && element instanceof Element
+              ? element.hasPointerCapture(pointerDown.pointerId)
+              : false
+          };
+        })()`);
+        if (pointerDownState.captured) {
+          break;
+        }
+      } catch {
+        pointerDownState = await evaluate(`(() => ({
+          events: window.__openlineopsLast3DDrag ?? [],
+          captured: false
+        }))()`);
+      }
     }
     await cdp.send('Input.dispatchMouseEvent', {
       type: 'mouseReleased',
@@ -2779,25 +2842,28 @@ async function dragElementByTestId(testId, deltaX, deltaY) {
       y: startY,
       button: 'left',
       buttons: 0,
-      clickCount: 1
+      clickCount: 1,
+      pointerType: 'mouse'
     });
     await delay(125);
   }
   if (!pointerDownState?.events.some(event => event.eventName === 'pointerdown')
+      || !pointerDownState.events.some(event => event.eventName === 'pointermove')
       || !pointerDownState.captured) {
-    throw new Error(`3D drag did not capture its pointer after 3 attempts: ${JSON.stringify(pointerDownState)}`);
+    throw new Error(`3D drag did not start a captured pointer move after 3 attempts: ${JSON.stringify(pointerDownState)}`);
   }
   const endX = startX + deltaX;
   const endY = startY + deltaY;
-  for (let step = 1; step <= 4; step += 1) {
+  for (let step = 2; step <= 8; step += 1) {
     await cdp.send('Input.dispatchMouseEvent', {
       type: 'mouseMoved',
-      x: startX + (deltaX * step) / 4,
-      y: startY + (deltaY * step) / 4,
-      button: 'none',
-      buttons: 1
+      x: startX + (deltaX * step) / 8,
+      y: startY + (deltaY * step) / 8,
+      button: 'left',
+      buttons: 1,
+      pointerType: 'mouse'
     });
-    await delay(25);
+    await delay(40);
   }
   await cdp.send('Input.dispatchMouseEvent', {
     type: 'mouseReleased',
@@ -2805,11 +2871,23 @@ async function dragElementByTestId(testId, deltaX, deltaY) {
     y: endY,
     button: 'left',
     buttons: 0,
-    clickCount: 1
+    clickCount: 1,
+    pointerType: 'mouse'
   });
+  await delay(75);
   const events = await evaluate('window.__openlineopsLast3DDrag');
-  if (!events.some(event => event.eventName === 'pointermove')) {
-    throw new Error(`3D drag emitted no pointer move: ${JSON.stringify(events)}`);
+  const pointerDown = events.find(event => event.eventName === 'pointerdown');
+  const pointerMove = events.find(event => event.eventName === 'pointermove'
+    && event.pointerId === pointerDown?.pointerId
+    && event.buttons === 1
+    && (Math.abs(event.clientX - pointerDown.clientX) > 0.5
+      || Math.abs(event.clientY - pointerDown.clientY) > 0.5));
+  const pointerUp = events.find(event => event.eventName === 'pointerup'
+    && event.pointerId === pointerDown?.pointerId
+    && event.buttons === 0);
+  if (!pointerDown || !pointerMove || !pointerUp) {
+    throw new Error(
+      `3D drag did not emit a single captured down/move/up sequence: ${JSON.stringify(events)}`);
   }
   return events;
 }
@@ -2832,14 +2910,17 @@ async function dragProductionOperationByTestId(testId, deltaX, deltaY) {
     y: startY,
     button: 'left',
     buttons: 1,
-    clickCount: 1
+    clickCount: 1,
+    pointerType: 'mouse'
   });
   for (let step = 1; step <= 4; step += 1) {
     await cdp.send('Input.dispatchMouseEvent', {
       type: 'mouseMoved',
       x: startX + (deltaX * step) / 4,
       y: startY + (deltaY * step) / 4,
-      buttons: 1
+      button: 'left',
+      buttons: 1,
+      pointerType: 'mouse'
     });
     await delay(25);
   }
@@ -2849,7 +2930,8 @@ async function dragProductionOperationByTestId(testId, deltaX, deltaY) {
     y: startY + deltaY,
     button: 'left',
     buttons: 0,
-    clickCount: 1
+    clickCount: 1,
+    pointerType: 'mouse'
   });
 }
 
