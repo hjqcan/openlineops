@@ -46,6 +46,23 @@ const packagedPluginHostExecutable = path.join(
   'OpenLineOps.PluginHost.exe');
 const viteCliPath = path.join(desktopRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const smokeScreenshotDirectory = process.env.OPENLINEOPS_SMOKE_SCREENSHOT_DIR?.trim() ?? '';
+const developmentHostConfiguration = 'Debug';
+const developmentHosts = [
+  'OpenLineOps.Api',
+  'OpenLineOps.ScriptWorker',
+  'OpenLineOps.PluginHost'
+].map(projectName => ({
+  projectName,
+  projectPath: path.join(repoRoot, 'src', projectName, `${projectName}.csproj`),
+  assemblyPath: path.join(
+    repoRoot,
+    'src',
+    projectName,
+    'bin',
+    developmentHostConfiguration,
+    'net10.0',
+    `${projectName}.dll`)
+}));
 
 const childLogs = [];
 const cdpEvents = [];
@@ -75,10 +92,10 @@ async function main() {
     path.join(physicalTempRoot, 'openlineops-desktop-smoke-'));
   if (packagedMode) {
     await seedIncompatiblePackagedRuntimeState();
+  } else {
+    await prepareDevelopmentHosts();
   }
-  sampleExtensionArchive = await buildSampleExtensionArchive(repoRoot, {
-    buildDevelopmentHost: !packagedMode
-  });
+  sampleExtensionArchive = await buildSampleExtensionArchive(repoRoot);
   ({ server: apiSquatterServer, baseUrl: apiSquatterBaseUrl } = await startApiSquatter());
 
   if (previewUrl) {
@@ -3642,6 +3659,45 @@ function assertNodeRuntime() {
   if (typeof WebSocket === 'undefined') {
     throw new Error('Node.js 22 or newer is required because the smoke test uses the built-in WebSocket API.');
   }
+}
+
+async function prepareDevelopmentHosts() {
+  for (const host of developmentHosts) {
+    await runLoggedProcess(
+      'dotnet',
+      [
+        'build',
+        host.projectPath,
+        '--configuration',
+        developmentHostConfiguration,
+        '--nologo',
+        '--verbosity',
+        'minimal',
+        '--property:TreatWarningsAsErrors=true'
+      ],
+      { cwd: repoRoot, env: process.env },
+      `build-${host.projectName}`);
+
+    const assembly = await fs.stat(host.assemblyPath).catch(() => null);
+    if (!assembly?.isFile()) {
+      throw new Error(
+        `Development host build did not produce ${host.projectName}: ${host.assemblyPath}`);
+    }
+  }
+
+  console.log(
+    `Development hosts ready (${developmentHostConfiguration}): `
+      + developmentHosts.map(host => host.projectName).join(', '));
+}
+
+async function runLoggedProcess(command, args, options, label) {
+  const child = spawnLogged(command, args, options, label);
+  await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', code => code === 0
+      ? resolve()
+      : reject(new Error(`${label} exited with code ${code ?? 'unknown'}.`)));
+  });
 }
 
 function delay(ms) {

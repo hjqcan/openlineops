@@ -5,7 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { createWindowsPowerShellHost } from './windows-powershell-host.mjs';
 
-export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHost = false } = {}) {
+export async function buildSampleExtensionArchive(repoRoot) {
   const workingRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'openlineops-extension-e2e-'));
   const packageRoot = path.join(workingRoot, 'package');
   const archivePath = path.join(workingRoot, 'openlineops.samples.loopback-device.zip');
@@ -32,19 +32,6 @@ export async function buildSampleExtensionArchive(repoRoot, { buildDevelopmentHo
       ],
       repoRoot);
     await fs.copyFile(path.join(sampleRoot, 'manifest.json'), path.join(packageRoot, 'manifest.json'));
-
-    if (buildDevelopmentHost) {
-      await run(
-        'dotnet',
-        [
-          'build',
-          path.join(repoRoot, 'src', 'OpenLineOps.PluginHost', 'OpenLineOps.PluginHost.csproj'),
-          '--configuration',
-          'Debug',
-          '--nologo'
-        ],
-        repoRoot);
-    }
 
     const powerShellHost = createWindowsPowerShellHost({
       OPENLINEOPS_EXTENSION_SOURCE: packageRoot,
