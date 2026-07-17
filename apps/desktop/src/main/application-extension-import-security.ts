@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from 'node:fs';
+import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -8,10 +8,10 @@ export interface ApplicationExtensionArchiveIdentity {
   path: string;
   fileName: string;
   sizeBytes: number;
-  device: number;
-  inode: number;
-  modifiedAtMilliseconds: number;
-  changedAtMilliseconds: number;
+  device: bigint;
+  inode: bigint;
+  modifiedAtNanoseconds: bigint;
+  changedAtNanoseconds: bigint;
 }
 
 export function inspectApplicationExtensionArchive(
@@ -33,36 +33,31 @@ export function inspectApplicationExtensionArchive(
   }
 
   const fileName = path.basename(normalizedPath);
-  if (fileName !== fileName.trim()
-      || fileName.length > 255
-      || [...fileName].some(character => character.charCodeAt(0) < 32)
-      || path.extname(fileName).toLowerCase() !== '.zip') {
-    throw new Error('Application extensions must be imported from one local .zip archive.');
-  }
+  assertApplicationExtensionArchiveFileName(fileName);
 
-  const resolvedPath = realpathSync.native(normalizedPath);
-  if (!samePath(resolvedPath, normalizedPath)) {
-    throw new Error('The selected extension package cannot be a link or redirected path.');
-  }
+  // Reject a linked leaf, then anchor subsequent path-based opens outside any stable parent alias
+  // by returning the resolved physical path bound to the selected file's filesystem identity.
+  const selectedMetadata = fs.lstatSync(normalizedPath, { bigint: true });
+  assertApplicationExtensionArchiveMetadata(selectedMetadata);
 
-  const metadata = lstatSync(normalizedPath);
-  if (!metadata.isFile()
-      || metadata.isSymbolicLink()
-      || metadata.nlink !== 1
-      || metadata.size <= 0
-      || metadata.size > maximumApplicationExtensionArchiveBytes) {
-    throw new Error(
-      'The selected extension package must be one non-linked regular ZIP file no larger than 256 MiB.');
+  const resolvedPath = fs.realpathSync.native(normalizedPath);
+  assertCanonicalResolvedApplicationExtensionPath(resolvedPath);
+  assertApplicationExtensionArchiveFileName(path.basename(resolvedPath));
+
+  const metadata = fs.lstatSync(resolvedPath, { bigint: true });
+  assertApplicationExtensionArchiveMetadata(metadata);
+  if (!sameArchiveIdentity(selectedMetadata, metadata)) {
+    throw new Error('The selected extension package resolved to a different physical file.');
   }
 
   return {
-    path: normalizedPath,
+    path: resolvedPath,
     fileName,
-    sizeBytes: metadata.size,
+    sizeBytes: Number(metadata.size),
     device: metadata.dev,
     inode: metadata.ino,
-    modifiedAtMilliseconds: metadata.mtimeMs,
-    changedAtMilliseconds: metadata.ctimeMs
+    modifiedAtNanoseconds: metadata.mtimeNs,
+    changedAtNanoseconds: metadata.ctimeNs
   };
 }
 
@@ -73,8 +68,8 @@ export function assertApplicationExtensionArchiveUnchanged(
   if (current.sizeBytes !== expected.sizeBytes
       || current.device !== expected.device
       || current.inode !== expected.inode
-      || current.modifiedAtMilliseconds !== expected.modifiedAtMilliseconds
-      || current.changedAtMilliseconds !== expected.changedAtMilliseconds) {
+      || current.modifiedAtNanoseconds !== expected.modifiedAtNanoseconds
+      || current.changedAtNanoseconds !== expected.changedAtNanoseconds) {
     throw new Error('The selected extension package changed while it was being prepared.');
   }
 }
@@ -109,6 +104,46 @@ function samePath(left: string, right: string): boolean {
     ? value.toLocaleLowerCase('en-US')
     : value;
   return normalize(left) === normalize(right);
+}
+
+function assertCanonicalResolvedApplicationExtensionPath(resolvedPath: string): void {
+  if (resolvedPath.length === 0
+      || resolvedPath !== resolvedPath.trim()
+      || resolvedPath.length > 32_767
+      || resolvedPath.includes('\0')
+      || !path.isAbsolute(resolvedPath)
+      || !samePath(resolvedPath, path.normalize(resolvedPath))
+      || process.platform === 'win32' && isWindowsRemoteOrDevicePath(resolvedPath)) {
+    throw new Error('The selected extension package did not resolve to one canonical local path.');
+  }
+}
+
+function assertApplicationExtensionArchiveFileName(fileName: string): void {
+  if (fileName !== fileName.trim()
+      || fileName.length > 255
+      || [...fileName].some(character => character.charCodeAt(0) < 32)
+      || path.extname(fileName).toLowerCase() !== '.zip') {
+    throw new Error('Application extensions must be imported from one local .zip archive.');
+  }
+}
+
+function assertApplicationExtensionArchiveMetadata(metadata: fs.BigIntStats): void {
+  if (!metadata.isFile()
+      || metadata.isSymbolicLink()
+      || metadata.nlink !== 1n
+      || metadata.size <= 0n
+      || metadata.size > BigInt(maximumApplicationExtensionArchiveBytes)) {
+    throw new Error(
+      'The selected extension package must be one non-linked regular ZIP file no larger than 256 MiB.');
+  }
+}
+
+function sameArchiveIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
 }
 
 function isWindowsRemoteOrDevicePath(value: string): boolean {
