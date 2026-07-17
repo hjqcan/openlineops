@@ -3234,6 +3234,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint WaitFailed = uint.MaxValue;
         private const uint ForcedTerminationExitCode = 1;
         private static readonly nuint ProcessThreadAttributeJobList = 0x0002000D;
+        private static readonly Lock ProcessTokenPrivilegeGate = new();
 
         private readonly SafeProcessHandle _processHandle;
         private readonly WindowsProcessJob _processJob;
@@ -3318,32 +3319,37 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 var creationError = 0;
                 if (identity.UserName is not null)
                 {
-                    using var privileges = CreatePrivilegeImpersonation(
-                        "SeImpersonatePrivilege");
-                    created = privileges.Run(() =>
-                    {
-                        var result = CreateProcessWithToken(
-                            profileToken
-                            ?? throw new InvalidOperationException(
-                                "The staged Agent restricted profile token is unavailable."),
-                            LogonWithoutProfile,
-                            executablePath,
-                            commandLine,
-                            CreateNewProcessGroup
-                            | CreateSuspended
-                            | CreateUnicodeEnvironment
-                            | ExtendedStartupInfoPresent,
-                            environmentPointer,
-                            workingDirectory,
-                            ref creationAttributes.StartupInfo,
-                            out processInformation);
-                        if (!result)
+                    created = RunWithProcessTokenPrivilege(
+                        "SeImpersonatePrivilege",
+                        () =>
                         {
-                            creationError = Marshal.GetLastWin32Error();
-                        }
+                            var result = CreateProcessWithToken(
+                                profileToken
+                                ?? throw new InvalidOperationException(
+                                    "The staged Agent restricted profile token is unavailable."),
+                                LogonWithoutProfile,
+                                executablePath,
+                                commandLine,
+                                CreateNewProcessGroup
+                                | CreateSuspended
+                                | CreateUnicodeEnvironment
+                                | ExtendedStartupInfoPresent,
+                                environmentPointer,
+                                workingDirectory,
+                                ref creationAttributes.StartupInfo,
+                                out processInformation);
+                            if (!result)
+                            {
+                                creationError = Marshal.GetLastWin32Error();
+                            }
 
-                        return result;
-                    });
+                            return result;
+                        });
+                    if (!created && creationError == 0)
+                    {
+                        throw new InvalidOperationException(
+                            "CreateProcessWithTokenW failed without preserving its Win32 error code.");
+                    }
                 }
                 else
                 {
@@ -3371,7 +3377,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 {
                     throw new Win32Exception(
                         creationError,
-                        $"Could not start staged Agent '{executablePath}' as '{identity.AccountName}'.");
+                        $"The staged Agent process creation API failed for '{executablePath}' "
+                        + $"as '{identity.AccountName}' "
+                        + $"(Win32 error {creationError}).");
                 }
 
                 processCreated = true;
@@ -3763,11 +3771,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     var requested = new TokenPrivileges
                     {
                         PrivilegeCount = checked((uint)privilegeNames.Length),
-                        First = CreatePrivilege(privilegeNames[0])
+                        First = CreateEnabledPrivilege(privilegeNames[0])
                     };
                     if (privilegeNames.Length == 2)
                     {
-                        requested.Second = CreatePrivilege(privilegeNames[1]);
+                        requested.Second = CreateEnabledPrivilege(privilegeNames[1]);
                     }
 
                     if (!AdjustTokenPrivileges(
@@ -3801,30 +3809,143 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     throw;
                 }
             }
+        }
 
-            static LuidAndAttributes CreatePrivilege(string privilegeName)
+        private static T RunWithProcessTokenPrivilege<T>(
+            string privilegeName,
+            Func<T> action)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+            lock (ProcessTokenPrivilegeGate)
             {
-                if (string.IsNullOrWhiteSpace(privilegeName)
-                    || char.IsWhiteSpace(privilegeName[0])
-                    || char.IsWhiteSpace(privilegeName[^1]))
+                using var process = Process.GetCurrentProcess();
+                if (!OpenProcessTokenSafe(
+                        process.SafeHandle,
+                        TokenQuery | TokenAdjustPrivileges,
+                        out var processToken))
                 {
-                    throw new ArgumentException(
-                        "Windows privilege names must be canonical non-empty text.",
-                        nameof(privilegeNames));
-                }
-
-                if (!LookupPrivilegeValue(
-                        systemName: null,
-                        privilegeName,
-                        out var luid))
-                {
+                    var tokenError = Marshal.GetLastWin32Error();
+                    processToken.Dispose();
                     throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        $"Could not resolve Windows privilege '{privilegeName}'.");
+                        tokenError,
+                        "Could not open the staged E2E process token for a bounded privilege grant.");
                 }
 
-                return new LuidAndAttributes(luid, PrivilegeEnabled);
+                using (processToken)
+                {
+                    var requested = new TokenPrivileges
+                    {
+                        PrivilegeCount = 1,
+                        First = CreateEnabledPrivilege(privilegeName)
+                    };
+                    var adjusted = AdjustTokenPrivilegesWithPreviousState(
+                        processToken,
+                        disableAllPrivileges: false,
+                        ref requested,
+                        checked((uint)Marshal.SizeOf<TokenPrivileges>()),
+                        out var previousState,
+                        out _);
+                    var adjustmentError = Marshal.GetLastWin32Error();
+                    if (!adjusted)
+                    {
+                        throw new Win32Exception(
+                            adjustmentError,
+                            $"Could not enable Windows process privilege '{privilegeName}'.");
+                    }
+
+                    Exception? validationFailure = adjustmentError switch
+                    {
+                        0 => null,
+                        ErrorNotAllAssigned => new Win32Exception(
+                            adjustmentError,
+                            $"The staged E2E process token does not contain Windows privilege '{privilegeName}'."),
+                        _ => new Win32Exception(
+                            adjustmentError,
+                            $"Windows reported an unexpected result while enabling process privilege '{privilegeName}'.")
+                    };
+                    if (previousState.PrivilegeCount > 1
+                        || (previousState.PrivilegeCount == 1
+                            && previousState.First.Luid != requested.First.Luid))
+                    {
+                        validationFailure = new InvalidOperationException(
+                            $"Windows returned an invalid previous state for process privilege '{privilegeName}'.");
+                    }
+
+                    if (validationFailure is not null)
+                    {
+                        RestoreProcessTokenPrivilegeOrFailFast(
+                            processToken,
+                            previousState,
+                            privilegeName);
+                        ExceptionDispatchInfo.Capture(validationFailure).Throw();
+                    }
+
+                    try
+                    {
+                        return action();
+                    }
+                    finally
+                    {
+                        RestoreProcessTokenPrivilegeOrFailFast(
+                            processToken,
+                            previousState,
+                            privilegeName);
+                    }
+                }
             }
+        }
+
+        private static void RestoreProcessTokenPrivilegeOrFailFast(
+            SafeAccessTokenHandle processToken,
+            TokenPrivileges previousState,
+            string privilegeName)
+        {
+            if (previousState.PrivilegeCount == 0)
+            {
+                return;
+            }
+
+            var restoration = previousState;
+            var restored = AdjustTokenPrivileges(
+                processToken,
+                disableAllPrivileges: false,
+                ref restoration,
+                bufferLength: 0,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            var restorationError = Marshal.GetLastWin32Error();
+            if (!restored || restorationError != 0)
+            {
+                Environment.FailFast(
+                    $"The staged E2E process privilege '{privilegeName}' could not be restored.",
+                    new Win32Exception(
+                        restorationError,
+                        $"Could not restore Windows process privilege '{privilegeName}'."));
+            }
+        }
+
+        private static LuidAndAttributes CreateEnabledPrivilege(string privilegeName)
+        {
+            if (string.IsNullOrWhiteSpace(privilegeName)
+                || char.IsWhiteSpace(privilegeName[0])
+                || char.IsWhiteSpace(privilegeName[^1]))
+            {
+                throw new ArgumentException(
+                    "Windows privilege names must be canonical non-empty text.",
+                    nameof(privilegeName));
+            }
+
+            if (!LookupPrivilegeValue(
+                    systemName: null,
+                    privilegeName,
+                    out var luid))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not resolve Windows privilege '{privilegeName}'.");
+            }
+
+            return new LuidAndAttributes(luid, PrivilegeEnabled);
         }
 
         private sealed class PrivilegeImpersonation(
@@ -4654,6 +4775,20 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             int bufferLength,
             IntPtr previousState,
             IntPtr returnLength);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "AdjustTokenPrivileges",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustTokenPrivilegesWithPreviousState(
+            SafeAccessTokenHandle token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TokenPrivileges newState,
+            uint bufferLength,
+            out TokenPrivileges previousState,
+            out uint returnLength);
 
         [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
