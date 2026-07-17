@@ -33,6 +33,15 @@ const databaseNames = [
   'openlineops-plugin-events.sqlite'
 ];
 
+test('desktop package defines one canonical product identity for default user data', () => {
+  const desktopPackage = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+
+  assert.equal(desktopPackage.productName, 'OpenLineOps');
+  assert.equal(path.basename(desktopPackage.productName), desktopPackage.productName);
+  assert.doesNotMatch(desktopPackage.productName, /[<>:"/\\|?*\u0000-\u001f]/u);
+});
+
 function createFixture() {
   const physicalTempRoot = fileSystem.realpathSync.native(os.tmpdir());
   const root = mkdtempSync(path.join(physicalTempRoot, 'openlineops-runtime-binding-'));
@@ -60,7 +69,7 @@ function createFixture() {
   writeFixtureFile(
     packagedContent,
     'resources/app/package.json',
-    '{"name":"@openlineops/desktop"}');
+    '{"name":"@openlineops/desktop","productName":"OpenLineOps"}');
   writeFixtureFile(
     packagedContent,
     'resources/app/runtime/api/OpenLineOps.Api.exe',

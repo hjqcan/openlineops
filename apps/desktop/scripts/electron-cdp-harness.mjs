@@ -66,13 +66,16 @@ export class ElectronCdpHarness {
 
   async start() {
     this.cdpPort = await getFreePort();
+    const launchArguments = [
+      `--remote-debugging-port=${this.cdpPort}`,
+      '--disable-gpu'
+    ];
+    if (this.userDataDirectory !== null && this.userDataDirectory !== undefined) {
+      launchArguments.push(`--user-data-dir=${this.userDataDirectory}`);
+    }
     this.process = spawnCaptured(
       this.executablePath,
-      [
-        `--remote-debugging-port=${this.cdpPort}`,
-        '--disable-gpu',
-        `--user-data-dir=${this.userDataDirectory}`
-      ],
+      launchArguments,
       {
         cwd: this.workingDirectory,
         env: {

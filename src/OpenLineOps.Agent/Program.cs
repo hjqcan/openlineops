@@ -156,15 +156,12 @@ try
         serviceProvider.GetRequiredService<IStationResourceLeaseChangeInbox>()));
     builder.Services.AddSingleton<StationSafetyCommandCoordinator>();
     builder.Services.AddSingleton<StationJobOutboxDispatcher>();
-    builder.Services.AddHostedService<StationAgentWorker>();
+    builder.Services.AddSingleton<StationAgentShutdownState>();
     builder.Services.AddHostedService<StationAgentPresenceWorker>();
+    builder.Services.AddHostedService<StationAgentWorker>();
     builder.Services.AddHostedService<StationMaterialArrivalWorker>();
 
     await builder.Build().RunAsync();
-    return 0;
-}
-catch (OperationCanceledException)
-{
     return 0;
 }
 catch (Exception exception)

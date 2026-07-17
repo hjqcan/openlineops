@@ -1,5 +1,6 @@
 {
   "name": "@openlineops/desktop",
+  "productName": "OpenLineOps",
   "version": "0.1.0",
   "private": true,
   "description": "OpenLineOps Electron desktop shell.",
@@ -18,6 +19,7 @@
     "smoke:dev-launcher-shutdown": "npm run build:electron && node scripts/dev-launcher-shutdown-smoke.mjs",
     "smoke:e2e:packaged": "npm run package:win && node scripts/electron-smoke.mjs --packaged",
     "smoke:e2e:packaged-existing": "node scripts/electron-smoke.mjs --packaged",
+    "smoke:e2e:packaged-default-user-data": "node --check scripts/packaged-default-user-data-smoke.mjs && node scripts/packaged-default-user-data-smoke.mjs",
     "e2e:production-closure:packaged": "node --check scripts/electron-cdp-harness.mjs && node --check scripts/production-closure-e2e.mjs && node scripts/production-closure-e2e.mjs",
     "e2e:production-closure:package-and-run": "npm run package:win && npm run e2e:production-closure:packaged",
     "test:line-projection": "node scripts/line-runtime-projection-test.mjs",

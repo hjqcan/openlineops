@@ -361,6 +361,18 @@ $cases = @(
         ExpectedFailure = "staged packaged desktop restart, persistence, and single-instance E2E"
     },
     [pscustomobject]@{
+        Name = "Packaged default user-data smoke deletion"
+        Search = "      - name: Smoke test packaged default user data`n        working-directory: apps/desktop`n        timeout-minutes: 5`n        env:`n          OPENLINEOPS_ALLOW_DEFAULT_USER_DATA_SMOKE: `"1`"`n        run: npm run smoke:e2e:packaged-default-user-data`n"
+        Replacement = ""
+        ExpectedFailure = "without a user-data-dir override and verify Electron productName user-data derivation"
+    },
+    [pscustomobject]@{
+        Name = "Packaged default user-data smoke override substitution"
+        Search = "npm run smoke:e2e:packaged-default-user-data"
+        Replacement = "npm run smoke:e2e:packaged-existing"
+        ExpectedFailure = "without a user-data-dir override and verify Electron productName user-data derivation"
+    },
+    [pscustomobject]@{
         Name = "Production route runtime projection gate deletion"
         Search = "      - name: Test production route runtime projection`n        working-directory: apps/desktop`n        run: npm run test:production-route-runtime`n"
         Replacement = ""

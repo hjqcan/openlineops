@@ -58,6 +58,36 @@ internal sealed class WindowsProcessJob : IDisposable
     {
         ArgumentNullException.ThrowIfNull(limits);
         limits.Validate();
+        var job = CreateUnconfigured();
+        try
+        {
+            job.Configure(limits);
+            return job;
+        }
+        catch
+        {
+            job.Dispose();
+            throw;
+        }
+    }
+
+    public static WindowsProcessJob CreateKillOnClose()
+    {
+        var job = CreateUnconfigured();
+        try
+        {
+            job.ConfigureKillOnClose();
+            return job;
+        }
+        catch
+        {
+            job.Dispose();
+            throw;
+        }
+    }
+
+    private static WindowsProcessJob CreateUnconfigured()
+    {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("Windows process jobs require Windows.");
@@ -71,17 +101,7 @@ internal sealed class WindowsProcessJob : IDisposable
                 "Could not create the external program Job Object.");
         }
 
-        var job = new WindowsProcessJob(handle);
-        try
-        {
-            job.Configure(limits);
-            return job;
-        }
-        catch
-        {
-            job.Dispose();
-            throw;
-        }
+        return new WindowsProcessJob(handle);
     }
 
     public uint ActiveProcessCount
@@ -110,6 +130,31 @@ internal sealed class WindowsProcessJob : IDisposable
             finally
             {
                 Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+
+    public TResult UseHandle<TResult>(Func<IntPtr, TResult> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (_handle.IsInvalid || _handle.IsClosed)
+        {
+            throw new ObjectDisposedException(
+                nameof(WindowsProcessJob),
+                "The Windows process Job Object handle is unavailable.");
+        }
+
+        var addedReference = false;
+        try
+        {
+            _handle.DangerousAddRef(ref addedReference);
+            return action(_handle.DangerousGetHandle());
+        }
+        finally
+        {
+            if (addedReference)
+            {
+                _handle.DangerousRelease();
             }
         }
     }
@@ -166,6 +211,24 @@ internal sealed class WindowsProcessJob : IDisposable
             JobMemoryLimit = checked((nuint)limits.JobMemoryLimitBytes)
         };
 
+        SetExtendedLimits(information);
+    }
+
+    private void ConfigureKillOnClose()
+    {
+        var information = new JobObjectExtendedLimitInformationData
+        {
+            BasicLimitInformation = new JobObjectBasicLimitInformation
+            {
+                LimitFlags = JobObjectLimitKillOnJobClose
+            }
+        };
+
+        SetExtendedLimits(information);
+    }
+
+    private void SetExtendedLimits(JobObjectExtendedLimitInformationData information)
+    {
         var length = Marshal.SizeOf<JobObjectExtendedLimitInformationData>();
         var buffer = Marshal.AllocHGlobal(length);
         try

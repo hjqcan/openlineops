@@ -12,6 +12,60 @@ public sealed class RabbitMqStationTransportReliabilityTests
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task QuiescenceRejectsNewDeliveriesAndWaitsForInFlightCleanup()
+    {
+        var quiescence = new StationDeliveryQuiescence();
+        var entered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var inFlight = quiescence.ExecuteAsync(
+            async () =>
+            {
+                entered.TrySetResult();
+                await release.Task;
+            },
+            CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var drained = quiescence.StopAcceptingAndWaitAsync();
+        Assert.False(drained.IsCompleted);
+        var lateDeliveryRan = false;
+        await quiescence.ExecuteAsync(
+            () =>
+            {
+                lateDeliveryRan = true;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+        Assert.False(lateDeliveryRan);
+
+        release.TrySetResult();
+        await inFlight.WaitAsync(TimeSpan.FromSeconds(2));
+        await drained.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task QuiescenceDoesNotStartDeliveryAfterShutdownCancellation()
+    {
+        var quiescence = new StationDeliveryQuiescence();
+        using var stopping = new CancellationTokenSource();
+        stopping.Cancel();
+        var handlerRan = false;
+
+        await quiescence.ExecuteAsync(
+            () =>
+            {
+                handlerRan = true;
+                return Task.CompletedTask;
+            },
+            stopping.Token);
+        await quiescence.StopAcceptingAndWaitAsync();
+
+        Assert.False(handlerRan);
+    }
+
+    [Fact]
     public async Task ConfirmedPublisherFailureEscapesAndIdenticalRetryKeepsCanonicalIdentity()
     {
         var publications = new FailOncePublicationTransport();

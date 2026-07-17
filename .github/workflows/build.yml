@@ -243,6 +243,13 @@ jobs:
         shell: powershell
         run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
 
+      - name: Smoke test packaged default user data
+        working-directory: apps/desktop
+        timeout-minutes: 5
+        env:
+          OPENLINEOPS_ALLOW_DEFAULT_USER_DATA_SMOKE: "1"
+        run: npm run smoke:e2e:packaged-default-user-data
+
       - name: Smoke test staged packaged desktop
         working-directory: apps/desktop
         timeout-minutes: 15

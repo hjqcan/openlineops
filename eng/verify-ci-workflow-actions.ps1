@@ -313,6 +313,10 @@ Test-ContentContains `
     -Message "Workflow must run the staged packaged desktop restart, persistence, and single-instance E2E without rebuilding it."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Smoke test packaged default user data\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*env:\s*\r?\n\s*OPENLINEOPS_ALLOW_DEFAULT_USER_DATA_SMOKE:\s*"1"\s*\r?\n\s*run:\s*npm run smoke:e2e:packaged-default-user-data\s*$' `
+    -Message "Workflow must launch the staged package without a user-data-dir override and verify Electron productName user-data derivation."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "npm run test:production-route-validation" `
     -Message "Workflow must verify production route graph validation."
 Test-ContentContains `
@@ -344,6 +348,9 @@ Test-StepCannotContinueOnError `
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Smoke test staged packaged desktop"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Smoke test packaged default user data"
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Verify sanitized Studio two-Agent evidence"

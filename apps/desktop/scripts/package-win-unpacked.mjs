@@ -10,6 +10,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(projectRoot, '..', '..');
+const desktopPackage = JSON.parse(
+  await fs.readFile(path.join(projectRoot, 'package.json'), 'utf8'));
+
+if (desktopPackage.productName !== 'OpenLineOps') {
+  throw new Error(
+    'Desktop productName must be exactly OpenLineOps so Electron derives one canonical user-data directory component.');
+}
 
 const electronExecutable = require('electron');
 const electronPackageJson = require.resolve('electron/package.json');

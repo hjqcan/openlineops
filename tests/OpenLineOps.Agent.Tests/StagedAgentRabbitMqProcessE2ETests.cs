@@ -25,6 +25,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Win32.SafeHandles;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
@@ -33,6 +34,7 @@ using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Processes.Application.FlowIr;
+using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.ExternalPrograms;
@@ -442,9 +444,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 initialEvents.Count,
                 initialExecutionCount);
 
+            var firstPresenceSessionId = Assert.Single(
+                presenceRepository.AcceptedSnapshots
+                    .Select(static presence => presence.SessionId)
+                    .Distinct());
             var firstAgentPid = agent.Id;
             var firstExitCode = await agent.StopCleanlyAsync(TimeSpan.FromSeconds(30));
             Assert.Equal(0, firstExitCode);
+            await WaitForAcceptedStoppingAsync(
+                presenceRepository,
+                firstPresenceSessionId,
+                TimeSpan.FromSeconds(5));
+            AssertPresenceSession(presenceRepository, firstPresenceSessionId);
             agent.Dispose();
             agent = null;
 
@@ -469,8 +480,19 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 initialEvents.Count,
                 initialExecutionCount);
 
+            var restartedPresenceSessionId = Assert.Single(
+                presenceRepository.AcceptedSnapshots
+                    .Select(static presence => presence.SessionId)
+                    .Distinct(),
+                sessionId => sessionId != firstPresenceSessionId);
+            Assert.NotEqual(firstPresenceSessionId, restartedPresenceSessionId);
             var restartExitCode = await agent.StopCleanlyAsync(TimeSpan.FromSeconds(30));
             Assert.Equal(0, restartExitCode);
+            await WaitForAcceptedStoppingAsync(
+                presenceRepository,
+                restartedPresenceSessionId,
+                TimeSpan.FromSeconds(5));
+            AssertPresenceSession(presenceRepository, restartedPresenceSessionId);
             agent.Dispose();
             agent = null;
             stationStore.Dispose();
@@ -1049,20 +1071,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         Uri coordinatorBaseUri,
         string artifactUploadBearerToken)
     {
-        var environment = Environment.GetEnvironmentVariables()
-            .Cast<DictionaryEntry>()
-            .ToDictionary(
-                entry => (string)entry.Key,
-                entry => (string?)entry.Value ?? string.Empty,
-                StringComparer.OrdinalIgnoreCase);
-        foreach (var key in environment.Keys
-                     .Where(key => key.StartsWith(
-                         "OpenLineOps__Agent__",
-                         StringComparison.OrdinalIgnoreCase))
-                     .ToArray())
-        {
-            environment.Remove(key);
-        }
+        var environment = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
 
         Set("AgentId", agentId);
         Set("StationId", stationId);
@@ -1320,6 +1330,53 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 station.StationSystemId,
                 StationSystemId,
                 StringComparison.Ordinal));
+    }
+
+    private static async Task WaitForAcceptedStoppingAsync(
+        EvidenceAgentPresenceRepository repository,
+        Guid sessionId,
+        TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
+        {
+            if (repository.AcceptedSnapshots.Any(presence =>
+                    presence.SessionId == sessionId
+                    && presence.State == AgentPresenceState.Stopping))
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException(
+            $"The staged Agent session {sessionId:D} did not persist its terminal Stopping presence.");
+    }
+
+    private static void AssertPresenceSession(
+        EvidenceAgentPresenceRepository repository,
+        Guid sessionId)
+    {
+        var snapshots = repository.AcceptedSnapshots
+            .Where(presence => presence.SessionId == sessionId)
+            .ToArray();
+        var started = Assert.Single(
+            snapshots,
+            static presence => presence.State == AgentPresenceState.Started);
+        Assert.Equal(1, started.Sequence);
+        Assert.Contains(
+            snapshots,
+            static presence => presence.State == AgentPresenceState.Heartbeat);
+        var stopping = Assert.Single(
+            snapshots,
+            static presence => presence.State == AgentPresenceState.Stopping);
+        Assert.Equal(stopping, snapshots[^1]);
+        Assert.Equal(snapshots.Max(static presence => presence.Sequence), stopping.Sequence);
+        for (var index = 1; index < snapshots.Length; index++)
+        {
+            Assert.True(snapshots[index].Sequence > snapshots[index - 1].Sequence);
+        }
     }
 
     [SupportedOSPlatform("windows")]
@@ -3154,37 +3211,70 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private sealed class WindowsAgentProcess : IDisposable
     {
         private const uint CreateNewProcessGroup = 0x00000200;
+        private const uint CreateSuspended = 0x00000004;
         private const uint CreateUnicodeEnvironment = 0x00000400;
-        private const uint LogonWithProfile = 0x00000001;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const uint Logon32LogonInteractive = 2;
+        private const uint Logon32ProviderDefault = 0;
+        private const int ProfileInfoNoUi = 1;
         private const uint TokenQuery = 0x0008;
         private const uint TokenDuplicate = 0x0002;
+        private const uint TokenImpersonate = 0x0004;
+        private const uint TokenAdjustPrivileges = 0x0020;
+        private const uint PrivilegeEnabled = 0x00000002;
+        private const int ErrorNotAllAssigned = 1300;
+        private const int ErrorPrivilegeNotHeld = 1314;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
         private const int ErrorInsufficientBuffer = 122;
         private const uint CtrlBreakEvent = 1;
+        private const uint StillActive = 259;
+        private const uint WaitObject0 = 0;
+        private const uint WaitTimeout = 258;
+        private const uint WaitFailed = uint.MaxValue;
+        private const uint ForcedTerminationExitCode = 1;
+        private static readonly nuint ProcessThreadAttributeJobList = 0x0002000D;
 
-        private readonly Process _process;
+        private readonly SafeProcessHandle _processHandle;
+        private readonly WindowsProcessJob _processJob;
+        private readonly uint _processId;
         private readonly bool _ownsConsole;
+        private SafeAccessTokenHandle? _profileToken;
+        private IntPtr _profileHandle;
+        private bool _processDisposed;
+        private bool _consoleReleased;
+        private bool _disposed;
 
         private WindowsAgentProcess(
-            Process process,
+            SafeProcessHandle processHandle,
+            WindowsProcessJob processJob,
+            uint processId,
             bool ownsConsole,
             AgentHostTokenEvidence tokenEvidence,
             string executablePath,
-            string executableSha256)
+            string executableSha256,
+            SafeAccessTokenHandle? profileToken,
+            IntPtr profileHandle)
         {
-            _process = process;
+            _processHandle = processHandle;
+            _processJob = processJob;
+            _processId = processId;
             _ownsConsole = ownsConsole;
+            _profileToken = profileToken;
+            _profileHandle = profileHandle;
             TokenEvidence = tokenEvidence;
             ExecutablePath = executablePath;
             ExecutableSha256 = executableSha256;
         }
 
-        public int Id => _process.Id;
+        public int Id => checked((int)_processId);
 
-        public bool HasExited => _process.HasExited;
+        public bool HasExited => TryReadExitCode(out _);
 
-        public int ExitCode => _process.ExitCode;
+        public int ExitCode => TryReadExitCode(out var exitCode)
+            ? unchecked((int)exitCode)
+            : throw new InvalidOperationException(
+                $"Staged Agent PID {_processId} is still running.");
 
         public AgentHostTokenEvidence TokenEvidence { get; }
 
@@ -3199,33 +3289,63 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             RestrictedAgentIdentity identity)
         {
             var ownsConsole = EnsureConsole();
-            var startupInfo = new StartupInfo
-            {
-                Size = Marshal.SizeOf<StartupInfo>()
-            };
             var commandLine = new StringBuilder($"\"{executablePath}\"");
-            var environmentBlock = BuildEnvironmentBlock(environment);
-            var environmentPointer = Marshal.StringToHGlobalUni(environmentBlock);
+            SafeAccessTokenHandle? profileToken = null;
+            var profileHandle = IntPtr.Zero;
+            var environmentPointer = IntPtr.Zero;
+            WindowsProcessJob? processJob = null;
+            SafeProcessHandle? processHandle = null;
+            SafeWaitHandle? threadHandle = null;
+            var processInformation = new ProcessInformation();
+            var processCreated = false;
+            var processExitConfirmed = true;
             try
             {
+                processJob = WindowsProcessJob.CreateKillOnClose();
+                using var creationAttributes = processJob.UseHandle(
+                    ProcessCreationAttributes.Create);
+                var processEnvironment = identity.UserName is null
+                    ? ReadCurrentEnvironment()
+                    : ReadRestrictedEnvironment(
+                        identity,
+                        out profileToken,
+                        out profileHandle);
+                RemoveAmbientAgentConfiguration(processEnvironment);
+                OverlayEnvironment(processEnvironment, environment);
+                environmentPointer = Marshal.StringToHGlobalUni(
+                    BuildEnvironmentBlock(processEnvironment));
                 bool created;
-                ProcessInformation processInformation;
+                var creationError = 0;
                 if (identity.UserName is not null)
                 {
-                    created = CreateProcessWithLogon(
-                        identity.UserName,
-                        identity.Domain,
-                        identity.Password
-                        ?? throw new InvalidOperationException(
-                            "The staged Agent standard account has no password."),
-                        LogonWithProfile,
-                        executablePath,
-                        commandLine,
-                        CreateNewProcessGroup | CreateUnicodeEnvironment,
-                        environmentPointer,
-                        workingDirectory,
-                        ref startupInfo,
-                        out processInformation);
+                    using var privileges = CreatePrivilegeImpersonation(
+                        "SeIncreaseQuotaPrivilege");
+                    created = privileges.Run(() =>
+                    {
+                        var result = CreateProcessAsUser(
+                            profileToken
+                            ?? throw new InvalidOperationException(
+                                "The staged Agent restricted profile token is unavailable."),
+                            executablePath,
+                            commandLine,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            inheritHandles: false,
+                            CreateNewProcessGroup
+                            | CreateSuspended
+                            | CreateUnicodeEnvironment
+                            | ExtendedStartupInfoPresent,
+                            environmentPointer,
+                            workingDirectory,
+                            ref creationAttributes.StartupInfo,
+                            out processInformation);
+                        if (!result)
+                        {
+                            creationError = Marshal.GetLastWin32Error();
+                        }
+
+                        return result;
+                    });
                 }
                 else
                 {
@@ -3235,84 +3355,558 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         IntPtr.Zero,
                         IntPtr.Zero,
                         inheritHandles: false,
-                        CreateNewProcessGroup | CreateUnicodeEnvironment,
+                        CreateNewProcessGroup
+                        | CreateSuspended
+                        | CreateUnicodeEnvironment
+                        | ExtendedStartupInfoPresent,
                         environmentPointer,
                         workingDirectory,
-                        ref startupInfo,
+                        ref creationAttributes.StartupInfo,
                         out processInformation);
+                    if (!created)
+                    {
+                        creationError = Marshal.GetLastWin32Error();
+                    }
                 }
 
                 if (!created)
                 {
+                    var failureReason = identity.UserName is not null
+                                        && creationError == ErrorPrivilegeNotHeld
+                        ? "CreateProcessAsUserW was denied because the staged E2E host lacks a required process-creation privilege; the launch failed closed because credential-based fallbacks create an independent console and cannot prove graceful Ctrl+Break delivery."
+                        : $"Could not start staged Agent '{executablePath}' as '{identity.AccountName}'.";
+                    throw new Win32Exception(
+                        creationError,
+                        failureReason);
+                }
+
+                processCreated = true;
+                processExitConfirmed = false;
+                processHandle = new SafeProcessHandle(
+                    processInformation.Process,
+                    ownsHandle: true);
+                processInformation.Process = IntPtr.Zero;
+                threadHandle = new SafeWaitHandle(
+                    processInformation.Thread,
+                    ownsHandle: true);
+                processInformation.Thread = IntPtr.Zero;
+                var activeProcessCount = processJob.ActiveProcessCount;
+                if (activeProcessCount != 1)
+                {
+                    throw new InvalidOperationException(
+                        $"The staged Agent atomic Job Object association reported {activeProcessCount} active processes; exactly one suspended primary process is required.");
+                }
+
+                AssertSharesConsole(processInformation.ProcessId);
+                var tokenEvidence = ReadRequiredTokenEvidence(
+                    processHandle,
+                    identity);
+                var actualExecutablePath = ReadRequiredExecutablePath(processHandle);
+                var requestedExecutablePath = Path.GetFullPath(executablePath);
+                if (!string.Equals(
+                        actualExecutablePath,
+                        requestedExecutablePath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "The staged Agent process main module differs from the requested executable.");
+                }
+
+                var executableSha256 = Convert.ToHexStringLower(
+                    SHA256.HashData(File.ReadAllBytes(actualExecutablePath)));
+                var suspendCount = ResumeThread(threadHandle);
+                if (suspendCount == uint.MaxValue)
+                {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        $"Could not start staged Agent '{executablePath}' as '{identity.AccountName}'.");
+                        "Could not resume the staged Agent after security validation and Job Object assignment.");
+                }
+
+                if (suspendCount != 1)
+                {
+                    throw new InvalidOperationException(
+                        $"The staged Agent primary thread had unexpected suspend count {suspendCount}; exactly one CREATE_SUSPENDED hold is required.");
+                }
+
+                threadHandle.Dispose();
+                threadHandle = null;
+                var owner = new WindowsAgentProcess(
+                    processHandle,
+                    processJob,
+                    processInformation.ProcessId,
+                    ownsConsole,
+                    tokenEvidence,
+                    actualExecutablePath,
+                    executableSha256,
+                    profileToken,
+                    profileHandle);
+                processHandle = null;
+                processJob = null;
+                profileToken = null;
+                profileHandle = IntPtr.Zero;
+                return owner;
+            }
+            catch (Exception exception)
+            {
+                var failures = new List<Exception> { exception };
+                if (processCreated)
+                {
+                    try
+                    {
+                        TerminateAndConfirmExit(
+                            processHandle,
+                            processInformation.Process,
+                            processJob,
+                            processInformation.ProcessId,
+                            TimeSpan.FromSeconds(10));
+                        processExitConfirmed = true;
+                    }
+                    catch (Exception terminationFailure)
+                    {
+                        failures.Add(terminationFailure);
+                    }
+                }
+
+                if (processExitConfirmed)
+                {
+                    CaptureCleanupFailure(failures, () => threadHandle?.Dispose());
+                    CaptureCleanupFailure(
+                        failures,
+                        () => CloseRequiredRawHandle(
+                            ref processInformation.Thread,
+                            "staged Agent primary thread"));
+                    CaptureCleanupFailure(failures, () => processHandle?.Dispose());
+                    CaptureCleanupFailure(
+                        failures,
+                        () => CloseRequiredRawHandle(
+                            ref processInformation.Process,
+                            "staged Agent process"));
+                    CaptureCleanupFailure(failures, () => processJob?.Dispose());
+                    CaptureCleanupFailure(
+                        failures,
+                        () => ReleaseProfile(ref profileToken, ref profileHandle));
+                    if (ownsConsole)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () =>
+                            {
+                                if (!FreeConsole())
+                                {
+                                    throw new Win32Exception(
+                                        Marshal.GetLastWin32Error(),
+                                        "Could not release the staged Agent test console.");
+                                }
+                            });
+                    }
+                }
+                else
+                {
+                    Environment.FailFast(
+                        "The staged Agent could not be proven terminated; the kill-on-close Job Object owner is being closed by fail-fast process termination.",
+                        new AggregateException(failures));
+                }
+
+                if (failures.Count > 1)
+                {
+                    Environment.FailFast(
+                        "The staged Agent launch failed and native resource cleanup could not be proven complete.",
+                        new AggregateException(failures));
+                }
+
+                if (failures.Count == 1)
+                {
+                    ExceptionDispatchInfo.Capture(exception).Throw();
+                }
+
+                throw new AggregateException(failures);
+            }
+            finally
+            {
+                if (environmentPointer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(environmentPointer);
+                }
+            }
+        }
+
+        private static Dictionary<string, string> ReadRestrictedEnvironment(
+            RestrictedAgentIdentity identity,
+            out SafeAccessTokenHandle? profileToken,
+            out IntPtr profileHandle)
+        {
+            profileToken = null;
+            profileHandle = IntPtr.Zero;
+            if (!LogonUser(
+                    identity.UserName
+                    ?? throw new InvalidOperationException(
+                        "The staged Agent standard account has no user name."),
+                    identity.Domain,
+                    identity.Password
+                    ?? throw new InvalidOperationException(
+                        "The staged Agent standard account has no password."),
+                    Logon32LogonInteractive,
+                    Logon32ProviderDefault,
+                    out profileToken))
+            {
+                var logonError = Marshal.GetLastWin32Error();
+                profileToken?.Dispose();
+                profileToken = null;
+                throw new Win32Exception(
+                    logonError,
+                    $"Could not log on staged Agent identity '{identity.AccountName}'.");
+            }
+
+            var profile = new ProfileInfo
+            {
+                Size = Marshal.SizeOf<ProfileInfo>(),
+                Flags = ProfileInfoNoUi,
+                UserName = identity.UserName
+            };
+            using var privileges = CreatePrivilegeImpersonation(
+                "SeRestorePrivilege",
+                "SeBackupPrivilege");
+            var loadedProfileToken = profileToken;
+            var loadedProfileHandle = IntPtr.Zero;
+            privileges.Run(() =>
+            {
+                if (!LoadUserProfile(loadedProfileToken, ref profile))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not load staged Agent profile for '{identity.AccountName}'.");
+                }
+
+                loadedProfileHandle = profile.Profile;
+            });
+            profileHandle = loadedProfileHandle;
+
+            if (profileHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    $"Loaded staged Agent profile for '{identity.AccountName}' has no hive handle.");
+            }
+
+            return ReadTokenEnvironment(profileToken, identity.AccountName);
+        }
+
+        private static Dictionary<string, string> ReadCurrentEnvironment()
+        {
+            using var process = Process.GetCurrentProcess();
+            if (!OpenProcessTokenSafe(
+                    process.SafeHandle,
+                    TokenQuery | TokenDuplicate,
+                    out var token))
+            {
+                var tokenError = Marshal.GetLastWin32Error();
+                token.Dispose();
+                throw new Win32Exception(
+                    tokenError,
+                    "Could not open the current staged Agent identity token.");
+            }
+
+            using (token)
+            {
+                return ReadTokenEnvironment(token, "current test identity");
+            }
+        }
+
+        private static Dictionary<string, string> ReadTokenEnvironment(
+            SafeAccessTokenHandle token,
+            string identityName)
+        {
+            if (!CreateEnvironmentBlock(
+                    out var environmentBlock,
+                    token,
+                    inherit: false))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not create staged Agent environment for '{identityName}'.");
+            }
+
+            Dictionary<string, string>? environment = null;
+            Exception? readFailure = null;
+            try
+            {
+                environment = ReadEnvironmentBlock(environmentBlock);
+            }
+            catch (Exception exception)
+            {
+                readFailure = exception;
+            }
+
+            if (!DestroyEnvironmentBlock(environmentBlock))
+            {
+                var destroyFailure = new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not release the staged Agent native environment block.");
+                Environment.FailFast(
+                    "The staged Agent token environment could not be released.",
+                    readFailure is null
+                        ? destroyFailure
+                        : new AggregateException(readFailure, destroyFailure));
+            }
+
+            if (readFailure is not null)
+            {
+                ExceptionDispatchInfo.Capture(readFailure).Throw();
+            }
+
+            return environment
+                   ?? throw new InvalidOperationException(
+                       "The staged Agent user environment was not created.");
+        }
+
+        private static Dictionary<string, string> ReadEnvironmentBlock(
+            IntPtr environmentBlock)
+        {
+            var environment = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            var offset = 0;
+            while (true)
+            {
+                var entry = Marshal.PtrToStringUni(IntPtr.Add(environmentBlock, offset))
+                            ?? throw new InvalidDataException(
+                                "The staged Agent native environment block is malformed.");
+                if (entry.Length == 0)
+                {
+                    return environment;
+                }
+
+                offset = checked(offset + (entry.Length + 1) * sizeof(char));
+                if (entry[0] == '=')
+                {
+                    continue;
+                }
+
+                var separator = entry.IndexOf('=');
+                if (separator <= 0)
+                {
+                    throw new InvalidDataException(
+                        "The staged Agent native environment contains a malformed entry.");
+                }
+
+                environment[entry[..separator]] = entry[(separator + 1)..];
+            }
+        }
+
+        private static void OverlayEnvironment(
+            Dictionary<string, string> environment,
+            IReadOnlyDictionary<string, string> overrides)
+        {
+            foreach (var (key, value) in overrides)
+            {
+                if (key.Contains('=') || key.Contains('\0') || value.Contains('\0'))
+                {
+                    throw new InvalidDataException(
+                        $"Environment entry '{key}' cannot be represented in a Windows block.");
+                }
+
+                environment[key] = value;
+            }
+        }
+
+        private static void RemoveAmbientAgentConfiguration(
+            Dictionary<string, string> environment)
+        {
+            foreach (var key in environment.Keys
+                         .Where(static key =>
+                             key.StartsWith(
+                                 "OpenLineOps__",
+                                 StringComparison.OrdinalIgnoreCase)
+                             || key.StartsWith(
+                                 "OPENLINEOPS_",
+                                 StringComparison.OrdinalIgnoreCase))
+                         .ToArray())
+            {
+                environment.Remove(key);
+            }
+        }
+
+        private static PrivilegeImpersonation CreatePrivilegeImpersonation(
+            params string[] privilegeNames)
+        {
+            if (privilegeNames is not { Length: > 0 and <= 2 })
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(privilegeNames),
+                    "One or two Windows privileges must be requested.");
+            }
+
+            using var process = Process.GetCurrentProcess();
+            if (!OpenProcessTokenSafe(
+                    process.SafeHandle,
+                    TokenQuery | TokenDuplicate,
+                    out var processToken))
+            {
+                var tokenError = Marshal.GetLastWin32Error();
+                processToken.Dispose();
+                throw new Win32Exception(
+                    tokenError,
+                    "Could not open the staged E2E process token for privilege impersonation.");
+            }
+
+            using (processToken)
+            {
+                if (!DuplicateTokenEx(
+                        processToken,
+                        TokenQuery | TokenImpersonate | TokenAdjustPrivileges,
+                        IntPtr.Zero,
+                        SecurityImpersonationLevel.Impersonation,
+                        TokenType.Impersonation,
+                        out var impersonationToken))
+                {
+                    var duplicationError = Marshal.GetLastWin32Error();
+                    impersonationToken.Dispose();
+                    throw new Win32Exception(
+                        duplicationError,
+                        "Could not create the staged E2E privilege impersonation token.");
                 }
 
                 try
                 {
-                    var process = Process.GetProcessById(
-                        checked((int)processInformation.ProcessId));
-                    try
+                    var requested = new TokenPrivileges
                     {
-                        var tokenEvidence = ReadRequiredTokenEvidence(
-                            process,
-                            identity);
-                        var actualExecutablePath = ReadRequiredExecutablePath(
-                            processInformation.Process);
-                        var requestedExecutablePath = Path.GetFullPath(executablePath);
-                        if (!string.Equals(
-                                actualExecutablePath,
-                                requestedExecutablePath,
-                                StringComparison.OrdinalIgnoreCase))
-                        {
-                            throw new InvalidOperationException(
-                                "The staged Agent process main module differs from the requested executable.");
-                        }
-
-                        var executableSha256 = Convert.ToHexStringLower(
-                            SHA256.HashData(File.ReadAllBytes(actualExecutablePath)));
-                        return new WindowsAgentProcess(
-                            process,
-                            ownsConsole,
-                            tokenEvidence,
-                            actualExecutablePath,
-                            executableSha256);
-                    }
-                    catch
+                        PrivilegeCount = checked((uint)privilegeNames.Length),
+                        First = CreatePrivilege(privilegeNames[0])
+                    };
+                    if (privilegeNames.Length == 2)
                     {
-                        if (!process.HasExited)
-                        {
-                            process.Kill(entireProcessTree: true);
-                            process.WaitForExit(10_000);
-                        }
-
-                        process.Dispose();
-                        throw;
+                        requested.Second = CreatePrivilege(privilegeNames[1]);
                     }
+
+                    if (!AdjustTokenPrivileges(
+                            impersonationToken,
+                            disableAllPrivileges: false,
+                            ref requested,
+                            bufferLength: 0,
+                            IntPtr.Zero,
+                            IntPtr.Zero))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "Could not enable the Windows privileges required for the staged Agent identity.");
+                    }
+
+                    var adjustmentError = Marshal.GetLastWin32Error();
+                    if (adjustmentError != 0)
+                    {
+                        throw new Win32Exception(
+                            adjustmentError,
+                            adjustmentError == ErrorNotAllAssigned
+                                ? "The staged E2E impersonation token does not contain every required Windows privilege."
+                                : "Windows reported an unexpected privilege-adjustment result.");
+                    }
+
+                    return new PrivilegeImpersonation(impersonationToken);
                 }
-                finally
+                catch
                 {
-                    _ = CloseHandle(processInformation.Thread);
-                    _ = CloseHandle(processInformation.Process);
+                    impersonationToken.Dispose();
+                    throw;
                 }
             }
-            catch
+
+            static LuidAndAttributes CreatePrivilege(string privilegeName)
             {
-                if (ownsConsole)
+                if (string.IsNullOrWhiteSpace(privilegeName)
+                    || char.IsWhiteSpace(privilegeName[0])
+                    || char.IsWhiteSpace(privilegeName[^1]))
                 {
-                    _ = FreeConsole();
+                    throw new ArgumentException(
+                        "Windows privilege names must be canonical non-empty text.",
+                        nameof(privilegeNames));
                 }
 
-                throw;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(environmentPointer);
+                if (!LookupPrivilegeValue(
+                        systemName: null,
+                        privilegeName,
+                        out var luid))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not resolve Windows privilege '{privilegeName}'.");
+                }
+
+                return new LuidAndAttributes(luid, PrivilegeEnabled);
             }
         }
 
-        private static string ReadRequiredExecutablePath(IntPtr processHandle)
+        private sealed class PrivilegeImpersonation(
+            SafeAccessTokenHandle token) : IDisposable
+        {
+            public T Run<T>(Func<T> action)
+            {
+                ArgumentNullException.ThrowIfNull(action);
+                return WindowsIdentity.RunImpersonated(token, action);
+            }
+
+            public void Run(Action action)
+            {
+                ArgumentNullException.ThrowIfNull(action);
+                WindowsIdentity.RunImpersonated(token, action);
+            }
+
+            public void Dispose() => token.Dispose();
+        }
+
+        private static void ReleaseProfile(
+            ref SafeAccessTokenHandle? profileToken,
+            ref IntPtr profileHandle)
+        {
+            if (profileToken is null)
+            {
+                if (profileHandle != IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(
+                        "A staged Agent profile handle exists without its logon token.");
+                }
+
+                return;
+            }
+
+            if (profileToken.IsClosed || profileToken.IsInvalid)
+            {
+                throw new InvalidOperationException(
+                    "The staged Agent logon token closed before its profile was released.");
+            }
+
+            if (profileHandle != IntPtr.Zero)
+            {
+                const int maximumAttempts = 20;
+                var unloaded = false;
+                var unloadError = 0;
+                for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+                {
+                    unloaded = UnloadUserProfile(profileToken, profileHandle);
+                    if (unloaded)
+                    {
+                        break;
+                    }
+
+                    unloadError = Marshal.GetLastWin32Error();
+                    if (attempt < maximumAttempts)
+                    {
+                        Thread.Sleep(TimeSpan.FromMilliseconds(100));
+                    }
+                }
+
+                if (!unloaded)
+                {
+                    throw new Win32Exception(
+                        unloadError,
+                        "Could not unload the staged Agent user profile after bounded retries.");
+                }
+
+                profileHandle = IntPtr.Zero;
+            }
+
+            profileToken.Dispose();
+            profileToken = null;
+        }
+
+        private static string ReadRequiredExecutablePath(SafeProcessHandle processHandle)
         {
             const int maximumWindowsPathLength = 32_768;
             var executablePath = new StringBuilder(maximumWindowsPathLength);
@@ -3338,63 +3932,301 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 executablePath.ToString(0, checked((int)executablePathLength)));
         }
 
-        public async Task<int> StopCleanlyAsync(TimeSpan timeout)
+        private bool TryReadExitCode(out uint exitCode) =>
+            TryReadExitCode(_processHandle, out exitCode);
+
+        private static bool TryReadExitCode(
+            SafeProcessHandle processHandle,
+            out uint exitCode)
         {
-            if (_process.HasExited)
+            if (!WaitForExit(processHandle, TimeSpan.Zero))
             {
-                return _process.ExitCode;
+                exitCode = StillActive;
+                return false;
             }
 
-            if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, checked((uint)_process.Id)))
+            if (!GetExitCodeProcess(processHandle, out exitCode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not read the staged Agent native process exit code.");
+            }
+
+            return true;
+        }
+
+        private static bool WaitForExit(
+            SafeProcessHandle processHandle,
+            TimeSpan timeout)
+        {
+            if (timeout < TimeSpan.Zero
+                || timeout.TotalMilliseconds > uint.MaxValue - 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "The staged Agent wait timeout must be non-negative and representable by Win32.");
+            }
+
+            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
+            return WaitForSingleObject(processHandle, milliseconds) switch
+            {
+                WaitObject0 => true,
+                WaitTimeout => false,
+                WaitFailed => throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not wait for the staged Agent native process handle."),
+                var result => throw new InvalidOperationException(
+                    $"WaitForSingleObject returned unexpected result 0x{result:x8} for the staged Agent.")
+            };
+        }
+
+        private static bool WaitForExit(IntPtr processHandle, TimeSpan timeout)
+        {
+            if (processHandle == IntPtr.Zero)
+            {
+                throw new ArgumentException(
+                    "The staged Agent raw process handle is unavailable.",
+                    nameof(processHandle));
+            }
+
+            if (timeout < TimeSpan.Zero
+                || timeout.TotalMilliseconds > uint.MaxValue - 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "The staged Agent wait timeout must be non-negative and representable by Win32.");
+            }
+
+            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
+            return WaitForSingleObjectRaw(processHandle, milliseconds) switch
+            {
+                WaitObject0 => true,
+                WaitTimeout => false,
+                WaitFailed => throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not wait for the staged Agent raw process handle."),
+                var result => throw new InvalidOperationException(
+                    $"WaitForSingleObject returned unexpected result 0x{result:x8} for the staged Agent.")
+            };
+        }
+
+        private static void TerminateAndConfirmExit(
+            SafeProcessHandle? processHandle,
+            IntPtr rawProcessHandle,
+            WindowsProcessJob? processJob,
+            uint processId,
+            TimeSpan timeout)
+        {
+            bool HasExited() => processHandle is not null
+                ? WaitForExit(processHandle, TimeSpan.Zero)
+                : WaitForExit(rawProcessHandle, TimeSpan.Zero);
+
+            var failures = new List<Exception>();
+            if (processJob is not null)
+            {
+                try
+                {
+                    processJob.Terminate();
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+
+            if (!HasExited())
+            {
+                var terminated = processHandle is not null
+                    ? TerminateProcess(processHandle, ForcedTerminationExitCode)
+                    : TerminateProcessRaw(rawProcessHandle, ForcedTerminationExitCode);
+                var terminationError = terminated ? 0 : Marshal.GetLastWin32Error();
+                if (!terminated && !HasExited())
+                {
+                    failures.Add(new Win32Exception(
+                        terminationError,
+                        $"Could not terminate staged Agent PID {processId} through its owned native handle."));
+                }
+            }
+
+            var processExited = processHandle is not null
+                ? WaitForExit(processHandle, timeout)
+                : WaitForExit(rawProcessHandle, timeout);
+            var jobEmpty = processJob is null;
+            if (processJob is not null)
+            {
+                try
+                {
+                    jobEmpty = WaitForJobEmpty(processJob, timeout);
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+
+            if (processExited && jobEmpty)
+            {
+                return;
+            }
+
+            if (!processExited)
+            {
+                failures.Add(new TimeoutException(
+                    $"Staged Agent PID {processId} did not exit after native termination."));
+            }
+
+            if (!jobEmpty)
+            {
+                failures.Add(new TimeoutException(
+                    $"Staged Agent PID {processId} left active processes in its Job Object after native termination."));
+            }
+
+            throw failures.Count == 1
+                ? failures[0]
+                : new AggregateException(failures);
+        }
+
+        private static bool WaitForJobEmpty(
+            WindowsProcessJob processJob,
+            TimeSpan timeout)
+        {
+            if (timeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "The staged Agent Job Object wait timeout must be positive.");
+            }
+
+            var elapsed = Stopwatch.StartNew();
+            while (processJob.ActiveProcessCount != 0)
+            {
+                var remaining = timeout - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return false;
+                }
+
+                Thread.Sleep(remaining < TimeSpan.FromMilliseconds(25)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(25));
+            }
+
+            return true;
+        }
+
+        private static void CloseRequiredRawHandle(
+            ref IntPtr handle,
+            string resourceName)
+        {
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (!CloseHandle(handle))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not close the {resourceName} native handle.");
+            }
+
+            handle = IntPtr.Zero;
+        }
+
+        public async Task<int> StopCleanlyAsync(TimeSpan timeout)
+        {
+            if (TryReadExitCode(out var existingExitCode))
+            {
+                return unchecked((int)existingExitCode);
+            }
+
+            if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, _processId))
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
                     "Could not signal Ctrl+Break to the staged Agent process group.");
             }
 
-            using var timeoutCancellation = new CancellationTokenSource(timeout);
-            try
-            {
-                await _process.WaitForExitAsync(timeoutCancellation.Token);
-            }
-            catch (OperationCanceledException) when (timeoutCancellation.IsCancellationRequested)
+            var exited = await Task.Run(() => WaitForExit(_processHandle, timeout));
+            if (!exited)
             {
                 throw new TimeoutException(
                     "The staged Agent did not stop cleanly after Ctrl+Break.");
             }
 
-            return _process.ExitCode;
+            return ExitCode;
         }
 
         public void Kill()
         {
-            if (!_process.HasExited)
-            {
-                _process.Kill(entireProcessTree: true);
-                _process.WaitForExit(10_000);
-            }
+            TerminateAndConfirmExit(
+                _processHandle,
+                IntPtr.Zero,
+                _processJob,
+                _processId,
+                TimeSpan.FromSeconds(10));
         }
 
         public void Dispose()
         {
-            _process.Dispose();
-            if (_ownsConsole)
+            if (_disposed)
             {
-                _ = FreeConsole();
+                return;
             }
+
+            if (!_processDisposed)
+            {
+                try
+                {
+                    TerminateAndConfirmExit(
+                        _processHandle,
+                        IntPtr.Zero,
+                        _processJob,
+                        _processId,
+                        TimeSpan.FromSeconds(10));
+                    _processJob.Dispose();
+                    ReleaseProfile(ref _profileToken, ref _profileHandle);
+                    _processHandle.Dispose();
+                    _processDisposed = true;
+                }
+                catch (Exception exception)
+                {
+                    Environment.FailFast(
+                        "The staged Agent exited but its native process, Job Object, or user profile cleanup could not be proven complete.",
+                        exception);
+                }
+            }
+
+            if (_ownsConsole && !_consoleReleased)
+            {
+                if (!FreeConsole())
+                {
+                    Environment.FailFast(
+                        "The staged Agent exited but its shared test console could not be released.",
+                        new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "Could not release the staged Agent test console."));
+                }
+
+                _consoleReleased = true;
+            }
+
+            _disposed = true;
         }
 
         internal static AgentHostTokenEvidence ReadCurrentProcessTokenEvidence()
         {
             using var process = Process.GetCurrentProcess();
-            return ReadTokenEvidence(process);
+            return ReadTokenEvidence(
+                process.SafeHandle,
+                checked((uint)process.Id));
         }
 
         private static AgentHostTokenEvidence ReadRequiredTokenEvidence(
-            Process process,
+            SafeProcessHandle processHandle,
             RestrictedAgentIdentity requestedIdentity)
         {
-            var evidence = ReadTokenEvidence(process);
+            var evidence = ReadTokenEvidence(processHandle, processId: null);
             if (!string.Equals(
                     evidence.UserSid,
                     requestedIdentity.Sid,
@@ -3412,28 +4244,34 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return evidence;
         }
 
-        private static AgentHostTokenEvidence ReadTokenEvidence(Process process)
+        private static AgentHostTokenEvidence ReadTokenEvidence(
+            SafeProcessHandle processHandle,
+            uint? processId)
         {
-            if (!OpenProcessToken(
-                    process.Handle,
+            if (!OpenProcessTokenSafe(
+                    processHandle,
                     TokenQuery | TokenDuplicate,
                     out var token))
             {
+                var tokenError = Marshal.GetLastWin32Error();
+                token.Dispose();
                 throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    $"Could not open staged Agent PID {process.Id} for token verification.");
+                    tokenError,
+                    processId is null
+                        ? "Could not open the staged Agent native process handle for token verification."
+                        : $"Could not open staged Agent PID {processId.Value} for token verification.");
             }
 
-            try
+            using (token)
             {
-                using var identity = new WindowsIdentity(token);
+                using var identity = new WindowsIdentity(token.DangerousGetHandle());
                 var userSid = identity.User
                               ?? throw new InvalidOperationException(
                                   "The staged Agent child token has no user SID.");
                 var administratorSid = new SecurityIdentifier(
                     WellKnownSidType.BuiltinAdministratorsSid,
                     null);
-                var groups = ReadTokenGroups(token);
+                var groups = ReadTokenGroups(token.DangerousGetHandle());
                 var administrator = groups.FirstOrDefault(group =>
                     string.Equals(
                         group.Sid,
@@ -3450,9 +4288,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 var evidence = new AgentHostTokenEvidence(
                     identity.Name,
                     userSid.Value,
-                    ReadTokenInt32(token, TokenInformationClass.TokenType) == 1,
-                    ReadTokenInt32(token, TokenInformationClass.TokenElevation) != 0,
-                    ReadTokenInt32(token, TokenInformationClass.TokenHasRestrictions) != 0,
+                    ReadTokenInt32(
+                        token.DangerousGetHandle(),
+                        TokenInformationClass.TokenType) == 1,
+                    ReadTokenInt32(
+                        token.DangerousGetHandle(),
+                        TokenInformationClass.TokenElevation) != 0,
+                    ReadTokenInt32(
+                        token.DangerousGetHandle(),
+                        TokenInformationClass.TokenHasRestrictions) != 0,
                     administratorPresent,
                     administratorEnabled,
                     administratorDenyOnly,
@@ -3461,10 +4305,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     && !userSid.IsWellKnown(WellKnownSidType.AnonymousSid),
                     userSid.IsWellKnown(WellKnownSidType.LocalSystemSid));
                 return evidence;
-            }
-            finally
-            {
-                _ = CloseHandle(token);
             }
         }
 
@@ -3563,6 +4403,40 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return true;
         }
 
+        private static void AssertSharesConsole(uint processId)
+        {
+            var processIds = new uint[16];
+            while (true)
+            {
+                var count = GetConsoleProcessList(
+                    processIds,
+                    checked((uint)processIds.Length));
+                if (count == 0)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not inspect the staged Agent console process list.");
+                }
+
+                if (count > processIds.Length)
+                {
+                    processIds = new uint[checked((int)count)];
+                    continue;
+                }
+
+                var attached = processIds.AsSpan(0, checked((int)count));
+                if (!attached.Contains(checked((uint)Environment.ProcessId))
+                    || !attached.Contains(processId))
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent PID {processId} and test host PID {Environment.ProcessId} "
+                        + "do not share the console required for graceful Ctrl+Break shutdown.");
+                }
+
+                return;
+            }
+        }
+
         private static string BuildEnvironmentBlock(
             IReadOnlyDictionary<string, string> environment)
         {
@@ -3584,6 +4458,125 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return builder.ToString();
         }
 
+        private sealed class ProcessCreationAttributes : IDisposable
+        {
+            private IntPtr _attributeList;
+            private IntPtr _jobList;
+
+            private ProcessCreationAttributes(
+                IntPtr attributeList,
+                IntPtr jobList)
+            {
+                _attributeList = attributeList;
+                _jobList = jobList;
+                StartupInfo = new StartupInfoEx
+                {
+                    StartupInfo = new StartupInfo
+                    {
+                        Size = Marshal.SizeOf<StartupInfoEx>()
+                    },
+                    AttributeList = attributeList
+                };
+            }
+
+            public StartupInfoEx StartupInfo;
+
+            public static ProcessCreationAttributes Create(IntPtr jobHandle)
+            {
+                if (jobHandle == IntPtr.Zero || jobHandle == new IntPtr(-1))
+                {
+                    throw new ArgumentException(
+                        "The staged Agent Job Object handle is invalid.",
+                        nameof(jobHandle));
+                }
+
+                nuint attributeListSize = 0;
+                _ = InitializeProcThreadAttributeList(
+                    IntPtr.Zero,
+                    attributeCount: 1,
+                    flags: 0,
+                    ref attributeListSize);
+                var sizingError = Marshal.GetLastWin32Error();
+                if (attributeListSize == 0 || sizingError != ErrorInsufficientBuffer)
+                {
+                    throw new Win32Exception(
+                        sizingError,
+                        "Could not size the staged Agent process attribute list.");
+                }
+
+                var attributeList = IntPtr.Zero;
+                var jobList = IntPtr.Zero;
+                var initialized = false;
+                try
+                {
+                    attributeList = Marshal.AllocHGlobal(checked((nint)attributeListSize));
+                    if (!InitializeProcThreadAttributeList(
+                            attributeList,
+                            attributeCount: 1,
+                            flags: 0,
+                            ref attributeListSize))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "Could not initialize the staged Agent process attribute list.");
+                    }
+
+                    initialized = true;
+                    jobList = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(jobList, jobHandle);
+                    if (!UpdateProcThreadAttribute(
+                            attributeList,
+                            flags: 0,
+                            ProcessThreadAttributeJobList,
+                            jobList,
+                            checked((nuint)IntPtr.Size),
+                            IntPtr.Zero,
+                            IntPtr.Zero))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "Could not bind the staged Agent Job Object to atomic process creation.");
+                    }
+
+                    return new ProcessCreationAttributes(attributeList, jobList);
+                }
+                catch
+                {
+                    if (initialized)
+                    {
+                        DeleteProcThreadAttributeList(attributeList);
+                    }
+
+                    if (jobList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(jobList);
+                    }
+
+                    if (attributeList != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(attributeList);
+                    }
+
+                    throw;
+                }
+            }
+
+            public void Dispose()
+            {
+                if (_attributeList == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                DeleteProcThreadAttributeList(_attributeList);
+                Marshal.FreeHGlobal(_jobList);
+                Marshal.FreeHGlobal(_attributeList);
+                _jobList = IntPtr.Zero;
+                _attributeList = IntPtr.Zero;
+                StartupInfo.AttributeList = IntPtr.Zero;
+            }
+        }
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         [SuppressMessage(
@@ -3599,7 +4592,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint creationFlags,
             IntPtr environment,
             string currentDirectory,
-            ref StartupInfo startupInfo,
+            ref StartupInfoEx startupInfo,
             out ProcessInformation processInformation);
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -3607,26 +4600,139 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         [SuppressMessage(
             "Performance",
             "CA1838:Avoid StringBuilder parameters for P/Invokes",
-            Justification = "CreateProcessWithLogonW requires a writable null-terminated command-line buffer.")]
-        private static extern bool CreateProcessWithLogon(
-            string userName,
-            string? domain,
-            string password,
-            uint logonFlags,
+            Justification = "CreateProcessAsUserW requires a writable null-terminated command-line buffer.")]
+        private static extern bool CreateProcessAsUser(
+            SafeAccessTokenHandle token,
             string applicationName,
             StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
             uint creationFlags,
             IntPtr environment,
             string currentDirectory,
-            ref StartupInfo startupInfo,
+            ref StartupInfoEx startupInfo,
             out ProcessInformation processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(
+            IntPtr attributeList,
+            int attributeCount,
+            uint flags,
+            ref nuint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(
+            IntPtr attributeList,
+            uint flags,
+            nuint attribute,
+            IntPtr value,
+            nuint size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LogonUser(
+            string userName,
+            string? domain,
+            string password,
+            uint logonType,
+            uint logonProvider,
+            out SafeAccessTokenHandle token);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeValue(
+            string? systemName,
+            string name,
+            out Luid luid);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool OpenProcessToken(
-            IntPtr processHandle,
+        private static extern bool AdjustTokenPrivileges(
+            SafeAccessTokenHandle token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TokenPrivileges newState,
+            int bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength);
+
+        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LoadUserProfile(
+            SafeAccessTokenHandle token,
+            ref ProfileInfo profileInfo);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnloadUserProfile(
+            SafeAccessTokenHandle token,
+            IntPtr profile);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateEnvironmentBlock(
+            out IntPtr environment,
+            SafeAccessTokenHandle token,
+            [MarshalAs(UnmanagedType.Bool)] bool inherit);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+        [DllImport("advapi32.dll", EntryPoint = "OpenProcessToken", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessTokenSafe(
+            SafeProcessHandle processHandle,
             uint desiredAccess,
-            out IntPtr tokenHandle);
+            out SafeAccessTokenHandle tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateTokenEx(
+            SafeAccessTokenHandle existingToken,
+            uint desiredAccess,
+            IntPtr tokenAttributes,
+            SecurityImpersonationLevel impersonationLevel,
+            TokenType tokenType,
+            out SafeAccessTokenHandle duplicateToken);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetExitCodeProcess(
+            SafeProcessHandle processHandle,
+            out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(
+            SafeProcessHandle handle,
+            uint milliseconds);
+
+        [DllImport("kernel32.dll", EntryPoint = "WaitForSingleObject", SetLastError = true)]
+        private static extern uint WaitForSingleObjectRaw(
+            IntPtr handle,
+            uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcess(
+            SafeProcessHandle processHandle,
+            uint exitCode);
+
+        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcessRaw(
+            IntPtr processHandle,
+            uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(SafeWaitHandle threadHandle);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -3658,7 +4764,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool FreeConsole();
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint GetConsoleProcessList(
             [Out] uint[] processList,
             uint processCount);
@@ -3670,7 +4776,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "CA1838:Avoid StringBuilder parameters for P/Invokes",
             Justification = "QueryFullProcessImageNameW writes the image path into a caller-owned buffer.")]
         private static extern bool QueryFullProcessImageName(
-            IntPtr processHandle,
+            SafeProcessHandle processHandle,
             uint flags,
             StringBuilder executablePath,
             ref uint executablePathLength);
@@ -3703,12 +4809,48 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        private struct StartupInfoEx
+        {
+            public StartupInfo StartupInfo;
+            public IntPtr AttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         private struct ProcessInformation
         {
             public IntPtr Process;
             public IntPtr Thread;
             public uint ProcessId;
             public uint ThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProfileInfo
+        {
+            public int Size;
+            public int Flags;
+            public string UserName;
+            public string? ProfilePath;
+            public string? DefaultPath;
+            public string? ServerName;
+            public string? PolicyPath;
+            public IntPtr Profile;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private readonly record struct Luid(uint LowPart, int HighPart);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private readonly record struct LuidAndAttributes(
+            Luid Luid,
+            uint Attributes);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenPrivileges
+        {
+            public uint PrivilegeCount;
+            public LuidAndAttributes First;
+            public LuidAndAttributes Second;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -3732,6 +4874,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenType = 8,
             TokenElevation = 20,
             TokenHasRestrictions = 21
+        }
+
+        private enum SecurityImpersonationLevel
+        {
+            Impersonation = 2
+        }
+
+        private enum TokenType
+        {
+            Impersonation = 2
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);
