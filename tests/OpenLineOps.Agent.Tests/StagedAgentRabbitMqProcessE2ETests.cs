@@ -3223,7 +3223,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint TokenAdjustPrivileges = 0x0020;
         private const uint PrivilegeEnabled = 0x00000002;
         private const int ErrorNotAllAssigned = 1300;
-        private const int ErrorPrivilegeNotHeld = 1314;
+        private const uint LogonWithoutProfile = 0;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
         private const int ErrorInsufficientBuffer = 122;
@@ -3319,18 +3319,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 if (identity.UserName is not null)
                 {
                     using var privileges = CreatePrivilegeImpersonation(
-                        "SeIncreaseQuotaPrivilege");
+                        "SeImpersonatePrivilege");
                     created = privileges.Run(() =>
                     {
-                        var result = CreateProcessAsUser(
+                        var result = CreateProcessWithToken(
                             profileToken
                             ?? throw new InvalidOperationException(
                                 "The staged Agent restricted profile token is unavailable."),
+                            LogonWithoutProfile,
                             executablePath,
                             commandLine,
-                            IntPtr.Zero,
-                            IntPtr.Zero,
-                            inheritHandles: false,
                             CreateNewProcessGroup
                             | CreateSuspended
                             | CreateUnicodeEnvironment
@@ -3371,13 +3369,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
                 if (!created)
                 {
-                    var failureReason = identity.UserName is not null
-                                        && creationError == ErrorPrivilegeNotHeld
-                        ? "CreateProcessAsUserW was denied because the staged E2E host lacks a required process-creation privilege; the launch failed closed because credential-based fallbacks create an independent console and cannot prove graceful Ctrl+Break delivery."
-                        : $"Could not start staged Agent '{executablePath}' as '{identity.AccountName}'.";
                     throw new Win32Exception(
                         creationError,
-                        failureReason);
+                        $"Could not start staged Agent '{executablePath}' as '{identity.AccountName}'.");
                 }
 
                 processCreated = true;
@@ -4600,14 +4594,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         [SuppressMessage(
             "Performance",
             "CA1838:Avoid StringBuilder parameters for P/Invokes",
-            Justification = "CreateProcessAsUserW requires a writable null-terminated command-line buffer.")]
-        private static extern bool CreateProcessAsUser(
+            Justification = "CreateProcessWithTokenW requires a writable null-terminated command-line buffer.")]
+        private static extern bool CreateProcessWithToken(
             SafeAccessTokenHandle token,
+            uint logonFlags,
             string applicationName,
             StringBuilder commandLine,
-            IntPtr processAttributes,
-            IntPtr threadAttributes,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
             uint creationFlags,
             IntPtr environment,
             string currentDirectory,
