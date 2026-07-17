@@ -1,4 +1,4 @@
-import {
+import fileSystem, {
   closeSync,
   fsyncSync,
   lstatSync,
@@ -6,12 +6,11 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   renameSync,
   rmSync,
   writeFileSync
 } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import * as nodeFileSystem from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -85,36 +84,38 @@ export function validatePackagedContentUserDataSeparation(
   const canonicalPackagedContentDirectory = requireCanonicalDirectory(
     packagedContentDirectory,
     'Packaged content');
-  const normalizedUserDataDirectory = normalizeCanonicalAbsolutePath(
+  const prospectiveUserDataDirectory = resolveProspectiveDirectoryPhysicalPath(
     userDataDirectory,
     'Desktop user data');
-  if (pathsOverlap(canonicalPackagedContentDirectory, normalizedUserDataDirectory)) {
+  if (pathsOverlap(canonicalPackagedContentDirectory, prospectiveUserDataDirectory)) {
     throw new Error(
       'Packaged content and Desktop user data directories must not contain one another.');
   }
 }
 
 export function ensureCanonicalDesktopUserDataDirectory(userDataDirectory: string): string {
-  if (!path.isAbsolute(userDataDirectory)
-      || path.resolve(userDataDirectory) !== path.normalize(userDataDirectory)) {
-    throw new Error('Desktop user data path must be canonical and absolute.');
-  }
-  const missingDirectories: string[] = [];
-  let existingAncestor = path.resolve(userDataDirectory);
+  const canonicalUserDataDirectory = normalizeCanonicalAbsolutePath(
+    userDataDirectory,
+    'Desktop user data');
+  const missingComponents: string[] = [];
+  let existingAncestor = canonicalUserDataDirectory;
   while (readPathMetadata(existingAncestor) === null) {
-    missingDirectories.push(existingAncestor);
     const parent = path.dirname(existingAncestor);
     if (parent === existingAncestor) {
       throw new Error('Desktop user data has no existing canonical ancestor.');
     }
+    missingComponents.unshift(path.basename(existingAncestor));
     existingAncestor = parent;
   }
-  requireCanonicalDirectory(existingAncestor, 'Desktop user data ancestor');
-  for (const missingDirectory of missingDirectories.reverse()) {
-    mkdirSync(missingDirectory, { recursive: false, mode: 0o700 });
-    requireCanonicalDirectory(missingDirectory, 'Desktop user data');
+  let physicalDirectory = requireCanonicalDirectory(
+    existingAncestor,
+    'Desktop user data ancestor');
+  for (const component of missingComponents) {
+    const missingDirectory = path.join(physicalDirectory, component);
+    fileSystem.mkdirSync(missingDirectory, { recursive: false, mode: 0o700 });
+    physicalDirectory = requireCanonicalDirectory(missingDirectory, 'Desktop user data');
   }
-  return requireCanonicalDirectory(userDataDirectory, 'Desktop user data');
+  return physicalDirectory;
 }
 
 export function ensurePackagedRuntimeDataBinding(
@@ -129,6 +130,10 @@ export function ensurePackagedRuntimeDataBinding(
     'Packaged content');
   const canonicalUserDataDirectory = ensureCanonicalDesktopUserDataDirectory(
     userDataDirectory);
+  if (pathsOverlap(canonicalPackagedContentDirectory, canonicalUserDataDirectory)) {
+    throw new Error(
+      'Packaged content and Desktop user data directories must not contain one another.');
+  }
   const dataDirectory = path.join(canonicalUserDataDirectory, 'data');
   if (readPathMetadata(dataDirectory) === null) {
     mkdirSync(dataDirectory, { recursive: false, mode: 0o700 });
@@ -763,27 +768,94 @@ function readPathMetadata(targetPath: string): Stats | null {
 
 function requireCanonicalDirectory(value: string, name: string): string {
   const canonical = normalizeCanonicalAbsolutePath(value, name);
-
-  requirePlainDirectory(canonical, name);
-  const physical = realpathSync.native(canonical);
-  const physicalMatchesCanonical = process.platform === 'win32'
-    ? physical.toLowerCase() === canonical.toLowerCase()
-    : physical === canonical;
-  if (!physicalMatchesCanonical) {
-    throw new Error(`${name} path must not traverse a symbolic link or junction.`);
+  const selectedMetadata = requireUnlinkedDirectoryPath(canonical, name);
+  const physical = fileSystem.realpathSync.native(canonical);
+  requireCanonicalLocalPhysicalPath(physical, name);
+  const physicalMetadata = requireUnlinkedDirectoryPath(physical, name);
+  if (!sameDirectoryIdentity(selectedMetadata, physicalMetadata)) {
+    throw new Error(`${name} path changed while its physical identity was being verified.`);
   }
   return physical;
 }
 
+function resolveProspectiveDirectoryPhysicalPath(value: string, name: string): string {
+  const canonical = normalizeCanonicalAbsolutePath(value, name);
+  const missingComponents: string[] = [];
+  let existingAncestor = canonical;
+  while (readPathMetadata(existingAncestor) === null) {
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) {
+      throw new Error(`${name} has no existing canonical ancestor.`);
+    }
+    missingComponents.unshift(path.basename(existingAncestor));
+    existingAncestor = parent;
+  }
+
+  const physicalAncestor = requireCanonicalDirectory(existingAncestor, `${name} ancestor`);
+  const prospective = path.join(physicalAncestor, ...missingComponents);
+  requireCanonicalLocalPhysicalPath(prospective, name);
+  return prospective;
+}
+
 function normalizeCanonicalAbsolutePath(value: string, name: string): string {
-  if (!path.isAbsolute(value)) {
+  if (!path.isAbsolute(value)
+      || process.platform === 'win32' && isWindowsRemoteOrDevicePath(value)) {
     throw new Error(`${name} path must be canonical and absolute.`);
   }
+  const normalized = path.normalize(value);
   const canonical = path.resolve(value);
-  if (canonical !== path.normalize(value)) {
+  if (value !== normalized || canonical !== normalized) {
     throw new Error(`${name} path must be canonical and absolute.`);
   }
   return canonical;
+}
+
+function requireCanonicalLocalPhysicalPath(value: string, name: string): void {
+  if (!path.isAbsolute(value)
+      || value !== path.normalize(value)
+      || process.platform === 'win32' && isWindowsRemoteOrDevicePath(value)) {
+    throw new Error(`${name} physical path must be one canonical local path.`);
+  }
+}
+
+function requireUnlinkedDirectoryPath(directoryPath: string, name: string): BigIntStats {
+  const root = path.parse(directoryPath).root;
+  let currentPath = root;
+  let metadata = fileSystem.lstatSync(currentPath, { bigint: true });
+  requirePlainDirectoryComponent(metadata, currentPath, name);
+  for (const component of directoryPath.slice(root.length).split(path.sep)) {
+    if (component.length === 0) {
+      continue;
+    }
+    currentPath = path.join(currentPath, component);
+    metadata = fileSystem.lstatSync(currentPath, { bigint: true });
+    requirePlainDirectoryComponent(metadata, currentPath, name);
+  }
+  return metadata;
+}
+
+function requirePlainDirectoryComponent(
+  metadata: BigIntStats,
+  componentPath: string,
+  name: string
+): void {
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`${name} path must not traverse a symbolic link or junction.`);
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error(`${name} path must contain only plain directories: ${componentPath}`);
+  }
+}
+
+function sameDirectoryIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.isDirectory()
+    && right.isDirectory()
+    && left.dev === right.dev
+    && left.ino === right.ino;
+}
+
+function isWindowsRemoteOrDevicePath(value: string): boolean {
+  return value.startsWith('\\\\') || value.startsWith('\\\\?\\') || value.startsWith('\\\\.\\');
 }
 
 function pathsOverlap(leftPath: string, rightPath: string): boolean {

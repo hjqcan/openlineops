@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
+import fileSystem, {
   existsSync,
   linkSync,
   mkdtempSync,
@@ -11,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs';
 import os from 'node:os';
@@ -18,7 +19,9 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   computeRuntimeContentSha256,
-  ensurePackagedRuntimeDataBinding
+  ensureCanonicalDesktopUserDataDirectory,
+  ensurePackagedRuntimeDataBinding,
+  validatePackagedContentUserDataSeparation
 } from '../dist-electron/main/packaged-runtime-data-binding.js';
 
 const databaseNames = [
@@ -31,7 +34,8 @@ const databaseNames = [
 ];
 
 function createFixture() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'openlineops-runtime-binding-'));
+  const physicalTempRoot = fileSystem.realpathSync.native(os.tmpdir());
+  const root = mkdtempSync(path.join(physicalTempRoot, 'openlineops-runtime-binding-'));
   const packagedContent = path.join(root, 'package');
   const userData = path.join(root, 'user-data');
   const data = path.join(userData, 'data');
@@ -593,6 +597,12 @@ test('destructive binding rejects a relative user data root', () => {
         fixture.packagedContent,
         'relative-user-data'),
       /must be canonical and absolute/u);
+    const nonCanonicalUserData = `${fixture.root}${path.sep}missing${path.sep}..${path.sep}user-data`;
+    assert.throws(
+      () => ensurePackagedRuntimeDataBinding(
+        fixture.packagedContent,
+        nonCanonicalUserData),
+      /must be canonical and absolute/u);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -643,6 +653,156 @@ test('destructive binding rejects a user data path whose parent traverses a junc
     assert.equal(
       readFileSync(path.join(physicalData, 'must-survive.bin'), 'utf8'),
       'must-survive');
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('destructive binding rejects a packaged content path whose parent traverses a junction', () => {
+  const fixture = createFixture();
+  try {
+    const aliasedRoot = path.join(path.dirname(fixture.root), `${path.basename(fixture.root)}-alias`);
+    symlinkSync(
+      fixture.root,
+      aliasedRoot,
+      process.platform === 'win32' ? 'junction' : 'dir');
+    const aliasedPackagedContent = path.join(aliasedRoot, 'package');
+
+    assert.throws(
+      () => ensurePackagedRuntimeDataBinding(
+        aliasedPackagedContent,
+        fixture.userData),
+      /must not traverse a symbolic link or junction/u);
+    assert.equal(existsSync(fixture.state), false);
+  } finally {
+    const aliasedRoot = `${fixture.root}-alias`;
+    if (existsSync(aliasedRoot)) {
+      unlinkSync(aliasedRoot);
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('native directory spelling is accepted only when its physical identity remains exact', context => {
+  const fixture = createFixture();
+  try {
+    const selectedMetadata = fileSystem.lstatSync(fixture.packagedContent, { bigint: true });
+    const differentMetadata = fileSystem.lstatSync(fixture.userData, { bigint: true });
+    const physicalParent = path.join(path.parse(fixture.packagedContent).root, 'openlineops-physical');
+    const physicalPath = path.join(physicalParent, 'package');
+    const originalRealpath = fileSystem.realpathSync.native;
+    const originalLstat = fileSystem.lstatSync;
+    const realpathMock = context.mock.method(fileSystem.realpathSync, 'native', value => (
+      value === fixture.packagedContent ? physicalPath : originalRealpath(value)));
+    const lstatMock = context.mock.method(fileSystem, 'lstatSync', (value, options) => {
+      if (value === physicalParent || value === physicalPath) {
+        return selectedMetadata;
+      }
+      return originalLstat(value, options);
+    });
+
+    assert.doesNotThrow(() => validatePackagedContentUserDataSeparation(
+      fixture.packagedContent,
+      fixture.userData));
+
+    lstatMock.mock.mockImplementation((value, options) => {
+      if (value === physicalParent) {
+        return selectedMetadata;
+      }
+      if (value === physicalPath) {
+        return differentMetadata;
+      }
+      return originalLstat(value, options);
+    });
+    assert.throws(
+      () => validatePackagedContentUserDataSeparation(
+        fixture.packagedContent,
+        fixture.userData),
+      /physical identity was being verified/u);
+
+    if (process.platform === 'win32') {
+      realpathMock.mock.mockImplementation(value => (
+        value === fixture.packagedContent
+          ? '\\\\server\\share\\package'
+          : originalRealpath(value)));
+      assert.throws(
+        () => validatePackagedContentUserDataSeparation(
+          fixture.packagedContent,
+          fixture.userData),
+        /physical path must be one canonical local path/u);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('separation compares a missing user data root through its physical existing ancestor', context => {
+  const fixture = createFixture();
+  try {
+    const selectedAliasRoot = path.join(fixture.root, 'selected-alias-root');
+    mkdirSync(selectedAliasRoot);
+    const prospectiveUserData = path.join(selectedAliasRoot, 'prospective-user-data');
+    const physicalAliasRoot = path.join(fixture.packagedContent, 'physical-alias-root');
+    const aliasMetadata = fileSystem.lstatSync(selectedAliasRoot, { bigint: true });
+    const originalRealpath = fileSystem.realpathSync.native;
+    const originalLstat = fileSystem.lstatSync;
+    context.mock.method(fileSystem.realpathSync, 'native', value => (
+      value === selectedAliasRoot ? physicalAliasRoot : originalRealpath(value)));
+    context.mock.method(fileSystem, 'lstatSync', (value, options) => {
+      if (value === physicalAliasRoot) {
+        return aliasMetadata;
+      }
+      return originalLstat(value, options);
+    });
+
+    assert.throws(
+      () => validatePackagedContentUserDataSeparation(
+        fixture.packagedContent,
+        prospectiveUserData),
+      /must not contain one another/u);
+    assert.equal(existsSync(prospectiveUserData), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('missing user data directories are created only below the verified physical ancestor', context => {
+  const fixture = createFixture();
+  try {
+    const selectedAncestor = path.join(fixture.root, 'selected-user-root');
+    mkdirSync(selectedAncestor);
+    const requestedUserData = path.join(selectedAncestor, 'nested', 'user-data');
+    const physicalAncestor = path.join(
+      path.parse(selectedAncestor).root,
+      'openlineops-physical-user-root');
+    const selectedMetadata = fileSystem.lstatSync(selectedAncestor, { bigint: true });
+    const originalRealpath = fileSystem.realpathSync.native;
+    const originalLstat = fileSystem.lstatSync;
+    const originalMkdir = fileSystem.mkdirSync;
+    const createdPaths = [];
+    context.mock.method(fileSystem.realpathSync, 'native', value => (
+      value === selectedAncestor || value.startsWith(`${physicalAncestor}${path.sep}`)
+        ? value === selectedAncestor ? physicalAncestor : value
+        : originalRealpath(value)));
+    context.mock.method(fileSystem, 'lstatSync', (value, options) => (
+      value === physicalAncestor || value.startsWith(`${physicalAncestor}${path.sep}`)
+        ? selectedMetadata
+        : originalLstat(value, options)));
+    context.mock.method(fileSystem, 'mkdirSync', (value, options) => {
+      if (value === physicalAncestor || value.startsWith(`${physicalAncestor}${path.sep}`)) {
+        createdPaths.push(value);
+        return undefined;
+      }
+      return originalMkdir(value, options);
+    });
+
+    const result = ensureCanonicalDesktopUserDataDirectory(requestedUserData);
+    assert.equal(result, path.join(physicalAncestor, 'nested', 'user-data'));
+    assert.deepEqual(createdPaths, [
+      path.join(physicalAncestor, 'nested'),
+      path.join(physicalAncestor, 'nested', 'user-data')
+    ]);
+    assert.equal(existsSync(path.join(selectedAncestor, 'nested')), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

@@ -15,8 +15,9 @@ const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
 const launcherPath = path.join(desktopRoot, 'scripts', 'dev-launcher.mjs');
+const physicalTempRoot = await fs.realpath(os.tmpdir());
 const userDataDirectory = await fs.mkdtemp(
-  path.join(os.tmpdir(), 'openlineops-dev-launcher-smoke-'));
+  path.join(physicalTempRoot, 'openlineops-dev-launcher-smoke-'));
 const output = [];
 let launcher;
 

@@ -70,8 +70,9 @@ async function main() {
   const previewUrl = previewPort === null ? null : `http://127.0.0.1:${previewPort}`;
   const rendererNonce = randomBytes(32).toString('base64url');
   let apiBaseUrl = 'unavailable';
+  const physicalTempRoot = await fs.realpath(os.tmpdir());
   smokeUserDataDirectory = await fs.mkdtemp(
-    path.join(os.tmpdir(), 'openlineops-desktop-smoke-'));
+    path.join(physicalTempRoot, 'openlineops-desktop-smoke-'));
   if (packagedMode) {
     await seedIncompatiblePackagedRuntimeState();
   }
