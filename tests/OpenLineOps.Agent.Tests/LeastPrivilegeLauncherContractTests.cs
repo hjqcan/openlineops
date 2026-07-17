@@ -636,10 +636,7 @@ public sealed class LeastPrivilegeLauncherContractTests
                 first.RuntimeRoot,
                 "..",
                 "content"));
-            Assert.True(File.Exists(Path.Combine(
-                firstContentRoot,
-                "OpenLineOps.ScriptWorker.dll")));
-            Assert.True(File.Exists(Path.Combine(firstContentRoot, "PythonScript.dll")));
+            AssertCopiedWorkerPayload(firstContentRoot, launcherBundleRoot);
             Assert.False(File.Exists(Path.Combine(
                 firstContentRoot,
                 "OpenLineOps.Agent.Tests.dll")));
@@ -1034,6 +1031,45 @@ public sealed class LeastPrivilegeLauncherContractTests
             + standardOutput
             + " stderr: "
             + standardError);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertCopiedWorkerPayload(
+        string contentRoot,
+        string sourceRoot)
+    {
+        Assert.True(File.Exists(Path.Combine(
+            contentRoot,
+            "OpenLineOps.ScriptWorker.exe")));
+
+        var runtimeConfig = Path.Combine(
+            sourceRoot,
+            "OpenLineOps.ScriptWorker.runtimeconfig.json");
+        if (File.Exists(runtimeConfig))
+        {
+            Assert.True(File.Exists(Path.Combine(
+                contentRoot,
+                "OpenLineOps.ScriptWorker.dll")));
+            Assert.True(File.Exists(Path.Combine(contentRoot, "PythonScript.dll")));
+            Assert.True(File.Exists(Path.Combine(
+                contentRoot,
+                "OpenLineOps.ScriptWorker.deps.json")));
+            Assert.True(File.Exists(Path.Combine(
+                contentRoot,
+                "OpenLineOps.ScriptWorker.runtimeconfig.json")));
+            return;
+        }
+
+        var copiedFiles = Directory
+            .EnumerateFiles(contentRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path
+                .GetRelativePath(contentRoot, path)
+                .Replace(Path.DirectorySeparatorChar, '/'))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(
+            ["OpenLineOps.ScriptWorker.exe"],
+            copiedFiles);
     }
 
     [SupportedOSPlatform("windows")]
