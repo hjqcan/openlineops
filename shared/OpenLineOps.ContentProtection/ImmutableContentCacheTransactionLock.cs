@@ -1,5 +1,4 @@
 using System.Runtime.Versioning;
-using System.Security;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -84,7 +83,8 @@ public sealed class ImmutableContentCacheTransactionLock : IDisposable
             WellKnownSidType.WinCreatorOwnerRightsSid,
             null);
         var localService = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null);
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
         SecurityIdentifier currentUser = identity.User
                                          ?? throw new InvalidOperationException(
                                              "Immutable content transaction token has no user SID.");
@@ -170,17 +170,8 @@ public sealed class ImmutableContentCacheTransactionLock : IDisposable
     [SupportedOSPlatform("windows")]
     private static bool IsEnabledAdministrator(
         WindowsIdentity identity,
-        SecurityIdentifier administrators)
-    {
-        try
-        {
-            return new WindowsPrincipal(identity).IsInRole(administrators);
-        }
-        catch (SecurityException)
-        {
-            return false;
-        }
-    }
+        SecurityIdentifier administrators) =>
+        new WindowsPrincipal(identity).IsInRole(administrators);
 
     [SupportedOSPlatform("windows")]
     private static void VerifyWindowsSecurity(

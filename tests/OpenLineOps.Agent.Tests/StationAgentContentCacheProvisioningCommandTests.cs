@@ -1,3 +1,5 @@
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using Microsoft.Extensions.Configuration;
 
 namespace OpenLineOps.Agent.Tests;
@@ -364,6 +366,43 @@ public sealed class StationAgentContentCacheProvisioningCommandTests
         Assert.Contains(
             "elevated Windows administrator",
             exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void AdministrativeCallerClassificationUsesAUsableCurrentToken()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
+        var isLocalSystem = identity.User?.IsWellKnown(
+            WellKnownSidType.LocalSystemSid) == true;
+        var isAdministrator = new WindowsPrincipal(identity).IsInRole(
+            WindowsBuiltInRole.Administrator);
+        var configuration = Configuration(new Dictionary<string, string?>());
+
+        if (isLocalSystem || isAdministrator)
+        {
+            InvalidDataException exception = Assert.Throws<InvalidDataException>(() =>
+                StationAgentContentCacheProvisioningCommand.Execute(configuration));
+            Assert.Contains(
+                "OpenLineOps:WindowsServiceName",
+                exception.Message,
+                StringComparison.Ordinal);
+            return;
+        }
+
+        UnauthorizedAccessException unauthorized =
+            Assert.Throws<UnauthorizedAccessException>(() =>
+                StationAgentContentCacheProvisioningCommand.Execute(configuration));
+        Assert.Contains(
+            "elevated Windows administrator or LocalSystem",
+            unauthorized.Message,
             StringComparison.Ordinal);
     }
 

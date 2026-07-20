@@ -222,7 +222,8 @@ internal static class StationAgentContentCacheProvisioningCommand
     [SupportedOSPlatform("windows")]
     private static void EnsureAdministrativeCaller()
     {
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
         var user = identity.User
             ?? throw new UnauthorizedAccessException(
                 "Station content-cache administration requires a Windows token user SID.");

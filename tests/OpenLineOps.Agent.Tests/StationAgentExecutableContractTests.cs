@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Principal;
 using System.Text;
 
 namespace OpenLineOps.Agent.Tests;
@@ -40,6 +41,26 @@ public sealed class StationAgentExecutableContractTests
             "--remove-content-cache-package requires one lowercase SHA-256 value",
             invalidRemoval.StandardError,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProvisioningModeClassifiesCallerWithoutGenericTokenAccessFailure()
+    {
+        var result = await RunAgentAsync(
+            StationAgentCommandLine.ProvisionContentCacheSwitch);
+
+        Assert.Equal(70, result.ExitCode);
+        Assert.Empty(result.StandardOutput);
+        Assert.Contains(
+            IsCurrentAdministrativeWindowsCaller()
+                ? "OpenLineOps:WindowsServiceName must contain 1-80 ASCII"
+                : "requires an elevated Windows administrator or LocalSystem process",
+            result.StandardError,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Access is denied",
+            result.StandardError,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<AgentProcessResult> RunAgentAsync(params string[] arguments)
@@ -126,6 +147,20 @@ public sealed class StationAgentExecutableContractTests
             "bin",
             configuration,
             "net10.0");
+    }
+
+    private static bool IsCurrentAdministrativeWindowsCaller()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
+        return identity.User?.IsWellKnown(WellKnownSidType.LocalSystemSid) == true
+               || new WindowsPrincipal(identity).IsInRole(
+                   WindowsBuiltInRole.Administrator);
     }
 
     private sealed record AgentProcessResult(

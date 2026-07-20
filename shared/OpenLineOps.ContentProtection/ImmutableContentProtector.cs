@@ -2488,7 +2488,8 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
     [SupportedOSPlatform("windows")]
     private static SecurityIdentifier ResolveWindowsAdministrativeCleanupAuthority()
     {
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        using var identity = WindowsIdentity.GetCurrent(
+            TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
         SecurityIdentifier user = identity.User
                                   ?? throw new InvalidOperationException(
                                       "Current Windows cleanup token has no user SID.");

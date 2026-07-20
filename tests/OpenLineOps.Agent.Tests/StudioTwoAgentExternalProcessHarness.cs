@@ -1284,7 +1284,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static void RequireElevatedTestProcess()
         {
-            using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+            using var identity = WindowsIdentity.GetCurrent(
+                TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
             var principal = new WindowsPrincipal(identity);
             if (!principal.IsInRole(WindowsBuiltInRole.Administrator))
             {

@@ -32,6 +32,8 @@ $commandLine = Read-RequiredText "src/OpenLineOps.Agent/StationAgentCommandLine.
 $hostOptions = Read-RequiredText "src/OpenLineOps.Agent/StationAgentHostOptions.cs"
 $executableContract = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StationAgentExecutableContractTests.cs"
 $contentProtector = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentProtector.cs"
+$transactionLock = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentCacheTransactionLock.cs"
+$studioHarness = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentExternalProcessHarness.cs"
 $deployment = Read-RequiredText "docs/station-agent-deployment.md"
 $security = Read-RequiredText "docs/station-agent-security.md"
 $release = Read-RequiredText "docs/release-packaging.md"
@@ -54,6 +56,8 @@ Assert-ContainsLiteral $command "OperatingSystem.IsWindows()" `
     "Content-cache provisioning does not fail closed outside Windows."
 Assert-ContainsLiteral $command "EnsureAdministrativeCaller();" `
     "Content-cache provisioning does not require an administrative token."
+Assert-ContainsLiteral $command "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
+    "Content-cache provisioning administrator classification does not request the token duplication right required by WindowsPrincipal role checks."
 Assert-ContainsLiteral $command "ServiceSidFromNameRequired" `
     "Content-cache provisioning does not derive the Station SID from WindowsServiceName."
 Assert-ContainsLiteral $command "ExternalProgramContentCapabilityName" `
@@ -78,6 +82,12 @@ Assert-ContainsLiteral $contentProtector "ValueTask RemoveProtectedPackageInstal
     "Immutable content protection is missing its formal protected-package removal API."
 Assert-ContainsLiteral $contentProtector "must be fully stopped" `
     "Immutable content administration does not fail closed while the Station service can run."
+Assert-ContainsLiteral $contentProtector "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
+    "Immutable content cleanup administrator classification does not request the token duplication right required by WindowsPrincipal role checks."
+Assert-ContainsLiteral $transactionLock "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
+    "Immutable content transaction-lock owner classification does not request the token duplication right required by WindowsPrincipal role checks."
+Assert-ContainsLiteral $studioHarness "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
+    "The packaged two-Agent elevation gate does not request the token duplication right required by WindowsPrincipal role checks."
 Assert-ContainsLiteral $hostOptions 'section["PackageCacheDirectory"]' `
     "Station Agent host options do not read PackageCacheDirectory."
 Assert-ContainsLiteral $hostOptions '"OpenLineOps:Agent:PackageCacheDirectory"' `
@@ -86,6 +96,8 @@ Assert-ContainsLiteral $hostOptions "StationAgentPackageCachePath.RequireCanonic
     "Normal Station Agent startup does not enforce the same canonical absolute cache path as provisioning."
 Assert-ContainsLiteral $executableContract "AdministrativeContentCacheModesAreExposedByAgentExecutable" `
     "The built Station Agent executable has no regression proof for both administrative cache modes."
+Assert-ContainsLiteral $executableContract "ProvisioningModeClassifiesCallerWithoutGenericTokenAccessFailure" `
+    "The built Station Agent executable has no process-level regression proof for administrative token classification."
 if ($hostOptions -cmatch 'Path\.Combine\(dataDirectory,\s*"(?:content|cache)"\)') {
     throw "Station Agent host options still contain an implicit data-directory package-cache fallback."
 }
