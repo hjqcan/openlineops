@@ -4,6 +4,27 @@ namespace OpenLineOps.Devices.Tests;
 
 public sealed class ExternalProgramOutputInspectionTests
 {
+    [Theory]
+    [InlineData(".result.json.0123456789abcdef0123456789abcdef.tmp")]
+    [InlineData("nested/.result.json.0123456789ABCDEF0123456789ABCDEF.tmp")]
+    public void AtomicWriteResidueRequiresPortableDestinationAndExactIdentifier(string relativePath)
+    {
+        Assert.True(ExternalProgramHost.IsIncompleteAtomicWriteResidue(relativePath));
+    }
+
+    [Theory]
+    [InlineData("result.json.0123456789abcdef0123456789abcdef.tmp")]
+    [InlineData(".result.json.0123456789abcdef0123456789abcde.tmp")]
+    [InlineData(".result.json.0123456789abcdef0123456789abcdeg.tmp")]
+    [InlineData(".result json.0123456789abcdef0123456789abcdef.tmp")]
+    [InlineData("nested/.result.json.0123456789abcdef0123456789abcdef.tmp/child")]
+    [InlineData("../.result.json.0123456789abcdef0123456789abcdef.tmp")]
+    [InlineData("unexpected.tmp")]
+    public void OtherNonCanonicalOutputIsNotAtomicWriteResidue(string relativePath)
+    {
+        Assert.False(ExternalProgramHost.IsIncompleteAtomicWriteResidue(relativePath));
+    }
+
     [Fact]
     public void SnapshotInspectionRetriesAFileThatWasAtomicallyMoved()
     {

@@ -21,6 +21,9 @@ public static class Program
     public const string CancellationFileName = "cancel.request";
     public const string ProcessIdFileName = "vendor-process-id.txt";
     public const string ChildProcessIdFileName = "child-process-id.txt";
+    public const string AtomicOutputResidueFileName =
+        ".result.json.0123456789abcdef0123456789abcdef.tmp";
+    public const string AtomicOutputResidueMarker = "atomic output residue ready";
 
     public const int UsageExitCode = 64;
     public const int CrashExitCode = 23;
@@ -78,6 +81,12 @@ public static class Program
         if (args.Length > 0 && string.Equals(args[0], "sandbox-exit", StringComparison.Ordinal))
         {
             return SandboxExit(args[1..]);
+        }
+
+        if (args.Length > 0
+            && string.Equals(args[0], "sandbox-atomic-output-residue", StringComparison.Ordinal))
+        {
+            return await LeaveAtomicOutputResidueAsync(args[1..]).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "sandbox-connect", StringComparison.Ordinal))
@@ -807,6 +816,35 @@ public static class Program
         }
 
         return exitCode;
+    }
+
+    private static async Task<int> LeaveAtomicOutputResidueAsync(string[] arguments)
+    {
+        if (arguments.Length != 1
+            || !int.TryParse(
+                arguments[0],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var delayMilliseconds)
+            || delayMilliseconds < 0
+            || delayMilliseconds > MaximumDelayMilliseconds)
+        {
+            return UsageExitCode;
+        }
+
+        var outputDirectory = RequireAbsoluteEnvironmentPath(OutputDirectoryEnvironmentVariable);
+        await File.WriteAllTextAsync(
+                Path.Combine(outputDirectory, AtomicOutputResidueFileName),
+                "uncommitted",
+                Utf8WithoutBom)
+            .ConfigureAwait(false);
+        await Console.Error.WriteLineAsync(AtomicOutputResidueMarker).ConfigureAwait(false);
+        if (delayMilliseconds > 0)
+        {
+            await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+        }
+
+        return 0;
     }
 
     private static async Task<int> TrySandboxConnectionAsync(string[] arguments)

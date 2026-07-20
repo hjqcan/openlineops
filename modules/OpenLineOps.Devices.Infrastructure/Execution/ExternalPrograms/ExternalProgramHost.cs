@@ -320,6 +320,12 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 []);
         }
 
+        var excludeIncompleteAtomicWriteResidue = executionFailure is not null
+                                                  || outputLimitCancellation.IsCancellationRequested
+                                                  || cancellationToken.IsCancellationRequested
+                                                  || timeoutCancellation.IsCancellationRequested
+                                                  || !processExited
+                                                  || process.ExitCode != 0;
         var artifacts = await PersistEvidenceAsync(
                 request,
                 policy,
@@ -327,6 +333,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 outputDirectory,
                 standardOutputPath,
                 standardErrorPath,
+                excludeIncompleteAtomicWriteResidue,
                 CancellationToken.None)
             .ConfigureAwait(false);
         if (executionFailure is not null)
@@ -447,6 +454,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         string standardOutputPath,
         string standardErrorPath,
+        bool excludeIncompleteAtomicWriteResidue,
         CancellationToken cancellationToken)
     {
         var candidates = new List<(string SourcePath, string RelativePath)>
@@ -456,6 +464,13 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         };
         foreach (var path in EnumerateOutputFiles(outputDirectory))
         {
+            var outputRelativePath = Path.GetRelativePath(outputDirectory, path).Replace('\\', '/');
+            if (excludeIncompleteAtomicWriteResidue
+                && IsIncompleteAtomicWriteResidue(outputRelativePath))
+            {
+                continue;
+            }
+
             if (candidates.Count == policy.MaximumArtifactCount)
             {
                 throw new InvalidDataException(
@@ -464,7 +479,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
 
             candidates.Add((
                 path,
-                "output/" + Path.GetRelativePath(outputDirectory, path).Replace('\\', '/')));
+                "output/" + outputRelativePath));
         }
 
         if (candidates.Count > policy.MaximumArtifactCount)
@@ -709,6 +724,39 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         }
 
         throw new InvalidOperationException("The bounded output workspace inspection did not terminate.");
+    }
+
+    internal static bool IsIncompleteAtomicWriteResidue(string relativePath)
+    {
+        if (!IsCanonical(relativePath)
+            || relativePath.Contains('\\', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var segments = relativePath.Split('/');
+        if (segments.Length == 0
+            || segments[..^1].Any(segment => !IsPortableArtifactPathSegment(segment)))
+        {
+            return false;
+        }
+
+        var fileName = segments[^1];
+        const int identifierLength = 32;
+        const string suffix = ".tmp";
+        var identifierSeparator = fileName.Length - suffix.Length - identifierLength - 1;
+        if (identifierSeparator <= 1
+            || fileName[0] != '.'
+            || fileName[identifierSeparator] != '.'
+            || !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var destinationName = fileName[1..identifierSeparator];
+        var identifier = fileName.AsSpan(identifierSeparator + 1, identifierLength);
+        return IsPortableArtifactPathSegment(destinationName)
+               && Guid.TryParseExact(identifier, "N", out _);
     }
 
     private static string? InspectOutputDirectory(

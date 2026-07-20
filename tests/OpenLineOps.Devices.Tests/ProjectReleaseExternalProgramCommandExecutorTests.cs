@@ -411,16 +411,16 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
     [Fact]
     public async Task ApplicationExecutableTimeoutTerminatesAndFailsClosed()
     {
-        var executable = CopyDelayProgramIntoApplication();
+        var program = CreateAtomicOutputResidueProgram(delayMilliseconds: 5_000);
         var route = CreateRoute(
             ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
-            executable,
+            program.Executable,
             providerRoute: null,
-            argumentTemplates: DelayArguments(),
-            timeoutMilliseconds: 100);
+            argumentTemplates: program.Arguments,
+            timeoutMilliseconds: 2_000);
 
         var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
-            CreateContext(timeout: TimeSpan.FromMilliseconds(100)),
+            CreateContext(timeout: TimeSpan.FromSeconds(2)),
             route,
             ProviderMustNotRun,
             AllowFences,
@@ -429,7 +429,41 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         Assert.True(
             result.Outcome == RuntimeCommandExecutionOutcome.TimedOut,
             result.Reason);
-        Assert.Contains("100 ms", result.Reason, StringComparison.Ordinal);
+        Assert.Contains("2000 ms", result.Reason, StringComparison.Ordinal);
+        Assert.Contains(
+            OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueMarker,
+            result.Reason,
+            StringComparison.Ordinal);
+        var evidence = Assert.IsType<RuntimeCommandEvidence>(
+            RuntimeCommandEvidencePayload.Read(result.Payload));
+        Assert.DoesNotContain(
+            evidence.Artifacts,
+            artifact => artifact.Name == OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName);
+        Assert.Empty(Directory.EnumerateFiles(
+            _hostRoot,
+            OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName,
+            SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task SuccessfulExecutableCannotHideNonCanonicalArtifactAsAtomicWriteResidue()
+    {
+        var program = CreateAtomicOutputResidueProgram(delayMilliseconds: 0);
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(),
+            route,
+            ProviderMustNotRun,
+            AllowFences,
+            CreateHost());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+        Assert.Contains("artifact path is not canonical", result.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -884,14 +918,31 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         return $"programs/external-program/{fileName}";
     }
 
-    private string CopyDelayProgramIntoApplication()
+    private FrozenTestProgram CreateAtomicOutputResidueProgram(int delayMilliseconds)
     {
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows())
         {
-            return CopyShellIntoApplication();
+            return new FrozenTestProgram(
+                CopyVendorHelperIntoApplication(),
+                [
+                    "sandbox-atomic-output-residue",
+                    delayMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ]);
         }
 
-        return CopyVendorHelperIntoApplication();
+        var command = "printf '%s' 'uncommitted' > \"$OPENLINEOPS_OUTPUT_DIRECTORY/"
+                      + OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName
+                      + "\"; printf '%s\\n' '"
+                      + OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueMarker
+                      + "' >&2";
+        if (delayMilliseconds > 0)
+        {
+            var delaySeconds = Math.Max(1, (delayMilliseconds + 999) / 1_000);
+            command += "; sleep "
+                       + delaySeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new FrozenTestProgram(CopyShellIntoApplication(), ["-c", command]);
     }
 
     private FrozenTestProgram CreateJsonOutputProgram()
@@ -1026,13 +1077,6 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         return OperatingSystem.IsWindows()
             ? ["/d", "/s", "/c", "exit /b 7"]
             : ["-c", "exit 7"];
-    }
-
-    private static IReadOnlyCollection<string> DelayArguments()
-    {
-        return OperatingSystem.IsWindows()
-            ? ["--mode", "Delay", "--delay-milliseconds", "5000"]
-            : ["-c", "sleep 5"];
     }
 
     private static ValueTask<RuntimeCommandExecutionResult> ProviderMustNotRun(
