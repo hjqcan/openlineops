@@ -84,6 +84,21 @@ public sealed class ImmutableContentProtectorTests
             ServiceSidRestricted: true));
     }
 
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsTokenHasRestrictionsUsesItsNativeBooleanWidth()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+
+        _ = WindowsStationServiceIdentityReader.ReadTokenHasRestrictions(
+            identity.AccessToken);
+    }
+
     [Theory]
     [InlineData("S-1-5-18", true, true, true, true, true)]
     [InlineData("S-1-5-19", false, true, true, true, true)]

@@ -242,9 +242,7 @@ public static class WindowsStationServiceIdentityReader
             && (group.Attributes & SeGroupUseForDenyOnly) == 0);
         var restricted = restrictedSids.Any(group =>
             string.Equals(group.Sid, canonicalServiceSid, StringComparison.Ordinal));
-        var tokenHasRestrictions = ReadTokenBoolean(
-            identity.AccessToken,
-            TokenInformationClass.TokenHasRestrictions);
+        var tokenHasRestrictions = ReadTokenHasRestrictions(identity.AccessToken);
         var result = new WindowsStationServiceIdentity(
             userSid,
             canonicalServiceSid,
@@ -309,18 +307,47 @@ public static class WindowsStationServiceIdentityReader
         && (group.Attributes & SeGroupUseForDenyOnly) == 0;
 
     [SupportedOSPlatform("windows")]
-    private static bool ReadTokenBoolean(
-        SafeAccessTokenHandle token,
-        TokenInformationClass informationClass)
+    internal static bool ReadTokenHasRestrictions(SafeAccessTokenHandle token)
     {
-        var buffer = Marshal.AllocHGlobal(sizeof(uint));
+        const TokenInformationClass informationClass =
+            TokenInformationClass.TokenHasRestrictions;
+        _ = GetTokenInformation(
+            token,
+            informationClass,
+            IntPtr.Zero,
+            0,
+            out var requiredBytes);
+        var sizingError = Marshal.GetLastPInvokeError();
+        if (requiredBytes == 0 || sizingError != ErrorInsufficientBuffer)
+        {
+            throw new Win32Exception(
+                sizingError,
+                $"Could not size Windows {informationClass} data.");
+        }
+
+        if (requiredBytes is not (sizeof(byte) or sizeof(uint)))
+        {
+            throw new InvalidDataException(
+                $"Windows {informationClass} requires an unsupported Boolean data length of {requiredBytes} bytes.");
+        }
+
+        var buffer = Marshal.AllocHGlobal(checked((int)requiredBytes));
         try
         {
+            if (requiredBytes == sizeof(byte))
+            {
+                Marshal.WriteByte(buffer, 0);
+            }
+            else
+            {
+                Marshal.WriteInt32(buffer, 0);
+            }
+
             if (!GetTokenInformation(
                     token,
                     informationClass,
                     buffer,
-                    sizeof(uint),
+                    requiredBytes,
                     out var returnedBytes))
             {
                 throw new Win32Exception(
@@ -328,13 +355,15 @@ public static class WindowsStationServiceIdentityReader
                     $"Could not read Windows {informationClass} data.");
             }
 
-            if (returnedBytes != sizeof(uint))
+            if (returnedBytes != requiredBytes)
             {
                 throw new InvalidDataException(
-                    $"Windows {informationClass} returned an invalid data length.");
+                    $"Windows {informationClass} returned {returnedBytes} bytes after requiring {requiredBytes} bytes.");
             }
 
-            return Marshal.ReadInt32(buffer) != 0;
+            return returnedBytes == sizeof(byte)
+                ? Marshal.ReadByte(buffer) != 0
+                : Marshal.ReadInt32(buffer) != 0;
         }
         finally
         {

@@ -32,6 +32,9 @@ $commandLine = Read-RequiredText "src/OpenLineOps.Agent/StationAgentCommandLine.
 $hostOptions = Read-RequiredText "src/OpenLineOps.Agent/StationAgentHostOptions.cs"
 $executableContract = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StationAgentExecutableContractTests.cs"
 $contentProtector = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentProtector.cs"
+$contentProtectorTests = Read-RequiredText "tests/OpenLineOps.ContentProtection.Tests/ImmutableContentProtectorTests.cs"
+$agentStagedE2E = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StagedAgentRabbitMqProcessE2ETests.cs"
+$runnerStagedE2E = Read-RequiredText "tests/OpenLineOps.Runner.Tests/RunnerStagedAgentProcessE2ETests.cs"
 $transactionLock = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentCacheTransactionLock.cs"
 $studioHarness = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentExternalProcessHarness.cs"
 $deployment = Read-RequiredText "docs/station-agent-deployment.md"
@@ -88,6 +91,34 @@ Assert-ContainsLiteral $transactionLock "TokenAccessLevels.Query | TokenAccessLe
     "Immutable content transaction-lock owner classification does not request the token duplication right required by WindowsPrincipal role checks."
 Assert-ContainsLiteral $studioHarness "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
     "The packaged two-Agent elevation gate does not request the token duplication right required by WindowsPrincipal role checks."
+Assert-ContainsLiteral $contentProtector "ReadTokenHasRestrictions(identity.AccessToken);" `
+    "Station service identity validation does not use the dedicated TokenHasRestrictions scalar reader."
+Assert-ContainsLiteral $contentProtector "requiredBytes is not (sizeof(byte) or sizeof(uint))" `
+    "The TokenHasRestrictions reader does not fail closed around the one-byte Windows ABI and documented DWORD width."
+Assert-ContainsLiteral $contentProtector "Marshal.WriteByte(buffer, 0);" `
+    "The TokenHasRestrictions reader does not clear a native one-byte Boolean buffer before the Windows call."
+Assert-ContainsLiteral $contentProtector "Marshal.WriteInt32(buffer, 0);" `
+    "The TokenHasRestrictions reader does not clear a documented DWORD buffer before the Windows call."
+Assert-ContainsLiteral $contentProtector "if (returnedBytes != requiredBytes)" `
+    "The TokenHasRestrictions reader does not require the returned width to match the sized native buffer."
+Assert-ContainsLiteral $contentProtector "return returnedBytes == sizeof(byte)" `
+    "The TokenHasRestrictions reader does not decode the sized native Boolean width explicitly."
+Assert-ContainsLiteral $contentProtectorTests "WindowsTokenHasRestrictionsUsesItsNativeBooleanWidth" `
+    "Content protection tests do not exercise the native TokenHasRestrictions width on Windows."
+Assert-ContainsLiteral $runnerStagedE2E "HasRestrictions: ReadTokenBoolean(" `
+    "Runner staged Agent evidence still lacks a dedicated Boolean reader for TokenHasRestrictions."
+Assert-ContainsLiteral $runnerStagedE2E "if (buffer.Size != sizeof(int))" `
+    "Runner staged Agent integer token evidence does not reject non-integer native widths."
+Assert-ContainsLiteral $agentStagedE2E "allowByteBoolean: true" `
+    "Agent staged evidence still lacks an explicit byte-Boolean path for TokenHasRestrictions."
+Assert-ContainsLiteral $agentStagedE2E "returnedLength != requiredLength" `
+    "Agent staged token evidence does not require the returned width to match the sized native buffer."
+if ($runnerStagedE2E -cmatch '(?s)HasRestrictions:\s*ReadTokenInt32\(.*?TokenInformationClass\.TokenHasRestrictions') {
+    throw "Runner staged Agent evidence must not decode TokenHasRestrictions through the generic Int32 reader."
+}
+if ($agentStagedE2E -cmatch '(?s)ReadTokenInt32\(\s*token\.DangerousGetHandle\(\),\s*TokenInformationClass\.TokenHasRestrictions') {
+    throw "Agent staged evidence must not decode TokenHasRestrictions through the generic Int32 reader."
+}
 Assert-ContainsLiteral $hostOptions 'section["PackageCacheDirectory"]' `
     "Station Agent host options do not read PackageCacheDirectory."
 Assert-ContainsLiteral $hostOptions '"OpenLineOps:Agent:PackageCacheDirectory"' `

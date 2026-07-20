@@ -7729,9 +7729,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     ReadTokenInt32(
                         token.DangerousGetHandle(),
                         TokenInformationClass.TokenElevation) != 0,
-                    ReadTokenInt32(
+                    ReadTokenBoolean(
                         token.DangerousGetHandle(),
-                        TokenInformationClass.TokenHasRestrictions) != 0,
+                        TokenInformationClass.TokenHasRestrictions),
                     administratorPresent,
                     administratorEnabled,
                     administratorDenyOnly,
@@ -7756,23 +7756,80 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static int ReadTokenInt32(
             IntPtr token,
-            TokenInformationClass informationClass)
+            TokenInformationClass informationClass) =>
+            ReadTokenScalar(token, informationClass, allowByteBoolean: false);
+
+        private static bool ReadTokenBoolean(
+            IntPtr token,
+            TokenInformationClass informationClass) =>
+            ReadTokenScalar(token, informationClass, allowByteBoolean: true) != 0;
+
+        private static int ReadTokenScalar(
+            IntPtr token,
+            TokenInformationClass informationClass,
+            bool allowByteBoolean)
         {
-            var value = 0;
-            if (!GetTokenInformation(
-                    token,
-                    informationClass,
-                    out value,
-                    sizeof(int),
-                    out _))
+            _ = GetTokenInformation(
+                token,
+                informationClass,
+                IntPtr.Zero,
+                0,
+                out var requiredLength);
+            var sizingError = Marshal.GetLastWin32Error();
+            if (requiredLength <= 0 || sizingError != ErrorInsufficientBuffer)
             {
                 throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not inspect staged Agent token information "
+                    sizingError,
+                    "Could not size staged Agent token information "
                     + informationClass + ".");
             }
 
-            return value;
+            if (requiredLength != sizeof(int)
+                && (!allowByteBoolean || requiredLength != sizeof(byte)))
+            {
+                throw new InvalidDataException(
+                    $"Staged Agent token information {informationClass} requires an unsupported scalar length of {requiredLength} bytes.");
+            }
+
+            var buffer = Marshal.AllocHGlobal(requiredLength);
+            try
+            {
+                if (requiredLength == sizeof(byte))
+                {
+                    Marshal.WriteByte(buffer, 0);
+                }
+                else
+                {
+                    Marshal.WriteInt32(buffer, 0);
+                }
+
+                if (!GetTokenInformation(
+                    token,
+                    informationClass,
+                    buffer,
+                    requiredLength,
+                    out var returnedLength))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not inspect staged Agent token information "
+                        + informationClass + ".");
+                }
+
+                if (returnedLength != requiredLength)
+                {
+                    throw new InvalidDataException(
+                        $"Staged Agent token information {informationClass} returned {returnedLength} bytes after requiring {requiredLength} bytes.");
+                }
+
+                return returnedLength == sizeof(byte)
+                    ? Marshal.ReadByte(buffer)
+                    : Marshal.ReadInt32(buffer);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
         }
 
         private static List<TokenGroupEvidence> ReadTokenGroups(
@@ -7899,15 +7956,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint flags,
             StringBuilder executablePath,
             ref uint executablePathLength);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetTokenInformation(
-            IntPtr tokenHandle,
-            TokenInformationClass tokenInformationClass,
-            out int tokenInformation,
-            int tokenInformationLength,
-            out int returnLength);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

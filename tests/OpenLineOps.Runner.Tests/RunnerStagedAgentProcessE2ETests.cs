@@ -3685,9 +3685,9 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     userSid,
                     IsPrimaryToken: ReadTokenInt32(token, TokenInformationClass.TokenType) == 1,
                     IsElevated: ReadTokenInt32(token, TokenInformationClass.TokenElevation) != 0,
-                    HasRestrictions: ReadTokenInt32(
+                    HasRestrictions: ReadTokenBoolean(
                         token,
-                        TokenInformationClass.TokenHasRestrictions) != 0
+                        TokenInformationClass.TokenHasRestrictions)
                         && IsTokenRestricted(token),
                     AdministratorGroupPresent: administrator is not null,
                     AdministratorGroupEnabled: IsEnabled(administrator),
@@ -3758,7 +3758,27 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             TokenInformationClass informationClass)
         {
             using var buffer = ReadTokenBuffer(token, informationClass);
+            if (buffer.Size != sizeof(int))
+            {
+                throw new InvalidDataException(
+                    $"Runner Agent token information {informationClass} requires an exact {sizeof(int)}-byte integer, not {buffer.Size} bytes.");
+            }
+
             return Marshal.ReadInt32(buffer.DangerousGetHandle());
+        }
+
+        private static bool ReadTokenBoolean(
+            SafeAccessTokenHandle token,
+            TokenInformationClass informationClass)
+        {
+            using var buffer = ReadTokenBuffer(token, informationClass);
+            return buffer.Size switch
+            {
+                sizeof(byte) => Marshal.ReadByte(buffer.DangerousGetHandle()) != 0,
+                sizeof(int) => Marshal.ReadInt32(buffer.DangerousGetHandle()) != 0,
+                _ => throw new InvalidDataException(
+                    $"Runner Agent token information {informationClass} requires an unsupported Boolean length of {buffer.Size} bytes.")
+            };
         }
 
         private static SafeHGlobalHandle ReadTokenBuffer(
@@ -3784,13 +3804,20 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     informationClass,
                     buffer.DangerousGetHandle(),
                     requiredBytes,
-                    out _))
+                    out var returnedBytes))
             {
                 var error = Marshal.GetLastWin32Error();
                 buffer.Dispose();
                 throw new Win32Exception(
                     error,
                     $"Could not read Runner Agent token information {informationClass}.");
+            }
+
+            if (returnedBytes != requiredBytes)
+            {
+                buffer.Dispose();
+                throw new InvalidDataException(
+                    $"Runner Agent token information {informationClass} returned {returnedBytes} bytes after requiring {requiredBytes} bytes.");
             }
 
             return buffer;
@@ -4125,8 +4152,22 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             public SafeHGlobalHandle(int size)
                 : base(ownsHandle: true)
             {
+                if (size <= 0)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(size),
+                        "Native token buffers must have a positive size.");
+                }
+
+                Size = size;
                 SetHandle(Marshal.AllocHGlobal(size));
+                for (var offset = 0; offset < size; offset++)
+                {
+                    Marshal.WriteByte(handle, offset, 0);
+                }
             }
+
+            public int Size { get; }
 
             protected override bool ReleaseHandle()
             {
