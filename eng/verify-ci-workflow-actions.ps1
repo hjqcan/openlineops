@@ -63,9 +63,9 @@ $workflowContent = Get-Content -LiteralPath $resolvedWorkflowPath -Raw
 $workflowLines = Get-Content -LiteralPath $resolvedWorkflowPath
 
 $allowedActionRefs = [ordered]@{
-    "actions/checkout@v4" = "checkout"
-    "actions/setup-dotnet@v4" = "dotnet setup"
-    "actions/setup-node@v4" = "node setup"
+    "actions/checkout@v7" = "checkout"
+    "actions/setup-dotnet@v6" = "dotnet setup"
+    "actions/setup-node@v7" = "node setup"
     "actions/setup-python@v6" = "python setup"
     "actions/upload-artifact@v7" = "release artifact upload"
     "actions/download-artifact@v8" = "release artifact download"

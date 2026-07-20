@@ -43,7 +43,7 @@ public static class CurrentContract
 }
 '@
     Set-Content -LiteralPath (Join-Path $root "eng/external-tooling.ps1") -Value @'
-$action = "actions/checkout@v4"
+$action = "actions/checkout@v7"
 $gitMode = "--porcelain=v1"
 '@
     Set-Content -LiteralPath (Join-Path $root "tests/OpenLineOps.Agent.Tests/LeastPrivilegeLauncherContractTests.cs") -Value @'
