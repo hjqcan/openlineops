@@ -174,13 +174,47 @@ Its Python execution uses the exact bundled launcher and fixed
 gate fails unless `TokenIsAppContainer` is true, the package SID is a canonical
 unique AppContainer SID, and the integrity RID is 4096. It also verifies
 cross-profile denial, network denial, descendant termination, profile deletion,
-and stale-profile recovery. Its staged RabbitMQ child gate runs the extracted
-Agent against a signed frozen vendor helper, stops the real broker while the
+and stale-profile recovery. Its staged RabbitMQ child gate installs the exact
+extracted Agent as a demand-start `WIN32_OWN_PROCESS` service named
+`OpenLineOpsAgentE2E-<32-lowercase-hex-guid>` under a dedicated temporary
+non-administrative standard service account. The gate grants that account only
+the service-logon right and supplies test configuration through the
+service-specific registry `Environment` value outside the frozen
+bundle. The service key ACL is limited to SYSTEM, administrators, and the test
+principal; the broker credential is never written to the service `ImagePath`,
+command line, bundle, or evidence. The gate starts, stops, and restarts the
+Agent through Windows SCM, stops the real broker while the signed frozen vendor
 helper is executing, proves the terminal result is durable in SQLite, restarts
-the broker, proves exactly-once result delivery, then restarts the Agent and
-proves the hardware action is not replayed. Commissioning evidence must also
-include the deployment-specific TLS peer, per-Station broker ACL, heartbeat
-Offline/Online transition, and independent safety actuator.
+the broker, proves exactly-once result delivery, and proves the hardware action
+is not replayed after the service restart. Cleanup deletes the temporary
+service, service environment, any profile materialized by Windows, account,
+and service-logon grant. Commissioning evidence must also include the
+deployment-specific TLS peer, per-Station broker ACL, heartbeat Offline/Online
+transition, and independent safety actuator.
+
+Each formal CI invocation allocates an independent 32-hex service scope before
+the test starts. A protected manifest under the runner's private temporary root
+binds only the deterministic service/account names, Windows Temp owned root,
+copied Agent path and hash. Its `accountSid` starts as `null` and is atomically
+replaced with the created standard account SID before any service-logon grant,
+profile creation, or SCM installation. The manifest has no broker URI, token,
+password, or arbitrary cleanup path. Both the wrapper `finally` block and a
+separate `if: always()` workflow step invoke the same bounded cleanup Fact; a
+missing manifest is accepted only after the exact deterministic service,
+account, registry key, EventLog source, profile, and owned root are proven
+absent.
+
+CI also runs an external-abort proof under a third independent scope. After SCM
+reports the Agent Running and the protected marker binds the testhost PID,
+Agent PID, image path and hash, the wrapper snapshots and force-terminates the
+complete `dotnet test` driver tree, including all testhost descendants. It
+proves every snapshotted child is gone while the SCM-hosted Agent remains
+alive, then launches cleanup
+from another `dotnet test` process, and verifies the process, service,
+per-service environment, EventLog source, account, profile, service-logon
+right, ACLs, and owned root are gone. The cleanup Fact then runs again against
+the same retained manifest to prove idempotency; the workflow-level always step
+is the final timeout/crash safety net.
 
 For an already staged local candidate, run the exact production gate from the
 repository root after a real local broker is ready:
@@ -195,8 +229,10 @@ There is no transport-skip mode. The evidence validator requires completed and
 passed vendor execution, authenticated central HTTP Artifact receipts and
 Operator GET/hash checks, all five Artifact kinds, durable offline Outbox
 state, exactly-once completion after reconnect, duplicate rejection before and
-after Agent restart, distinct non-administrative process identities, presence
-Offline/Online transitions, and a clean shutdown. `-RequireSanitizedRoot`
+after Agent restart, the canonical temporary SCM service name, a fully verified
+start/stop/restart/delete lifecycle, the same dedicated non-administrative
+standard service identity before and after restart, presence Offline/Online
+transitions, and a clean shutdown. `-RequireSanitizedRoot`
 additionally rejects reparse points, credentials, private keys, extracted
 runtime payloads, token diagnostics, logs, and any file outside the exact
 top-level evidence, five TRX files, and raw RabbitMQ evidence references.

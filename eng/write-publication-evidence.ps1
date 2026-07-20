@@ -503,23 +503,37 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
     try {
         $stagedAgentDocument = Get-Content -LiteralPath $stagedAgentEvidencePath -Raw |
             ConvertFrom-Json
-        $allowedIdentityStrategies = @(
-            "temporary-standard-account",
-            "inherited-uac-filtered-token"
-        )
         if ($stagedAgentDocument.schemaVersion -ne 1 `
             -or $stagedAgentDocument.product -cne "OpenLineOps" `
             -or $stagedAgentDocument.status -cne "passed" `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.status -cne "passed" `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
-            -or $allowedIdentityStrategies -cnotcontains $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupDenyOnly -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.principalAdministratorMembership -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isAuthenticated -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isSystem -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.principalAdministratorMembership -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isAuthenticated -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isSystem -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+            -or [string]$stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceLifecycleVerified -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.expiredOfflineDuringBrokerOutage -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.freshOnlineAfterReconnect -ne $true) {
-            $InternalFailures.Add("Staged Agent bundle E2E evidence is not a passed production transport closure.") | Out-Null
+            $InternalFailures.Add("Staged Agent bundle E2E evidence is not a passed production transport and Windows SCM service closure.") | Out-Null
         }
     }
     catch {

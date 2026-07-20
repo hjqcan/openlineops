@@ -387,6 +387,9 @@ $requiredFiles = @(
     "eng/verify-dotnet-package-vulnerabilities.tests.ps1",
     "eng/verify-release-staging-security.ps1",
     "eng/verify-staged-agent-bundle-e2e.ps1",
+    "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+    "eng/invoke-run-scoped-agent-service-cleanup.ps1",
+    "eng/verify-agent-service-external-abort-cleanup.ps1",
     "eng/verify-staged-agent-evidence.ps1",
     "eng/verify-production-closure-evidence.ps1",
     "eng/verify-studio-two-agent-production-closure.ps1",
@@ -548,6 +551,12 @@ Test-FileContains "eng/write-publication-evidence.ps1" "verify-runner-staged-age
 Test-FileContains "eng/verify-evidence-validation.tests.ps1" "station package contains zip traversal" "Evidence regression must reject Station package traversal."
 Test-FileContains "eng/verify-evidence-validation.tests.ps1" "production summary missing recovery scenario" "Evidence regression must reject reduced production scenarios."
 Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent once-only proof reduced" "Evidence regression must reject reduced once-only delivery proof."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent Windows service name missing" "Evidence regression must reject missing staged Agent SCM service identity."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent Windows service lifecycle not verified" "Evidence regression must reject an unverified staged Agent SCM lifecycle."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent legacy identity strategy rejected" "Evidence regression must reject staged Agent identity compatibility branches."
+Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent administrator group token presence rejected" "Evidence regression must reject staged Agent administrator-group token presence."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "temporary-standard-service-account" "Staged Agent evidence must require the sole standard service-account identity strategy."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "windowsServiceLifecycleVerified" "Staged Agent evidence must require the Windows SCM lifecycle proof."
 Test-FileContains "eng/verify-publication-evidence.ps1" "invalid-production-integration-evidence" "Publication evidence verification must reject invalid production integration evidence."
 Test-FileContains "eng/verify-publication-evidence.ps1" "RequirePublishable" "Publication evidence verification must cover final publishable assertions."
 Test-FileContains "eng/write-production-integration-evidence.ps1" "trx =" "Production integration evidence must bind the deterministic TRX."
@@ -579,6 +588,14 @@ Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "Agent application la
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childTokenIsAppContainer" "Staged Agent E2E evidence must prove the Python child uses an AppContainer token."
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childAppContainerSid" "Staged Agent E2E evidence must record the Python child package SID."
 Test-FileContains "eng/verify-staged-agent-bundle-e2e.ps1" "childIntegrityRid" "Staged Agent E2E evidence must prove the Python child uses Low Integrity."
+Test-FileContains "eng/verify-staged-agent-rabbitmq-e2e.ps1" "invoke-run-scoped-agent-service-cleanup.ps1" "Staged Agent RabbitMQ wrapper must unconditionally invoke the shared bounded service scavenger."
+Test-FileContains "eng/verify-studio-two-agent-production-closure.ps1" "invoke-run-scoped-agent-service-cleanup.ps1" "Studio two-Agent wrapper must invoke the shared bounded service scavenger before compensation."
+Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "openlineops-agent-service-cleanup" "Agent service scavenger must use the single strict cleanup manifest schema."
+Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "accountSid" "Agent service cleanup manifest must retain the exact created SID for crash-safe rights and profile cleanup."
+Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "Assert-RunScopeAbsent" "Absent cleanup manifests must still prove the exact run scope has no residue."
+Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "SourceExists" "Agent service cleanup preflight must reject a same-name EventLog source under any log."
+Test-FileContains "eng/verify-agent-service-external-abort-cleanup.ps1" "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_GATE" "External-abort cleanup must behaviorally stop the testhost outside its normal finally path."
+Test-FileContains "eng/verify-agent-service-external-abort-cleanup.ps1" "/T /F" "External-abort cleanup must terminate the complete testhost child tree before scavenging the SCM service."
 Test-FileContains "apps/desktop/scripts/production-closure-e2e.mjs" "resetProductionClosureEvidence" "Packaged production closure E2E must remove stale run evidence before creating its single current summary."
 Test-FileContains "eng/stage-release-artifacts.ps1" "ZipArchive\]::new" "Release staging must create ZIP archives with explicit canonical entry names."
 Test-FileContains "eng/stage-release-artifacts.ps1" "non-canonical or out-of-order entry" "Release staging must verify every emitted ZIP entry path and order."

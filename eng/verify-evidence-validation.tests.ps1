@@ -820,6 +820,45 @@ Invoke-ExpectedFailure `
 
 Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.PSObject.Properties.Remove("windowsServiceName")
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent Windows service name missing" `
+    -Pattern "RabbitMQ|service|closure" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.windowsServiceLifecycleVerified = $false
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent Windows service lifecycle not verified" `
+    -Pattern "RabbitMQ|service|closure" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy =
+    "temporary-standard-account"
+$stagedEvidence.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy =
+    "temporary-standard-account"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent legacy identity strategy rejected" `
+    -Pattern "service account|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent = $true
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent administrator group token presence rejected" `
+    -Pattern "service account|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
 $stagedEvidence.rabbitMqTransportCoverage.completionDeliveredOnceAfterReconnect = $false
 Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
 Invoke-ExpectedFailure `

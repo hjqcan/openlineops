@@ -97,6 +97,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly string _safetyExecutable;
         private readonly StudioVendorProcessStartObserver _vendorObserver;
         private readonly StudioRabbitMqConsumerProbe _consumerProbe;
+        private WindowsAgentService? _entryService;
+        private WindowsAgentService? _downstreamService;
         private WindowsAgentProcess? _entryProcess;
         private WindowsAgentProcess? _downstreamProcess;
         private StudioRabbitMqCleanupEvidence _rabbitCleanup = new(false, false, 0);
@@ -272,17 +274,37 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 throw new InvalidDataException(
                     "Studio two-Agent identity suffix must be 32 lowercase hexadecimal characters.");
             }
+            var cleanupContract = ReadRequiredAgentServiceCleanupContract(
+                expectedKind: "studio-two-agent",
+                expectedScope: suffix);
+            if (cleanupContract.Entries.Any(entry => !string.Equals(
+                    entry.ExecutableSha256,
+                    canonicalExpectedAgentSha256,
+                    StringComparison.Ordinal)))
+            {
+                throw new InvalidDataException(
+                    "Studio cleanup manifest executable SHA-256 differs from release attestation.");
+            }
+
+            var ownedAgentBundleRoot = Path.GetDirectoryName(
+                cleanupContract.Entries[0].ExecutablePath)
+                ?? throw new InvalidDataException(
+                    "Studio cleanup manifest Agent bundle path has no parent.");
             var entryIdentity = RestrictedAgentIdentity.CreateRequired(
-                $"entry{suffix}",
-                allowInheritedUacFilteredIdentity: false);
+                AgentServiceScopedSuffix("entry-account", suffix));
             RestrictedAgentIdentity? downstreamIdentity = null;
             var root = Path.Combine(
-                entryIdentity.RequiresSharedTestRoot
-                    ? Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                        "Temp")
-                    : Path.GetTempPath(),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "Temp",
                 $"olo-studio-two-agent-{suffix}");
+            if (!string.Equals(
+                    root,
+                    cleanupContract.Entries[0].OwnedRoot,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "Studio cleanup manifest owned root differs from the harness root.");
+            }
             var distribution = Path.Combine(root, "station-packages");
             var catalogs = Path.Combine(root, "deployment-catalog");
             var trust = Path.Combine(root, "trust");
@@ -291,8 +313,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             try
             {
                 downstreamIdentity = RestrictedAgentIdentity.CreateRequired(
-                    $"down{suffix}",
-                    allowInheritedUacFilteredIdentity: false);
+                    AgentServiceScopedSuffix("downstream-account", suffix));
                 if (string.Equals(
                         entryIdentity.Sid,
                         downstreamIdentity.Sid,
@@ -304,6 +325,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
                 Directory.CreateDirectory(root);
                 ProtectStudioHarnessRoot(root);
+                CopyFrozenAgentBundle(canonicalBundleRoot, ownedAgentBundleRoot);
+                ProtectFrozenBundleRoot(ownedAgentBundleRoot);
+                foreach (var entry in cleanupContract.Entries)
+                {
+                    VerifyCleanupExecutable(entry);
+                }
                 Directory.CreateDirectory(distribution);
                 Directory.CreateDirectory(catalogs);
                 Directory.CreateDirectory(trust);
@@ -367,7 +394,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 GrantStudioAgentAccess(
                     entryIdentity,
                     root,
-                    canonicalBundleRoot,
+                    ownedAgentBundleRoot,
                     distribution,
                     catalogs,
                     trust,
@@ -376,7 +403,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 GrantStudioAgentAccess(
                     downstreamIdentity,
                     root,
-                    canonicalBundleRoot,
+                    ownedAgentBundleRoot,
                     distribution,
                     catalogs,
                     trust,
@@ -415,7 +442,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     downstreamAgent.Token);
                 return new StudioTwoAgentExternalProcessHarness(
                     fixture,
-                    canonicalBundleRoot,
+                    ownedAgentBundleRoot,
                     brokerUri,
                     root,
                     distribution,
@@ -464,37 +491,62 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     }
                 }
 
-                if (Directory.Exists(root))
+                var failuresBeforeIdentityCleanup = cleanupFailures.Count;
+                var allowedIdentitySids = new HashSet<string>(StringComparer.Ordinal)
                 {
-                    try
-                    {
-                        DeleteStudioAgentHarnessRoot(root);
-                    }
-                    catch (Exception exception)
-                    {
-                        cleanupFailures.Add(exception);
-                    }
-                }
-
+                    entryIdentity.Sid
+                };
                 if (downstreamIdentity is not null)
                 {
-                    try
-                    {
-                        downstreamIdentity.Dispose();
-                    }
-                    catch (Exception exception)
-                    {
-                        cleanupFailures.Add(exception);
-                    }
+                    allowedIdentitySids.Add(downstreamIdentity.Sid);
                 }
 
                 try
                 {
-                    entryIdentity.Dispose();
+                    VerifyRunScopedOwnedRootForIdentityCleanup(
+                        root,
+                        allowedIdentitySids);
                 }
                 catch (Exception exception)
                 {
                     cleanupFailures.Add(exception);
+                }
+
+                if (cleanupFailures.Count == failuresBeforeIdentityCleanup)
+                {
+                    if (downstreamIdentity is not null)
+                    {
+                        try
+                        {
+                            downstreamIdentity.Dispose();
+                        }
+                        catch (Exception exception)
+                        {
+                            cleanupFailures.Add(exception);
+                        }
+                    }
+
+                    try
+                    {
+                        entryIdentity.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailures.Add(exception);
+                    }
+                }
+
+                if (cleanupFailures.Count == failuresBeforeIdentityCleanup
+                    && Directory.Exists(root))
+                {
+                    try
+                    {
+                        DeleteRunScopedOwnedRoot("studio-two-agent", root);
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailures.Add(exception);
+                    }
                 }
 
                 if (cleanupFailures.Count == 1)
@@ -531,18 +583,24 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             try
             {
                 VerifyAgentExecutableHash();
-                _entryProcess = WindowsAgentProcess.Start(
+                _entryService = WindowsAgentService.Install(
                     AgentExecutablePath,
                     _agentBundleRoot,
                     entryEnvironment,
-                    _entryIdentity);
+                    _entryIdentity,
+                    AgentServiceScopedSuffix("entry-service", EntryAgent.AgentId[^32..]));
+                _entryProcess = _entryService.Start();
                 VerifyStartedAgentProcess(_entryProcess, "entry");
                 VerifyAgentExecutableHash();
-                _downstreamProcess = WindowsAgentProcess.Start(
+                _downstreamService = WindowsAgentService.Install(
                     AgentExecutablePath,
                     _agentBundleRoot,
                     downstreamEnvironment,
-                    _downstreamIdentity);
+                    _downstreamIdentity,
+                    AgentServiceScopedSuffix(
+                        "downstream-service",
+                        DownstreamAgent.AgentId[^32..]));
+                _downstreamProcess = _downstreamService.Start();
                 VerifyStartedAgentProcess(_downstreamProcess, "downstream");
                 VerifyAgentExecutableHash();
                 await Task.WhenAll(
@@ -573,6 +631,24 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         cleanupFailures))
                 {
                     _downstreamProcess = null;
+                }
+
+                if (_entryService is not null
+                    && TryDisposeAgentService(
+                        _entryService,
+                        "entry",
+                        cleanupFailures))
+                {
+                    _entryService = null;
+                }
+
+                if (_downstreamService is not null
+                    && TryDisposeAgentService(
+                        _downstreamService,
+                        "downstream",
+                        cleanupFailures))
+                {
+                    _downstreamService = null;
                 }
 
                 if (cleanupFailures.Count == 1)
@@ -686,6 +762,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 _downstreamProcess = null;
             }
 
+            if (_entryService is not null
+                && TryDisposeAgentService(_entryService, "entry", failures))
+            {
+                _entryService = null;
+            }
+
+            if (_downstreamService is not null
+                && TryDisposeAgentService(_downstreamService, "downstream", failures))
+            {
+                _downstreamService = null;
+            }
+
             try
             {
                 await _vendorObserver.DisposeAsync();
@@ -723,39 +811,66 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 }
             }
 
-            var processResidue = _entryProcess is not null || _downstreamProcess is not null;
-            if (processResidue)
+            var nativeResidue = _entryProcess is not null
+                                || _downstreamProcess is not null
+                                || _entryService is not null
+                                || _downstreamService is not null
+                                || _entryIdentity.HasUnprovenServiceInstallation
+                                || _downstreamIdentity.HasUnprovenServiceInstallation;
+            if (nativeResidue)
             {
                 failures.Add(new InvalidOperationException(
-                    "Studio Agent process residue prevents safe recursive root and account cleanup."));
+                    "Studio Agent process or SCM service residue prevents safe recursive root, SeServiceLogonRight, and account cleanup."));
             }
             else
             {
+                var failuresBeforeIdentityCleanup = failures.Count;
                 try
                 {
-                    DeleteStudioAgentHarnessRoot(RootPath);
+                    VerifyRunScopedOwnedRootForIdentityCleanup(
+                        RootPath,
+                        new HashSet<string>(StringComparer.Ordinal)
+                        {
+                            _entryIdentity.Sid,
+                            _downstreamIdentity.Sid
+                        });
                 }
                 catch (Exception exception)
                 {
                     failures.Add(exception);
                 }
 
-                try
+                if (failures.Count == failuresBeforeIdentityCleanup)
                 {
-                    _downstreamIdentity.Dispose();
-                }
-                catch (Exception exception)
-                {
-                    failures.Add(exception);
+                    try
+                    {
+                        _downstreamIdentity.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
+
+                    try
+                    {
+                        _entryIdentity.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
                 }
 
-                try
+                if (failures.Count == failuresBeforeIdentityCleanup)
                 {
-                    _entryIdentity.Dispose();
-                }
-                catch (Exception exception)
-                {
-                    failures.Add(exception);
+                    try
+                    {
+                        DeleteRunScopedOwnedRoot("studio-two-agent", RootPath);
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
                 }
             }
 
@@ -843,6 +958,26 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
 
             return true;
+        }
+
+        private static bool TryDisposeAgentService(
+            WindowsAgentService service,
+            string role,
+            List<Exception> failures)
+        {
+            try
+            {
+                service.Dispose();
+            }
+            catch (Exception exception)
+            {
+                failures.Add(new InvalidOperationException(
+                    $"The {role} Studio Agent SCM service could not be deleted with proof.",
+                    exception));
+                return service.DeletionProven;
+            }
+
+            return service.DeletionProven;
         }
 
         private void VerifyAgentExecutableHash()
@@ -1024,31 +1159,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         private static void ProtectStudioHarnessRoot(string root)
-        {
-            var currentSid = WindowsIdentity.GetCurrent().User
-                             ?? throw new InvalidOperationException(
-                                 "The Studio E2E controller has no Windows SID.");
-            var security = new DirectorySecurity();
-            security.SetOwner(currentSid);
-            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            var inherited = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-            foreach (var sid in new[]
-                     {
-                         currentSid,
-                         new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                         new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null)
-                     })
-            {
-                security.AddAccessRule(new FileSystemAccessRule(
-                    sid,
-                    FileSystemRights.FullControl,
-                    inherited,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-            }
-
-            FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(root), security);
-        }
+            => ProtectRunScopedRoot(root);
 
         private static string RequireStudioSha256(string value, string name) =>
             value.Length == 64

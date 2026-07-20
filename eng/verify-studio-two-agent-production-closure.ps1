@@ -75,9 +75,72 @@ function Assert-NoReparseTree {
     if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Studio two-Agent gate refuses a reparse-point root."
     }
-    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Force -Recurse)) {
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Studio two-Agent gate refuses reparse points in an owned tree."
+    if ($rootItem -isnot [System.IO.DirectoryInfo]) { return }
+    $pending = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $pending.Push($rootItem)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Studio two-Agent gate refuses reparse points in an owned tree."
+            }
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $pending.Push($item)
+            }
+        }
+    }
+}
+
+function Set-PrivateDirectoryAcl {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($null -eq $currentSid) {
+        throw "Studio two-Agent private directory owner has no Windows SID."
+    }
+    $sids = @(
+        [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+        [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+        $currentSid) | Sort-Object -Property Value -Unique
+    $security = [System.Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($currentSid)
+    foreach ($sid in $sids) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+        [void]$security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $security
+
+    $readBack = Get-Acl -LiteralPath $Path
+    $ownerSid = ([System.Security.Principal.NTAccount]$readBack.Owner).Translate(
+        [System.Security.Principal.SecurityIdentifier])
+    $allowed = @($sids | ForEach-Object { $_.Value })
+    $rules = @($readBack.GetAccessRules(
+            $true,
+            $true,
+            [System.Security.Principal.SecurityIdentifier]))
+    if (-not $readBack.AreAccessRulesProtected `
+        -or $ownerSid.Value -cne $currentSid.Value `
+        -or @($rules | Where-Object {
+                $_.IsInherited `
+                    -or $_.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow `
+                    -or $allowed -cnotcontains $_.IdentityReference.Value
+            }).Count -ne 0) {
+        throw "Studio two-Agent private directory ACL is not protected or contains an unexpected principal."
+    }
+    foreach ($sid in $allowed) {
+        if (@($rules | Where-Object {
+                    $_.IdentityReference.Value -ceq $sid `
+                        -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) `
+                            -eq [System.Security.AccessControl.FileSystemRights]::FullControl
+                }).Count -eq 0) {
+            throw "Studio two-Agent private directory ACL lacks FullControl for '$sid'."
         }
     }
 }
@@ -268,77 +331,10 @@ function Test-IsAdministrator {
     }
 }
 
-function Test-LocalAccountExists {
-    param([Parameter(Mandatory = $true)][string] $Name)
-    return $null -ne (Get-LocalUser -Name $Name -ErrorAction SilentlyContinue)
-}
-
-function Remove-ExactLocalAccount {
-    param([Parameter(Mandatory = $true)][string] $Name)
-
-    if (Test-LocalAccountExists $Name) {
-        Remove-LocalUser -Name $Name -ErrorAction Stop
-    }
-    if (Test-LocalAccountExists $Name) {
-        throw "Studio two-Agent temporary account cleanup was not complete."
-    }
-}
-
-function Test-AdministratorMemberSid {
-    param([Parameter(Mandatory = $true)][string] $Sid)
-
-    $members = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop)
-    return @($members | Where-Object { $_.SID.Value -ceq $Sid }).Count -gt 0
-}
-
-function Invoke-TemporaryAccountPreflight {
-    param([Parameter(Mandatory = $true)][string[]] $Names)
-
-    $created = [System.Collections.Generic.List[string]]::new()
-    try {
-        foreach ($name in $Names) {
-            if (Test-LocalAccountExists $name) {
-                throw "Studio two-Agent preflight refuses an existing temporary account name."
-            }
-            $password = ConvertTo-SecureString `
-                "Aa1!$([System.Guid]::NewGuid().ToString('N'))" `
-                -AsPlainText `
-                -Force
-            New-LocalUser `
-                -Name $name `
-                -Password $password `
-                -AccountNeverExpires `
-                -PasswordNeverExpires `
-                -Description 'Temporary OpenLineOps formal E2E preflight identity' | Out-Null
-            $created.Add($name)
-            $user = Get-LocalUser -Name $name -ErrorAction Stop
-            if (Test-AdministratorMemberSid $user.SID.Value) {
-                throw "Studio two-Agent preflight account unexpectedly belongs to Administrators."
-            }
-        }
-        $sids = @($Names | ForEach-Object { (Get-LocalUser -Name $_ -ErrorAction Stop).SID.Value })
-        if ($sids.Count -ne 2 -or $sids[0] -ceq $sids[1]) {
-            throw "Studio two-Agent preflight did not create two distinct account SIDs."
-        }
-    }
-    finally {
-        $failures = [System.Collections.Generic.List[System.Exception]]::new()
-        foreach ($name in @($created)) {
-            try { Remove-ExactLocalAccount $name } catch { $failures.Add($_.Exception) }
-        }
-        if ($failures.Count -gt 0) {
-            throw [System.AggregateException]::new(
-                "Studio two-Agent account preflight cleanup was incomplete.",
-                $failures.ToArray())
-        }
-    }
-}
-
 function Invoke-StudioCompensation {
     param(
         [Parameter(Mandatory = $true)][string] $PrivateRoot,
-        [Parameter(Mandatory = $true)][string] $HandoffPath,
-        [Parameter(Mandatory = $true)][string] $Suffix
+        [Parameter(Mandatory = $true)][string] $HandoffPath
     )
 
     if (-not (Test-Path -LiteralPath $HandoffPath -PathType Leaf)) { return }
@@ -421,9 +417,16 @@ foreach ($root in @($resolvedStagedWorkRoot, $resolvedProductionRoot, $resolvedE
 }
 Assert-NoReparseTree $resolvedStagedWorkRoot
 
-$suffix = [System.Guid]::NewGuid().ToString('N')
-$entryAccount = "oloe2eentry$($suffix.Substring(0, 5))"
-$downstreamAccount = "oloe2edown$($suffix.Substring(0, 6))"
+$requestedSuffix = $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX
+$suffix = if ([string]::IsNullOrWhiteSpace($requestedSuffix)) {
+    [System.Guid]::NewGuid().ToString('N')
+}
+else {
+    $requestedSuffix
+}
+if ($suffix -cnotmatch '^[0-9a-f]{32}$') {
+    throw "OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX must contain exactly 32 lowercase hexadecimal characters."
+}
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $privateGateBase = Join-Path $tempRoot 'openlineops-studio-two-agent-gates'
 $privateRoot = Join-Path $privateGateBase $suffix
@@ -433,6 +436,16 @@ $handoffPath = Join-Path $handoffScope 'production-closure-handoff.json'
 $privateExecutionBase = Join-Path $tempRoot 'openlineops-production-closure-e2e'
 $harnessBase = Join-Path $env:SystemRoot 'Temp'
 $harnessRoot = Join-Path $harnessBase "olo-studio-two-agent-$suffix"
+$requestedCleanupManifestPath = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH
+$cleanupManifestPath = if ([string]::IsNullOrWhiteSpace($requestedCleanupManifestPath)) {
+    [System.IO.Path]::GetFullPath((Join-Path `
+            ([System.IO.Path]::GetTempPath()) `
+            "openlineops-agent-service-cleanup/studio-two-agent-$suffix.json"))
+}
+else {
+    [System.IO.Path]::GetFullPath($requestedCleanupManifestPath)
+}
+$serviceCleanupScript = Join-Path $PSScriptRoot 'invoke-run-scoped-agent-service-cleanup.ps1'
 foreach ($base in @($privateGateBase, $handoffBase, $privateExecutionBase, $harnessBase)) {
     Assert-NoReparseAncestors $base
 }
@@ -443,6 +456,8 @@ if (Test-Path -LiteralPath $privateRoot `
 }
 New-Item -ItemType Directory -Path $privateRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $handoffScope -Force | Out-Null
+Set-PrivateDirectoryAcl $privateRoot
+Set-PrivateDirectoryAcl $handoffScope
 $existingPrivateRuns = @{}
 if (Test-Path -LiteralPath $privateExecutionBase -PathType Container) {
     foreach ($child in @(Get-ChildItem -LiteralPath $privateExecutionBase -Directory -Force)) {
@@ -455,6 +470,8 @@ $gateVariables = @(
     'OPENLINEOPS_STUDIO_TWO_AGENT_FORMAL_GATE',
     'OPENLINEOPS_STUDIO_TWO_AGENT_CLEANUP_GATE',
     'OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX',
+    'OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE',
+    'OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH',
     'OPENLINEOPS_STUDIO_TWO_AGENT_EVIDENCE_PATH',
     'OPENLINEOPS_STUDIO_TWO_AGENT_RELEASE_MANIFEST_PATH',
     'OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT',
@@ -474,7 +491,17 @@ $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
 $succeeded = $false
 $runtimeMayHaveMutated = $false
 try {
-    Invoke-TemporaryAccountPreflight @($entryAccount, $downstreamAccount)
+    & $serviceCleanupScript `
+        -Kind studio-two-agent `
+        -Scope $suffix `
+        -AgentBundleRoot $stagedAgentRoot `
+        -ManifestPath $cleanupManifestPath `
+        -Configuration $Configuration `
+        -DotNetPath $DotNetPath `
+        -PrepareManifest `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore `
+        -CleanupTimeoutSeconds $CleanupTimeoutSeconds
     Reset-RepoDirectory $resolvedEvidenceRoot
     $env:OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH = $handoffPath
     $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
@@ -499,6 +526,8 @@ try {
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_FORMAL_GATE = 'true'
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_CLEANUP_GATE = $null
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX = $suffix
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $null
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $cleanupManifestPath
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_EVIDENCE_PATH = $evidencePath
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_RELEASE_MANIFEST_PATH = $resolvedReleaseManifest
     $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT = $stagedAgentRoot
@@ -542,18 +571,32 @@ catch {
     $primaryFailure = $_.Exception
 }
 finally {
-    if (-not $succeeded -and $runtimeMayHaveMutated) {
+    $serviceCleanupSucceeded = $false
+    try {
+        & $serviceCleanupScript `
+            -Kind studio-two-agent `
+            -Scope $suffix `
+            -AgentBundleRoot $stagedAgentRoot `
+            -ManifestPath $cleanupManifestPath `
+            -Configuration $Configuration `
+            -DotNetPath $DotNetPath `
+            -NoBuild:$NoBuild `
+            -NoRestore:$NoRestore `
+            -CleanupTimeoutSeconds $CleanupTimeoutSeconds
+        $serviceCleanupSucceeded = $true
+    }
+    catch { $cleanupFailures.Add($_.Exception) }
+
+    if (-not $succeeded -and $runtimeMayHaveMutated -and $serviceCleanupSucceeded) {
         try {
             Invoke-StudioCompensation `
                 -PrivateRoot $privateRoot `
-                -HandoffPath $handoffPath `
-                -Suffix $suffix
+                -HandoffPath $handoffPath
         }
         catch { $cleanupFailures.Add($_.Exception) }
     }
 
     foreach ($target in @(
-            [pscustomobject]@{ Base = $harnessBase; Path = $harnessRoot },
             [pscustomobject]@{ Base = $handoffBase; Path = $handoffScope })) {
         try { Remove-OwnedDirectChild $target.Base $target.Path } catch { $cleanupFailures.Add($_.Exception) }
     }
@@ -563,9 +606,6 @@ finally {
                 try { Remove-OwnedDirectChild $privateExecutionBase $child.FullName } catch { $cleanupFailures.Add($_.Exception) }
             }
         }
-    }
-    foreach ($account in @($entryAccount, $downstreamAccount)) {
-        try { Remove-ExactLocalAccount $account } catch { $cleanupFailures.Add($_.Exception) }
     }
     foreach ($name in $gateVariables) {
         try { [System.Environment]::SetEnvironmentVariable($name, $previous[$name]) } catch { $cleanupFailures.Add($_.Exception) }

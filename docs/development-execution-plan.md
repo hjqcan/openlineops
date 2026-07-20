@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-17
+Last updated: 2026-07-20
 
 ## Product Contract
 
@@ -214,8 +214,14 @@ they fail when their real PostgreSQL/RabbitMQ inputs are absent or unreachable.
 Their evidence must pass
 `eng/verify-staged-agent-evidence.ps1`, including authenticated central Artifact
 upload and Operator GET/hash verification, offline durable completion,
-once-only redelivery, distinct non-administrative Agent process identities, and
-the raw evidence hash; `eng/verify-studio-two-agent-production-evidence.ps1`
+once-only redelivery, an exact temporary standard service-account identity, a
+canonical unique Windows service name, SCM start/stop/restart/delete lifecycle,
+the raw evidence hash, and an external `dotnet test` driver-tree abort cleanup
+proof, including testhost descendants, under a separate run scope. Strict
+private cleanup manifests bind deterministic service,
+account, recorded SID, copied Agent hash, and Windows Temp root; wrapper
+`finally` blocks and independent workflow `always()` steps invoke the same
+bounded, idempotent scavenger. `eng/verify-studio-two-agent-production-evidence.ps1`
 and `eng/verify-runner-staged-agent-evidence.ps1` bind the two-Agent and Runner
 public roots. The production-closure scanner accepts only its exact
 public manifest: summary, screenshots, verified Trace saves, frozen manifest,

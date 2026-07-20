@@ -220,8 +220,24 @@ Test-ContentContains `
     -Message "Workflow must start and SQL-probe the GitHub Windows PostgreSQL service and export the loopback connection string."
 Test-ContentContains `
     -Content $workflowContent `
-    -Pattern "(?ms)name:\s*Stage release artifacts.*?name:\s*Setup PostgreSQL for Windows production gates.*?name:\s*Setup RabbitMQ for staged Agent E2E.*?name:\s*Run staged Agent bundle E2E\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*25\s*\r?\n\s*run:\s*\|.*?verify-staged-agent-bundle-e2e\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore" `
+    -Pattern "(?ms)name:\s*Stage release artifacts.*?name:\s*Setup PostgreSQL for Windows production gates.*?name:\s*Setup RabbitMQ for staged Agent E2E.*?name:\s*Prepare run-scoped Agent service cleanup contracts.*?name:\s*Run staged Agent bundle E2E\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*25\s*\r?\n\s*env:.*?OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE:\s*\$\{\{\s*env\.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?verify-staged-agent-bundle-e2e\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore" `
     -Message "Workflow must execute the staged Agent gate after release staging and real PostgreSQL/RabbitMQ readiness."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)name:\s*Prepare run-scoped Agent service cleanup contracts.*?\[System\.Guid\]::NewGuid\(\)\.ToString\("N"\).*?OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=.*?OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=.*?OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=.*?OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=' `
+    -Message "Workflow must allocate private 32-hex RabbitMQ, external-abort, and Studio cleanup scopes before the formal gates."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Cleanup staged Agent Windows service scope\s*\r?\n\s*if:\s*\$\{\{\s*always\(\)\s*&&\s*env\.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE\s*!=\s*\x27\x27\s*\}\}\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?invoke-run-scoped-agent-service-cleanup\.ps1.*?-Kind rabbitmq.*?OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE.*?OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH' `
+    -Message "Workflow must always run the bounded external RabbitMQ Agent service scavenger with the exact prepared scope and manifest."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Verify external-abort Agent service scavenging\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*10\s*\r?\n\s*env:.*?OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE:.*?OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:.*?OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH.*?OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH:.*?OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH.*?run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?verify-agent-service-external-abort-cleanup\.ps1.*?-NoBuild.*?-NoRestore' `
+    -Message "Workflow must kill the external-abort testhost and behaviorally prove scavenger cleanup from another process."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Cleanup external-abort Agent Windows service scope\s*\r?\n\s*if:\s*\$\{\{\s*always\(\)\s*&&\s*env\.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE\s*!=\s*\x27\x27\s*\}\}\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?invoke-run-scoped-agent-service-cleanup\.ps1.*?-Kind rabbitmq.*?OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE.*?OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH' `
+    -Message "Workflow must always rerun the exact external-abort Agent service scavenger scope."
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern '(?ms)name:\s*Setup RabbitMQ for staged Agent E2E.*?choco install erlang --version=\$erlangVersion[^\r\n]*--allow-downgrade.*?choco install rabbitmq --version=\$rabbitMqVersion[^\r\n]*--allow-downgrade' `
@@ -259,6 +275,15 @@ Test-StepCannotContinueOnError `
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Run staged Agent bundle E2E"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Cleanup staged Agent Windows service scope"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Verify external-abort Agent service scavenging"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Cleanup external-abort Agent Windows service scope"
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern "verify-windows-signing-readiness\.ps1" `
@@ -333,8 +358,12 @@ Test-ContentContains `
     -Message "Workflow must verify that operator commands are enabled only in domain-valid Production Run states."
 Test-ContentContains `
     -Content $workflowContent `
-    -Pattern '(?ms)name:\s*Run packaged Studio two-Agent production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*35\s*\r?\n\s*run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-studio-two-agent-production-closure\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore' `
+    -Pattern '(?ms)name:\s*Run packaged Studio two-Agent production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*35\s*\r?\n\s*env:.*?OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-studio-two-agent-production-closure\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore' `
     -Message "Workflow must run the bounded packaged-to-two-staged-Agent production closure against real PostgreSQL and RabbitMQ."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Cleanup Studio two-Agent Windows service scope\s*\r?\n\s*if:\s*\$\{\{\s*always\(\)\s*&&\s*env\.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE\s*!=\s*\x27\x27\s*\}\}\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?invoke-run-scoped-agent-service-cleanup\.ps1.*?-Kind studio-two-agent.*?OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE.*?OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH' `
+    -Message "Workflow must always run the bounded external Studio Agent service scavenger with the exact prepared scope and manifest."
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern "(?ms)name:\s*Run packaged Studio two-Agent production closure.*?name:\s*Verify sanitized production closure evidence\s*\r?\n\s*id:\s*production_closure_evidence\s*\r?\n\s*if:.*?verify-production-closure-evidence\.ps1[^\r\n]*-EvidenceRoot\s+artifacts/production-closure-e2e[^\r\n]*-RequirePassed.*?name:\s*Verify sanitized Studio two-Agent evidence\s*\r?\n\s*id:\s*studio_two_agent_evidence\s*\r?\n\s*if:.*?verify-studio-two-agent-production-evidence\.ps1" `
@@ -345,6 +374,9 @@ Test-StepCannotContinueOnError `
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Run packaged Studio two-Agent production closure"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Cleanup Studio two-Agent Windows service scope"
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Smoke test staged packaged desktop"

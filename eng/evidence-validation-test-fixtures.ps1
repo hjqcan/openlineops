@@ -913,9 +913,13 @@ function Write-StagedAgentEvidenceFixture {
         nonAdministrative = $true
         isPrimaryToken = $true
         isElevated = $false
+        administratorGroupPresent = $false
         administratorGroupEnabled = $false
+        administratorGroupDenyOnly = $false
         principalAdministratorMembership = $false
-        identityStrategy = "temporary-standard-account"
+        isAuthenticated = $true
+        isSystem = $false
+        identityStrategy = "temporary-standard-service-account"
         userSid = "S-1-5-21-1000"
     }
     $artifactDefinitions = [ordered]@{
@@ -969,6 +973,8 @@ function Write-StagedAgentEvidenceFixture {
         packageContentSha256 = "c" * 64
         AgentId = "agent.fixture"
         StationId = "station.fixture"
+        windowsServiceName = "OpenLineOpsAgentE2E-0123456789abcdef0123456789abcdef"
+        windowsServiceLifecycleVerified = $true
         vendorArtifacts = $artifacts
         agentHostIdentity = $identity
         restartedAgentHostIdentity = $identity
@@ -991,6 +997,8 @@ function Write-StagedAgentEvidenceFixture {
         restartedAgentHostIdentity = $identity
         agentId = $raw.AgentId
         stationId = $raw.StationId
+        windowsServiceName = $raw.windowsServiceName
+        windowsServiceLifecycleVerified = $raw.windowsServiceLifecycleVerified
         packageContentSha256 = $raw.packageContentSha256
         firstAgentPid = $raw.firstAgentPid
         restartedAgentPid = $raw.restartedAgentPid

@@ -402,9 +402,31 @@ jobs:
           "OPENLINEOPS_RABBITMQ_URI=$rabbitMqUri" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "RabbitMQ $rabbitMqVersion is ready for the staged Agent gate on 127.0.0.1:5672."
 
+      - name: Prepare run-scoped Agent service cleanup contracts
+        shell: powershell
+        run: |
+          $cleanupRoot = Join-Path $env:RUNNER_TEMP "openlineops-agent-service-cleanup"
+          $rabbitScope = [System.Guid]::NewGuid().ToString("N")
+          $externalAbortScope = [System.Guid]::NewGuid().ToString("N")
+          $studioScope = [System.Guid]::NewGuid().ToString("N")
+          $rabbitManifest = Join-Path $cleanupRoot "rabbitmq-$rabbitScope.json"
+          $externalAbortManifest = Join-Path $cleanupRoot "rabbitmq-$externalAbortScope.json"
+          $externalAbortReady = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.json"
+          $studioManifest = Join-Path $cleanupRoot "studio-two-agent-$studioScope.json"
+          "OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=$rabbitScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=$rabbitManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH=$externalAbortManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=$externalAbortReady" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=$studioScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=$studioManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Run staged Agent bundle E2E
         shell: powershell
         timeout-minutes: 25
+        env:
+          OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
             throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
@@ -412,9 +434,41 @@ jobs:
 
           ./eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
 
+      - name: Cleanup staged Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind rabbitmq -Scope $env:OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify external-abort Agent service scavenging
+        shell: powershell
+        timeout-minutes: 10
+        env:
+          OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH }}
+          OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH }}
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          $samplePluginRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\sample-plugin'
+          $apiRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\api'
+          ./eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot $agentRoot -SamplePluginRoot $samplePluginRoot -ApiBundleRoot $apiRoot -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup external-abort Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind rabbitmq -Scope $env:OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
       - name: Run packaged Studio two-Agent production closure
         shell: powershell
         timeout-minutes: 35
+        env:
+          OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX: ${{ env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
             throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
@@ -424,6 +478,14 @@ jobs:
           }
 
           ./eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup Studio two-Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind studio-two-agent -Scope $env:OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
 
       - name: Verify sanitized production closure evidence
         id: production_closure_evidence

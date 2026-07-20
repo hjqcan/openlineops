@@ -860,6 +860,7 @@ $rabbitMqEvidencePath = Join-Path $rabbitMqWorkRoot "evidence.json"
 if (-not (Test-Path -LiteralPath $rabbitMqEvidencePath -PathType Leaf)) {
     throw "The staged Agent RabbitMQ child gate did not produce required evidence."
 }
+Assert-AgentBundleManifest -BundleRoot $agentBundleRoot | Out-Null
 
 $privateRabbitMqEvidence = Get-Content `
     -LiteralPath $rabbitMqEvidencePath `
@@ -868,8 +869,12 @@ $publicAgentIdentity = [ordered]@{
     nonAdministrative = [bool]$privateRabbitMqEvidence.agentHostIdentity.nonAdministrative
     isPrimaryToken = [bool]$privateRabbitMqEvidence.agentHostIdentity.isPrimaryToken
     isElevated = [bool]$privateRabbitMqEvidence.agentHostIdentity.isElevated
+    administratorGroupPresent = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupPresent
     administratorGroupEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupEnabled
+    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupDenyOnly
     principalAdministratorMembership = [bool]$privateRabbitMqEvidence.agentHostIdentity.principalAdministratorMembership
+    isAuthenticated = [bool]$privateRabbitMqEvidence.agentHostIdentity.isAuthenticated
+    isSystem = [bool]$privateRabbitMqEvidence.agentHostIdentity.isSystem
     identityStrategy = [string]$privateRabbitMqEvidence.agentHostIdentity.identityStrategy
     userSid = [string]$privateRabbitMqEvidence.agentHostIdentity.userSid
 }
@@ -877,8 +882,12 @@ $publicRestartedAgentIdentity = [ordered]@{
     nonAdministrative = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.nonAdministrative
     isPrimaryToken = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isPrimaryToken
     isElevated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isElevated
+    administratorGroupPresent = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupPresent
     administratorGroupEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupEnabled
+    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupDenyOnly
     principalAdministratorMembership = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.principalAdministratorMembership
+    isAuthenticated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isAuthenticated
+    isSystem = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isSystem
     identityStrategy = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.identityStrategy
     userSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.userSid
 }
@@ -934,6 +943,8 @@ $rabbitMqEvidence = [ordered]@{
     eventKinds = @($privateRabbitMqEvidence.eventKinds)
     progressPhases = @($privateRabbitMqEvidence.progressPhases)
     outageControlMode = [string]$privateRabbitMqEvidence.outageControlMode
+    windowsServiceName = [string]$privateRabbitMqEvidence.windowsServiceName
+    windowsServiceLifecycleVerified = [bool]$privateRabbitMqEvidence.windowsServiceLifecycleVerified
     presence = $publicPresence
     cleanShutdownVerified = [bool]$privateRabbitMqEvidence.cleanShutdownVerified
 }
@@ -969,6 +980,8 @@ $evidence["rabbitMqTransportCoverage"] = [ordered]@{
     duplicateRedeliveryRejected = $rabbitMqEvidence.duplicateRedeliveryRejected
     duplicateAfterRestartRejected = $rabbitMqEvidence.duplicateAfterRestartRejected
     outageControlMode = $rabbitMqEvidence.outageControlMode
+    windowsServiceName = $rabbitMqEvidence.windowsServiceName
+    windowsServiceLifecycleVerified = $rabbitMqEvidence.windowsServiceLifecycleVerified
     presence = $rabbitMqEvidence.presence
     cleanShutdownVerified = $rabbitMqEvidence.cleanShutdownVerified
     evidence = "rabbitmq-process/evidence.json"
@@ -990,4 +1003,5 @@ Write-Host "Staged Agent bundle E2E passed."
 Write-Host " - Agent archive: $($agentArtifact.Entry.relativePath)"
 Write-Host " - Four entry-point role probes passed."
 Write-Host " - Signed plugin and Python .olopkg process chains used only extracted release executables."
+Write-Host " - The extracted Agent passed its RabbitMQ lifecycle through a temporary Windows SCM service."
 Write-Host " - Evidence: $evidencePath"

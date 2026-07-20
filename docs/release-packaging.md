@@ -198,8 +198,28 @@ termination, profile deletion, and stale-profile recovery. No custom launcher,
 argument template, `runas`, password prompt, or test-only `ExternalProcess`
 exception is part of this production proof. The same staged gate executes the
 full `OpenLineOps.Agent.exe` message-delivery run against the supplied real
-RabbitMQ broker. The separate production-integration CI job proves the durable
-PostgreSQL Coordinator and RabbitMQ composition across Coordinator restart.
+RabbitMQ broker from a temporary, non-administrative Windows service account.
+It installs the extracted executable as a uniquely named demand-start service,
+keeps broker configuration in the protected per-service environment instead of
+the frozen bundle or `ImagePath`, and proves SCM start, stop, restart, and
+deletion. Public evidence is rejected unless it binds the canonical service
+name and verified lifecycle to the raw RabbitMQ evidence. The separate
+production-integration CI job proves the durable PostgreSQL Coordinator and
+RabbitMQ composition across Coordinator restart.
+
+The RabbitMQ and Studio wrappers create separate strict cleanup manifests in a
+private runner-temporary directory before any service mutation. Every manifest
+authorizes only deterministic 32-hex run-scoped names, the copied Agent image
+and SHA-256, and the exact Windows Temp owned root; the created account SID is
+atomically recorded before SCM installation. Wrapper `finally` blocks and
+independent `if: always()` workflow steps run the same bounded scavenger. The
+external-abort gate additionally kills the full `dotnet test` driver tree,
+including all testhost descendants, after
+the Agent service reaches Running, proves every snapshotted child is gone and
+the service survives that host failure,
+then removes and independently verifies every service, registry, account,
+profile, logon-right, process, and filesystem residue before an idempotent
+second cleanup.
 
 The formal Windows production closure is one ordered chain. It uses the same
 staged release, PostgreSQL service, and RabbitMQ broker for the packaged Studio
@@ -236,7 +256,8 @@ desktop production build, using `-SkipDesktopBuild` so the already-built
 Electron renderer and main-process outputs are packaged and validated. After
 the manifest/checksum verification and staged candidate inspection, CI starts
 the Windows PostgreSQL and RabbitMQ services, then runs the extracted Agent
-bundle E2E, packaged-to-two-Agent closure, staged Runner closure, release
+bundle E2E through its temporary SCM service, packaged-to-two-Agent closure,
+external-abort scavenger proof, staged Runner closure, release
 candidate inspection behavior verification, and the publication
 readiness gate with `-AllowPendingExternal` so non-external release
 requirements are continuously checked while final external release inputs are

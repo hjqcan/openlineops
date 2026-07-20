@@ -154,6 +154,26 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
 }
 New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
 $evidencePath = Join-Path $resolvedWorkRoot "evidence.json"
+$requestedServiceScope = $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE
+$serviceScope = if ([string]::IsNullOrWhiteSpace($requestedServiceScope)) {
+    [System.Guid]::NewGuid().ToString("N")
+}
+else {
+    $requestedServiceScope
+}
+if ($serviceScope -cnotmatch '^[0-9a-f]{32}$') {
+    throw "OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE must contain exactly 32 lowercase hexadecimal characters."
+}
+$requestedCleanupManifestPath = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH
+$cleanupManifestPath = if ([string]::IsNullOrWhiteSpace($requestedCleanupManifestPath)) {
+    [System.IO.Path]::GetFullPath((Join-Path `
+            ([System.IO.Path]::GetTempPath()) `
+            "openlineops-agent-service-cleanup/rabbitmq-$serviceScope.json"))
+}
+else {
+    [System.IO.Path]::GetFullPath($requestedCleanupManifestPath)
+}
+$cleanupScript = Join-Path $PSScriptRoot "invoke-run-scoped-agent-service-cleanup.ps1"
 
 $testProject = Join-Path $RepoRoot "tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj"
 $testFilter = "FullyQualifiedName=OpenLineOps.Agent.Tests.StagedAgentRabbitMqProcessE2ETests.StagedAgentBuffersSignedVendorResultDuringBrokerOutageAndDeduplicatesAcrossRestart"
@@ -180,14 +200,31 @@ $previousApiBundleRoot = $env:OPENLINEOPS_STAGED_API_BUNDLE_ROOT
 $previousBrokerUri = $env:OPENLINEOPS_RABBITMQ_URI
 $previousEvidencePath = $env:OPENLINEOPS_STAGED_AGENT_RABBITMQ_EVIDENCE_PATH
 $previousOutageControl = $env:OPENLINEOPS_RABBITMQ_OUTAGE_CONTROL
+$previousServiceScope = $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE
+$previousCleanupManifestPath = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH
+$previousCleanupGate = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE
 $previousDotnetCliLanguage = $env:DOTNET_CLI_UI_LANGUAGE
 $previousVsLanguage = $env:VSLANG
+$primaryFailure = $null
+$cleanupFailure = $null
 try {
+    & $cleanupScript `
+        -Kind rabbitmq `
+        -Scope $serviceScope `
+        -AgentBundleRoot $resolvedAgentBundleRoot `
+        -ManifestPath $cleanupManifestPath `
+        -Configuration $Configuration `
+        -PrepareManifest `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore
     $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT = $resolvedAgentBundleRoot
     $env:OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT = $resolvedSamplePluginRoot
     $env:OPENLINEOPS_STAGED_API_BUNDLE_ROOT = $resolvedApiBundleRoot
     $env:OPENLINEOPS_RABBITMQ_URI = $parsedBrokerUri.AbsoluteUri
     $env:OPENLINEOPS_STAGED_AGENT_RABBITMQ_EVIDENCE_PATH = $evidencePath
+    $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE = $serviceScope
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $cleanupManifestPath
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $null
     $env:DOTNET_CLI_UI_LANGUAGE = "en-US"
     $env:VSLANG = "1033"
     if ([string]::IsNullOrWhiteSpace($previousOutageControl)) {
@@ -245,34 +282,49 @@ try {
         throw "Staged Agent RabbitMQ process E2E failed with exit code $testExitCode."
     }
 }
+catch {
+    $primaryFailure = $_.Exception
+}
 finally {
+    try {
+        & $cleanupScript `
+            -Kind rabbitmq `
+            -Scope $serviceScope `
+            -AgentBundleRoot $resolvedAgentBundleRoot `
+            -ManifestPath $cleanupManifestPath `
+            -Configuration $Configuration `
+            -NoBuild:$NoBuild `
+            -NoRestore:$NoRestore
+    }
+    catch {
+        $cleanupFailure = $_.Exception
+    }
     $env:OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT = $previousAgentBundleRoot
     $env:OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT = $previousSamplePluginRoot
     $env:OPENLINEOPS_STAGED_API_BUNDLE_ROOT = $previousApiBundleRoot
     $env:OPENLINEOPS_RABBITMQ_URI = $previousBrokerUri
     $env:OPENLINEOPS_STAGED_AGENT_RABBITMQ_EVIDENCE_PATH = $previousEvidencePath
     $env:OPENLINEOPS_RABBITMQ_OUTAGE_CONTROL = $previousOutageControl
+    $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE = $previousServiceScope
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $previousCleanupManifestPath
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $previousCleanupGate
     $env:DOTNET_CLI_UI_LANGUAGE = $previousDotnetCliLanguage
     $env:VSLANG = $previousVsLanguage
 }
+
+if ($null -ne $primaryFailure -and $null -ne $cleanupFailure) {
+    throw [System.AggregateException]::new(
+        "Staged Agent RabbitMQ process E2E failed and run-scoped Windows service cleanup was incomplete.",
+        @($primaryFailure, $cleanupFailure))
+}
+if ($null -ne $primaryFailure) { throw $primaryFailure }
+if ($null -ne $cleanupFailure) { throw $cleanupFailure }
 
 if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
     throw "Staged Agent RabbitMQ process E2E did not produce its required evidence: $evidencePath"
 }
 
 $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
-$allowedIdentityStrategies = @(
-    "temporary-standard-account",
-    "inherited-uac-filtered-token"
-)
-$identityStrategyInvalid = `
-    $allowedIdentityStrategies -cnotcontains $evidence.agentHostIdentity.identityStrategy `
-    -or $evidence.restartedAgentHostIdentity.identityStrategy -cne `
-        $evidence.agentHostIdentity.identityStrategy
-$inheritedIdentityInvalid = `
-    $evidence.agentHostIdentity.identityStrategy -ceq "inherited-uac-filtered-token" `
-    -and ($evidence.agentHostIdentity.administratorGroupPresent -ne $true `
-        -or $evidence.agentHostIdentity.administratorGroupDenyOnly -ne $true)
 $vendorArtifacts = @($evidence.vendorArtifacts)
 $requiredVendorArtifacts = [ordered]@{
     "measurements.csv" = "Csv"
@@ -315,13 +367,23 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or $evidence.agentHostIdentity.nonAdministrative -ne $true `
     -or $evidence.agentHostIdentity.isPrimaryToken -ne $true `
     -or $evidence.agentHostIdentity.isElevated -ne $false `
+    -or $evidence.agentHostIdentity.administratorGroupPresent -ne $false `
     -or $evidence.agentHostIdentity.administratorGroupEnabled -ne $false `
+    -or $evidence.agentHostIdentity.administratorGroupDenyOnly -ne $false `
     -or $evidence.agentHostIdentity.principalAdministratorMembership -ne $false `
-    -or $identityStrategyInvalid `
-    -or $inheritedIdentityInvalid `
+    -or $evidence.agentHostIdentity.isAuthenticated -ne $true `
+    -or $evidence.agentHostIdentity.isSystem -ne $false `
+    -or $evidence.agentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
     -or $evidence.restartedAgentHostIdentity.nonAdministrative -ne $true `
     -or $evidence.restartedAgentHostIdentity.isPrimaryToken -ne $true `
     -or $evidence.restartedAgentHostIdentity.isElevated -ne $false `
+    -or $evidence.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
+    -or $evidence.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
+    -or $evidence.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `
+    -or $evidence.restartedAgentHostIdentity.principalAdministratorMembership -ne $false `
+    -or $evidence.restartedAgentHostIdentity.isAuthenticated -ne $true `
+    -or $evidence.restartedAgentHostIdentity.isSystem -ne $false `
+    -or $evidence.restartedAgentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
     -or $evidence.offlinePendingOutboxCount -lt 1 `
     -or $evidence.offlineCompletionWasNotDelivered -ne $true `
     -or $evidence.completionDeliveredOnceAfterReconnect -ne $true `
@@ -336,14 +398,17 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or $evidence.presence.freshOnlineAfterReconnect -ne $true `
     -or $evidence.presence.onlineAfterReconnect.status -cne "Idle" `
     -or $evidence.presence.onlineAfterReconnect.health -cne "Online" `
+    -or [string]$evidence.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+    -or $evidence.windowsServiceLifecycleVerified -ne $true `
     -or $evidence.cleanShutdownVerified -ne $true) {
     throw "Staged Agent RabbitMQ process E2E evidence is incomplete or invalid."
 }
 
 Write-Host "Staged Agent RabbitMQ process E2E passed."
 Write-Host " - Broker: $($parsedBrokerUri.Host):$($parsedBrokerUri.Port) (TLS: $($parsedBrokerUri.Scheme -ceq 'amqps'))"
-Write-Host " - True staged Agent process completed a signed frozen vendor helper while RabbitMQ was offline."
+Write-Host " - A temporary Windows service completed a signed frozen vendor helper while RabbitMQ was offline."
 Write-Host " - SQLite buffered the result; reconnect delivered it once; redelivery and restart did not replay hardware."
-Write-Host " - Coordinator transport/result inbox restarted after broker recovery; child-token inspection proved the Agent non-administrative."
+Write-Host " - SCM start, stop, restart, and deletion were verified under a temporary standard service account."
+Write-Host " - Coordinator transport/result inbox restarted after broker recovery; token inspection proved the Agent non-administrative."
 Write-Host " - Persisted Started/Heartbeat presence expired to Offline during outage and recovered to fresh Online."
 Write-Host " - Evidence: $evidencePath"

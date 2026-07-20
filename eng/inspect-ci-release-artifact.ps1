@@ -966,22 +966,36 @@ catch {
     Add-Failure "Runner staged-Agent evidence failed strict validation: $($_.Exception.Message)"
 }
 $stagedAgentE2e = Read-JsonFile $stagedAgentEvidencePath
-$allowedStagedAgentIdentityStrategies = @(
-    "temporary-standard-account",
-    "inherited-uac-filtered-token"
-)
 if ($null -ne $stagedAgentE2e `
     -and ($stagedAgentE2e.status -cne "passed" `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.status -cne "passed" `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
-        -or $allowedStagedAgentIdentityStrategies -cnotcontains $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
-        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupDenyOnly -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.principalAdministratorMembership -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isAuthenticated -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isSystem -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.principalAdministratorMembership -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isAuthenticated -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isSystem -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+        -or [string]$stagedAgentE2e.rabbitMqTransportCoverage.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.windowsServiceLifecycleVerified -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.presence.expiredOfflineDuringBrokerOutage -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.presence.freshOnlineAfterReconnect -ne $true)) {
-    Add-Failure "Staged Agent bundle evidence does not prove the passed RabbitMQ and presence closure."
+    Add-Failure "Staged Agent bundle evidence does not prove the passed RabbitMQ, Windows SCM service, and presence closure."
 }
 if ($productionClosureSummaries.Count -eq 1) {
     $productionClosureE2e = Read-JsonFile $productionClosureSummaries[0].FullName

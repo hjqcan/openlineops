@@ -187,6 +187,36 @@ $cases = @(
         ExpectedFailure = "finite timeout on the staged Agent process boundary"
     },
     [pscustomobject]@{
+        Name = "staged Agent cleanup scope binding"
+        Search = "OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: `${{ env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE }}"
+        Replacement = "OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: deadbeefdeadbeefdeadbeefdeadbeef"
+        ExpectedFailure = "execute the staged Agent gate after release staging"
+    },
+    [pscustomobject]@{
+        Name = "Agent service cleanup scope preparation"
+        Search = '"OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File'
+        Replacement = '"BROKEN_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File'
+        ExpectedFailure = "allocate private 32-hex RabbitMQ, external-abort, and Studio cleanup scopes"
+    },
+    [pscustomobject]@{
+        Name = "staged Agent always cleanup"
+        Search = "if: `${{ always() && env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE != '' }}"
+        Replacement = "if: `${{ success() }}"
+        ExpectedFailure = "always run the bounded external RabbitMQ Agent service scavenger"
+    },
+    [pscustomobject]@{
+        Name = "external abort behavior gate"
+        Search = "./eng/verify-agent-service-external-abort-cleanup.ps1"
+        Replacement = "Write-Host 'external abort cleanup proof disabled'"
+        ExpectedFailure = "behaviorally prove scavenger cleanup from another process"
+    },
+    [pscustomobject]@{
+        Name = "external abort always cleanup"
+        Search = "if: `${{ always() && env.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE != '' }}"
+        Replacement = "if: `${{ success() }}"
+        ExpectedFailure = "always rerun the exact external-abort Agent service scavenger scope"
+    },
+    [pscustomobject]@{
         Name = "production evidence scanner"
         Search = "./eng/verify-production-closure-evidence.ps1"
         Replacement = "Write-Host 'production evidence scan disabled'"
@@ -209,6 +239,12 @@ $cases = @(
         Search = "      - name: Run packaged Studio two-Agent production closure`n        shell: powershell`n        timeout-minutes: 35"
         Replacement = "      - name: Run packaged Studio two-Agent production closure`n        shell: powershell"
         ExpectedFailure = "bounded packaged-to-two-staged-Agent"
+    },
+    [pscustomobject]@{
+        Name = "Studio two-Agent always cleanup"
+        Search = "if: `${{ always() && env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE != '' }}"
+        Replacement = "if: `${{ success() }}"
+        ExpectedFailure = "always run the bounded external Studio Agent service scavenger"
     },
     [pscustomobject]@{
         Name = "Studio two-Agent evidence scanner"

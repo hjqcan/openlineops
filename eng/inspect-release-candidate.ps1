@@ -1274,6 +1274,8 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/verify-ci-workflow-actions.ps1",
             "eng/verify-staged-agent-bundle-e2e.ps1",
             "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+            "eng/invoke-run-scoped-agent-service-cleanup.ps1",
+            "eng/verify-agent-service-external-abort-cleanup.ps1",
             "eng/verify-staged-agent-evidence.ps1",
             "eng/verify-production-closure-evidence.ps1",
             "eng/verify-studio-two-agent-production-closure.ps1",

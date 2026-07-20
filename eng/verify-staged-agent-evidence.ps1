@@ -448,18 +448,23 @@ Assert-Condition ($rabbit.status -ceq "passed" `
         -and $rabbit.packageContentSha256 -cmatch '^[0-9a-f]{64}$' `
         -and -not [string]::IsNullOrWhiteSpace([string]$rabbit.agentId) `
         -and -not [string]::IsNullOrWhiteSpace([string]$rabbit.stationId) `
+        -and [string]$rabbit.windowsServiceName -cmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+        -and $rabbit.windowsServiceLifecycleVerified -eq $true `
         -and $rabbit.cleanShutdownVerified -eq $true) `
     "Staged Agent RabbitMQ transport closure is incomplete or was skipped."
 
-$allowedIdentityStrategies = @("temporary-standard-account", "inherited-uac-filtered-token")
 foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIdentity)) {
     Assert-Condition ($identity.nonAdministrative -eq $true `
             -and $identity.isPrimaryToken -eq $true `
             -and $identity.isElevated -eq $false `
+            -and $identity.administratorGroupPresent -eq $false `
             -and $identity.administratorGroupEnabled -eq $false `
+            -and $identity.administratorGroupDenyOnly -eq $false `
             -and $identity.principalAdministratorMembership -eq $false `
-            -and $allowedIdentityStrategies -ccontains [string]$identity.identityStrategy) `
-        "Staged Agent host identity is not a proven non-administrative primary token."
+            -and $identity.isAuthenticated -eq $true `
+            -and $identity.isSystem -eq $false `
+            -and $identity.identityStrategy -ceq "temporary-standard-service-account") `
+        "Staged Agent host identity is not the required temporary standard Windows service account."
 }
 Assert-Condition ($rabbit.agentHostIdentity.identityStrategy -ceq $rabbit.restartedAgentHostIdentity.identityStrategy `
         -and $rabbit.agentHostIdentity.userSid -ceq $rabbit.restartedAgentHostIdentity.userSid) `
@@ -532,9 +537,28 @@ foreach ($field in @(
         "runtimeFinishedExecutionCount",
         "firstAgentPid",
         "restartedAgentPid",
-        "packageContentSha256")) {
+        "packageContentSha256",
+        "windowsServiceName",
+        "windowsServiceLifecycleVerified")) {
     Assert-Condition ($rabbit.$field -ceq $raw.$field) `
         "Staged Agent summary field '$field' differs from raw RabbitMQ evidence."
+}
+foreach ($identityField in @(
+        "nonAdministrative",
+        "isPrimaryToken",
+        "isElevated",
+        "administratorGroupPresent",
+        "administratorGroupEnabled",
+        "administratorGroupDenyOnly",
+        "principalAdministratorMembership",
+        "isAuthenticated",
+        "isSystem",
+        "identityStrategy",
+        "userSid")) {
+    Assert-Condition ($rabbit.agentHostIdentity.$identityField -ceq $raw.agentHostIdentity.$identityField) `
+        "Staged Agent initial identity field '$identityField' differs from raw RabbitMQ evidence."
+    Assert-Condition ($rabbit.restartedAgentHostIdentity.$identityField -ceq $raw.restartedAgentHostIdentity.$identityField) `
+        "Staged Agent restarted identity field '$identityField' differs from raw RabbitMQ evidence."
 }
 Assert-Condition ((ConvertTo-Json @($rabbit.vendorArtifacts) -Depth 10 -Compress) `
         -ceq (ConvertTo-Json @($raw.vendorArtifacts) -Depth 10 -Compress)) `
@@ -552,5 +576,5 @@ if ($RequireSanitizedRoot) {
 Write-Host "Staged Agent evidence verification passed."
 Write-Host " - Exact tests: $($exactTests.Count)"
 Write-Host " - Required central vendor artifacts: $($requiredArtifacts.Count)"
-Write-Host " - RabbitMQ boundary: required and passed"
+Write-Host " - RabbitMQ and Windows SCM service lifecycle boundaries: required and passed"
 Write-Host " - Sanitized public root required: $([bool]$RequireSanitizedRoot)"

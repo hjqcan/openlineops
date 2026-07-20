@@ -25,6 +25,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
@@ -86,6 +87,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private const long VendorDelayMilliseconds = 15_000;
     private const string BrokerOutageControlVariable =
         "OPENLINEOPS_RABBITMQ_OUTAGE_CONTROL";
+    private const string AgentServiceScopeVariable =
+        "OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE";
+    private const string AgentServiceCleanupGateVariable =
+        "OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE";
+    private const string AgentServiceCleanupManifestPathVariable =
+        "OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH";
+    private const string AgentServiceExternalAbortGateVariable =
+        "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_GATE";
+    private const string AgentServiceExternalAbortReadyPathVariable =
+        "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH";
 
     [Fact]
     [SupportedOSPlatform("windows")]
@@ -102,24 +113,35 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return;
         }
 
-        var suffix = Guid.NewGuid().ToString("N");
+        var suffix = RequireLowerHexScope(
+            Environment.GetEnvironmentVariable(AgentServiceScopeVariable),
+            AgentServiceScopeVariable);
+        var cleanupContract = ReadRequiredAgentServiceCleanupContract(
+            expectedKind: "rabbitmq",
+            expectedScope: suffix);
+        var cleanupEntry = Assert.Single(cleanupContract.Entries);
+        var root = cleanupEntry.OwnedRoot;
+        var ownedAgentBundleRoot = Path.Combine(root, "agent-bundle");
+        Directory.CreateDirectory(root);
+        ProtectRunScopedRoot(root);
+        CopyFrozenAgentBundle(prerequisites.AgentBundleRoot, ownedAgentBundleRoot);
+        ProtectFrozenBundleRoot(ownedAgentBundleRoot);
+        VerifyCleanupExecutable(cleanupEntry);
+        var executionPrerequisites = prerequisites with
+        {
+            AgentBundleRoot = ownedAgentBundleRoot
+        };
         var agentId = $"agent.rabbitmq-e2e.{suffix}";
         var stationId = $"station.rabbitmq-e2e.{suffix}";
         var coordinatorId = $"coordinator-rabbitmq-e2e-{suffix}";
         var agentIdentity = RestrictedAgentIdentity.CreateRequired(suffix);
-        var root = Path.Combine(
-            agentIdentity.RequiresSharedTestRoot
-                ? Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                    "Temp")
-                : Path.GetTempPath(),
-            $"olo-staged-agent-rmq-{suffix}");
         var dataRoot = Path.Combine(root, "agent-data");
         var distributionRoot = Path.Combine(root, "package-distribution");
         var runtimeWorkRoot = Path.Combine(root, "runtime-work");
         var packageCacheRoot = Path.Combine(root, "package-cache");
         StagedCoordinatorApiProcess? artifactApi = null;
         HttpClient? operatorTraceClient = null;
+        WindowsAgentService? agentService = null;
         WindowsAgentProcess? agent = null;
         CancellationTokenSource? resultInboxStop = null;
         Task? resultInbox = null;
@@ -134,12 +156,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var cleanupFailures = new List<Exception>();
         try
         {
-            Directory.CreateDirectory(root);
             agentIdentity.GrantDirectoryAccess(
                 root,
                 FileSystemRights.Modify | FileSystemRights.Synchronize);
             agentIdentity.GrantDirectoryAccess(
-                prerequisites.AgentBundleRoot,
+                ownedAgentBundleRoot,
                 FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize);
             var artifactApiCredentials = ArtifactApiCredentials.Create(suffix, agentId, stationId);
             artifactApi = await StagedCoordinatorApiProcess.StartAsync(
@@ -209,7 +230,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 resultInboxStop.Token);
 
             var environment = CreateAgentEnvironment(
-                prerequisites,
+                executionPrerequisites,
                 root,
                 dataRoot,
                 distributionRoot,
@@ -223,12 +244,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 agentIdentity.Sid,
                 artifactApi.BaseUri,
                 artifactApiCredentials.AgentToken);
-            agent = WindowsAgentProcess.Start(
-                Path.Combine(prerequisites.AgentBundleRoot, "OpenLineOps.Agent.exe"),
-                prerequisites.AgentBundleRoot,
+            agentService = WindowsAgentService.Install(
+                cleanupEntry.ExecutablePath,
+                ownedAgentBundleRoot,
                 environment,
-                agentIdentity);
+                agentIdentity,
+                suffix);
+            agent = agentService.Start();
             initialAgentTokenEvidence = agent.TokenEvidence;
+            await WaitForExternalAbortIfRequestedAsync(cleanupEntry, agent);
             await topology.WaitForAgentConsumerAsync(agent, TimeSpan.FromSeconds(30));
 
             var runtimeClock = new SystemClock();
@@ -459,11 +483,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             agent.Dispose();
             agent = null;
 
-            agent = WindowsAgentProcess.Start(
-                Path.Combine(prerequisites.AgentBundleRoot, "OpenLineOps.Agent.exe"),
-                prerequisites.AgentBundleRoot,
-                environment,
-                agentIdentity);
+            agent = agentService.Start();
             var restartedAgentTokenEvidence = agent.TokenEvidence;
             Assert.Equal(initialAgentTokenEvidence, restartedAgentTokenEvidence);
             var restartedAgentPid = agent.Id;
@@ -497,6 +517,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             agent = null;
             stationStore.Dispose();
             stationStore = null;
+            var windowsServiceName = agentService.ServiceName;
+            var windowsServiceLifecycleVerified = agentService.LifecycleVerified;
+            Assert.True(windowsServiceLifecycleVerified);
+            agentService.Dispose();
+            Assert.True(agentService.DeletionProven);
+            agentService = null;
 
             WriteEvidence(
                 prerequisites,
@@ -519,6 +545,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 brokerOutage.ControlMode,
                 coordinatorTransportResultInboxRestartedAfterBrokerRecovery,
                 agentIdentity,
+                windowsServiceName,
+                windowsServiceLifecycleVerified,
                 initialAgentTokenEvidence!,
                 restartedAgentTokenEvidence);
         }
@@ -544,6 +572,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 cleanupFailures,
                 () => agent?.Dispose());
             agent = null;
+            CaptureCleanupFailure(
+                cleanupFailures,
+                () => agentService?.Dispose());
+            agentService = null;
             CaptureCleanupFailure(
                 cleanupFailures,
                 () => stationStore?.Dispose());
@@ -608,12 +640,37 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     }
                 });
             artifactApi = null;
-            CaptureCleanupFailure(
-                cleanupFailures,
-                () => DeleteWorkRoot(root, packageCacheRoot));
-            CaptureCleanupFailure(
-                cleanupFailures,
-                agentIdentity.Dispose);
+            if (agentIdentity.HasUnprovenServiceInstallation)
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    "Staged Agent SCM deletion is unproven; the service account, "
+                    + "SeServiceLogonRight, profile, ACLs, and working root were deliberately preserved for safe diagnosis."));
+            }
+            else
+            {
+                var identityCleanupFailureCount = cleanupFailures.Count;
+                CaptureCleanupFailure(
+                    cleanupFailures,
+                    () => VerifyRunScopedOwnedRootForIdentityCleanup(
+                        root,
+                        new HashSet<string>(StringComparer.Ordinal)
+                        {
+                            agentIdentity.Sid
+                        }));
+                if (cleanupFailures.Count == identityCleanupFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        cleanupFailures,
+                        agentIdentity.Dispose);
+                }
+
+                if (cleanupFailures.Count == identityCleanupFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        cleanupFailures,
+                        () => DeleteRunScopedOwnedRoot("rabbitmq", root));
+                }
+            }
         }
 
         if (executionFailure is not null)
@@ -632,6 +689,1033 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 "The staged Agent RabbitMQ E2E failed and one or more independent cleanup steps also failed.",
                 cleanupFailures);
         }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void CleanupRunScopedWindowsAgentServicesAndIdentities()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var gate = Environment.GetEnvironmentVariable(AgentServiceCleanupGateVariable);
+        if (gate is null)
+        {
+            return;
+        }
+
+        if (!string.Equals(gate, "true", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceCleanupGateVariable} must be exactly 'true'.");
+        }
+
+        CleanupRunScopedAgentServicesAndIdentities(
+            ReadRequiredAgentServiceCleanupContract(
+                expectedKind: null,
+                expectedScope: null));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void CleanupRunScopedAgentServicesAndIdentities(
+        AgentServiceCleanupContract contract)
+    {
+        var failures = new List<Exception>();
+        var identities = new Dictionary<string, RestrictedAgentIdentity.RunScopedIdentity?>(
+            StringComparer.Ordinal);
+        var invalidIdentities = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in contract.Entries)
+        {
+            try
+            {
+                identities.Add(
+                    entry.Role,
+                    RestrictedAgentIdentity.ReadRunScopedIdentity(
+                        entry.AccountName,
+                        entry.AccountSid));
+            }
+            catch (Exception exception)
+            {
+                identities.Add(entry.Role, null);
+                invalidIdentities.Add(entry.Role);
+                failures.Add(new InvalidOperationException(
+                    $"Run-scoped identity validation failed for role '{entry.Role}'; preserving that identity and owned root.",
+                    exception));
+            }
+        }
+
+        var deletedServices = new HashSet<string>(StringComparer.Ordinal);
+        var deletedIdentities = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var entry in contract.Entries)
+        {
+            if (invalidIdentities.Contains(entry.Role))
+            {
+                continue;
+            }
+
+            try
+            {
+                var identity = identities[entry.Role];
+                if (identity is null)
+                {
+                    WindowsAgentService.ProveRunScopedArtifactsAbsent(entry);
+                }
+                else
+                {
+                    WindowsAgentService.CleanupRunScoped(entry, identity.Sid);
+                }
+
+                deletedServices.Add(entry.Role);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(new InvalidOperationException(
+                    $"Run-scoped service cleanup failed for role '{entry.Role}'; preserving its identity and owned root.",
+                    exception));
+            }
+        }
+
+        var authorizedRootSids = new Dictionary<string, IReadOnlySet<string>>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var rootGroup in contract.Entries.GroupBy(
+                     static entry => entry.OwnedRoot,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            if (rootGroup.Any(entry => invalidIdentities.Contains(entry.Role)
+                                       || !deletedServices.Contains(entry.Role)))
+            {
+                continue;
+            }
+
+            try
+            {
+                var allowedSids = rootGroup
+                    .Select(entry => identities[entry.Role]?.Sid)
+                    .Where(static sid => sid is not null)
+                    .Cast<string>()
+                    .ToHashSet(StringComparer.Ordinal);
+                VerifyRunScopedOwnedRootForIdentityCleanup(
+                    rootGroup.Key,
+                    allowedSids);
+                authorizedRootSids.Add(rootGroup.Key, allowedSids);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(new InvalidOperationException(
+                    $"Run-scoped owned-root provenance validation failed for '{rootGroup.Key}'; preserving every identity in that root.",
+                    exception));
+            }
+        }
+
+        foreach (var rootGroup in contract.Entries.GroupBy(
+                     static entry => entry.OwnedRoot,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            if (!authorizedRootSids.TryGetValue(rootGroup.Key, out var allowedSids))
+            {
+                continue;
+            }
+
+            foreach (var entry in rootGroup)
+            {
+                try
+                {
+                    RestrictedAgentIdentity.CleanupRunScoped(
+                        identities[entry.Role],
+                        entry.AccountName,
+                        entry.OwnedRoot,
+                        allowedSids);
+                    deletedIdentities.Add(entry.Role);
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(new InvalidOperationException(
+                        $"Run-scoped identity cleanup failed for role '{entry.Role}'; preserving its owned root.",
+                        exception));
+                }
+            }
+        }
+
+        foreach (var rootGroup in contract.Entries.GroupBy(
+                     static entry => entry.OwnedRoot,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            if (rootGroup.Any(entry => !deletedServices.Contains(entry.Role)
+                                       || !deletedIdentities.Contains(entry.Role)))
+            {
+                continue;
+            }
+
+            try
+            {
+                DeleteRunScopedOwnedRoot(contract.Kind, rootGroup.Key);
+                if (Directory.Exists(rootGroup.Key) || File.Exists(rootGroup.Key))
+                {
+                    throw new InvalidOperationException(
+                        $"Run-scoped staged Agent root '{rootGroup.Key}' still exists after cleanup.");
+                }
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        if (failures.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        }
+
+        if (failures.Count > 1)
+        {
+            throw new AggregateException(
+                "Run-scoped staged Agent cleanup was incomplete.",
+                failures);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static AgentServiceCleanupContract ReadRequiredAgentServiceCleanupContract(
+        string? expectedKind,
+        string? expectedScope)
+    {
+        var manifestText = RequiredText(
+            Environment.GetEnvironmentVariable(AgentServiceCleanupManifestPathVariable),
+            AgentServiceCleanupManifestPathVariable);
+        if (!Path.IsPathFullyQualified(manifestText))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceCleanupManifestPathVariable} must be a canonical absolute path.");
+        }
+
+        var manifestPath = Path.GetFullPath(manifestText);
+        if (!string.Equals(manifestPath, manifestText, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(manifestPath))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceCleanupManifestPathVariable} must identify an existing canonical file.");
+        }
+
+        EnsureNoReparsePointInExistingPath(manifestPath, AgentServiceCleanupManifestPathVariable);
+        VerifyCleanupManifestAcl(manifestPath);
+        using var manifest = JsonDocument.Parse(
+            File.ReadAllBytes(manifestPath),
+            new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 8
+            });
+        var root = manifest.RootElement;
+        RequireExactJsonProperties(
+            root,
+            "Agent service cleanup manifest",
+            "schema",
+            "schemaVersion",
+            "kind",
+            "scope",
+            "entries");
+        if (!string.Equals(
+                RequiredJsonString(root, "schema"),
+                "openlineops-agent-service-cleanup",
+                StringComparison.Ordinal)
+            || RequiredJsonInt32(root, "schemaVersion") != 1)
+        {
+            throw new InvalidDataException(
+                "Agent service cleanup manifest schema is invalid.");
+        }
+
+        var kind = RequiredJsonString(root, "kind");
+        if (kind is not ("rabbitmq" or "studio-two-agent")
+            || expectedKind is not null
+            && !string.Equals(kind, expectedKind, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Agent service cleanup manifest kind is invalid.");
+        }
+
+        var scope = RequireLowerHexScope(RequiredJsonString(root, "scope"), "scope");
+        if (expectedScope is not null
+            && !string.Equals(scope, expectedScope, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Agent service cleanup manifest scope differs from the formal gate scope.");
+        }
+
+        var entriesElement = root.GetProperty("entries");
+        if (entriesElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException(
+                "Agent service cleanup manifest entries must be an array.");
+        }
+
+        var entries = entriesElement.EnumerateArray()
+            .Select(element => ReadCleanupEntry(element, kind, scope))
+            .ToArray();
+        var expectedRoles = kind == "rabbitmq"
+            ? new[] { "rabbitmq" }
+            : new[] { "entry", "downstream" };
+        if (!entries.Select(static entry => entry.Role)
+                .SequenceEqual(expectedRoles, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Agent service cleanup manifest roles are missing, duplicated, or out of canonical order.");
+        }
+
+        return new AgentServiceCleanupContract(manifestPath, kind, scope, entries);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static AgentServiceCleanupEntry ReadCleanupEntry(
+        JsonElement element,
+        string kind,
+        string scope)
+    {
+        RequireExactJsonProperties(
+            element,
+            "Agent service cleanup entry",
+            "role",
+            "serviceSuffix",
+            "accountSuffix",
+            "serviceName",
+            "accountName",
+            "accountSid",
+            "executablePath",
+            "executableSha256",
+            "ownedRoot");
+        var role = RequiredJsonString(element, "role");
+        var serviceSuffix = RequireLowerHexScope(
+            RequiredJsonString(element, "serviceSuffix"),
+            "serviceSuffix");
+        var accountSuffix = RequireLowerHexScope(
+            RequiredJsonString(element, "accountSuffix"),
+            "accountSuffix");
+        var expectedServiceSuffix = kind == "rabbitmq"
+            ? scope
+            : AgentServiceScopedSuffix($"{role}-service", scope);
+        var expectedAccountSuffix = kind == "rabbitmq"
+            ? scope
+            : AgentServiceScopedSuffix($"{role}-account", scope);
+        if (!string.Equals(serviceSuffix, expectedServiceSuffix, StringComparison.Ordinal)
+            || !string.Equals(accountSuffix, expectedAccountSuffix, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' has a non-canonical derived suffix.");
+        }
+
+        var serviceName = RequiredJsonString(element, "serviceName");
+        var accountName = RequiredJsonString(element, "accountName");
+        if (!string.Equals(
+                serviceName,
+                $"OpenLineOpsAgentE2E-{serviceSuffix}",
+                StringComparison.Ordinal)
+            || !string.Equals(
+                accountName,
+                $"oloe2e{accountSuffix[..10]}",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' has a non-canonical service or account name.");
+        }
+
+        var accountSidElement = element.GetProperty("accountSid");
+        string? accountSid = null;
+        if (accountSidElement.ValueKind == JsonValueKind.String)
+        {
+            accountSid = accountSidElement.GetString();
+            if (string.IsNullOrWhiteSpace(accountSid)
+                || !string.Equals(
+                    new SecurityIdentifier(accountSid).Value,
+                    accountSid,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Agent service cleanup entry '{role}' accountSid is not canonical.");
+            }
+        }
+        else if (accountSidElement.ValueKind != JsonValueKind.Null)
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' accountSid must be null or a canonical SID string.");
+        }
+
+        var windowsTemp = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "Temp");
+        var expectedOwnedRoot = Path.Combine(
+            windowsTemp,
+            kind == "rabbitmq"
+                ? $"olo-staged-agent-rmq-{scope}"
+                : $"olo-studio-two-agent-{scope}");
+        var ownedRootText = RequiredJsonString(element, "ownedRoot");
+        var ownedRoot = RequireCanonicalAbsolutePath(ownedRootText, "ownedRoot");
+        if (!string.Equals(ownedRoot, expectedOwnedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' owned root is outside its exact run scope.");
+        }
+
+        var executablePath = RequireCanonicalAbsolutePath(
+            RequiredJsonString(element, "executablePath"),
+            "executablePath");
+        var expectedExecutablePath = Path.Combine(
+            ownedRoot,
+            "agent-bundle",
+            "OpenLineOps.Agent.exe");
+        if (!string.Equals(
+                executablePath,
+                expectedExecutablePath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' executable is outside its exact owned bundle.");
+        }
+
+        return new AgentServiceCleanupEntry(
+            role,
+            serviceSuffix,
+            accountSuffix,
+            serviceName,
+            accountName,
+            accountSid,
+            executablePath,
+            RequireLowerHex(
+                RequiredJsonString(element, "executableSha256"),
+                64,
+                "executableSha256"),
+            ownedRoot);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void UpdateCleanupManifestAccountSid(
+        string accountSuffix,
+        string accountName,
+        string accountSid)
+    {
+        var contract = ReadRequiredAgentServiceCleanupContract(
+            expectedKind: null,
+            expectedScope: null);
+        var matching = contract.Entries
+            .Where(entry => string.Equals(
+                entry.AccountSuffix,
+                accountSuffix,
+                StringComparison.Ordinal))
+            .ToArray();
+        var entry = matching.Length == 1
+            ? matching[0]
+            : throw new InvalidDataException(
+                "Protected cleanup manifest does not contain exactly one entry for the new service account.");
+        if (!string.Equals(entry.AccountName, accountName, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Protected cleanup manifest account name differs from the newly created account.");
+        }
+
+        var canonicalSid = new SecurityIdentifier(accountSid).Value;
+        if (entry.AccountSid is not null)
+        {
+            if (!string.Equals(entry.AccountSid, canonicalSid, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Protected cleanup manifest already records a different account SID.");
+            }
+
+            return;
+        }
+
+        using var bytes = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+                   bytes,
+                   new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("schema", "openlineops-agent-service-cleanup");
+            writer.WriteNumber("schemaVersion", 1);
+            writer.WriteString("kind", contract.Kind);
+            writer.WriteString("scope", contract.Scope);
+            writer.WriteStartArray("entries");
+            foreach (var item in contract.Entries)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("role", item.Role);
+                writer.WriteString("serviceSuffix", item.ServiceSuffix);
+                writer.WriteString("accountSuffix", item.AccountSuffix);
+                writer.WriteString("serviceName", item.ServiceName);
+                writer.WriteString("accountName", item.AccountName);
+                if (string.Equals(item.Role, entry.Role, StringComparison.Ordinal))
+                {
+                    writer.WriteString("accountSid", canonicalSid);
+                }
+                else if (item.AccountSid is null)
+                {
+                    writer.WriteNull("accountSid");
+                }
+                else
+                {
+                    writer.WriteString("accountSid", item.AccountSid);
+                }
+
+                writer.WriteString("executablePath", item.ExecutablePath);
+                writer.WriteString("executableSha256", item.ExecutableSha256);
+                writer.WriteString("ownedRoot", item.OwnedRoot);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+            writer.Flush();
+        }
+
+        var temporaryPath = contract.ManifestPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (File.Create(temporaryPath))
+            {
+            }
+
+            ProtectRunScopedFile(temporaryPath);
+            using (var stream = new FileStream(
+                       temporaryPath,
+                       FileMode.Open,
+                       FileAccess.Write,
+                       FileShare.None))
+            {
+                stream.Write(bytes.GetBuffer(), 0, checked((int)bytes.Length));
+                stream.SetLength(bytes.Length);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, contract.ManifestPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+
+        var updated = ReadRequiredAgentServiceCleanupContract(
+            expectedKind: contract.Kind,
+            expectedScope: contract.Scope);
+        var updatedEntry = Assert.Single(updated.Entries, item =>
+            string.Equals(item.Role, entry.Role, StringComparison.Ordinal));
+        if (!string.Equals(updatedEntry.AccountSid, canonicalSid, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Protected cleanup manifest did not persist the exact new account SID.");
+        }
+    }
+
+    private static void VerifyCleanupExecutable(AgentServiceCleanupEntry entry)
+    {
+        if (!File.Exists(entry.ExecutablePath))
+        {
+            throw new FileNotFoundException(
+                "The copied run-scoped staged Agent executable is missing.",
+                entry.ExecutablePath);
+        }
+
+        var actual = Convert.ToHexStringLower(
+            SHA256.HashData(File.ReadAllBytes(entry.ExecutablePath)));
+        if (!string.Equals(actual, entry.ExecutableSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The copied run-scoped staged Agent executable differs from the cleanup manifest SHA-256.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static async Task WaitForExternalAbortIfRequestedAsync(
+        AgentServiceCleanupEntry entry,
+        WindowsAgentProcess agent)
+    {
+        var gate = Environment.GetEnvironmentVariable(
+            AgentServiceExternalAbortGateVariable);
+        if (gate is null)
+        {
+            return;
+        }
+
+        if (!string.Equals(gate, "true", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceExternalAbortGateVariable} must be exactly 'true'.");
+        }
+
+        var readyText = RequiredText(
+            Environment.GetEnvironmentVariable(
+                AgentServiceExternalAbortReadyPathVariable),
+            AgentServiceExternalAbortReadyPathVariable);
+        var readyPath = RequireCanonicalAbsolutePath(
+            readyText,
+            AgentServiceExternalAbortReadyPathVariable);
+        if (File.Exists(readyPath) || Directory.Exists(readyPath))
+        {
+            throw new InvalidOperationException(
+                "External-abort ready marker path is not fresh.");
+        }
+
+        var parent = Path.GetDirectoryName(readyPath)
+                     ?? throw new InvalidDataException(
+                         "External-abort ready marker has no parent directory.");
+        if (!Directory.Exists(parent))
+        {
+            throw new DirectoryNotFoundException(
+                $"External-abort ready marker parent '{parent}' is missing.");
+        }
+
+        EnsureNoReparsePointInExistingPath(parent, "external-abort ready marker parent");
+        var temporaryPath = readyPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (File.Create(temporaryPath))
+            {
+            }
+
+            ProtectRunScopedFile(temporaryPath);
+            using (var stream = new FileStream(
+                       temporaryPath,
+                       FileMode.Open,
+                       FileAccess.Write,
+                       FileShare.None))
+            {
+                using var writer = new Utf8JsonWriter(
+                    stream,
+                    new JsonWriterOptions { Indented = true });
+                writer.WriteStartObject();
+                writer.WriteString(
+                    "schema",
+                    "openlineops-agent-service-external-abort-ready");
+                writer.WriteNumber("schemaVersion", 1);
+                writer.WriteString("scope", entry.ServiceSuffix);
+                writer.WriteString("serviceName", entry.ServiceName);
+                writer.WriteString("accountName", entry.AccountName);
+                writer.WriteNumber("testHostProcessId", Environment.ProcessId);
+                writer.WriteNumber("agentProcessId", agent.Id);
+                writer.WriteString("executablePath", agent.ExecutablePath);
+                writer.WriteString("executableSha256", agent.ExecutableSha256);
+                writer.WriteEndObject();
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, readyPath, overwrite: false);
+            VerifyCleanupManifestAcl(readyPath);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+
+        await Task.Delay(Timeout.InfiniteTimeSpan);
+    }
+
+    private static void CopyFrozenAgentBundle(string sourceRoot, string destinationRoot)
+    {
+        var source = Path.GetFullPath(sourceRoot);
+        var destination = Path.GetFullPath(destinationRoot);
+        if (!Directory.Exists(source))
+        {
+            throw new DirectoryNotFoundException(
+                $"Staged Agent source bundle '{source}' is missing.");
+        }
+
+        EnsureNoReparsePointInExistingPath(source, "staged Agent source bundle");
+        var sourcePaths = RejectTreeReparsePoints(
+            source,
+            "staged Agent source bundle");
+        if (Directory.Exists(destination) || File.Exists(destination))
+        {
+            throw new InvalidOperationException(
+                $"Run-scoped staged Agent bundle destination '{destination}' is not fresh.");
+        }
+
+        Directory.CreateDirectory(destination);
+        foreach (var directory in sourcePaths
+                     .Where(Directory.Exists)
+                     .Order(StringComparer.OrdinalIgnoreCase))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                destination,
+                Path.GetRelativePath(source, directory)));
+        }
+
+        foreach (var file in sourcePaths
+                     .Where(File.Exists)
+                     .Order(StringComparer.OrdinalIgnoreCase))
+        {
+            var sourceHash = Convert.ToHexStringLower(
+                SHA256.HashData(File.ReadAllBytes(file)));
+            var target = Path.Combine(destination, Path.GetRelativePath(source, file));
+            File.Copy(file, target, overwrite: false);
+            var targetHash = Convert.ToHexStringLower(
+                SHA256.HashData(File.ReadAllBytes(target)));
+            if (!string.Equals(sourceHash, targetHash, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent bundle copy changed '{Path.GetRelativePath(source, file)}'.");
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ProtectRunScopedRoot(string root)
+    {
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The staged Agent gate identity has no SID.");
+        var security = new DirectorySecurity();
+        security.SetOwner(currentSid);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (var sid in new[]
+                 {
+                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                     new SecurityIdentifier(
+                         WellKnownSidType.BuiltinAdministratorsSid,
+                         null),
+                     currentSid
+                 }.Distinct())
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(root), security);
+        VerifyProtectedFileSystemAcl(
+            FileSystemAclExtensions.GetAccessControl(
+                new DirectoryInfo(root),
+                AccessControlSections.Owner | AccessControlSections.Access),
+            currentSid,
+            "run-scoped staged Agent root");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ProtectFrozenBundleRoot(string bundleRoot)
+    {
+        ProtectRunScopedRoot(bundleRoot);
+        foreach (var path in Directory.EnumerateFileSystemEntries(
+                     bundleRoot,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ProtectRunScopedFile(string path)
+    {
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The staged Agent gate identity has no SID.");
+        var security = new FileSecurity();
+        security.SetOwner(currentSid);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (var sid in new[]
+                 {
+                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                     new SecurityIdentifier(
+                         WellKnownSidType.BuiltinAdministratorsSid,
+                         null),
+                     currentSid
+                 }.Distinct())
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+        }
+
+        FileSystemAclExtensions.SetAccessControl(new FileInfo(path), security);
+        VerifyProtectedFileSystemAcl(
+            FileSystemAclExtensions.GetAccessControl(
+                new FileInfo(path),
+                AccessControlSections.Owner | AccessControlSections.Access),
+            currentSid,
+            "run-scoped staged Agent file");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyProtectedFileSystemAcl(
+        FileSystemSecurity security,
+        SecurityIdentifier expectedOwner,
+        string name,
+        IReadOnlySet<string>? allowedAdditionalSids = null)
+    {
+        if (!security.AreAccessRulesProtected
+            || security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+            || !string.Equals(owner.Value, expectedOwner.Value, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"The {name} ACL is inherited or has an unexpected owner.");
+        }
+
+        var requiredFullControl = new[]
+        {
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
+            expectedOwner.Value
+        }.ToHashSet(StringComparer.Ordinal);
+        var allowed = requiredFullControl.ToHashSet(StringComparer.Ordinal);
+        if (allowedAdditionalSids is not null)
+        {
+            allowed.UnionWith(allowedAdditionalSids);
+        }
+
+        var rules = security.GetAccessRules(
+            includeExplicit: true,
+            includeInherited: true,
+            typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
+        if (rules.Any(rule => rule.IsInherited
+                              || rule.AccessControlType != AccessControlType.Allow
+                              || rule.IdentityReference is not SecurityIdentifier sid
+                              || !allowed.Contains(sid.Value)))
+        {
+            throw new InvalidOperationException(
+                $"The {name} ACL contains an inherited, denied, or unexpected rule.");
+        }
+
+        foreach (var sid in requiredFullControl)
+        {
+            if (!rules.Any(rule => rule.IdentityReference is SecurityIdentifier identity
+                                   && string.Equals(identity.Value, sid, StringComparison.Ordinal)
+                                   && (rule.FileSystemRights & FileSystemRights.FullControl)
+                                   == FileSystemRights.FullControl))
+            {
+                throw new InvalidOperationException(
+                    $"The {name} ACL lacks FullControl for '{sid}'.");
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void DeleteRunScopedOwnedRoot(string kind, string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            if (File.Exists(root))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent root '{root}' is a file; preserving it.");
+            }
+
+            return;
+        }
+
+        VerifyRunScopedOwnedRootForCleanup(root);
+        if (kind == "studio-two-agent")
+        {
+            DeleteStudioAgentHarnessRoot(root);
+            return;
+        }
+
+        DeleteWorkRoot(root, Path.Combine(root, "package-cache"));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyRunScopedOwnedRootForCleanup(string root)
+    {
+        EnsureNoReparsePointInExistingPath(root, "run-scoped staged Agent root");
+        RejectTreeReparsePoints(root, "run-scoped staged Agent root");
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The staged E2E cleanup identity has no SID for owned-root validation.");
+        VerifyProtectedFileSystemAcl(
+            FileSystemAclExtensions.GetAccessControl(
+                new DirectoryInfo(root),
+                AccessControlSections.Owner | AccessControlSections.Access),
+            currentSid,
+            "run-scoped staged Agent root");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyRunScopedOwnedRootForIdentityCleanup(
+        string root,
+        IReadOnlySet<string> allowedAccountSids)
+    {
+        ArgumentNullException.ThrowIfNull(allowedAccountSids);
+        foreach (var sid in allowedAccountSids)
+        {
+            _ = new SecurityIdentifier(sid);
+        }
+
+        if (!Directory.Exists(root))
+        {
+            if (File.Exists(root))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent root '{root}' is a file; preserving it.");
+            }
+
+            return;
+        }
+
+        EnsureNoReparsePointInExistingPath(root, "run-scoped staged Agent identity root");
+        RejectTreeReparsePoints(root, "run-scoped staged Agent identity root");
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The staged E2E cleanup identity has no SID for identity-root validation.");
+        VerifyProtectedFileSystemAcl(
+            FileSystemAclExtensions.GetAccessControl(
+                new DirectoryInfo(root),
+                AccessControlSections.Owner | AccessControlSections.Access),
+            currentSid,
+            "run-scoped staged Agent identity root",
+            allowedAccountSids);
+    }
+
+    private static List<string> RejectTreeReparsePoints(
+        string root,
+        string name)
+    {
+        var proven = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            foreach (var path in Directory.EnumerateFileSystemEntries(
+                         directory,
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                var attributes = File.GetAttributes(path);
+                if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    throw new InvalidDataException(
+                        $"{name} contains a reparse point: {path}");
+                }
+
+                proven.Add(path);
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    pending.Push(path);
+                }
+            }
+        }
+
+        return proven;
+    }
+
+    private static void EnsureNoReparsePointInExistingPath(string path, string name)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if ((File.Exists(fullPath) || Directory.Exists(fullPath))
+            && File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new InvalidDataException(
+                $"{name} is a reparse point: {fullPath}");
+        }
+
+        var current = File.Exists(fullPath)
+            ? Path.GetDirectoryName(fullPath)
+            : fullPath;
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint))
+            {
+                throw new InvalidDataException(
+                    $"{name} traverses a reparse point: {current}");
+            }
+
+            current = Path.GetDirectoryName(current);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyCleanupManifestAcl(string manifestPath)
+    {
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The cleanup process identity has no SID.");
+        var security = FileSystemAclExtensions.GetAccessControl(
+            new FileInfo(manifestPath),
+            AccessControlSections.Owner | AccessControlSections.Access);
+        VerifyProtectedFileSystemAcl(
+            security,
+            currentSid,
+            "Agent service cleanup manifest");
+    }
+
+    private static string RequireCanonicalAbsolutePath(string value, string name)
+    {
+        if (!Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidDataException($"{name} must be a canonical absolute path.");
+        }
+
+        var canonical = Path.GetFullPath(value);
+        return string.Equals(canonical, value, StringComparison.OrdinalIgnoreCase)
+            ? canonical
+            : throw new InvalidDataException($"{name} must be canonical.");
+    }
+
+    private static string RequireLowerHexScope(string? value, string name) =>
+        RequireLowerHex(RequiredText(value, name), 32, name);
+
+    private static string RequireLowerHex(string value, int length, string name)
+    {
+        if (value.Length != length
+            || value.Any(static character =>
+                character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        {
+            throw new InvalidDataException(
+                $"{name} must contain exactly {length} lowercase hexadecimal characters.");
+        }
+
+        return value;
+    }
+
+    private static string AgentServiceScopedSuffix(string role, string scope) =>
+        Convert.ToHexStringLower(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{role}:{scope}")))[..32];
+
+    private static void RequireExactJsonProperties(
+        JsonElement element,
+        string name,
+        params string[] expected)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException($"{name} must be an object.");
+        }
+
+        var actual = element.EnumerateObject().Select(static property => property.Name).ToArray();
+        if (!actual.SequenceEqual(expected, StringComparer.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{name} properties are missing, unknown, duplicated, or out of canonical order.");
+        }
+    }
+
+    private static string RequiredJsonString(JsonElement element, string propertyName)
+    {
+        var value = element.GetProperty(propertyName);
+        return value.ValueKind == JsonValueKind.String
+               && value.GetString() is { Length: > 0 } text
+            ? text
+            : throw new InvalidDataException(
+                $"Agent service cleanup manifest '{propertyName}' must be a non-empty string.");
+    }
+
+    private static int RequiredJsonInt32(JsonElement element, string propertyName)
+    {
+        var value = element.GetProperty(propertyName);
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var result)
+            ? result
+            : throw new InvalidDataException(
+                $"Agent service cleanup manifest '{propertyName}' must be an Int32.");
     }
 
     private static StagedPrerequisites? ResolvePrerequisites()
@@ -1503,6 +2587,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string outageControlMode,
         bool coordinatorTransportResultInboxRestartedAfterBrokerRecovery,
         RestrictedAgentIdentity agentIdentity,
+        string windowsServiceName,
+        bool windowsServiceLifecycleVerified,
         AgentHostTokenEvidence initialAgentTokenEvidence,
         AgentHostTokenEvidence restartedAgentTokenEvidence)
     {
@@ -1571,6 +2657,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     brokerOutageVerified = true,
                     outageControlMode,
                     coordinatorTransportResultInboxRestartedAfterBrokerRecovery,
+                    windowsServiceName,
+                    windowsServiceLifecycleVerified,
                     agentHostIdentity = TokenProjection(
                         initialAgentTokenEvidence,
                         agentIdentity),
@@ -1844,6 +2932,23 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string SamplePluginRoot,
         string ApiBundleRoot,
         Uri BrokerUri);
+
+    private sealed record AgentServiceCleanupContract(
+        string ManifestPath,
+        string Kind,
+        string Scope,
+        IReadOnlyList<AgentServiceCleanupEntry> Entries);
+
+    private sealed record AgentServiceCleanupEntry(
+        string Role,
+        string ServiceSuffix,
+        string AccountSuffix,
+        string ServiceName,
+        string AccountName,
+        string? AccountSid,
+        string ExecutablePath,
+        string ExecutableSha256,
+        string OwnedRoot);
 
     private sealed record ArtifactApiCredentials(
         string AgentId,
@@ -2145,7 +3250,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         public bool NonAdministrative =>
             IsPrimaryToken
             && !IsElevated
+            && !AdministratorGroupPresent
             && !AdministratorGroupEnabled
+            && !AdministratorGroupDenyOnly
             && !PrincipalAdministratorMembership
             && IsAuthenticated
             && !IsSystem;
@@ -2207,28 +3314,34 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint AccessDenied = 5;
         private const uint UserNotFound = 2221;
         private const uint MemberAlreadyInAlias = 1378;
-        private const string TemporaryStandardAccountStrategy =
-            "temporary-standard-account";
-        private const string InheritedUacFilteredTokenStrategy =
-            "inherited-uac-filtered-token";
+        private const uint PolicyCreateAccount = 0x00000010;
+        private const uint PolicyLookupNames = 0x00000800;
+        private const uint StatusObjectNameNotFound = 0xC0000034;
+        private const string ServiceLogonRight = "SeServiceLogonRight";
+        private const string TemporaryStandardServiceAccountStrategy =
+            "temporary-standard-service-account";
+        private const string TemporaryStandardServiceAccountComment =
+            "Temporary OpenLineOps staged Agent E2E identity";
 
         private readonly List<GrantedDirectoryAccess> _grantedAccess = [];
-        private readonly string? _userName;
-        private readonly string? _password;
+        private readonly string _userName;
+        private readonly string _password;
+        private string? _unprovenInstalledServiceName;
+        private bool _serviceLogonRightGranted;
         private bool _disposed;
 
         private RestrictedAgentIdentity(
             string accountName,
             string sid,
-            string? userName,
-            string? password,
-            string strategy)
+            string userName,
+            string password)
         {
             AccountName = accountName;
             Sid = sid;
             _userName = userName;
             _password = password;
-            Strategy = strategy;
+            Strategy = TemporaryStandardServiceAccountStrategy;
+            _serviceLogonRightGranted = true;
         }
 
         public string AccountName { get; }
@@ -2237,18 +3350,52 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public string Strategy { get; }
 
-        public bool RequiresSharedTestRoot => _userName is not null;
+        internal string UserName => _userName;
 
-        internal string? UserName => _userName;
+        internal string Password => _password;
 
-        internal string? Password => _password;
+        internal string ServiceAccountName => $".\\{_userName}";
 
-        internal string? Domain => _userName is null ? null : Environment.MachineName;
+        internal bool HasUnprovenServiceInstallation =>
+            _unprovenInstalledServiceName is not null;
 
-        public static RestrictedAgentIdentity CreateRequired(
-            string suffix,
-            bool allowInheritedUacFilteredIdentity = true)
+        internal void MarkServiceInstalled(string serviceName)
         {
+            if (_unprovenInstalledServiceName is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent identity '{AccountName}' is already bound to unproven service '{_unprovenInstalledServiceName}'.");
+            }
+
+            _unprovenInstalledServiceName = serviceName;
+        }
+
+        internal void MarkServiceDeletionProven(string serviceName)
+        {
+            if (!string.Equals(
+                    _unprovenInstalledServiceName,
+                    serviceName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent identity '{AccountName}' is not bound to service '{serviceName}'.");
+            }
+
+            _unprovenInstalledServiceName = null;
+        }
+
+        public static RestrictedAgentIdentity CreateRequired(string suffix)
+        {
+            if (suffix.Length != 32
+                || suffix.Any(static character =>
+                    character is not (>= '0' and <= '9')
+                        and not (>= 'a' and <= 'f')))
+            {
+                throw new ArgumentException(
+                    "The staged Agent service-account suffix must contain exactly 32 lowercase hexadecimal characters.",
+                    nameof(suffix));
+            }
+
             var userName = $"oloe2e{suffix[..10]}";
             var password = $"Aa1!{Convert.ToHexString(RandomNumberGenerator.GetBytes(12))}";
             var user = new UserInfo1
@@ -2257,72 +3404,167 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 Password = password,
                 Privilege = UserPrivilegeUser,
                 Flags = UserFlagScript | UserFlagNormalAccount | UserFlagPasswordDoesNotExpire,
-                Comment = "Temporary OpenLineOps staged Agent E2E identity"
+                Comment = TemporaryStandardServiceAccountComment
             };
             var status = NetUserAdd(null, 1, ref user, out var parameterError);
-            if (status == AccessDenied)
+            if (status != Success)
             {
-                if (!allowInheritedUacFilteredIdentity)
-                {
-                    throw new InvalidOperationException(
-                        "The formal two-Agent production gate requires permission to provision "
-                        + "two distinct temporary standard Windows accounts; NetUserAdd was denied.");
-                }
+                throw new InvalidOperationException(
+                    status == AccessDenied
+                        ? "The formal staged Agent service gate requires elevated permission to provision its temporary standard Windows service account; NetUserAdd was denied."
+                        : $"Could not provision the staged Agent standard service account (NetUserAdd {status}, parameter {parameterError}).");
+            }
 
-                using var currentIdentity = WindowsIdentity.GetCurrent(
-                    TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
-                var currentSid = currentIdentity.User
-                                 ?? throw new InvalidOperationException(
-                                     "The staged Agent E2E Windows identity has no SID.");
-                var currentToken = WindowsAgentProcess.ReadCurrentProcessTokenEvidence();
-                if (!string.Equals(
-                        currentToken.UserSid,
-                        currentSid.Value,
-                        StringComparison.Ordinal)
-                    || !currentToken.NonAdministrative
-                    || !currentToken.AdministratorGroupPresent
-                    || !currentToken.AdministratorGroupDenyOnly)
-                {
-                    throw new InvalidOperationException(
-                        "NetUserAdd was denied and the current process token did not prove "
-                        + "an authenticated, primary, non-elevated UAC-filtered identity "
-                        + "with the Administrators group deny-only. "
-                        + JsonSerializer.Serialize(currentToken));
-                }
-
+            SecurityIdentifier? sid = null;
+            try
+            {
+                sid = (SecurityIdentifier)new NTAccount(
+                        Environment.MachineName,
+                        userName)
+                    .Translate(typeof(SecurityIdentifier));
+                UpdateCleanupManifestAccountSid(suffix, userName, sid.Value);
+                AddToBuiltinUsers(sid);
+                GrantServiceLogonRight(sid);
                 return new RestrictedAgentIdentity(
-                    currentIdentity.Name,
-                    currentSid.Value,
-                    null,
-                    null,
-                    InheritedUacFilteredTokenStrategy);
+                    $"{Environment.MachineName}\\{userName}",
+                    sid.Value,
+                    userName,
+                    password);
+            }
+            catch (Exception exception)
+            {
+                var failures = new List<Exception> { exception };
+                if (sid is not null)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => RemoveServiceLogonRightIfPresent(sid));
+                }
+
+                if (failures.Count == 1)
+                {
+                    if (sid is null)
+                    {
+                        failures.Add(new InvalidOperationException(
+                            $"Could not bind staged Agent account '{userName}' to its exact SID; preserving it for diagnosis."));
+                    }
+                    else
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteExactAccountRequired(userName, sid.Value));
+                    }
+                }
+
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        "Staged Agent service-account creation failed and rollback was incomplete.",
+                        failures);
+                }
+
+                ExceptionDispatchInfo.Capture(exception).Throw();
+                throw;
+            }
+        }
+
+        public static RunScopedIdentity? ReadRunScopedIdentity(
+            string accountName,
+            string? recordedSid)
+        {
+            ValidateRunScopedAccountName(accountName);
+            var status = NetUserGetInfo(null, accountName, 1, out var buffer);
+            if (status == UserNotFound)
+            {
+                return recordedSid is null
+                    ? null
+                    : new RunScopedIdentity(accountName, recordedSid, AccountExists: false);
             }
 
             if (status != Success)
             {
                 throw new InvalidOperationException(
-                    $"Could not provision the staged Agent standard account (NetUserAdd {status}, parameter {parameterError}).");
+                    $"Could not inspect run-scoped staged Agent account '{accountName}' (NetUserGetInfo {status}).");
             }
 
+            UserInfo1 user;
+            uint freeStatus;
             try
             {
-                var sid = (SecurityIdentifier)new NTAccount(
-                        Environment.MachineName,
-                        userName)
-                    .Translate(typeof(SecurityIdentifier));
-                AddToBuiltinUsers(sid);
-                return new RestrictedAgentIdentity(
-                    $"{Environment.MachineName}\\{userName}",
-                    sid.Value,
-                    userName,
-                    password,
-                    TemporaryStandardAccountStrategy);
+                user = Marshal.PtrToStructure<UserInfo1>(buffer);
             }
-            catch
+            finally
             {
-                _ = NetUserDel(null, userName);
-                throw;
+                freeStatus = NetApiBufferFree(buffer);
             }
+
+            if (freeStatus != Success)
+            {
+                throw new InvalidOperationException(
+                    $"Could not release NetUserGetInfo memory (NetApiBufferFree {freeStatus}).");
+            }
+
+            if (!string.Equals(user.Name, accountName, StringComparison.Ordinal)
+                || user.Privilege != UserPrivilegeUser
+                || (user.Flags & UserFlagNormalAccount) == 0
+                || !string.Equals(
+                    user.Comment,
+                    TemporaryStandardServiceAccountComment,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped account '{accountName}' does not match the exact temporary service-account contract.");
+            }
+
+            if (recordedSid is null)
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped account '{accountName}' exists before its exact SID was committed to the protected cleanup manifest; preserving it for diagnosis.");
+            }
+
+            var sid = (SecurityIdentifier)new NTAccount(
+                    Environment.MachineName,
+                    accountName)
+                .Translate(typeof(SecurityIdentifier));
+            if (recordedSid is not null
+                && !string.Equals(recordedSid, sid.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped account '{accountName}' SID differs from its protected cleanup manifest.");
+            }
+
+            return new RunScopedIdentity(accountName, sid.Value, AccountExists: true);
+        }
+
+        public static void CleanupRunScoped(
+            RunScopedIdentity? identity,
+            string expectedAccountName,
+            string ownedRoot,
+            IReadOnlySet<string> allowedRootSids)
+        {
+            ArgumentNullException.ThrowIfNull(allowedRootSids);
+            ValidateRunScopedAccountName(expectedAccountName);
+            if (identity is null)
+            {
+                EnsureAccountAbsent(expectedAccountName);
+                return;
+            }
+
+            if (!string.Equals(
+                    identity.AccountName,
+                    expectedAccountName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Run-scoped staged Agent identity differs from its cleanup manifest account.");
+            }
+
+            var sid = new SecurityIdentifier(identity.Sid);
+            VerifyRunScopedOwnedRootForIdentityCleanup(ownedRoot, allowedRootSids);
+            RemoveExactSidAccessRules(ownedRoot, sid);
+            RemoveServiceLogonRightIfPresent(sid);
+            DeleteProfileRequired(identity.Sid, expectedAccountName);
+            DeleteExactAccountRequired(expectedAccountName, identity.Sid);
         }
 
         public void GrantDirectoryAccess(
@@ -2331,11 +3573,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             InheritanceFlags inheritanceFlags =
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
         {
-            if (_userName is null)
-            {
-                return;
-            }
-
             var directory = new DirectoryInfo(Path.GetFullPath(path));
             if (!directory.Exists)
             {
@@ -2362,58 +3599,344 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 return;
             }
 
-            _disposed = true;
-            var failures = new List<Exception>();
-            if (_userName is not null)
+            if (_unprovenInstalledServiceName is not null)
             {
-                foreach (var granted in _grantedAccess.AsEnumerable().Reverse())
-                {
-                    CaptureCleanupFailure(
-                        failures,
-                        () =>
-                        {
-                            if (!Directory.Exists(granted.Path))
-                            {
-                                return;
-                            }
+                throw new InvalidOperationException(
+                    $"Staged Agent service '{_unprovenInstalledServiceName}' deletion is unproven; preserving its account, SeServiceLogonRight, profile, and ACLs for safe diagnosis.");
+            }
 
-                            var directory = new DirectoryInfo(granted.Path);
-                            var security = FileSystemAclExtensions.GetAccessControl(directory);
-                            security.RemoveAccessRuleSpecific(granted.Rule);
-                            FileSystemAclExtensions.SetAccessControl(directory, security);
-                        });
-                }
-
+            var failures = new List<Exception>();
+            foreach (var granted in _grantedAccess.AsEnumerable().Reverse())
+            {
                 CaptureCleanupFailure(
                     failures,
                     () =>
                     {
-                        if (DeleteProfile(Sid, null, null))
+                        if (!Directory.Exists(granted.Path))
                         {
                             return;
                         }
 
-                        var error = Marshal.GetLastWin32Error();
-                        if (error is not 2 and not 3)
-                        {
-                            throw new Win32Exception(
-                                error,
-                                $"Could not delete the temporary staged Agent profile for SID {Sid}.");
-                        }
-                    });
-                CaptureCleanupFailure(
-                    failures,
-                    () =>
-                    {
-                        var status = NetUserDel(null, _userName);
-                        if (status is not Success and not UserNotFound)
-                        {
-                            throw new InvalidOperationException(
-                                $"Could not delete the temporary staged Agent account '{_userName}' (NetUserDel {status}).");
-                        }
+                        var directory = new DirectoryInfo(granted.Path);
+                        var security = FileSystemAclExtensions.GetAccessControl(directory);
+                        security.RemoveAccessRuleSpecific(granted.Rule);
+                        FileSystemAclExtensions.SetAccessControl(directory, security);
                     });
             }
 
+            ThrowIdentityCleanupFailures(
+                failures,
+                "Staged Agent ACL cleanup failed; preserving its SeServiceLogonRight, profile, and account.");
+            _grantedAccess.Clear();
+
+            if (_serviceLogonRightGranted)
+            {
+                RemoveServiceLogonRight(new SecurityIdentifier(Sid));
+                _serviceLogonRightGranted = false;
+            }
+
+            DeleteProfileRequired(Sid, _userName);
+            DeleteExactAccountRequired(_userName, Sid);
+
+            _disposed = true;
+        }
+
+        private static void RemoveExactSidAccessRules(
+            string ownedRoot,
+            SecurityIdentifier sid)
+        {
+            if (!Directory.Exists(ownedRoot))
+            {
+                return;
+            }
+
+            EnsureNoReparsePointInExistingPath(ownedRoot, "run-scoped staged Agent ACL root");
+            var paths = RejectTreeReparsePoints(
+                    ownedRoot,
+                    "run-scoped staged Agent ACL root")
+                .OrderByDescending(static path => path.Length)
+                .Append(ownedRoot)
+                .ToArray();
+            foreach (var path in paths)
+            {
+                if (Directory.Exists(path))
+                {
+                    var directory = new DirectoryInfo(path);
+                    var security = FileSystemAclExtensions.GetAccessControl(directory);
+                    security.PurgeAccessRules(sid);
+                    FileSystemAclExtensions.SetAccessControl(directory, security);
+                }
+                else if (File.Exists(path))
+                {
+                    var file = new FileInfo(path);
+                    var security = FileSystemAclExtensions.GetAccessControl(file);
+                    security.PurgeAccessRules(sid);
+                    FileSystemAclExtensions.SetAccessControl(file, security);
+                }
+            }
+
+            foreach (var path in paths)
+            {
+                FileSystemSecurity security = Directory.Exists(path)
+                    ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
+                    : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+                var rules = security.GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: true,
+                    typeof(SecurityIdentifier));
+                if (rules.Cast<FileSystemAccessRule>().Any(rule =>
+                        rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(identity.Value, sid.Value, StringComparison.Ordinal)))
+                {
+                    throw new InvalidOperationException(
+                        $"Run-scoped staged Agent SID '{sid.Value}' still has an ACL entry on '{path}'.");
+                }
+            }
+        }
+
+        private static void ValidateRunScopedAccountName(string accountName)
+        {
+            if (accountName.Length != 16
+                || !accountName.StartsWith("oloe2e", StringComparison.Ordinal)
+                || accountName[6..].Any(static character =>
+                    character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            {
+                throw new InvalidDataException(
+                    "Run-scoped staged Agent account name is not canonical.");
+            }
+        }
+
+        private static void EnsureAccountAbsent(string accountName)
+        {
+            var status = NetUserGetInfo(null, accountName, 1, out var buffer);
+            if (status == Success)
+            {
+                _ = NetApiBufferFree(buffer);
+                throw new InvalidOperationException(
+                    $"Run-scoped staged Agent account '{accountName}' still exists after cleanup.");
+            }
+
+            if (status != UserNotFound)
+            {
+                throw new InvalidOperationException(
+                    $"Could not prove deletion of run-scoped staged Agent account '{accountName}' (NetUserGetInfo {status}).");
+            }
+        }
+
+        private static void DeleteExactAccountRequired(
+            string accountName,
+            string expectedSid)
+        {
+            _ = new SecurityIdentifier(expectedSid);
+            var currentIdentity = ReadRunScopedIdentity(accountName, expectedSid)
+                                  ?? throw new InvalidOperationException(
+                                      $"Could not bind run-scoped staged Agent account '{accountName}' to its exact SID immediately before deletion.");
+            if (!currentIdentity.AccountExists)
+            {
+                EnsureAccountAbsent(accountName);
+                return;
+            }
+
+            var status = NetUserDel(null, accountName);
+            if (status is not Success and not UserNotFound)
+            {
+                throw new InvalidOperationException(
+                    $"Could not delete the exact run-scoped staged Agent account '{accountName}' (NetUserDel {status}).");
+            }
+
+            EnsureAccountAbsent(accountName);
+        }
+
+        private static void DeleteProfileRequired(string sid, string accountName)
+        {
+            const string profileListRegistryPath =
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+            var profileRegistryPath = profileListRegistryPath + "\\" + sid;
+            string? registeredProfilePath;
+            using (var key = Registry.LocalMachine.OpenSubKey(
+                       profileRegistryPath,
+                       writable: false))
+            {
+                var registeredProfileValue = key?.GetValue(
+                    "ProfileImagePath",
+                    defaultValue: null,
+                    RegistryValueOptions.DoNotExpandEnvironmentNames);
+                if (registeredProfileValue is not null
+                    && registeredProfileValue is not string)
+                {
+                    throw new InvalidDataException(
+                        $"Run-scoped staged Agent profile for SID '{sid}' has a non-string ProfileImagePath.");
+                }
+
+                registeredProfilePath = registeredProfileValue as string;
+            }
+
+            if (registeredProfilePath is not null)
+            {
+                if (string.IsNullOrWhiteSpace(registeredProfilePath))
+                {
+                    throw new InvalidDataException(
+                        $"Run-scoped staged Agent profile for SID '{sid}' has an empty ProfileImagePath.");
+                }
+
+                registeredProfilePath = Environment.ExpandEnvironmentVariables(
+                    registeredProfilePath);
+                if (!Path.IsPathFullyQualified(registeredProfilePath))
+                {
+                    throw new InvalidDataException(
+                        $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not absolute.");
+                }
+
+                registeredProfilePath = Path.TrimEndingDirectorySeparator(
+                    Path.GetFullPath(registeredProfilePath));
+            }
+
+            string profilesDirectory;
+            using (var profileListKey = Registry.LocalMachine.OpenSubKey(
+                       profileListRegistryPath,
+                       writable: false)
+                   ?? throw new InvalidOperationException(
+                       "The Windows ProfileList registry key is missing."))
+            {
+                profilesDirectory = profileListKey.GetValue(
+                        "ProfilesDirectory",
+                        defaultValue: null,
+                        RegistryValueOptions.DoNotExpandEnvironmentNames) as string
+                    ?? throw new InvalidOperationException(
+                        "The Windows ProfileList ProfilesDirectory value is missing or is not a string.");
+            }
+
+            profilesDirectory = Environment.ExpandEnvironmentVariables(profilesDirectory);
+            if (string.IsNullOrWhiteSpace(profilesDirectory)
+                || !Path.IsPathFullyQualified(profilesDirectory))
+            {
+                throw new InvalidDataException(
+                    "The Windows ProfileList ProfilesDirectory value is not an absolute path.");
+            }
+
+            var userProfilesRoot = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(profilesDirectory));
+            if (!Directory.Exists(userProfilesRoot))
+            {
+                throw new DirectoryNotFoundException(
+                    $"The configured Windows user-profile root '{userProfilesRoot}' does not exist.");
+            }
+
+            EnsureNoReparsePointInExistingPath(
+                userProfilesRoot,
+                "configured Windows user-profile root");
+            var expectedDefaultProfilePath = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(Path.Combine(userProfilesRoot, accountName)));
+            if (!string.Equals(
+                    Path.GetDirectoryName(expectedDefaultProfilePath),
+                    userProfilesRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    Path.GetFileName(expectedDefaultProfilePath),
+                    accountName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"The expected profile path for account '{accountName}' is not a direct child of the configured profile root.");
+            }
+
+            if (registeredProfilePath is not null
+                && !string.Equals(
+                    registeredProfilePath,
+                    expectedDefaultProfilePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not the exact direct profile for account '{accountName}'.");
+            }
+
+            if (registeredProfilePath is not null
+                && (Directory.Exists(registeredProfilePath) || File.Exists(registeredProfilePath)))
+            {
+                EnsureNoReparsePointInExistingPath(
+                    registeredProfilePath,
+                    "run-scoped staged Agent profile path");
+            }
+
+            const int maximumAttempts = 30;
+            var error = 0;
+            for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                if (DeleteProfile(sid, null, null))
+                {
+                    VerifyProfileAbsent(
+                        profileRegistryPath,
+                        registeredProfilePath,
+                        expectedDefaultProfilePath,
+                        sid);
+                    return;
+                }
+
+                error = Marshal.GetLastWin32Error();
+                if (error is 2 or 3)
+                {
+                    VerifyProfileAbsent(
+                        profileRegistryPath,
+                        registeredProfilePath,
+                        expectedDefaultProfilePath,
+                        sid);
+                    return;
+                }
+
+                if (attempt < maximumAttempts)
+                {
+                    Thread.Sleep(TimeSpan.FromMilliseconds(100));
+                }
+            }
+
+            throw new Win32Exception(
+                error,
+                $"Could not delete the temporary staged Agent service profile for SID {sid} after bounded retries; preserving the account for retry.");
+        }
+
+        private static void VerifyProfileAbsent(
+            string profileRegistryPath,
+            string? registeredProfilePath,
+            string expectedDefaultProfilePath,
+            string sid)
+        {
+            const int maximumAttempts = 30;
+            for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                var registryAbsent = false;
+                using (var key = Registry.LocalMachine.OpenSubKey(
+                           profileRegistryPath,
+                           writable: false))
+                {
+                    registryAbsent = key is null;
+                }
+
+                var pathAbsent = new[]
+                    {
+                        registeredProfilePath,
+                        expectedDefaultProfilePath
+                    }.Where(static path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .All(path => !Directory.Exists(path) && !File.Exists(path));
+                if (registryAbsent && pathAbsent)
+                {
+                    return;
+                }
+
+                if (attempt < maximumAttempts)
+                {
+                    Thread.Sleep(TimeSpan.FromMilliseconds(100));
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"Run-scoped staged Agent profile residue for SID '{sid}' remained in ProfileList or its exact profile directory after bounded verification.");
+        }
+
+        private static void ThrowIdentityCleanupFailures(
+            List<Exception> failures,
+            string message)
+        {
             if (failures.Count == 1)
             {
                 ExceptionDispatchInfo.Capture(failures[0]).Throw();
@@ -2421,9 +3944,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             if (failures.Count > 1)
             {
-                throw new AggregateException(
-                    "One or more staged Agent identity cleanup steps failed.",
-                    failures);
+                throw new AggregateException(message, failures);
             }
         }
 
@@ -2459,6 +3980,222 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
         }
 
+        private static void GrantServiceLogonRight(SecurityIdentifier userSid) =>
+            ChangeAccountRight(userSid, add: true);
+
+        private static void RemoveServiceLogonRight(SecurityIdentifier userSid) =>
+            ChangeAccountRight(userSid, add: false);
+
+        private static void RemoveServiceLogonRightIfPresent(SecurityIdentifier userSid)
+        {
+            var attributes = new LsaObjectAttributes
+            {
+                Length = checked((uint)Marshal.SizeOf<LsaObjectAttributes>())
+            };
+            var status = LsaOpenPolicy(
+                IntPtr.Zero,
+                ref attributes,
+                PolicyLookupNames,
+                out var policy);
+            if (status != 0)
+            {
+                policy.Dispose();
+                ThrowIfLsaFailed(
+                    status,
+                    "Could not open Local Security Policy for run-scoped staged Agent cleanup.");
+            }
+
+            using (policy)
+            {
+                var sidBytes = new byte[userSid.BinaryLength];
+                userSid.GetBinaryForm(sidBytes, 0);
+                var sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
+                var rightBuffer = Marshal.StringToHGlobalUni(ServiceLogonRight);
+                try
+                {
+                    Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
+                    if (!HasAccountRight(policy, sidPointer, ServiceLogonRight))
+                    {
+                        return;
+                    }
+
+                    var right = new LsaUnicodeString
+                    {
+                        Length = checked((ushort)(ServiceLogonRight.Length * sizeof(char))),
+                        MaximumLength = checked((ushort)((ServiceLogonRight.Length + 1) * sizeof(char))),
+                        Buffer = rightBuffer
+                    };
+                    status = LsaRemoveAccountRights(
+                        policy,
+                        sidPointer,
+                        removeAllRights: false,
+                        [right],
+                        1);
+                    ThrowIfLsaFailed(
+                        status,
+                        $"Could not remove {ServiceLogonRight} from run-scoped staged Agent account '{userSid.Value}'.");
+                    if (HasAccountRight(policy, sidPointer, ServiceLogonRight))
+                    {
+                        throw new InvalidOperationException(
+                            $"Run-scoped staged Agent account '{userSid.Value}' still owns {ServiceLogonRight} after cleanup.");
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(rightBuffer);
+                    Marshal.FreeHGlobal(sidPointer);
+                }
+            }
+        }
+
+        private static void ChangeAccountRight(
+            SecurityIdentifier userSid,
+            bool add)
+        {
+            var attributes = new LsaObjectAttributes
+            {
+                Length = checked((uint)Marshal.SizeOf<LsaObjectAttributes>())
+            };
+            var status = LsaOpenPolicy(
+                IntPtr.Zero,
+                ref attributes,
+                PolicyLookupNames | (add ? PolicyCreateAccount : 0),
+                out var policy);
+            if (status != 0)
+            {
+                policy.Dispose();
+                ThrowIfLsaFailed(
+                    status,
+                    "Could not open Local Security Policy for the staged Agent service account.");
+            }
+            using (policy)
+            {
+                var sidBytes = new byte[userSid.BinaryLength];
+                userSid.GetBinaryForm(sidBytes, 0);
+                var sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
+                var rightBuffer = Marshal.StringToHGlobalUni(ServiceLogonRight);
+                try
+                {
+                    Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
+                    var right = new LsaUnicodeString
+                    {
+                        Length = checked((ushort)(ServiceLogonRight.Length * sizeof(char))),
+                        MaximumLength = checked((ushort)((ServiceLogonRight.Length + 1) * sizeof(char))),
+                        Buffer = rightBuffer
+                    };
+                    var rightPresentBefore = HasAccountRight(
+                        policy,
+                        sidPointer,
+                        ServiceLogonRight);
+                    if (rightPresentBefore != !add)
+                    {
+                        throw new InvalidOperationException(
+                            add
+                                ? $"Fresh staged Agent account '{userSid.Value}' unexpectedly already owns {ServiceLogonRight}."
+                                : $"Staged Agent account '{userSid.Value}' no longer owns the {ServiceLogonRight} grant that this test must remove.");
+                    }
+
+                    status = add
+                        ? LsaAddAccountRights(policy, sidPointer, [right], 1)
+                        : LsaRemoveAccountRights(
+                            policy,
+                            sidPointer,
+                            removeAllRights: false,
+                            [right],
+                            1);
+                    ThrowIfLsaFailed(
+                        status,
+                        add
+                            ? $"Could not grant {ServiceLogonRight} to staged Agent account '{userSid.Value}'."
+                            : $"Could not remove {ServiceLogonRight} from staged Agent account '{userSid.Value}'.");
+                    var rightPresentAfter = HasAccountRight(
+                        policy,
+                        sidPointer,
+                        ServiceLogonRight);
+                    if (rightPresentAfter != add)
+                    {
+                        throw new InvalidOperationException(
+                            $"Local Security Policy did not persist the required {(add ? "grant" : "removal")} of {ServiceLogonRight} for '{userSid.Value}'.");
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(rightBuffer);
+                    Marshal.FreeHGlobal(sidPointer);
+                }
+            }
+        }
+
+        private static bool HasAccountRight(
+            SafeLsaPolicyHandle policy,
+            IntPtr accountSid,
+            string expectedRight)
+        {
+            var status = LsaEnumerateAccountRights(
+                policy,
+                accountSid,
+                out var rights,
+                out var count);
+            if (status == StatusObjectNameNotFound)
+            {
+                return false;
+            }
+
+            ThrowIfLsaFailed(
+                status,
+                "Could not enumerate staged Agent service-account rights.");
+            var present = false;
+            uint freeStatus = 0;
+            try
+            {
+                var stride = Marshal.SizeOf<LsaUnicodeString>();
+                for (var index = 0u; index < count; index++)
+                {
+                    var right = Marshal.PtrToStructure<LsaUnicodeString>(
+                        IntPtr.Add(rights, checked((int)index * stride)));
+                    var name = right.Buffer == IntPtr.Zero
+                        ? null
+                        : Marshal.PtrToStringUni(
+                            right.Buffer,
+                            right.Length / sizeof(char));
+                    if (string.Equals(name, expectedRight, StringComparison.Ordinal))
+                    {
+                        present = true;
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                if (rights != IntPtr.Zero)
+                {
+                    freeStatus = LsaFreeMemory(rights);
+                }
+            }
+
+            if (freeStatus != 0)
+            {
+                throw new Win32Exception(
+                    checked((int)LsaNtStatusToWinError(freeStatus)),
+                    "Could not release staged Agent LSA account-rights memory.");
+            }
+
+            return present;
+        }
+
+        private static void ThrowIfLsaFailed(uint status, string message)
+        {
+            if (status == 0)
+            {
+                return;
+            }
+
+            var win32Error = LsaNtStatusToWinError(status);
+            throw new Win32Exception(
+                checked((int)win32Error),
+                $"{message} (NTSTATUS 0x{status:x8}, Win32 error {win32Error}).");
+        }
+
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern uint NetUserAdd(
             string? serverName,
@@ -2470,12 +4207,57 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private static extern uint NetUserDel(string? serverName, string userName);
 
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint NetUserGetInfo(
+            string? serverName,
+            string userName,
+            uint level,
+            out IntPtr buffer);
+
+        [DllImport("netapi32.dll")]
+        private static extern uint NetApiBufferFree(IntPtr buffer);
+
+        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern uint NetLocalGroupAddMembers(
             string? serverName,
             string groupName,
             uint level,
             ref LocalGroupMembersInfo0 buffer,
             uint totalEntries);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(
+            IntPtr systemName,
+            ref LsaObjectAttributes objectAttributes,
+            uint desiredAccess,
+            out SafeLsaPolicyHandle policyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaAddAccountRights(
+            SafeLsaPolicyHandle policyHandle,
+            IntPtr accountSid,
+            [In] LsaUnicodeString[] userRights,
+            uint countOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaRemoveAccountRights(
+            SafeLsaPolicyHandle policyHandle,
+            IntPtr accountSid,
+            [MarshalAs(UnmanagedType.U1)] bool removeAllRights,
+            [In] LsaUnicodeString[] userRights,
+            uint countOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaEnumerateAccountRights(
+            SafeLsaPolicyHandle policyHandle,
+            IntPtr accountSid,
+            out IntPtr userRights,
+            out uint countOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaFreeMemory(IntPtr buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaNtStatusToWinError(uint status);
 
         [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -2503,9 +4285,46 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             public IntPtr Sid;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaObjectAttributes
+        {
+            public uint Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaUnicodeString
+        {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        private sealed class SafeLsaPolicyHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeLsaPolicyHandle()
+                : base(ownsHandle: true)
+            {
+            }
+
+            protected override bool ReleaseHandle() => LsaClose(handle) == 0;
+
+            [DllImport("advapi32.dll")]
+            private static extern uint LsaClose(IntPtr policyHandle);
+        }
+
         private sealed record GrantedDirectoryAccess(
             string Path,
             FileSystemAccessRule Rule);
+
+        public sealed record RunScopedIdentity(
+            string AccountName,
+            string Sid,
+            bool AccountExists);
     }
 
     [SupportedOSPlatform("windows")]
@@ -3208,61 +5027,1994 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [SupportedOSPlatform("windows")]
+    private sealed class WindowsAgentService : IDisposable
+    {
+        private const uint ScManagerConnect = 0x0001;
+        private const uint ScManagerCreateService = 0x0002;
+        private const uint DeleteAccess = 0x00010000;
+        private const uint ServiceQueryConfig = 0x0001;
+        private const uint ServiceQueryStatus = 0x0004;
+        private const uint ServiceStart = 0x0010;
+        private const uint ServiceStop = 0x0020;
+        private const uint ServiceWin32OwnProcess = 0x00000010;
+        private const uint ServiceDemandStart = 0x00000003;
+        private const uint ServiceErrorNormal = 0x00000001;
+        private const uint ServiceControlStop = 0x00000001;
+        private const uint ScStatusProcessInfo = 0;
+        private const uint ServiceConfigFailureActions = 2;
+        private const uint ServiceStopped = 0x00000001;
+        private const uint ServiceStartPending = 0x00000002;
+        private const uint ServiceStopPending = 0x00000003;
+        private const uint ServiceRunning = 0x00000004;
+        private const int ErrorServiceDoesNotExist = 1060;
+        private const int ErrorServiceNotActive = 1062;
+        private const int ErrorServiceAlreadyRunning = 1056;
+        private const int ErrorServiceMarkedForDelete = 1072;
+        private const int ErrorInsufficientBuffer = 122;
+        private const string ServiceRegistryPrefix =
+            @"SYSTEM\CurrentControlSet\Services\";
+        private const string EventLogSourceRegistryPrefix =
+            @"SYSTEM\CurrentControlSet\Services\EventLog\Application\";
+        private static readonly TimeSpan ServiceTransitionTimeout =
+            TimeSpan.FromSeconds(45);
+
+        private readonly object _gate = new();
+        private readonly SafeServiceHandle _serviceControlManager;
+        private SafeServiceHandle? _service;
+        private readonly string[] _environmentEntries;
+        private readonly string _expectedExecutablePath;
+        private readonly string _expectedExecutableSha256;
+        private readonly string _expectedBinaryPath;
+        private readonly string _expectedServiceAccountName;
+        private readonly RestrictedAgentIdentity _identity;
+        private readonly List<uint> _startedProcessIds = [];
+        private readonly List<uint> _cleanlyStoppedProcessIds = [];
+        private SafeProcessHandle? _activeProcessHandle;
+        private uint? _activeProcessId;
+        private bool _disposed;
+
+        private WindowsAgentService(
+            SafeServiceHandle serviceControlManager,
+            SafeServiceHandle service,
+            string serviceName,
+            string[] environmentEntries,
+            string expectedExecutablePath,
+            string expectedExecutableSha256,
+            string expectedBinaryPath,
+            string expectedServiceAccountName,
+            RestrictedAgentIdentity identity)
+        {
+            _serviceControlManager = serviceControlManager;
+            _service = service;
+            ServiceName = serviceName;
+            _environmentEntries = environmentEntries;
+            _expectedExecutablePath = expectedExecutablePath;
+            _expectedExecutableSha256 = expectedExecutableSha256;
+            _expectedBinaryPath = expectedBinaryPath;
+            _expectedServiceAccountName = expectedServiceAccountName;
+            _identity = identity;
+        }
+
+        public string ServiceName { get; }
+
+        public bool DeletionProven { get; private set; }
+
+        public bool LifecycleVerified
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return !_disposed
+                           && _startedProcessIds.Count == 2
+                           && _cleanlyStoppedProcessIds.SequenceEqual(
+                               _startedProcessIds)
+                           && _startedProcessIds.Distinct().Count() == 2
+                           && QueryStatus(RequiredService(), ServiceName).CurrentState
+                           == ServiceStopped;
+                }
+            }
+        }
+
+        public static WindowsAgentService Install(
+            string executablePath,
+            string workingDirectory,
+            IReadOnlyDictionary<string, string> environment,
+            RestrictedAgentIdentity identity,
+            string suffix)
+        {
+            ArgumentNullException.ThrowIfNull(environment);
+            ArgumentNullException.ThrowIfNull(identity);
+            var fullExecutablePath = Path.GetFullPath(executablePath);
+            var fullWorkingDirectory = Path.GetFullPath(workingDirectory);
+            if (!File.Exists(fullExecutablePath))
+            {
+                throw new FileNotFoundException(
+                    "The staged Agent service executable is missing.",
+                    fullExecutablePath);
+            }
+
+            if (!Directory.Exists(fullWorkingDirectory))
+            {
+                throw new DirectoryNotFoundException(
+                    $"The staged Agent service content root '{fullWorkingDirectory}' is missing.");
+            }
+
+            if (!string.Equals(
+                    Path.GetDirectoryName(fullExecutablePath),
+                    fullWorkingDirectory.TrimEnd(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "The staged Agent service executable must be the direct child of its frozen content root.");
+            }
+
+            if (suffix.Length != 32
+                || suffix.Any(static character =>
+                    character is not (>= '0' and <= '9')
+                        and not (>= 'a' and <= 'f')))
+            {
+                throw new ArgumentException(
+                    "The staged Agent service suffix must contain exactly 32 lowercase hexadecimal characters.",
+                    nameof(suffix));
+            }
+
+            var serviceName = $"OpenLineOpsAgentE2E-{suffix}";
+            if (serviceName.Length > 80)
+            {
+                throw new InvalidOperationException(
+                    "The staged Agent dynamic service name exceeds the ServiceBase limit.");
+            }
+
+            var serviceEnvironment = new Dictionary<string, string>(
+                environment,
+                StringComparer.OrdinalIgnoreCase)
+            {
+                ["OpenLineOps__WindowsServiceName"] = serviceName,
+                ["DOTNET_CONTENTROOT"] = fullWorkingDirectory
+            };
+            var environmentEntries = CreateEnvironmentEntries(serviceEnvironment);
+            var executableSha256 = Convert.ToHexStringLower(
+                SHA256.HashData(File.ReadAllBytes(fullExecutablePath)));
+            var binaryPath = QuoteServiceBinaryPath(fullExecutablePath);
+            var manager = OpenSCManager(
+                machineName: null,
+                databaseName: null,
+                ScManagerConnect | ScManagerCreateService);
+            if (manager.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                manager.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "Could not open the Windows Service Control Manager for staged Agent installation.");
+            }
+
+            SafeServiceHandle? service = null;
+            var eventLogSourceRegistered = false;
+            try
+            {
+                service = CreateService(
+                    manager,
+                    serviceName,
+                    serviceName,
+                    DeleteAccess
+                    | ServiceQueryConfig
+                    | ServiceQueryStatus
+                    | ServiceStart
+                    | ServiceStop,
+                    ServiceWin32OwnProcess,
+                    ServiceDemandStart,
+                    ServiceErrorNormal,
+                    binaryPath,
+                    loadOrderGroup: null,
+                    IntPtr.Zero,
+                    dependencies: null,
+                    identity.ServiceAccountName,
+                    identity.Password);
+                if (service.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    service.Dispose();
+                    service = null;
+                    throw new Win32Exception(
+                        error,
+                        $"Could not install staged Agent Windows service '{serviceName}'.");
+                }
+
+                identity.MarkServiceInstalled(serviceName);
+                RegisterEventLogSource(
+                    serviceName,
+                    new SecurityIdentifier(identity.Sid),
+                    out eventLogSourceRegistered);
+                ProtectAndWriteEnvironment(serviceName, environmentEntries);
+                VerifyEnvironment(serviceName, environmentEntries);
+                VerifyConfiguration(
+                    service,
+                    serviceName,
+                    binaryPath,
+                    identity.ServiceAccountName);
+                var owner = new WindowsAgentService(
+                    manager,
+                    service,
+                    serviceName,
+                    environmentEntries,
+                    fullExecutablePath,
+                    executableSha256,
+                    binaryPath,
+                    identity.ServiceAccountName,
+                    identity);
+                service = null;
+                return owner;
+            }
+            catch (Exception exception)
+            {
+                var failures = new List<Exception> { exception };
+                var eventLogSourceDeletionProven = !eventLogSourceRegistered;
+                if (eventLogSourceRegistered)
+                {
+                    var failureCount = failures.Count;
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEventLogSource(
+                            serviceName,
+                            new SecurityIdentifier(identity.Sid)));
+                    eventLogSourceDeletionProven = failures.Count == failureCount;
+                }
+
+                var serviceDeletionRequested = false;
+                if (service is not null && !service.IsInvalid)
+                {
+                    if (eventLogSourceDeletionProven)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteEnvironmentValue(serviceName));
+                        var failureCount = failures.Count;
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteServiceRequired(service, serviceName));
+                        serviceDeletionRequested = failures.Count == failureCount;
+                    }
+                }
+
+                CaptureCleanupFailure(failures, () => service?.Dispose());
+                if (serviceDeletionRequested)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () =>
+                        {
+                            WaitForServiceDeletion(
+                                manager,
+                                serviceName,
+                                TimeSpan.FromSeconds(15));
+                            VerifyEventLogSourceAbsent(serviceName);
+                            identity.MarkServiceDeletionProven(serviceName);
+                        });
+                }
+
+                CaptureCleanupFailure(failures, manager.Dispose);
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        "Staged Agent service installation failed and rollback was incomplete.",
+                        failures);
+                }
+
+                ExceptionDispatchInfo.Capture(exception).Throw();
+                throw;
+            }
+        }
+
+        public static void CleanupRunScoped(
+            AgentServiceCleanupEntry entry,
+            string expectedAccountSid)
+        {
+            _ = new SecurityIdentifier(expectedAccountSid);
+            var manager = OpenSCManager(
+                machineName: null,
+                databaseName: null,
+                ScManagerConnect);
+            if (manager.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                manager.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "Could not open SCM for run-scoped staged Agent cleanup.");
+            }
+
+            using (manager)
+            {
+                var service = OpenService(
+                    manager,
+                    entry.ServiceName,
+                    DeleteAccess | ServiceQueryConfig | ServiceQueryStatus | ServiceStop);
+                if (service.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    service.Dispose();
+                    if (error is ErrorServiceDoesNotExist or ErrorServiceMarkedForDelete)
+                    {
+                        WaitForServiceDeletion(
+                            manager,
+                            entry.ServiceName,
+                            ServiceTransitionTimeout);
+                        DeleteEventLogSource(
+                            entry.ServiceName,
+                            new SecurityIdentifier(expectedAccountSid));
+                        VerifyEventLogSourceAbsent(entry.ServiceName);
+                        return;
+                    }
+
+                    throw new Win32Exception(
+                        error,
+                        $"Could not open run-scoped staged Agent service '{entry.ServiceName}'.");
+                }
+
+                var failures = new List<Exception>();
+                var serviceDeletionRequested = false;
+                try
+                {
+                    VerifyConfiguration(
+                        service,
+                        entry.ServiceName,
+                        QuoteServiceBinaryPath(entry.ExecutablePath),
+                        $".\\{entry.AccountName}");
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEnvironmentValue(entry.ServiceName));
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEventLogSource(
+                            entry.ServiceName,
+                            new SecurityIdentifier(expectedAccountSid)));
+                    var executableValidated = true;
+                    try
+                    {
+                        VerifyCleanupExecutable(entry);
+                    }
+                    catch (Exception exception)
+                    {
+                        executableValidated = false;
+                        failures.Add(exception);
+                    }
+
+                    if (executableValidated)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => StopRunScopedService(
+                                service,
+                                entry,
+                                expectedAccountSid,
+                                ServiceTransitionTimeout));
+                        var failureCount = failures.Count;
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteServiceRequired(service, entry.ServiceName));
+                        serviceDeletionRequested = failures.Count == failureCount;
+                    }
+                }
+                finally
+                {
+                    service.Dispose();
+                }
+
+                if (serviceDeletionRequested)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => WaitForServiceDeletion(
+                            manager,
+                            entry.ServiceName,
+                            ServiceTransitionTimeout));
+                }
+
+                CaptureCleanupFailure(
+                    failures,
+                    () => VerifyEventLogSourceAbsent(entry.ServiceName));
+                if (failures.Count == 1)
+                {
+                    ExceptionDispatchInfo.Capture(failures[0]).Throw();
+                }
+
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        $"Run-scoped service '{entry.ServiceName}' cleanup was incomplete.",
+                        failures);
+                }
+            }
+        }
+
+        public static void ProveRunScopedArtifactsAbsent(
+            AgentServiceCleanupEntry entry)
+        {
+            var manager = OpenSCManager(
+                machineName: null,
+                databaseName: null,
+                ScManagerConnect);
+            if (manager.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                manager.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "Could not open SCM to prove pre-account run-scope absence.");
+            }
+
+            using (manager)
+            {
+                var service = OpenService(
+                    manager,
+                    entry.ServiceName,
+                    ServiceQueryStatus);
+                if (!service.IsInvalid)
+                {
+                    service.Dispose();
+                    throw new InvalidOperationException(
+                        $"Service '{entry.ServiceName}' exists without a manifest-bound account SID; preserving it.");
+                }
+
+                var error = Marshal.GetLastWin32Error();
+                service.Dispose();
+                if (error != ErrorServiceDoesNotExist)
+                {
+                    throw new Win32Exception(
+                        error,
+                        $"Could not prove absence of pre-account service '{entry.ServiceName}'.");
+                }
+
+                using var serviceKey = Registry.LocalMachine.OpenSubKey(
+                    ServiceRegistryPrefix + entry.ServiceName,
+                    writable: false);
+                if (serviceKey is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"Service registry key '{entry.ServiceName}' exists without a manifest-bound account SID; preserving it.");
+                }
+            }
+
+            VerifyEventLogSourceAbsent(entry.ServiceName);
+            if (File.Exists(entry.OwnedRoot))
+            {
+                throw new InvalidDataException(
+                    $"Pre-account run-scoped root '{entry.OwnedRoot}' is a file; preserving it.");
+            }
+
+            if (Directory.Exists(entry.OwnedRoot))
+            {
+                VerifyRunScopedOwnedRootForCleanup(entry.OwnedRoot);
+                if (File.Exists(entry.ExecutablePath))
+                {
+                    VerifyCleanupExecutable(entry);
+                }
+            }
+        }
+
+        private static void StopRunScopedService(
+            SafeServiceHandle service,
+            AgentServiceCleanupEntry entry,
+            string expectedAccountSid,
+            TimeSpan timeout)
+        {
+            var status = QueryStatus(service, entry.ServiceName);
+            if (status.CurrentState == ServiceStopped)
+            {
+                return;
+            }
+
+            if (status.CurrentState == ServiceStartPending)
+            {
+                try
+                {
+                    status = WaitForState(
+                        service,
+                        ServiceRunning,
+                        timeout,
+                        entry.ServiceName);
+                }
+                catch (InvalidOperationException)
+                    when (QueryStatus(service, entry.ServiceName).CurrentState == ServiceStopped)
+                {
+                    return;
+                }
+            }
+
+            if (status.CurrentState == ServiceStopPending)
+            {
+                _ = WaitForState(
+                    service,
+                    ServiceStopped,
+                    timeout,
+                    entry.ServiceName);
+                return;
+            }
+
+            if (status.CurrentState != ServiceRunning)
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped staged Agent service '{entry.ServiceName}' is in unsupported cleanup state {DescribeState(status.CurrentState)}.");
+            }
+
+            SafeProcessHandle? validatedProcess = null;
+            uint validatedProcessId = 0;
+            try
+            {
+                if (status.ProcessId == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Running service '{entry.ServiceName}' reported no PID.");
+                }
+
+                validatedProcess = WindowsAgentProcess.OpenRequiredProcess(status.ProcessId);
+                var confirmed = QueryStatus(service, entry.ServiceName);
+                if (confirmed.CurrentState == ServiceStopped)
+                {
+                    WindowsAgentProcess.WaitForExitRequired(
+                        validatedProcess,
+                        timeout,
+                        status.ProcessId);
+                    return;
+                }
+
+                if (confirmed.ProcessId != status.ProcessId
+                    || confirmed.CurrentState != ServiceRunning)
+                {
+                    throw new InvalidOperationException(
+                        $"Run-scoped service '{entry.ServiceName}' changed state or PID while cleanup secured its Running process handle.");
+                }
+
+                _ = WindowsAgentProcess.ValidateRequiredProcess(
+                    validatedProcess,
+                    status.ProcessId,
+                    entry.ExecutablePath,
+                    entry.ExecutableSha256,
+                    expectedAccountSid);
+                confirmed = QueryStatus(service, entry.ServiceName);
+                if (confirmed.CurrentState == ServiceStopped)
+                {
+                    WindowsAgentProcess.WaitForExitRequired(
+                        validatedProcess,
+                        timeout,
+                        status.ProcessId);
+                    return;
+                }
+
+                if (confirmed.ProcessId != status.ProcessId
+                    || confirmed.CurrentState != ServiceRunning)
+                {
+                    throw new InvalidOperationException(
+                        $"Run-scoped service '{entry.ServiceName}' changed state or PID after exact token and image validation.");
+                }
+
+                validatedProcessId = status.ProcessId;
+                var stopRequested = ControlService(service, ServiceControlStop, out _);
+                var stopError = stopRequested ? 0 : Marshal.GetLastWin32Error();
+                try
+                {
+                    if (!stopRequested && stopError != ErrorServiceNotActive)
+                    {
+                        throw new Win32Exception(
+                            stopError,
+                            $"Could not stop run-scoped staged Agent service '{entry.ServiceName}'.");
+                    }
+
+                    _ = WaitForState(service, ServiceStopped, timeout, entry.ServiceName);
+                    WindowsAgentProcess.WaitForExitRequired(
+                        validatedProcess,
+                        timeout,
+                        validatedProcessId);
+                }
+                catch (Exception exception)
+                    when (exception is TimeoutException or Win32Exception)
+                {
+                    var current = QueryStatus(service, entry.ServiceName);
+                    if (current.CurrentState == ServiceStopped)
+                    {
+                        WindowsAgentProcess.WaitForExitRequired(
+                            validatedProcess,
+                            timeout,
+                            validatedProcessId);
+                        return;
+                    }
+
+                    if (current.CurrentState == ServiceRunning
+                        && current.ProcessId != validatedProcessId)
+                    {
+                        throw new InvalidOperationException(
+                            $"Run-scoped service '{entry.ServiceName}' changed Running PID before forced cleanup.",
+                            exception);
+                    }
+
+                    _ = WindowsAgentProcess.ValidateRequiredProcess(
+                        validatedProcess,
+                        validatedProcessId,
+                        entry.ExecutablePath,
+                        entry.ExecutableSha256,
+                        expectedAccountSid!);
+                    current = QueryStatus(service, entry.ServiceName);
+                    if (current.CurrentState == ServiceStopped
+                        || current.CurrentState == ServiceRunning
+                        && current.ProcessId != validatedProcessId
+                        || current.CurrentState is not (ServiceRunning or ServiceStopPending))
+                    {
+                        throw new InvalidOperationException(
+                            $"Run-scoped service '{entry.ServiceName}' changed state or Running PID immediately before forced termination.",
+                            exception);
+                    }
+
+                    if (!WindowsAgentProcess.IsExited(validatedProcess)
+                        && !TerminateProcess(validatedProcess, exitCode: 1)
+                        && !WindowsAgentProcess.IsExited(validatedProcess))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            $"Could not terminate validated run-scoped staged Agent PID {validatedProcessId}.");
+                    }
+
+                    WindowsAgentProcess.WaitForExitRequired(
+                        validatedProcess,
+                        timeout,
+                        validatedProcessId);
+                    _ = WaitForState(
+                        service,
+                        ServiceStopped,
+                        timeout,
+                        entry.ServiceName);
+                }
+            }
+            finally
+            {
+                validatedProcess?.Dispose();
+            }
+        }
+
+        public WindowsAgentProcess Start()
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                var service = RequiredService();
+                var before = QueryStatus(service, ServiceName);
+                if (before.CurrentState != ServiceStopped)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{ServiceName}' must be Stopped before Start; actual state is {DescribeState(before.CurrentState)}.");
+                }
+
+                VerifyEnvironment(ServiceName, _environmentEntries);
+                VerifyConfiguration(
+                    service,
+                    ServiceName,
+                    _expectedBinaryPath,
+                    _expectedServiceAccountName);
+                if (!StartService(service, argumentCount: 0, IntPtr.Zero))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        error == ErrorServiceAlreadyRunning
+                            ? $"Staged Agent service '{ServiceName}' was already running."
+                            : $"Could not start staged Agent service '{ServiceName}'.");
+                }
+
+                SafeProcessHandle? processHandle = null;
+                uint? securedProcessId = null;
+                try
+                {
+                    var running = WaitForState(
+                        service,
+                        ServiceRunning,
+                        ServiceTransitionTimeout,
+                        ServiceName);
+                    if (running.ProcessId == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Staged Agent service '{ServiceName}' reported Running without a process ID.");
+                    }
+
+                    securedProcessId = running.ProcessId;
+                    processHandle = WindowsAgentProcess.OpenRequiredProcess(
+                        running.ProcessId);
+                    var confirmed = QueryStatus(service, ServiceName);
+                    if (confirmed.CurrentState != ServiceRunning
+                        || confirmed.ProcessId != running.ProcessId)
+                    {
+                        throw new InvalidOperationException(
+                            $"Staged Agent service '{ServiceName}' changed state or PID while its process handle was secured.");
+                    }
+
+                    var process = WindowsAgentProcess.CreateValidated(
+                        this,
+                        processHandle,
+                        running.ProcessId,
+                        _expectedExecutablePath,
+                        _expectedExecutableSha256,
+                        _identity);
+                    confirmed = QueryStatus(service, ServiceName);
+                    if (confirmed.CurrentState != ServiceRunning
+                        || confirmed.ProcessId != running.ProcessId)
+                    {
+                        throw new InvalidOperationException(
+                            $"Staged Agent service '{ServiceName}' changed state or PID after exact token and frozen-image validation.");
+                    }
+
+                    _activeProcessId = running.ProcessId;
+                    _activeProcessHandle = processHandle;
+                    processHandle = null;
+                    _startedProcessIds.Add(running.ProcessId);
+                    return process;
+                }
+                catch (Exception exception)
+                {
+                    var failures = new List<Exception> { exception };
+                    CaptureCleanupFailure(
+                        failures,
+                        () => StopOrTerminateCurrentProcess(ServiceTransitionTimeout));
+                    CaptureCleanupFailure(
+                        failures,
+                        () =>
+                        {
+                            if (processHandle is not null
+                                && securedProcessId is uint processId)
+                            {
+                                WindowsAgentProcess.WaitForExitRequired(
+                                    processHandle,
+                                    ServiceTransitionTimeout,
+                                    processId);
+                            }
+                        });
+                    CaptureCleanupFailure(
+                        failures,
+                        () => processHandle?.Dispose());
+                    if (failures.Count > 1)
+                    {
+                        throw new AggregateException(
+                            $"Staged Agent service '{ServiceName}' failed security validation and cleanup was incomplete.",
+                            failures);
+                    }
+
+                    ExceptionDispatchInfo.Capture(exception).Throw();
+                    throw;
+                }
+            }
+        }
+
+        internal int StopCleanly(
+            uint expectedProcessId,
+            SafeProcessHandle processHandle,
+            TimeSpan timeout)
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                EnsureExpectedActiveProcess(expectedProcessId);
+                var service = RequiredService();
+                var status = QueryStatus(service, ServiceName);
+                if (status.CurrentState == ServiceStopped)
+                {
+                    WindowsAgentProcess.WaitForExitRequired(
+                        processHandle,
+                        timeout,
+                        expectedProcessId);
+                    var exitCode = WindowsAgentProcess.ReadExitCode(processHandle);
+                    ReleaseActiveProcessHandle(expectedProcessId);
+                    _cleanlyStoppedProcessIds.Add(expectedProcessId);
+                    return exitCode;
+                }
+
+                if (status.CurrentState == ServiceRunning
+                    && status.ProcessId != expectedProcessId)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{ServiceName}' changed from expected PID {expectedProcessId} to PID {status.ProcessId}.");
+                }
+
+                if (status.CurrentState != ServiceStopPending)
+                {
+                    if (!ControlService(
+                            service,
+                            ServiceControlStop,
+                            out _))
+                    {
+                        var error = Marshal.GetLastWin32Error();
+                        if (error != ErrorServiceNotActive)
+                        {
+                            throw new Win32Exception(
+                                error,
+                                $"Could not stop staged Agent service '{ServiceName}'.");
+                        }
+                    }
+                }
+
+                var stopped = WaitForState(
+                    service,
+                    ServiceStopped,
+                    timeout,
+                    ServiceName);
+                WindowsAgentProcess.WaitForExitRequired(
+                    processHandle,
+                    timeout,
+                    expectedProcessId);
+                var processExitCode = WindowsAgentProcess.ReadExitCode(processHandle);
+                if (stopped.Win32ExitCode != 0
+                    && stopped.Win32ExitCode != unchecked((uint)processExitCode))
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{ServiceName}' stopped with SCM Win32 exit code {stopped.Win32ExitCode}, but process exit code was {processExitCode}.");
+                }
+
+                ReleaseActiveProcessHandle(expectedProcessId);
+                _cleanlyStoppedProcessIds.Add(expectedProcessId);
+                return processExitCode;
+            }
+        }
+
+        internal int Kill(
+            uint expectedProcessId,
+            SafeProcessHandle processHandle)
+        {
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+
+                if (_activeProcessId is null
+                    && WindowsAgentProcess.IsExited(processHandle))
+                {
+                    return WindowsAgentProcess.ReadExitCode(processHandle);
+                }
+
+                EnsureExpectedActiveProcess(expectedProcessId);
+                if (!WindowsAgentProcess.IsExited(processHandle))
+                {
+                    if (!TerminateProcess(processHandle, exitCode: 1)
+                        && !WindowsAgentProcess.IsExited(processHandle))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            $"Could not terminate staged Agent service PID {expectedProcessId}.");
+                    }
+                }
+
+                WindowsAgentProcess.WaitForExitRequired(
+                    processHandle,
+                    TimeSpan.FromSeconds(15),
+                    expectedProcessId);
+                var exitCode = WindowsAgentProcess.ReadExitCode(processHandle);
+                _ = WaitForState(
+                    RequiredService(),
+                    ServiceStopped,
+                    TimeSpan.FromSeconds(15),
+                    ServiceName);
+                ReleaseActiveProcessHandle(expectedProcessId);
+                return exitCode;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                var failures = new List<Exception>();
+                CaptureCleanupFailure(
+                    failures,
+                    () => StopOrTerminateCurrentProcess(ServiceTransitionTimeout));
+                CaptureCleanupFailure(
+                    failures,
+                    ReleaseAnyActiveProcessHandle);
+                CaptureCleanupFailure(
+                    failures,
+                    () => DeleteEnvironmentValue(ServiceName));
+                CaptureCleanupFailure(
+                    failures,
+                    () => DeleteEventLogSource(
+                        ServiceName,
+                        new SecurityIdentifier(_identity.Sid)));
+                var service = _service;
+                if (service is not null)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteServiceRequired(service, ServiceName));
+                    CaptureCleanupFailure(failures, service.Dispose);
+                    _service = null;
+                }
+
+                var deletionProven = false;
+                CaptureCleanupFailure(
+                    failures,
+                    () =>
+                    {
+                        WaitForServiceDeletion(
+                            _serviceControlManager,
+                            ServiceName,
+                            TimeSpan.FromSeconds(15));
+                        VerifyEventLogSourceAbsent(ServiceName);
+                        deletionProven = true;
+                    });
+                DeletionProven = deletionProven;
+                if (deletionProven)
+                {
+                    _identity.MarkServiceDeletionProven(ServiceName);
+                }
+                CaptureCleanupFailure(failures, _serviceControlManager.Dispose);
+                _disposed = true;
+                if (failures.Count == 1)
+                {
+                    ExceptionDispatchInfo.Capture(failures[0]).Throw();
+                }
+
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        $"One or more cleanup steps failed for staged Agent service '{ServiceName}'.",
+                        failures);
+                }
+            }
+        }
+
+        private void StopOrTerminateCurrentProcess(TimeSpan timeout)
+        {
+            var service = RequiredService();
+            var status = QueryStatus(service, ServiceName);
+            if (status.CurrentState == ServiceStopped)
+            {
+                if (_activeProcessHandle is not null
+                    && _activeProcessId is uint processId)
+                {
+                    WindowsAgentProcess.WaitForExitRequired(
+                        _activeProcessHandle,
+                        timeout,
+                        processId);
+                }
+
+                ReleaseAnyActiveProcessHandle();
+                return;
+            }
+
+            if (status.CurrentState != ServiceStopPending
+                && !ControlService(service, ServiceControlStop, out _))
+            {
+                var stopError = Marshal.GetLastWin32Error();
+                if (stopError != ErrorServiceNotActive)
+                {
+                    TerminateServiceProcess(status, timeout);
+                    return;
+                }
+            }
+
+            try
+            {
+                _ = WaitForState(service, ServiceStopped, timeout, ServiceName);
+                if (_activeProcessHandle is not null
+                    && _activeProcessId is uint processId)
+                {
+                    WindowsAgentProcess.WaitForExitRequired(
+                        _activeProcessHandle,
+                        timeout,
+                        processId);
+                }
+
+                ReleaseAnyActiveProcessHandle();
+            }
+            catch (TimeoutException)
+            {
+                status = QueryStatus(service, ServiceName);
+                TerminateServiceProcess(status, timeout);
+            }
+        }
+
+        private void TerminateServiceProcess(
+            ServiceStatusProcess status,
+            TimeSpan timeout)
+        {
+            var processId = _activeProcessId;
+            var processHandle = _activeProcessHandle;
+            if (processHandle is null)
+            {
+                if (status.CurrentState != ServiceRunning || status.ProcessId == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{ServiceName}' could not stop and no retained Running process handle is available for forced cleanup.");
+                }
+
+                processHandle = WindowsAgentProcess.OpenRequiredProcess(status.ProcessId);
+                var confirmed = QueryStatus(RequiredService(), ServiceName);
+                if (confirmed.CurrentState != ServiceRunning
+                    || confirmed.ProcessId != status.ProcessId)
+                {
+                    processHandle.Dispose();
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{ServiceName}' changed state or PID while cleanup secured its process handle.");
+                }
+
+                try
+                {
+                    _ = WindowsAgentProcess.CreateValidated(
+                        this,
+                        processHandle,
+                        status.ProcessId,
+                        _expectedExecutablePath,
+                        _expectedExecutableSha256,
+                        _identity);
+                    confirmed = QueryStatus(RequiredService(), ServiceName);
+                    if (confirmed.CurrentState != ServiceRunning
+                        || confirmed.ProcessId != status.ProcessId)
+                    {
+                        throw new InvalidOperationException(
+                            $"Staged Agent service '{ServiceName}' changed state or PID after cleanup validated its exact token and frozen image.");
+                    }
+                }
+                catch
+                {
+                    processHandle.Dispose();
+                    throw;
+                }
+
+                processId = status.ProcessId;
+                _activeProcessId = processId;
+                _activeProcessHandle = processHandle;
+            }
+
+            var requiredProcessId = processId
+                ?? throw new InvalidOperationException(
+                    "The staged Agent cleanup process ID was not captured.");
+            if (!WindowsAgentProcess.IsExited(processHandle)
+                && !TerminateProcess(processHandle, exitCode: 1)
+                && !WindowsAgentProcess.IsExited(processHandle))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not force-terminate staged Agent service PID {requiredProcessId}.");
+            }
+
+            WindowsAgentProcess.WaitForExitRequired(
+                processHandle,
+                timeout,
+                requiredProcessId);
+            _ = WaitForState(
+                RequiredService(),
+                ServiceStopped,
+                timeout,
+                ServiceName);
+            ReleaseActiveProcessHandle(requiredProcessId);
+        }
+
+        private void ReleaseActiveProcessHandle(uint expectedProcessId)
+        {
+            EnsureExpectedActiveProcess(expectedProcessId);
+            ReleaseAnyActiveProcessHandle();
+        }
+
+        private void ReleaseAnyActiveProcessHandle()
+        {
+            _activeProcessHandle?.Dispose();
+            _activeProcessHandle = null;
+            _activeProcessId = null;
+        }
+
+        private void EnsureExpectedActiveProcess(uint expectedProcessId)
+        {
+            if (_activeProcessId != expectedProcessId)
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent PID {expectedProcessId} is not the active process owned by service '{ServiceName}'.");
+            }
+        }
+
+        private SafeServiceHandle RequiredService() =>
+            _service is { IsClosed: false, IsInvalid: false } service
+                ? service
+                : throw new ObjectDisposedException(nameof(WindowsAgentService));
+
+        private void ThrowIfDisposed()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
+
+        private static ServiceStatusProcess WaitForState(
+            SafeServiceHandle service,
+            uint requiredState,
+            TimeSpan timeout,
+            string serviceName)
+        {
+            if (timeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "The staged Agent service transition timeout must be positive.");
+            }
+
+            var elapsed = Stopwatch.StartNew();
+            uint? observedState = null;
+            uint? observedCheckpoint = null;
+            var progressDeadline = TimeSpan.Zero;
+            ServiceStatusProcess status;
+            while (true)
+            {
+                status = QueryStatus(service, serviceName);
+                if (status.CurrentState == requiredState)
+                {
+                    return status;
+                }
+
+                if (requiredState == ServiceRunning
+                    && status.CurrentState == ServiceStopped)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' stopped during startup "
+                        + $"(Win32 exit {status.Win32ExitCode}, service exit {status.ServiceSpecificExitCode}).");
+                }
+
+                var now = elapsed.Elapsed;
+                if (now >= timeout)
+                {
+                    throw new TimeoutException(
+                        $"Staged Agent service '{serviceName}' did not reach {DescribeState(requiredState)} "
+                        + $"within {timeout}; last state was {DescribeState(status.CurrentState)} "
+                        + $"at checkpoint {status.CheckPoint} with wait hint {status.WaitHint} ms.");
+                }
+
+                if (observedState != status.CurrentState)
+                {
+                    observedState = status.CurrentState;
+                    observedCheckpoint = status.CheckPoint;
+                    progressDeadline = now + ProgressWindow(status.WaitHint);
+                }
+                else if (observedCheckpoint is null
+                         || status.CheckPoint > observedCheckpoint.Value)
+                {
+                    observedCheckpoint = status.CheckPoint;
+                    progressDeadline = now + ProgressWindow(status.WaitHint);
+                }
+                else if (status.CheckPoint < observedCheckpoint.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' SCM checkpoint regressed from "
+                        + $"{observedCheckpoint.Value} to {status.CheckPoint} while state remained "
+                        + $"{DescribeState(status.CurrentState)}.");
+                }
+                else if (now >= progressDeadline)
+                {
+                    throw new TimeoutException(
+                        $"Staged Agent service '{serviceName}' made no SCM checkpoint progress "
+                        + $"while waiting for {DescribeState(requiredState)}; state "
+                        + $"{DescribeState(status.CurrentState)}, checkpoint {status.CheckPoint}, "
+                        + $"wait hint {status.WaitHint} ms.");
+                }
+
+                var delay = PollInterval(status.WaitHint);
+                var hardRemaining = timeout - now;
+                var progressRemaining = progressDeadline - now;
+                if (delay > hardRemaining)
+                {
+                    delay = hardRemaining;
+                }
+
+                if (delay > progressRemaining)
+                {
+                    delay = progressRemaining;
+                }
+
+                if (delay > TimeSpan.Zero)
+                {
+                    Thread.Sleep(delay);
+                }
+            }
+        }
+
+        private static TimeSpan PollInterval(uint waitHintMilliseconds) =>
+            TimeSpan.FromMilliseconds(Math.Clamp(
+                waitHintMilliseconds / 10d,
+                1_000d,
+                10_000d));
+
+        private static TimeSpan ProgressWindow(uint waitHintMilliseconds) =>
+            TimeSpan.FromMilliseconds(waitHintMilliseconds == 0
+                ? 10_000d
+                : Math.Clamp(
+                    (double)waitHintMilliseconds,
+                    1_000d,
+                    120_000d));
+
+        private static ServiceStatusProcess QueryStatus(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            var status = new ServiceStatusProcess();
+            if (!QueryServiceStatusEx(
+                    service,
+                    ScStatusProcessInfo,
+                    ref status,
+                    checked((uint)Marshal.SizeOf<ServiceStatusProcess>()),
+                    out _))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not query staged Agent service '{serviceName}'.");
+            }
+
+            return status;
+        }
+
+        private static void VerifyConfiguration(
+            SafeServiceHandle service,
+            string serviceName,
+            string expectedBinaryPath,
+            string expectedServiceAccountName)
+        {
+            _ = QueryServiceConfig(
+                service,
+                IntPtr.Zero,
+                bufferSize: 0,
+                out var requiredSize);
+            var sizingError = Marshal.GetLastWin32Error();
+            if (requiredSize == 0 || sizingError != ErrorInsufficientBuffer)
+            {
+                throw new Win32Exception(
+                    sizingError,
+                    $"Could not size configuration for staged Agent service '{serviceName}'.");
+            }
+
+            var buffer = Marshal.AllocHGlobal(checked((int)requiredSize));
+            try
+            {
+                if (!QueryServiceConfig(
+                        service,
+                        buffer,
+                        requiredSize,
+                        out _))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not read configuration for staged Agent service '{serviceName}'.");
+                }
+
+                var configuration = Marshal.PtrToStructure<QueryServiceConfiguration>(
+                    buffer);
+                var binaryPath = Marshal.PtrToStringUni(
+                    configuration.BinaryPathName);
+                var loadOrderGroup = Marshal.PtrToStringUni(
+                    configuration.LoadOrderGroup);
+                var dependencies = Marshal.PtrToStringUni(
+                    configuration.Dependencies);
+                var serviceAccountName = Marshal.PtrToStringUni(
+                    configuration.ServiceStartName);
+                var displayName = Marshal.PtrToStringUni(
+                    configuration.DisplayName);
+                if (configuration.ServiceType != ServiceWin32OwnProcess
+                    || configuration.StartType != ServiceDemandStart
+                    || configuration.ErrorControl != ServiceErrorNormal
+                    || configuration.TagId != 0
+                    || !string.IsNullOrEmpty(loadOrderGroup)
+                    || !string.IsNullOrEmpty(dependencies)
+                    || !string.Equals(
+                        binaryPath,
+                        expectedBinaryPath,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        serviceAccountName,
+                        expectedServiceAccountName,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(
+                        displayName,
+                        serviceName,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' SCM configuration differs from the exact own-process, demand-start, error-normal, frozen-image, dedicated-account, display-name, empty-group, empty-dependencies contract.");
+                }
+
+                VerifyFailureActions(service, serviceName);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void VerifyFailureActions(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            _ = QueryServiceConfig2(
+                service,
+                ServiceConfigFailureActions,
+                IntPtr.Zero,
+                bufferSize: 0,
+                out var requiredSize);
+            var sizingError = Marshal.GetLastWin32Error();
+            if (requiredSize == 0 || sizingError != ErrorInsufficientBuffer)
+            {
+                throw new Win32Exception(
+                    sizingError,
+                    $"Could not size failure actions for staged Agent service '{serviceName}'.");
+            }
+
+            var buffer = Marshal.AllocHGlobal(checked((int)requiredSize));
+            try
+            {
+                if (!QueryServiceConfig2(
+                        service,
+                        ServiceConfigFailureActions,
+                        buffer,
+                        requiredSize,
+                        out _))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not read failure actions for staged Agent service '{serviceName}'.");
+                }
+
+                var failureActions = Marshal.PtrToStructure<ServiceFailureActions>(
+                    buffer);
+                if (failureActions.ResetPeriod != 0
+                    || failureActions.ActionsCount != 0
+                    || failureActions.Actions != IntPtr.Zero
+                    || !string.IsNullOrEmpty(Marshal.PtrToStringUni(
+                        failureActions.RebootMessage))
+                    || !string.IsNullOrEmpty(Marshal.PtrToStringUni(
+                        failureActions.Command)))
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' must have no SCM failure action or automatic restart command.");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static string DescribeState(uint state) => state switch
+        {
+            ServiceStopped => "Stopped",
+            ServiceStartPending => "StartPending",
+            ServiceStopPending => "StopPending",
+            ServiceRunning => "Running",
+            _ => $"SCM state {state}"
+        };
+
+        private static string[] CreateEnvironmentEntries(
+            Dictionary<string, string> environment)
+        {
+            if (environment.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "The staged Agent service environment cannot be empty.");
+            }
+
+            return environment
+                .OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(static pair =>
+                {
+                    if (string.IsNullOrWhiteSpace(pair.Key)
+                        || pair.Key.Contains('=')
+                        || pair.Key.Contains('\0')
+                        || pair.Value.Contains('\0'))
+                    {
+                        throw new InvalidDataException(
+                            $"Environment entry '{pair.Key}' cannot be represented by SCM.");
+                    }
+
+                    return $"{pair.Key}={pair.Value}";
+                })
+                .ToArray();
+        }
+
+        private static void ProtectAndWriteEnvironment(
+            string serviceName,
+            string[] environmentEntries)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                RegistryKeyPermissionCheck.ReadWriteSubTree,
+                RegistryRights.FullControl)
+                ?? throw new InvalidOperationException(
+                    $"SCM did not create registry state for staged Agent service '{serviceName}'.");
+            var currentSid = WindowsIdentity.GetCurrent().User
+                             ?? throw new InvalidOperationException(
+                                 "The staged E2E process identity has no SID for service-key ACL protection.");
+            var allowedSids = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                currentSid
+            }.Distinct().ToArray();
+            var security = new RegistrySecurity();
+            security.SetOwner(currentSid);
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            foreach (var sid in allowedSids)
+            {
+                security.AddAccessRule(new RegistryAccessRule(
+                    sid,
+                    RegistryRights.FullControl,
+                    InheritanceFlags.ContainerInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+
+            key.SetAccessControl(security);
+            key.SetValue(
+                "Environment",
+                environmentEntries,
+                RegistryValueKind.MultiString);
+            key.Flush();
+            VerifyServiceKeyAcl(key, allowedSids, currentSid);
+        }
+
+        private static void VerifyServiceKeyAcl(
+            RegistryKey key,
+            IReadOnlyCollection<SecurityIdentifier> allowedSids,
+            SecurityIdentifier expectedOwner)
+        {
+            var security = key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            if (!security.AreAccessRulesProtected
+                || security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                || !string.Equals(owner.Value, expectedOwner.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The staged Agent service registry key still inherits ambient access rules or has an unexpected owner.");
+            }
+
+            var allowed = allowedSids
+                .Select(static sid => sid.Value)
+                .ToHashSet(StringComparer.Ordinal);
+            var rules = security.GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier));
+            foreach (RegistryAccessRule rule in rules)
+            {
+                if (rule.IsInherited
+                    || rule.AccessControlType != AccessControlType.Allow
+                    || rule.IdentityReference is not SecurityIdentifier sid
+                    || !allowed.Contains(sid.Value))
+                {
+                    throw new InvalidOperationException(
+                        $"The staged Agent service registry ACL contains unexpected rule '{rule.IdentityReference} {rule.AccessControlType} {rule.RegistryRights}'.");
+                }
+            }
+
+            foreach (var sid in allowed)
+            {
+                if (!rules.Cast<RegistryAccessRule>().Any(rule =>
+                        rule.AccessControlType == AccessControlType.Allow
+                        && rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(identity.Value, sid, StringComparison.Ordinal)
+                        && (rule.RegistryRights & RegistryRights.FullControl)
+                        == RegistryRights.FullControl))
+                {
+                    throw new InvalidOperationException(
+                        $"The staged Agent service registry ACL is missing FullControl for SID '{sid}'.");
+                }
+            }
+        }
+
+        private static void VerifyEnvironment(
+            string serviceName,
+            string[] expectedEntries)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                writable: false)
+                ?? throw new InvalidOperationException(
+                    $"Staged Agent service registry key '{serviceName}' is missing.");
+            var actual = key.GetValue(
+                "Environment",
+                defaultValue: null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string[];
+            if (actual is null
+                || !actual.SequenceEqual(expectedEntries, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent service '{serviceName}' environment did not round-trip exactly through SCM registry state.");
+            }
+        }
+
+        private static void RegisterEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceAccountSid,
+            out bool sourceCreated)
+        {
+            sourceCreated = false;
+            var registryPath = EventLogSourceRegistryPrefix + serviceName;
+            if (EventLog.SourceExists(serviceName))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' already exists before staged Agent registration.");
+            }
+
+            try
+            {
+                EventLog.CreateEventSource(new EventSourceCreationData(
+                    serviceName,
+                    "Application"));
+                sourceCreated = true;
+                using var key = Registry.LocalMachine.OpenSubKey(
+                    registryPath,
+                    RegistryKeyPermissionCheck.ReadWriteSubTree,
+                    RegistryRights.FullControl)
+                    ?? throw new InvalidOperationException(
+                        $"Could not create EventLog source '{serviceName}'.");
+                var currentSid = WindowsIdentity.GetCurrent().User
+                                 ?? throw new InvalidOperationException(
+                                     "The staged E2E process identity has no SID for EventLog source ACL protection.");
+                var security = new RegistrySecurity();
+                security.SetOwner(currentSid);
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+                foreach (var sid in new[]
+                         {
+                             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                             new SecurityIdentifier(
+                                 WellKnownSidType.BuiltinAdministratorsSid,
+                                 null),
+                             currentSid
+                         }.Distinct())
+                {
+                    security.AddAccessRule(new RegistryAccessRule(
+                        sid,
+                        RegistryRights.FullControl,
+                        InheritanceFlags.ContainerInherit,
+                        PropagationFlags.None,
+                        AccessControlType.Allow));
+                }
+
+                security.AddAccessRule(new RegistryAccessRule(
+                    serviceAccountSid,
+                    RegistryRights.ReadKey,
+                    InheritanceFlags.None,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                key.SetAccessControl(security);
+                key.Flush();
+                VerifyEventLogSource(
+                    serviceName,
+                    serviceAccountSid,
+                    currentSid);
+            }
+            catch (Exception exception)
+            {
+                if (!sourceCreated)
+                {
+                    throw;
+                }
+
+                var failures = new List<Exception> { exception };
+                CaptureCleanupFailure(
+                    failures,
+                    () => EventLog.DeleteEventSource(serviceName));
+                CaptureCleanupFailure(
+                    failures,
+                    () => VerifyEventLogSourceAbsent(serviceName));
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        $"EventLog source '{serviceName}' registration failed and rollback was incomplete.",
+                        failures);
+                }
+
+                sourceCreated = false;
+                ExceptionDispatchInfo.Capture(exception).Throw();
+                throw;
+            }
+        }
+
+        private static void VerifyEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceAccountSid,
+            SecurityIdentifier currentSid)
+        {
+            if (!EventLog.SourceExists(serviceName))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' is missing after registration.");
+            }
+
+
+            if (!string.Equals(
+                    EventLog.LogNameFromSourceName(serviceName, "."),
+                    "Application",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' is not registered to the Application log.");
+            }
+
+            using var key = Registry.LocalMachine.OpenSubKey(
+                EventLogSourceRegistryPrefix + serviceName,
+                writable: false)
+                ?? throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' is missing after registration.");
+            var security = key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            if (!security.AreAccessRulesProtected
+                || security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                || !string.Equals(owner.Value, currentSid.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' still inherits ambient registry access or has an unexpected owner.");
+            }
+
+            var fullControlSids = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+                new SecurityIdentifier(
+                    WellKnownSidType.BuiltinAdministratorsSid,
+                    null).Value,
+                currentSid.Value
+            }.ToHashSet(StringComparer.Ordinal);
+            var rules = security.GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier)).Cast<RegistryAccessRule>().ToArray();
+            if (rules.Any(rule => rule.IsInherited
+                                  || rule.AccessControlType != AccessControlType.Allow
+                                  || rule.IdentityReference is not SecurityIdentifier sid
+                                  || !fullControlSids.Contains(sid.Value)
+                                  && !string.Equals(
+                                      sid.Value,
+                                      serviceAccountSid.Value,
+                                      StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' ACL contains an unexpected rule.");
+            }
+
+            if (!rules.Any(rule =>
+                    rule.IdentityReference is SecurityIdentifier sid
+                    && string.Equals(
+                        sid.Value,
+                        serviceAccountSid.Value,
+                        StringComparison.Ordinal)
+                    && (rule.RegistryRights & RegistryRights.ReadKey)
+                    == RegistryRights.ReadKey))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' is not readable by its exact service account.");
+            }
+
+            foreach (var sid in fullControlSids)
+            {
+                if (!rules.Any(rule =>
+                        rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(identity.Value, sid, StringComparison.Ordinal)
+                        && (rule.RegistryRights & RegistryRights.FullControl)
+                        == RegistryRights.FullControl))
+                {
+                    throw new InvalidOperationException(
+                        $"EventLog source '{serviceName}' lacks FullControl for privileged SID '{sid}'.");
+                }
+            }
+
+            var serviceRules = rules.Where(rule =>
+                    rule.IdentityReference is SecurityIdentifier sid
+                    && string.Equals(
+                        sid.Value,
+                        serviceAccountSid.Value,
+                        StringComparison.Ordinal))
+                .ToArray();
+            if (serviceRules.Length != 1
+                || serviceRules[0].RegistryRights != RegistryRights.ReadKey)
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' service-account ACL must be exactly one ReadKey rule.");
+            }
+        }
+
+        private static void DeleteEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceAccountSid)
+        {
+            if (EventLog.SourceExists(serviceName))
+            {
+                var currentSid = WindowsIdentity.GetCurrent().User
+                                 ?? throw new InvalidOperationException(
+                                     "The staged E2E cleanup identity has no SID for EventLog source validation.");
+                VerifyEventLogSource(
+                    serviceName,
+                    serviceAccountSid,
+                    currentSid);
+                EventLog.DeleteEventSource(serviceName);
+            }
+
+            VerifyEventLogSourceAbsent(serviceName);
+        }
+
+        private static void VerifyEventLogSourceAbsent(string serviceName)
+        {
+            if (EventLog.SourceExists(serviceName))
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' is still registered after cleanup.");
+            }
+
+            using var key = Registry.LocalMachine.OpenSubKey(
+                EventLogSourceRegistryPrefix + serviceName,
+                writable: false);
+            if (key is not null)
+            {
+                throw new InvalidOperationException(
+                    $"EventLog source '{serviceName}' still exists after cleanup.");
+            }
+        }
+
+        private static void DeleteEnvironmentValue(string serviceName)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                writable: true);
+            if (key is null)
+            {
+                return;
+            }
+
+            key.DeleteValue("Environment", throwOnMissingValue: false);
+            key.Flush();
+            if (key.GetValue("Environment", null) is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Sensitive staged Agent environment persisted after deletion for service '{serviceName}'.");
+            }
+        }
+
+        private static void DeleteServiceRequired(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            if (!DeleteService(service))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != ErrorServiceMarkedForDelete)
+                {
+                    throw new Win32Exception(
+                        error,
+                        $"Could not delete staged Agent service '{serviceName}'.");
+                }
+            }
+        }
+
+        private static void WaitForServiceDeletion(
+            SafeServiceHandle serviceControlManager,
+            string serviceName,
+            TimeSpan timeout)
+        {
+            var elapsed = Stopwatch.StartNew();
+            while (elapsed.Elapsed < timeout)
+            {
+                var service = OpenService(
+                    serviceControlManager,
+                    serviceName,
+                    ServiceQueryStatus);
+                if (service.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    service.Dispose();
+                    if (error == ErrorServiceDoesNotExist)
+                    {
+                        using var key = Registry.LocalMachine.OpenSubKey(
+                            ServiceRegistryPrefix + serviceName,
+                            writable: false);
+                        if (key is null)
+                        {
+                            return;
+                        }
+                    }
+                    else if (error != ErrorServiceMarkedForDelete)
+                    {
+                        throw new Win32Exception(
+                            error,
+                            $"Could not prove deletion of staged Agent service '{serviceName}'.");
+                    }
+                }
+                else
+                {
+                    service.Dispose();
+                }
+
+                Thread.Sleep(TimeSpan.FromMilliseconds(50));
+            }
+
+            throw new TimeoutException(
+                $"SCM did not fully delete staged Agent service '{serviceName}' and its registry key within {timeout}.");
+        }
+
+        private static string QuoteServiceBinaryPath(string executablePath)
+        {
+            if (executablePath.Contains('"') || executablePath.Contains('\0'))
+            {
+                throw new InvalidDataException(
+                    "The staged Agent service executable path contains characters that cannot be represented in ImagePath.");
+            }
+
+            return $"\"{executablePath}\"";
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle OpenSCManager(
+            string? machineName,
+            string? databaseName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle CreateService(
+            SafeServiceHandle serviceControlManager,
+            string serviceName,
+            string displayName,
+            uint desiredAccess,
+            uint serviceType,
+            uint startType,
+            uint errorControl,
+            string binaryPathName,
+            string? loadOrderGroup,
+            IntPtr tagId,
+            string? dependencies,
+            string serviceStartName,
+            string password);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle OpenService(
+            SafeServiceHandle serviceControlManager,
+            string serviceName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool StartService(
+            SafeServiceHandle service,
+            uint argumentCount,
+            IntPtr argumentVectors);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ControlService(
+            SafeServiceHandle service,
+            uint control,
+            out ServiceStatus serviceStatus);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceStatusEx(
+            SafeServiceHandle service,
+            uint infoLevel,
+            ref ServiceStatusProcess serviceStatus,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig(
+            SafeServiceHandle service,
+            IntPtr queryServiceConfig,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig2(
+            SafeServiceHandle service,
+            uint infoLevel,
+            IntPtr buffer,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteService(SafeServiceHandle service);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcess(
+            SafeProcessHandle processHandle,
+            uint exitCode);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceStatus
+        {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceStatusProcess
+        {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+            public uint ProcessId;
+            public uint ServiceFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct QueryServiceConfiguration
+        {
+            public uint ServiceType;
+            public uint StartType;
+            public uint ErrorControl;
+            public IntPtr BinaryPathName;
+            public IntPtr LoadOrderGroup;
+            public uint TagId;
+            public IntPtr Dependencies;
+            public IntPtr ServiceStartName;
+            public IntPtr DisplayName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceFailureActions
+        {
+            public uint ResetPeriod;
+            public IntPtr RebootMessage;
+            public IntPtr Command;
+            public uint ActionsCount;
+            public IntPtr Actions;
+        }
+
+        private sealed class SafeServiceHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeServiceHandle()
+                : base(ownsHandle: true)
+            {
+            }
+
+            protected override bool ReleaseHandle() => CloseServiceHandle(handle);
+
+            [DllImport("advapi32.dll")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool CloseServiceHandle(IntPtr serviceHandle);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
     private sealed class WindowsAgentProcess : IDisposable
     {
-        private const uint CreateNewProcessGroup = 0x00000200;
-        private const uint CreateSuspended = 0x00000004;
-        private const uint CreateUnicodeEnvironment = 0x00000400;
-        private const uint ExtendedStartupInfoPresent = 0x00080000;
-        private const uint Logon32LogonInteractive = 2;
-        private const uint Logon32ProviderDefault = 0;
-        private const int ProfileInfoNoUi = 1;
+        private const uint ProcessTerminate = 0x0001;
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint Synchronize = 0x00100000;
         private const uint TokenQuery = 0x0008;
-        private const uint TokenDuplicate = 0x0002;
-        private const uint TokenImpersonate = 0x0004;
-        private const uint TokenAdjustPrivileges = 0x0020;
-        private const uint PrivilegeEnabled = 0x00000002;
-        private const int ErrorNotAllAssigned = 1300;
-        private const uint LogonWithoutProfile = 0;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
         private const int ErrorInsufficientBuffer = 122;
-        private const uint CtrlBreakEvent = 1;
-        private const uint StillActive = 259;
         private const uint WaitObject0 = 0;
         private const uint WaitTimeout = 258;
         private const uint WaitFailed = uint.MaxValue;
-        private const uint ForcedTerminationExitCode = 1;
-        private static readonly nuint ProcessThreadAttributeJobList = 0x0002000D;
-        private static readonly Lock ProcessTokenPrivilegeGate = new();
 
+        private readonly WindowsAgentService _service;
         private readonly SafeProcessHandle _processHandle;
-        private readonly WindowsProcessJob _processJob;
         private readonly uint _processId;
-        private readonly bool _ownsConsole;
-        private SafeAccessTokenHandle? _profileToken;
-        private IntPtr _profileHandle;
-        private bool _processDisposed;
-        private bool _consoleReleased;
+        private int? _exitCode;
         private bool _disposed;
 
         private WindowsAgentProcess(
+            WindowsAgentService service,
             SafeProcessHandle processHandle,
-            WindowsProcessJob processJob,
             uint processId,
-            bool ownsConsole,
             AgentHostTokenEvidence tokenEvidence,
             string executablePath,
-            string executableSha256,
-            SafeAccessTokenHandle? profileToken,
-            IntPtr profileHandle)
+            string executableSha256)
         {
+            _service = service;
             _processHandle = processHandle;
-            _processJob = processJob;
             _processId = processId;
-            _ownsConsole = ownsConsole;
-            _profileToken = profileToken;
-            _profileHandle = profileHandle;
             TokenEvidence = tokenEvidence;
             ExecutablePath = executablePath;
             ExecutableSha256 = executableSha256;
@@ -3270,12 +7022,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public int Id => checked((int)_processId);
 
-        public bool HasExited => TryReadExitCode(out _);
+        public bool HasExited => _exitCode.HasValue || IsExited(_processHandle);
 
-        public int ExitCode => TryReadExitCode(out var exitCode)
-            ? unchecked((int)exitCode)
+        public int ExitCode => _exitCode
+            ?? (HasExited
+            ? ReadExitCode(_processHandle)
             : throw new InvalidOperationException(
-                $"Staged Agent PID {_processId} is still running.");
+                "Staged Agent PID " + _processId + " is still running."));
 
         public AgentHostTokenEvidence TokenEvidence { get; }
 
@@ -3283,745 +7036,208 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public string ExecutableSha256 { get; }
 
-        public static WindowsAgentProcess Start(
-            string executablePath,
-            string workingDirectory,
-            IReadOnlyDictionary<string, string> environment,
-            RestrictedAgentIdentity identity)
+        internal static SafeProcessHandle OpenRequiredProcess(uint processId)
         {
-            var ownsConsole = EnsureConsole();
-            var commandLine = new StringBuilder($"\"{executablePath}\"");
-            SafeAccessTokenHandle? profileToken = null;
-            var profileHandle = IntPtr.Zero;
-            var environmentPointer = IntPtr.Zero;
-            WindowsProcessJob? processJob = null;
-            SafeProcessHandle? processHandle = null;
-            SafeWaitHandle? threadHandle = null;
-            var processInformation = new ProcessInformation();
-            var processCreated = false;
-            var processExitConfirmed = true;
-            try
-            {
-                processJob = WindowsProcessJob.CreateKillOnClose();
-                using var creationAttributes = processJob.UseHandle(
-                    ProcessCreationAttributes.Create);
-                var processEnvironment = identity.UserName is null
-                    ? ReadCurrentEnvironment()
-                    : ReadRestrictedEnvironment(
-                        identity,
-                        out profileToken,
-                        out profileHandle);
-                RemoveAmbientAgentConfiguration(processEnvironment);
-                OverlayEnvironment(processEnvironment, environment);
-                environmentPointer = Marshal.StringToHGlobalUni(
-                    BuildEnvironmentBlock(processEnvironment));
-                bool created;
-                var creationError = 0;
-                if (identity.UserName is not null)
-                {
-                    created = RunWithProcessTokenPrivilege(
-                        "SeImpersonatePrivilege",
-                        () =>
-                        {
-                            var result = CreateProcessWithToken(
-                                profileToken
-                                ?? throw new InvalidOperationException(
-                                    "The staged Agent restricted profile token is unavailable."),
-                                LogonWithoutProfile,
-                                executablePath,
-                                commandLine,
-                                CreateNewProcessGroup
-                                | CreateSuspended
-                                | CreateUnicodeEnvironment
-                                | ExtendedStartupInfoPresent,
-                                environmentPointer,
-                                workingDirectory,
-                                ref creationAttributes.StartupInfo,
-                                out processInformation);
-                            if (!result)
-                            {
-                                creationError = Marshal.GetLastWin32Error();
-                            }
-
-                            return result;
-                        });
-                    if (!created && creationError == 0)
-                    {
-                        throw new InvalidOperationException(
-                            "CreateProcessWithTokenW failed without preserving its Win32 error code.");
-                    }
-                }
-                else
-                {
-                    created = CreateProcess(
-                        executablePath,
-                        commandLine,
-                        IntPtr.Zero,
-                        IntPtr.Zero,
-                        inheritHandles: false,
-                        CreateNewProcessGroup
-                        | CreateSuspended
-                        | CreateUnicodeEnvironment
-                        | ExtendedStartupInfoPresent,
-                        environmentPointer,
-                        workingDirectory,
-                        ref creationAttributes.StartupInfo,
-                        out processInformation);
-                    if (!created)
-                    {
-                        creationError = Marshal.GetLastWin32Error();
-                    }
-                }
-
-                if (!created)
-                {
-                    throw new Win32Exception(
-                        creationError,
-                        $"The staged Agent process creation API failed for '{executablePath}' "
-                        + $"as '{identity.AccountName}' "
-                        + $"(Win32 error {creationError}).");
-                }
-
-                processCreated = true;
-                processExitConfirmed = false;
-                processHandle = new SafeProcessHandle(
-                    processInformation.Process,
-                    ownsHandle: true);
-                processInformation.Process = IntPtr.Zero;
-                threadHandle = new SafeWaitHandle(
-                    processInformation.Thread,
-                    ownsHandle: true);
-                processInformation.Thread = IntPtr.Zero;
-                var activeProcessCount = processJob.ActiveProcessCount;
-                if (activeProcessCount != 1)
-                {
-                    throw new InvalidOperationException(
-                        $"The staged Agent atomic Job Object association reported {activeProcessCount} active processes; exactly one suspended primary process is required.");
-                }
-
-                AssertSharesConsole(processInformation.ProcessId);
-                var tokenEvidence = ReadRequiredTokenEvidence(
-                    processHandle,
-                    identity);
-                var actualExecutablePath = ReadRequiredExecutablePath(processHandle);
-                var requestedExecutablePath = Path.GetFullPath(executablePath);
-                if (!string.Equals(
-                        actualExecutablePath,
-                        requestedExecutablePath,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException(
-                        "The staged Agent process main module differs from the requested executable.");
-                }
-
-                var executableSha256 = Convert.ToHexStringLower(
-                    SHA256.HashData(File.ReadAllBytes(actualExecutablePath)));
-                var suspendCount = ResumeThread(threadHandle);
-                if (suspendCount == uint.MaxValue)
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Could not resume the staged Agent after security validation and Job Object assignment.");
-                }
-
-                if (suspendCount != 1)
-                {
-                    throw new InvalidOperationException(
-                        $"The staged Agent primary thread had unexpected suspend count {suspendCount}; exactly one CREATE_SUSPENDED hold is required.");
-                }
-
-                threadHandle.Dispose();
-                threadHandle = null;
-                var owner = new WindowsAgentProcess(
-                    processHandle,
-                    processJob,
-                    processInformation.ProcessId,
-                    ownsConsole,
-                    tokenEvidence,
-                    actualExecutablePath,
-                    executableSha256,
-                    profileToken,
-                    profileHandle);
-                processHandle = null;
-                processJob = null;
-                profileToken = null;
-                profileHandle = IntPtr.Zero;
-                return owner;
-            }
-            catch (Exception exception)
-            {
-                var failures = new List<Exception> { exception };
-                if (processCreated)
-                {
-                    try
-                    {
-                        TerminateAndConfirmExit(
-                            processHandle,
-                            processInformation.Process,
-                            processJob,
-                            processInformation.ProcessId,
-                            TimeSpan.FromSeconds(10));
-                        processExitConfirmed = true;
-                    }
-                    catch (Exception terminationFailure)
-                    {
-                        failures.Add(terminationFailure);
-                    }
-                }
-
-                if (processExitConfirmed)
-                {
-                    CaptureCleanupFailure(failures, () => threadHandle?.Dispose());
-                    CaptureCleanupFailure(
-                        failures,
-                        () => CloseRequiredRawHandle(
-                            ref processInformation.Thread,
-                            "staged Agent primary thread"));
-                    CaptureCleanupFailure(failures, () => processHandle?.Dispose());
-                    CaptureCleanupFailure(
-                        failures,
-                        () => CloseRequiredRawHandle(
-                            ref processInformation.Process,
-                            "staged Agent process"));
-                    CaptureCleanupFailure(failures, () => processJob?.Dispose());
-                    CaptureCleanupFailure(
-                        failures,
-                        () => ReleaseProfile(ref profileToken, ref profileHandle));
-                    if (ownsConsole)
-                    {
-                        CaptureCleanupFailure(
-                            failures,
-                            () =>
-                            {
-                                if (!FreeConsole())
-                                {
-                                    throw new Win32Exception(
-                                        Marshal.GetLastWin32Error(),
-                                        "Could not release the staged Agent test console.");
-                                }
-                            });
-                    }
-                }
-                else
-                {
-                    Environment.FailFast(
-                        "The staged Agent could not be proven terminated; the kill-on-close Job Object owner is being closed by fail-fast process termination.",
-                        new AggregateException(failures));
-                }
-
-                if (failures.Count > 1)
-                {
-                    Environment.FailFast(
-                        "The staged Agent launch failed and native resource cleanup could not be proven complete.",
-                        new AggregateException(failures));
-                }
-
-                if (failures.Count == 1)
-                {
-                    ExceptionDispatchInfo.Capture(exception).Throw();
-                }
-
-                throw new AggregateException(failures);
-            }
-            finally
-            {
-                if (environmentPointer != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(environmentPointer);
-                }
-            }
-        }
-
-        private static Dictionary<string, string> ReadRestrictedEnvironment(
-            RestrictedAgentIdentity identity,
-            out SafeAccessTokenHandle? profileToken,
-            out IntPtr profileHandle)
-        {
-            profileToken = null;
-            profileHandle = IntPtr.Zero;
-            if (!LogonUser(
-                    identity.UserName
-                    ?? throw new InvalidOperationException(
-                        "The staged Agent standard account has no user name."),
-                    identity.Domain,
-                    identity.Password
-                    ?? throw new InvalidOperationException(
-                        "The staged Agent standard account has no password."),
-                    Logon32LogonInteractive,
-                    Logon32ProviderDefault,
-                    out profileToken))
-            {
-                var logonError = Marshal.GetLastWin32Error();
-                profileToken?.Dispose();
-                profileToken = null;
-                throw new Win32Exception(
-                    logonError,
-                    $"Could not log on staged Agent identity '{identity.AccountName}'.");
-            }
-
-            var profile = new ProfileInfo
-            {
-                Size = Marshal.SizeOf<ProfileInfo>(),
-                Flags = ProfileInfoNoUi,
-                UserName = identity.UserName
-            };
-            using var privileges = CreatePrivilegeImpersonation(
-                "SeRestorePrivilege",
-                "SeBackupPrivilege");
-            var loadedProfileToken = profileToken;
-            var loadedProfileHandle = IntPtr.Zero;
-            privileges.Run(() =>
-            {
-                if (!LoadUserProfile(loadedProfileToken, ref profile))
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        $"Could not load staged Agent profile for '{identity.AccountName}'.");
-                }
-
-                loadedProfileHandle = profile.Profile;
-            });
-            profileHandle = loadedProfileHandle;
-
-            if (profileHandle == IntPtr.Zero)
-            {
-                throw new InvalidOperationException(
-                    $"Loaded staged Agent profile for '{identity.AccountName}' has no hive handle.");
-            }
-
-            return ReadTokenEnvironment(profileToken, identity.AccountName);
-        }
-
-        private static Dictionary<string, string> ReadCurrentEnvironment()
-        {
-            using var process = Process.GetCurrentProcess();
-            if (!OpenProcessTokenSafe(
-                    process.SafeHandle,
-                    TokenQuery | TokenDuplicate,
-                    out var token))
-            {
-                var tokenError = Marshal.GetLastWin32Error();
-                token.Dispose();
-                throw new Win32Exception(
-                    tokenError,
-                    "Could not open the current staged Agent identity token.");
-            }
-
-            using (token)
-            {
-                return ReadTokenEnvironment(token, "current test identity");
-            }
-        }
-
-        private static Dictionary<string, string> ReadTokenEnvironment(
-            SafeAccessTokenHandle token,
-            string identityName)
-        {
-            if (!CreateEnvironmentBlock(
-                    out var environmentBlock,
-                    token,
-                    inherit: false))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    $"Could not create staged Agent environment for '{identityName}'.");
-            }
-
-            Dictionary<string, string>? environment = null;
-            Exception? readFailure = null;
-            try
-            {
-                environment = ReadEnvironmentBlock(environmentBlock);
-            }
-            catch (Exception exception)
-            {
-                readFailure = exception;
-            }
-
-            if (!DestroyEnvironmentBlock(environmentBlock))
-            {
-                var destroyFailure = new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not release the staged Agent native environment block.");
-                Environment.FailFast(
-                    "The staged Agent token environment could not be released.",
-                    readFailure is null
-                        ? destroyFailure
-                        : new AggregateException(readFailure, destroyFailure));
-            }
-
-            if (readFailure is not null)
-            {
-                ExceptionDispatchInfo.Capture(readFailure).Throw();
-            }
-
-            return environment
-                   ?? throw new InvalidOperationException(
-                       "The staged Agent user environment was not created.");
-        }
-
-        private static Dictionary<string, string> ReadEnvironmentBlock(
-            IntPtr environmentBlock)
-        {
-            var environment = new Dictionary<string, string>(
-                StringComparer.OrdinalIgnoreCase);
-            var offset = 0;
-            while (true)
-            {
-                var entry = Marshal.PtrToStringUni(IntPtr.Add(environmentBlock, offset))
-                            ?? throw new InvalidDataException(
-                                "The staged Agent native environment block is malformed.");
-                if (entry.Length == 0)
-                {
-                    return environment;
-                }
-
-                offset = checked(offset + (entry.Length + 1) * sizeof(char));
-                if (entry[0] == '=')
-                {
-                    continue;
-                }
-
-                var separator = entry.IndexOf('=');
-                if (separator <= 0)
-                {
-                    throw new InvalidDataException(
-                        "The staged Agent native environment contains a malformed entry.");
-                }
-
-                environment[entry[..separator]] = entry[(separator + 1)..];
-            }
-        }
-
-        private static void OverlayEnvironment(
-            Dictionary<string, string> environment,
-            IReadOnlyDictionary<string, string> overrides)
-        {
-            foreach (var (key, value) in overrides)
-            {
-                if (key.Contains('=') || key.Contains('\0') || value.Contains('\0'))
-                {
-                    throw new InvalidDataException(
-                        $"Environment entry '{key}' cannot be represented in a Windows block.");
-                }
-
-                environment[key] = value;
-            }
-        }
-
-        private static void RemoveAmbientAgentConfiguration(
-            Dictionary<string, string> environment)
-        {
-            foreach (var key in environment.Keys
-                         .Where(static key =>
-                             key.StartsWith(
-                                 "OpenLineOps__",
-                                 StringComparison.OrdinalIgnoreCase)
-                             || key.StartsWith(
-                                 "OPENLINEOPS_",
-                                 StringComparison.OrdinalIgnoreCase))
-                         .ToArray())
-            {
-                environment.Remove(key);
-            }
-        }
-
-        private static PrivilegeImpersonation CreatePrivilegeImpersonation(
-            params string[] privilegeNames)
-        {
-            if (privilegeNames is not { Length: > 0 and <= 2 })
+            if (processId == 0)
             {
                 throw new ArgumentOutOfRangeException(
-                    nameof(privilegeNames),
-                    "One or two Windows privileges must be requested.");
+                    nameof(processId),
+                    "A staged Agent service process ID must be positive.");
             }
 
-            using var process = Process.GetCurrentProcess();
-            if (!OpenProcessTokenSafe(
-                    process.SafeHandle,
-                    TokenQuery | TokenDuplicate,
-                    out var processToken))
+            var processHandle = OpenProcess(
+                ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+                inheritHandle: false,
+                processId);
+            if (processHandle.IsInvalid)
             {
-                var tokenError = Marshal.GetLastWin32Error();
-                processToken.Dispose();
+                var error = Marshal.GetLastWin32Error();
+                processHandle.Dispose();
                 throw new Win32Exception(
-                    tokenError,
-                    "Could not open the staged E2E process token for privilege impersonation.");
+                    error,
+                    "Could not open staged Agent service PID " + processId + ".");
             }
 
-            using (processToken)
-            {
-                if (!DuplicateTokenEx(
-                        processToken,
-                        TokenQuery | TokenImpersonate | TokenAdjustPrivileges,
-                        IntPtr.Zero,
-                        SecurityImpersonationLevel.Impersonation,
-                        TokenType.Impersonation,
-                        out var impersonationToken))
-                {
-                    var duplicationError = Marshal.GetLastWin32Error();
-                    impersonationToken.Dispose();
-                    throw new Win32Exception(
-                        duplicationError,
-                        "Could not create the staged E2E privilege impersonation token.");
-                }
-
-                try
-                {
-                    var requested = new TokenPrivileges
-                    {
-                        PrivilegeCount = checked((uint)privilegeNames.Length),
-                        First = CreateEnabledPrivilege(privilegeNames[0])
-                    };
-                    if (privilegeNames.Length == 2)
-                    {
-                        requested.Second = CreateEnabledPrivilege(privilegeNames[1]);
-                    }
-
-                    if (!AdjustTokenPrivileges(
-                            impersonationToken,
-                            disableAllPrivileges: false,
-                            ref requested,
-                            bufferLength: 0,
-                            IntPtr.Zero,
-                            IntPtr.Zero))
-                    {
-                        throw new Win32Exception(
-                            Marshal.GetLastWin32Error(),
-                            "Could not enable the Windows privileges required for the staged Agent identity.");
-                    }
-
-                    var adjustmentError = Marshal.GetLastWin32Error();
-                    if (adjustmentError != 0)
-                    {
-                        throw new Win32Exception(
-                            adjustmentError,
-                            adjustmentError == ErrorNotAllAssigned
-                                ? "The staged E2E impersonation token does not contain every required Windows privilege."
-                                : "Windows reported an unexpected privilege-adjustment result.");
-                    }
-
-                    return new PrivilegeImpersonation(impersonationToken);
-                }
-                catch
-                {
-                    impersonationToken.Dispose();
-                    throw;
-                }
-            }
+            return processHandle;
         }
 
-        private static T RunWithProcessTokenPrivilege<T>(
-            string privilegeName,
-            Func<T> action)
+        internal static WindowsAgentProcess CreateValidated(
+            WindowsAgentService service,
+            SafeProcessHandle processHandle,
+            uint processId,
+            string expectedExecutablePath,
+            string expectedExecutableSha256,
+            RestrictedAgentIdentity requestedIdentity)
         {
-            ArgumentNullException.ThrowIfNull(action);
-            lock (ProcessTokenPrivilegeGate)
+            ArgumentNullException.ThrowIfNull(service);
+            ArgumentNullException.ThrowIfNull(processHandle);
+            if (processHandle.IsInvalid || processHandle.IsClosed)
             {
-                using var process = Process.GetCurrentProcess();
-                if (!OpenProcessTokenSafe(
-                        process.SafeHandle,
-                        TokenQuery | TokenAdjustPrivileges,
-                        out var processToken))
-                {
-                    var tokenError = Marshal.GetLastWin32Error();
-                    processToken.Dispose();
-                    throw new Win32Exception(
-                        tokenError,
-                        "Could not open the staged E2E process token for a bounded privilege grant.");
-                }
-
-                using (processToken)
-                {
-                    var requested = new TokenPrivileges
-                    {
-                        PrivilegeCount = 1,
-                        First = CreateEnabledPrivilege(privilegeName)
-                    };
-                    var adjusted = AdjustTokenPrivilegesWithPreviousState(
-                        processToken,
-                        disableAllPrivileges: false,
-                        ref requested,
-                        checked((uint)Marshal.SizeOf<TokenPrivileges>()),
-                        out var previousState,
-                        out _);
-                    var adjustmentError = Marshal.GetLastWin32Error();
-                    if (!adjusted)
-                    {
-                        throw new Win32Exception(
-                            adjustmentError,
-                            $"Could not enable Windows process privilege '{privilegeName}'.");
-                    }
-
-                    Exception? validationFailure = adjustmentError switch
-                    {
-                        0 => null,
-                        ErrorNotAllAssigned => new Win32Exception(
-                            adjustmentError,
-                            $"The staged E2E process token does not contain Windows privilege '{privilegeName}'."),
-                        _ => new Win32Exception(
-                            adjustmentError,
-                            $"Windows reported an unexpected result while enabling process privilege '{privilegeName}'.")
-                    };
-                    if (previousState.PrivilegeCount > 1
-                        || (previousState.PrivilegeCount == 1
-                            && previousState.First.Luid != requested.First.Luid))
-                    {
-                        validationFailure = new InvalidOperationException(
-                            $"Windows returned an invalid previous state for process privilege '{privilegeName}'.");
-                    }
-
-                    if (validationFailure is not null)
-                    {
-                        RestoreProcessTokenPrivilegeOrFailFast(
-                            processToken,
-                            previousState,
-                            privilegeName);
-                        ExceptionDispatchInfo.Capture(validationFailure).Throw();
-                    }
-
-                    try
-                    {
-                        return action();
-                    }
-                    finally
-                    {
-                        RestoreProcessTokenPrivilegeOrFailFast(
-                            processToken,
-                            previousState,
-                            privilegeName);
-                    }
-                }
+                throw new ArgumentException(
+                    "The staged Agent service process handle is unavailable.",
+                    nameof(processHandle));
             }
+
+            ArgumentNullException.ThrowIfNull(requestedIdentity);
+            var validation = ValidateRequiredProcess(
+                processHandle,
+                processId,
+                expectedExecutablePath,
+                expectedExecutableSha256,
+                requestedIdentity.Sid);
+            return new WindowsAgentProcess(
+                service,
+                processHandle,
+                processId,
+                validation.TokenEvidence,
+                validation.ExecutablePath,
+                validation.ExecutableSha256);
         }
 
-        private static void RestoreProcessTokenPrivilegeOrFailFast(
-            SafeAccessTokenHandle processToken,
-            TokenPrivileges previousState,
-            string privilegeName)
+        internal static ValidatedProcessEvidence ValidateRequiredProcess(
+            SafeProcessHandle processHandle,
+            uint processId,
+            string expectedExecutablePath,
+            string expectedExecutableSha256,
+            string expectedSid)
         {
-            if (previousState.PrivilegeCount == 0)
+            ArgumentNullException.ThrowIfNull(processHandle);
+            if (processHandle.IsInvalid || processHandle.IsClosed)
+            {
+                throw new ArgumentException(
+                    "The staged Agent service process handle is unavailable.",
+                    nameof(processHandle));
+            }
+
+            var tokenEvidence = ReadRequiredTokenEvidence(processHandle, expectedSid);
+            var actualExecutablePath = ReadRequiredExecutablePath(processHandle);
+            var fullExpectedPath = Path.GetFullPath(expectedExecutablePath);
+            if (!string.Equals(
+                    actualExecutablePath,
+                    fullExpectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Staged Agent service PID " + processId
+                    + " runs image '" + actualExecutablePath
+                    + "', not frozen image '" + fullExpectedPath + "'.");
+            }
+
+            var actualSha256 = Convert.ToHexStringLower(
+                SHA256.HashData(File.ReadAllBytes(actualExecutablePath)));
+            if (!string.Equals(
+                    actualSha256,
+                    expectedExecutableSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Staged Agent service PID " + processId
+                    + " image hash differs from the hash captured before SCM installation.");
+            }
+
+            return new ValidatedProcessEvidence(
+                tokenEvidence,
+                actualExecutablePath,
+                actualSha256);
+        }
+
+        public async Task<int> StopCleanlyAsync(TimeSpan timeout)
+        {
+            ThrowIfDisposed();
+            var exitCode = await Task.Run(
+                () => _service.StopCleanly(_processId, _processHandle, timeout));
+            _exitCode = exitCode;
+            return exitCode;
+        }
+
+        public void Kill()
+        {
+            if (_disposed)
             {
                 return;
             }
 
-            var restoration = previousState;
-            var restored = AdjustTokenPrivileges(
-                processToken,
-                disableAllPrivileges: false,
-                ref restoration,
-                bufferLength: 0,
-                IntPtr.Zero,
-                IntPtr.Zero);
-            var restorationError = Marshal.GetLastWin32Error();
-            if (!restored || restorationError != 0)
+            if (_exitCode.HasValue)
             {
-                Environment.FailFast(
-                    $"The staged E2E process privilege '{privilegeName}' could not be restored.",
-                    new Win32Exception(
-                        restorationError,
-                        $"Could not restore Windows process privilege '{privilegeName}'."));
+                return;
             }
+
+            _exitCode = _service.Kill(_processId, _processHandle);
         }
 
-        private static LuidAndAttributes CreateEnabledPrivilege(string privilegeName)
+        public void Dispose()
         {
-            if (string.IsNullOrWhiteSpace(privilegeName)
-                || char.IsWhiteSpace(privilegeName[0])
-                || char.IsWhiteSpace(privilegeName[^1]))
+            if (_disposed)
             {
-                throw new ArgumentException(
-                    "Windows privilege names must be canonical non-empty text.",
-                    nameof(privilegeName));
+                return;
             }
 
-            if (!LookupPrivilegeValue(
-                    systemName: null,
-                    privilegeName,
-                    out var luid))
+            _disposed = true;
+        }
+
+        internal static bool IsExited(SafeProcessHandle processHandle) =>
+            WaitForExit(processHandle, TimeSpan.Zero);
+
+        internal static int ReadExitCode(SafeProcessHandle processHandle)
+        {
+            if (!IsExited(processHandle))
+            {
+                throw new InvalidOperationException(
+                    "The staged Agent service process is still running.");
+            }
+
+            if (!GetExitCodeProcess(processHandle, out var exitCode))
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    $"Could not resolve Windows privilege '{privilegeName}'.");
+                    "Could not read the staged Agent service process exit code.");
             }
 
-            return new LuidAndAttributes(luid, PrivilegeEnabled);
+            return unchecked((int)exitCode);
         }
 
-        private sealed class PrivilegeImpersonation(
-            SafeAccessTokenHandle token) : IDisposable
+        internal static void WaitForExitRequired(
+            SafeProcessHandle processHandle,
+            TimeSpan timeout,
+            uint processId)
         {
-            public T Run<T>(Func<T> action)
+            if (!WaitForExit(processHandle, timeout))
             {
-                ArgumentNullException.ThrowIfNull(action);
-                return WindowsIdentity.RunImpersonated(token, action);
+                throw new TimeoutException(
+                    "Staged Agent service PID " + processId
+                    + " did not exit within " + timeout + ".");
             }
-
-            public void Run(Action action)
-            {
-                ArgumentNullException.ThrowIfNull(action);
-                WindowsIdentity.RunImpersonated(token, action);
-            }
-
-            public void Dispose() => token.Dispose();
         }
 
-        private static void ReleaseProfile(
-            ref SafeAccessTokenHandle? profileToken,
-            ref IntPtr profileHandle)
+        private static bool WaitForExit(
+            SafeProcessHandle processHandle,
+            TimeSpan timeout)
         {
-            if (profileToken is null)
+            if (timeout < TimeSpan.Zero
+                || timeout.TotalMilliseconds > uint.MaxValue - 1)
             {
-                if (profileHandle != IntPtr.Zero)
-                {
-                    throw new InvalidOperationException(
-                        "A staged Agent profile handle exists without its logon token.");
-                }
-
-                return;
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "The staged Agent process wait timeout must be non-negative and representable by Win32.");
             }
 
-            if (profileToken.IsClosed || profileToken.IsInvalid)
+            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
+            return WaitForSingleObject(processHandle, milliseconds) switch
             {
-                throw new InvalidOperationException(
-                    "The staged Agent logon token closed before its profile was released.");
-            }
-
-            if (profileHandle != IntPtr.Zero)
-            {
-                const int maximumAttempts = 20;
-                var unloaded = false;
-                var unloadError = 0;
-                for (var attempt = 1; attempt <= maximumAttempts; attempt++)
-                {
-                    unloaded = UnloadUserProfile(profileToken, profileHandle);
-                    if (unloaded)
-                    {
-                        break;
-                    }
-
-                    unloadError = Marshal.GetLastWin32Error();
-                    if (attempt < maximumAttempts)
-                    {
-                        Thread.Sleep(TimeSpan.FromMilliseconds(100));
-                    }
-                }
-
-                if (!unloaded)
-                {
-                    throw new Win32Exception(
-                        unloadError,
-                        "Could not unload the staged Agent user profile after bounded retries.");
-                }
-
-                profileHandle = IntPtr.Zero;
-            }
-
-            profileToken.Dispose();
-            profileToken = null;
+                WaitObject0 => true,
+                WaitTimeout => false,
+                WaitFailed => throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not wait for the staged Agent service process handle."),
+                var result => throw new InvalidOperationException(
+                    "WaitForSingleObject returned unexpected result 0x"
+                    + result.ToString("x8", CultureInfo.InvariantCulture)
+                    + " for the staged Agent service process.")
+            };
         }
 
-        private static string ReadRequiredExecutablePath(SafeProcessHandle processHandle)
+        private static string ReadRequiredExecutablePath(
+            SafeProcessHandle processHandle)
         {
             const int maximumWindowsPathLength = 32_768;
             var executablePath = new StringBuilder(maximumWindowsPathLength);
@@ -4034,325 +7250,33 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    "Could not inspect the staged Agent process image path.");
+                    "Could not inspect the staged Agent service process image path.");
             }
 
             if (executablePathLength == 0)
             {
                 throw new InvalidOperationException(
-                    "The staged Agent process image path is empty.");
+                    "The staged Agent service process image path is empty.");
             }
 
             return Path.GetFullPath(
                 executablePath.ToString(0, checked((int)executablePathLength)));
         }
 
-        private bool TryReadExitCode(out uint exitCode) =>
-            TryReadExitCode(_processHandle, out exitCode);
-
-        private static bool TryReadExitCode(
-            SafeProcessHandle processHandle,
-            out uint exitCode)
-        {
-            if (!WaitForExit(processHandle, TimeSpan.Zero))
-            {
-                exitCode = StillActive;
-                return false;
-            }
-
-            if (!GetExitCodeProcess(processHandle, out exitCode))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not read the staged Agent native process exit code.");
-            }
-
-            return true;
-        }
-
-        private static bool WaitForExit(
-            SafeProcessHandle processHandle,
-            TimeSpan timeout)
-        {
-            if (timeout < TimeSpan.Zero
-                || timeout.TotalMilliseconds > uint.MaxValue - 1)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timeout),
-                    "The staged Agent wait timeout must be non-negative and representable by Win32.");
-            }
-
-            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
-            return WaitForSingleObject(processHandle, milliseconds) switch
-            {
-                WaitObject0 => true,
-                WaitTimeout => false,
-                WaitFailed => throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not wait for the staged Agent native process handle."),
-                var result => throw new InvalidOperationException(
-                    $"WaitForSingleObject returned unexpected result 0x{result:x8} for the staged Agent.")
-            };
-        }
-
-        private static bool WaitForExit(IntPtr processHandle, TimeSpan timeout)
-        {
-            if (processHandle == IntPtr.Zero)
-            {
-                throw new ArgumentException(
-                    "The staged Agent raw process handle is unavailable.",
-                    nameof(processHandle));
-            }
-
-            if (timeout < TimeSpan.Zero
-                || timeout.TotalMilliseconds > uint.MaxValue - 1)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timeout),
-                    "The staged Agent wait timeout must be non-negative and representable by Win32.");
-            }
-
-            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
-            return WaitForSingleObjectRaw(processHandle, milliseconds) switch
-            {
-                WaitObject0 => true,
-                WaitTimeout => false,
-                WaitFailed => throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not wait for the staged Agent raw process handle."),
-                var result => throw new InvalidOperationException(
-                    $"WaitForSingleObject returned unexpected result 0x{result:x8} for the staged Agent.")
-            };
-        }
-
-        private static void TerminateAndConfirmExit(
-            SafeProcessHandle? processHandle,
-            IntPtr rawProcessHandle,
-            WindowsProcessJob? processJob,
-            uint processId,
-            TimeSpan timeout)
-        {
-            bool HasExited() => processHandle is not null
-                ? WaitForExit(processHandle, TimeSpan.Zero)
-                : WaitForExit(rawProcessHandle, TimeSpan.Zero);
-
-            var failures = new List<Exception>();
-            if (processJob is not null)
-            {
-                try
-                {
-                    processJob.Terminate();
-                }
-                catch (Exception exception)
-                {
-                    failures.Add(exception);
-                }
-            }
-
-            if (!HasExited())
-            {
-                var terminated = processHandle is not null
-                    ? TerminateProcess(processHandle, ForcedTerminationExitCode)
-                    : TerminateProcessRaw(rawProcessHandle, ForcedTerminationExitCode);
-                var terminationError = terminated ? 0 : Marshal.GetLastWin32Error();
-                if (!terminated && !HasExited())
-                {
-                    failures.Add(new Win32Exception(
-                        terminationError,
-                        $"Could not terminate staged Agent PID {processId} through its owned native handle."));
-                }
-            }
-
-            var processExited = processHandle is not null
-                ? WaitForExit(processHandle, timeout)
-                : WaitForExit(rawProcessHandle, timeout);
-            var jobEmpty = processJob is null;
-            if (processJob is not null)
-            {
-                try
-                {
-                    jobEmpty = WaitForJobEmpty(processJob, timeout);
-                }
-                catch (Exception exception)
-                {
-                    failures.Add(exception);
-                }
-            }
-
-            if (processExited && jobEmpty)
-            {
-                return;
-            }
-
-            if (!processExited)
-            {
-                failures.Add(new TimeoutException(
-                    $"Staged Agent PID {processId} did not exit after native termination."));
-            }
-
-            if (!jobEmpty)
-            {
-                failures.Add(new TimeoutException(
-                    $"Staged Agent PID {processId} left active processes in its Job Object after native termination."));
-            }
-
-            throw failures.Count == 1
-                ? failures[0]
-                : new AggregateException(failures);
-        }
-
-        private static bool WaitForJobEmpty(
-            WindowsProcessJob processJob,
-            TimeSpan timeout)
-        {
-            if (timeout <= TimeSpan.Zero)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timeout),
-                    "The staged Agent Job Object wait timeout must be positive.");
-            }
-
-            var elapsed = Stopwatch.StartNew();
-            while (processJob.ActiveProcessCount != 0)
-            {
-                var remaining = timeout - elapsed.Elapsed;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    return false;
-                }
-
-                Thread.Sleep(remaining < TimeSpan.FromMilliseconds(25)
-                    ? remaining
-                    : TimeSpan.FromMilliseconds(25));
-            }
-
-            return true;
-        }
-
-        private static void CloseRequiredRawHandle(
-            ref IntPtr handle,
-            string resourceName)
-        {
-            if (handle == IntPtr.Zero)
-            {
-                return;
-            }
-
-            if (!CloseHandle(handle))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    $"Could not close the {resourceName} native handle.");
-            }
-
-            handle = IntPtr.Zero;
-        }
-
-        public async Task<int> StopCleanlyAsync(TimeSpan timeout)
-        {
-            if (TryReadExitCode(out var existingExitCode))
-            {
-                return unchecked((int)existingExitCode);
-            }
-
-            if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, _processId))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not signal Ctrl+Break to the staged Agent process group.");
-            }
-
-            var exited = await Task.Run(() => WaitForExit(_processHandle, timeout));
-            if (!exited)
-            {
-                throw new TimeoutException(
-                    "The staged Agent did not stop cleanly after Ctrl+Break.");
-            }
-
-            return ExitCode;
-        }
-
-        public void Kill()
-        {
-            TerminateAndConfirmExit(
-                _processHandle,
-                IntPtr.Zero,
-                _processJob,
-                _processId,
-                TimeSpan.FromSeconds(10));
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            if (!_processDisposed)
-            {
-                try
-                {
-                    TerminateAndConfirmExit(
-                        _processHandle,
-                        IntPtr.Zero,
-                        _processJob,
-                        _processId,
-                        TimeSpan.FromSeconds(10));
-                    _processJob.Dispose();
-                    ReleaseProfile(ref _profileToken, ref _profileHandle);
-                    _processHandle.Dispose();
-                    _processDisposed = true;
-                }
-                catch (Exception exception)
-                {
-                    Environment.FailFast(
-                        "The staged Agent exited but its native process, Job Object, or user profile cleanup could not be proven complete.",
-                        exception);
-                }
-            }
-
-            if (_ownsConsole && !_consoleReleased)
-            {
-                if (!FreeConsole())
-                {
-                    Environment.FailFast(
-                        "The staged Agent exited but its shared test console could not be released.",
-                        new Win32Exception(
-                            Marshal.GetLastWin32Error(),
-                            "Could not release the staged Agent test console."));
-                }
-
-                _consoleReleased = true;
-            }
-
-            _disposed = true;
-        }
-
-        internal static AgentHostTokenEvidence ReadCurrentProcessTokenEvidence()
-        {
-            using var process = Process.GetCurrentProcess();
-            return ReadTokenEvidence(
-                process.SafeHandle,
-                checked((uint)process.Id));
-        }
-
         private static AgentHostTokenEvidence ReadRequiredTokenEvidence(
             SafeProcessHandle processHandle,
-            RestrictedAgentIdentity requestedIdentity)
+            string expectedSid)
         {
-            var evidence = ReadTokenEvidence(processHandle, processId: null);
+            var evidence = ReadTokenEvidence(processHandle);
             if (!string.Equals(
                     evidence.UserSid,
-                    requestedIdentity.Sid,
+                    expectedSid,
                     StringComparison.Ordinal)
-                || !evidence.NonAdministrative
-                || (evidence.AdministratorGroupPresent
-                    && !evidence.AdministratorGroupDenyOnly))
+                || !evidence.NonAdministrative)
             {
                 throw new InvalidOperationException(
-                    "The staged Agent child token did not prove the required authenticated, "
-                    + "primary, non-elevated, non-administrative identity. "
+                    "The staged Agent service token did not prove the exact authenticated, "
+                    + "primary, non-elevated, non-administrative service identity. "
                     + JsonSerializer.Serialize(evidence));
             }
 
@@ -4360,21 +7284,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         private static AgentHostTokenEvidence ReadTokenEvidence(
-            SafeProcessHandle processHandle,
-            uint? processId)
+            SafeProcessHandle processHandle)
         {
             if (!OpenProcessTokenSafe(
                     processHandle,
-                    TokenQuery | TokenDuplicate,
+                    TokenQuery,
                     out var token))
             {
                 var tokenError = Marshal.GetLastWin32Error();
                 token.Dispose();
                 throw new Win32Exception(
                     tokenError,
-                    processId is null
-                        ? "Could not open the staged Agent native process handle for token verification."
-                        : $"Could not open staged Agent PID {processId.Value} for token verification.");
+                    "Could not open the staged Agent service process token.");
             }
 
             using (token)
@@ -4382,7 +7303,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 using var identity = new WindowsIdentity(token.DangerousGetHandle());
                 var userSid = identity.User
                               ?? throw new InvalidOperationException(
-                                  "The staged Agent child token has no user SID.");
+                                  "The staged Agent service process token has no user SID.");
                 var administratorSid = new SecurityIdentifier(
                     WellKnownSidType.BuiltinAdministratorsSid,
                     null);
@@ -4400,7 +7321,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                             && (administrator.Attributes & GroupUseForDenyOnly) != 0;
                 var principalAdministrator = new WindowsPrincipal(identity)
                     .IsInRole(WindowsBuiltInRole.Administrator);
-                var evidence = new AgentHostTokenEvidence(
+                return new AgentHostTokenEvidence(
                     identity.Name,
                     userSid.Value,
                     ReadTokenInt32(
@@ -4419,7 +7340,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     !string.IsNullOrWhiteSpace(identity.AuthenticationType)
                     && !userSid.IsWellKnown(WellKnownSidType.AnonymousSid),
                     userSid.IsWellKnown(WellKnownSidType.LocalSystemSid));
-                return evidence;
             }
         }
 
@@ -4437,14 +7357,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    $"Could not inspect staged Agent token information {informationClass}.");
+                    "Could not inspect staged Agent token information "
+                    + informationClass + ".");
             }
 
             return value;
         }
 
-        private static List<TokenGroupEvidence> ReadTokenGroups(
-            IntPtr token)
+        private static List<TokenGroupEvidence> ReadTokenGroups(IntPtr token)
         {
             _ = GetTokenInformation(
                 token,
@@ -4500,335 +7420,36 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
         }
 
-        private static bool EnsureConsole()
+        private void ThrowIfDisposed()
         {
-            var processes = new uint[1];
-            if (GetConsoleProcessList(processes, 1) != 0)
-            {
-                return false;
-            }
-
-            if (!AllocConsole())
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not allocate a console for staged Agent shutdown control.");
-            }
-
-            return true;
+            ObjectDisposedException.ThrowIf(_disposed, this);
         }
 
-        private static void AssertSharesConsole(uint processId)
-        {
-            var processIds = new uint[16];
-            while (true)
-            {
-                var count = GetConsoleProcessList(
-                    processIds,
-                    checked((uint)processIds.Length));
-                if (count == 0)
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Could not inspect the staged Agent console process list.");
-                }
-
-                if (count > processIds.Length)
-                {
-                    processIds = new uint[checked((int)count)];
-                    continue;
-                }
-
-                var attached = processIds.AsSpan(0, checked((int)count));
-                if (!attached.Contains(checked((uint)Environment.ProcessId))
-                    || !attached.Contains(processId))
-                {
-                    throw new InvalidOperationException(
-                        $"Staged Agent PID {processId} and test host PID {Environment.ProcessId} "
-                        + "do not share the console required for graceful Ctrl+Break shutdown.");
-                }
-
-                return;
-            }
-        }
-
-        private static string BuildEnvironmentBlock(
-            IReadOnlyDictionary<string, string> environment)
-        {
-            var builder = new StringBuilder();
-            foreach (var (key, value) in environment.OrderBy(
-                         pair => pair.Key,
-                         StringComparer.OrdinalIgnoreCase))
-            {
-                if (key.Contains('=') || key.Contains('\0') || value.Contains('\0'))
-                {
-                    throw new InvalidDataException(
-                        $"Environment entry '{key}' cannot be represented in a Windows block.");
-                }
-
-                builder.Append(key).Append('=').Append(value).Append('\0');
-            }
-
-            builder.Append('\0');
-            return builder.ToString();
-        }
-
-        private sealed class ProcessCreationAttributes : IDisposable
-        {
-            private IntPtr _attributeList;
-            private IntPtr _jobList;
-
-            private ProcessCreationAttributes(
-                IntPtr attributeList,
-                IntPtr jobList)
-            {
-                _attributeList = attributeList;
-                _jobList = jobList;
-                StartupInfo = new StartupInfoEx
-                {
-                    StartupInfo = new StartupInfo
-                    {
-                        Size = Marshal.SizeOf<StartupInfoEx>()
-                    },
-                    AttributeList = attributeList
-                };
-            }
-
-            public StartupInfoEx StartupInfo;
-
-            public static ProcessCreationAttributes Create(IntPtr jobHandle)
-            {
-                if (jobHandle == IntPtr.Zero || jobHandle == new IntPtr(-1))
-                {
-                    throw new ArgumentException(
-                        "The staged Agent Job Object handle is invalid.",
-                        nameof(jobHandle));
-                }
-
-                nuint attributeListSize = 0;
-                _ = InitializeProcThreadAttributeList(
-                    IntPtr.Zero,
-                    attributeCount: 1,
-                    flags: 0,
-                    ref attributeListSize);
-                var sizingError = Marshal.GetLastWin32Error();
-                if (attributeListSize == 0 || sizingError != ErrorInsufficientBuffer)
-                {
-                    throw new Win32Exception(
-                        sizingError,
-                        "Could not size the staged Agent process attribute list.");
-                }
-
-                var attributeList = IntPtr.Zero;
-                var jobList = IntPtr.Zero;
-                var initialized = false;
-                try
-                {
-                    attributeList = Marshal.AllocHGlobal(checked((nint)attributeListSize));
-                    if (!InitializeProcThreadAttributeList(
-                            attributeList,
-                            attributeCount: 1,
-                            flags: 0,
-                            ref attributeListSize))
-                    {
-                        throw new Win32Exception(
-                            Marshal.GetLastWin32Error(),
-                            "Could not initialize the staged Agent process attribute list.");
-                    }
-
-                    initialized = true;
-                    jobList = Marshal.AllocHGlobal(IntPtr.Size);
-                    Marshal.WriteIntPtr(jobList, jobHandle);
-                    if (!UpdateProcThreadAttribute(
-                            attributeList,
-                            flags: 0,
-                            ProcessThreadAttributeJobList,
-                            jobList,
-                            checked((nuint)IntPtr.Size),
-                            IntPtr.Zero,
-                            IntPtr.Zero))
-                    {
-                        throw new Win32Exception(
-                            Marshal.GetLastWin32Error(),
-                            "Could not bind the staged Agent Job Object to atomic process creation.");
-                    }
-
-                    return new ProcessCreationAttributes(attributeList, jobList);
-                }
-                catch
-                {
-                    if (initialized)
-                    {
-                        DeleteProcThreadAttributeList(attributeList);
-                    }
-
-                    if (jobList != IntPtr.Zero)
-                    {
-                        Marshal.FreeHGlobal(jobList);
-                    }
-
-                    if (attributeList != IntPtr.Zero)
-                    {
-                        Marshal.FreeHGlobal(attributeList);
-                    }
-
-                    throw;
-                }
-            }
-
-            public void Dispose()
-            {
-                if (_attributeList == IntPtr.Zero)
-                {
-                    return;
-                }
-
-                DeleteProcThreadAttributeList(_attributeList);
-                Marshal.FreeHGlobal(_jobList);
-                Marshal.FreeHGlobal(_attributeList);
-                _jobList = IntPtr.Zero;
-                _attributeList = IntPtr.Zero;
-                StartupInfo.AttributeList = IntPtr.Zero;
-            }
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        [SuppressMessage(
-            "Performance",
-            "CA1838:Avoid StringBuilder parameters for P/Invokes",
-            Justification = "CreateProcessW requires a writable null-terminated command-line buffer.")]
-        private static extern bool CreateProcess(
-            string applicationName,
-            StringBuilder commandLine,
-            IntPtr processAttributes,
-            IntPtr threadAttributes,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
-            uint creationFlags,
-            IntPtr environment,
-            string currentDirectory,
-            ref StartupInfoEx startupInfo,
-            out ProcessInformation processInformation);
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        [SuppressMessage(
-            "Performance",
-            "CA1838:Avoid StringBuilder parameters for P/Invokes",
-            Justification = "CreateProcessWithTokenW requires a writable null-terminated command-line buffer.")]
-        private static extern bool CreateProcessWithToken(
-            SafeAccessTokenHandle token,
-            uint logonFlags,
-            string applicationName,
-            StringBuilder commandLine,
-            uint creationFlags,
-            IntPtr environment,
-            string currentDirectory,
-            ref StartupInfoEx startupInfo,
-            out ProcessInformation processInformation);
+        internal sealed record ValidatedProcessEvidence(
+            AgentHostTokenEvidence TokenEvidence,
+            string ExecutablePath,
+            string ExecutableSha256);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool InitializeProcThreadAttributeList(
-            IntPtr attributeList,
-            int attributeCount,
-            uint flags,
-            ref nuint size);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UpdateProcThreadAttribute(
-            IntPtr attributeList,
-            uint flags,
-            nuint attribute,
-            IntPtr value,
-            nuint size,
-            IntPtr previousValue,
-            IntPtr returnSize);
-
-        [DllImport("kernel32.dll")]
-        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool LogonUser(
-            string userName,
-            string? domain,
-            string password,
-            uint logonType,
-            uint logonProvider,
-            out SafeAccessTokenHandle token);
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool LookupPrivilegeValue(
-            string? systemName,
-            string name,
-            out Luid luid);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AdjustTokenPrivileges(
-            SafeAccessTokenHandle token,
-            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
-            ref TokenPrivileges newState,
-            int bufferLength,
-            IntPtr previousState,
-            IntPtr returnLength);
+        private static extern SafeProcessHandle OpenProcess(
+            uint desiredAccess,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+            uint processId);
 
         [DllImport(
             "advapi32.dll",
-            EntryPoint = "AdjustTokenPrivileges",
-            ExactSpelling = true,
+            EntryPoint = "OpenProcessToken",
             SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AdjustTokenPrivilegesWithPreviousState(
-            SafeAccessTokenHandle token,
-            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
-            ref TokenPrivileges newState,
-            uint bufferLength,
-            out TokenPrivileges previousState,
-            out uint returnLength);
-
-        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool LoadUserProfile(
-            SafeAccessTokenHandle token,
-            ref ProfileInfo profileInfo);
-
-        [DllImport("userenv.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UnloadUserProfile(
-            SafeAccessTokenHandle token,
-            IntPtr profile);
-
-        [DllImport("userenv.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreateEnvironmentBlock(
-            out IntPtr environment,
-            SafeAccessTokenHandle token,
-            [MarshalAs(UnmanagedType.Bool)] bool inherit);
-
-        [DllImport("userenv.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DestroyEnvironmentBlock(IntPtr environment);
-
-        [DllImport("advapi32.dll", EntryPoint = "OpenProcessToken", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool OpenProcessTokenSafe(
             SafeProcessHandle processHandle,
             uint desiredAccess,
             out SafeAccessTokenHandle tokenHandle);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DuplicateTokenEx(
-            SafeAccessTokenHandle existingToken,
-            uint desiredAccess,
-            IntPtr tokenAttributes,
-            SecurityImpersonationLevel impersonationLevel,
-            TokenType tokenType,
-            out SafeAccessTokenHandle duplicateToken);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(
+            SafeProcessHandle handle,
+            uint milliseconds);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -4836,30 +7457,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             SafeProcessHandle processHandle,
             out uint exitCode);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint WaitForSingleObject(
-            SafeProcessHandle handle,
-            uint milliseconds);
-
-        [DllImport("kernel32.dll", EntryPoint = "WaitForSingleObject", SetLastError = true)]
-        private static extern uint WaitForSingleObjectRaw(
-            IntPtr handle,
-            uint milliseconds);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateProcess(
+        [SuppressMessage(
+            "Performance",
+            "CA1838:Avoid StringBuilder parameters for P/Invokes",
+            Justification = "QueryFullProcessImageNameW writes the image path into a caller-owned buffer.")]
+        private static extern bool QueryFullProcessImageName(
             SafeProcessHandle processHandle,
-            uint exitCode);
-
-        [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool TerminateProcessRaw(
-            IntPtr processHandle,
-            uint exitCode);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint ResumeThread(SafeWaitHandle threadHandle);
+            uint flags,
+            StringBuilder executablePath,
+            ref uint executablePathLength);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -4878,107 +7486,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             IntPtr tokenInformation,
             int tokenInformationLength,
             out int returnLength);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GenerateConsoleCtrlEvent(uint controlEvent, uint processGroupId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool AllocConsole();
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool FreeConsole();
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint GetConsoleProcessList(
-            [Out] uint[] processList,
-            uint processCount);
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        [SuppressMessage(
-            "Performance",
-            "CA1838:Avoid StringBuilder parameters for P/Invokes",
-            Justification = "QueryFullProcessImageNameW writes the image path into a caller-owned buffer.")]
-        private static extern bool QueryFullProcessImageName(
-            SafeProcessHandle processHandle,
-            uint flags,
-            StringBuilder executablePath,
-            ref uint executablePathLength);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct StartupInfo
-        {
-            public int Size;
-            public string? Reserved;
-            public string? Desktop;
-            public string? Title;
-            public uint X;
-            public uint Y;
-            public uint XSize;
-            public uint YSize;
-            public uint XCountChars;
-            public uint YCountChars;
-            public uint FillAttribute;
-            public uint Flags;
-            public ushort ShowWindow;
-            public ushort Reserved2;
-            public IntPtr Reserved2Pointer;
-            public IntPtr StandardInput;
-            public IntPtr StandardOutput;
-            public IntPtr StandardError;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct StartupInfoEx
-        {
-            public StartupInfo StartupInfo;
-            public IntPtr AttributeList;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ProcessInformation
-        {
-            public IntPtr Process;
-            public IntPtr Thread;
-            public uint ProcessId;
-            public uint ThreadId;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct ProfileInfo
-        {
-            public int Size;
-            public int Flags;
-            public string UserName;
-            public string? ProfilePath;
-            public string? DefaultPath;
-            public string? ServerName;
-            public string? PolicyPath;
-            public IntPtr Profile;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private readonly record struct Luid(uint LowPart, int HighPart);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private readonly record struct LuidAndAttributes(
-            Luid Luid,
-            uint Attributes);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct TokenPrivileges
-        {
-            public uint PrivilegeCount;
-            public LuidAndAttributes First;
-            public LuidAndAttributes Second;
-        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TokenGroupsHeader
@@ -5001,16 +7508,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenType = 8,
             TokenElevation = 20,
             TokenHasRestrictions = 21
-        }
-
-        private enum SecurityImpersonationLevel
-        {
-            Impersonation = 2
-        }
-
-        private enum TokenType
-        {
-            Impersonation = 2
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);

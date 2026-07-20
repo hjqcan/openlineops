@@ -9,13 +9,34 @@ using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.ProcessIsolation;
 
 const int hostFailureExitCode = 70;
+const string defaultWindowsServiceName = "OpenLineOps Station Agent";
 
 try
 {
     var builder = Host.CreateApplicationBuilder(args);
+    var configuredWindowsServiceName = builder.Configuration[
+        "OpenLineOps:WindowsServiceName"];
+    var windowsServiceName = configuredWindowsServiceName
+        ?? defaultWindowsServiceName;
+    if (string.IsNullOrWhiteSpace(windowsServiceName)
+        || !string.Equals(
+            windowsServiceName,
+            windowsServiceName.Trim(),
+            StringComparison.Ordinal)
+        || windowsServiceName.Length > 80
+        || windowsServiceName.Contains('/')
+        || windowsServiceName.Contains('\\')
+        || windowsServiceName.Any(char.IsControl))
+    {
+        throw new InvalidDataException(
+            "OpenLineOps:WindowsServiceName must be canonical non-empty text with no "
+            + "leading or trailing whitespace, at most 80 characters, and contain "
+            + "neither path separators nor control characters.");
+    }
+
     builder.Services.AddWindowsService(options =>
     {
-        options.ServiceName = "OpenLineOps Station Agent";
+        options.ServiceName = windowsServiceName;
     });
 
     var options = StationAgentHostOptions.Load(builder.Configuration);

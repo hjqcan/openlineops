@@ -7,6 +7,9 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $StageScript = Join-Path $PSScriptRoot "stage-release-artifacts.ps1"
 $PrepareScript = Join-Path $PSScriptRoot "prepare-final-publication.ps1"
 $RabbitMqScript = Join-Path $PSScriptRoot "verify-staged-agent-rabbitmq-e2e.ps1"
+$StudioScript = Join-Path $PSScriptRoot "verify-studio-two-agent-production-closure.ps1"
+$AgentServiceCleanupScript = Join-Path $PSScriptRoot "invoke-run-scoped-agent-service-cleanup.ps1"
+$ExternalAbortScript = Join-Path $PSScriptRoot "verify-agent-service-external-abort-cleanup.ps1"
 . (Join-Path $PSScriptRoot "github-fixture-process.ps1")
 
 function Resolve-RepoPath {
@@ -91,6 +94,9 @@ function Invoke-Git {
 $stageAst = Get-ScriptAst $StageScript
 $prepareAst = Get-ScriptAst $PrepareScript
 $rabbitMqAst = Get-ScriptAst $RabbitMqScript
+$studioAst = Get-ScriptAst $StudioScript
+$agentServiceCleanupAst = Get-ScriptAst $AgentServiceCleanupScript
+$externalAbortAst = Get-ScriptAst $ExternalAbortScript
 
 Assert-ParameterAbsent `
     -Ast $stageAst `
@@ -112,6 +118,9 @@ Assert-ParameterAbsent `
 $stageText = Get-Content -LiteralPath $StageScript -Raw
 $prepareText = Get-Content -LiteralPath $PrepareScript -Raw
 $rabbitMqText = Get-Content -LiteralPath $RabbitMqScript -Raw
+$studioText = Get-Content -LiteralPath $StudioScript -Raw
+$agentServiceCleanupText = Get-Content -LiteralPath $AgentServiceCleanupScript -Raw
+$externalAbortText = Get-Content -LiteralPath $ExternalAbortScript -Raw
 foreach ($expectedStageBoundary in @(
         "git -c core.quotePath=false ls-files --cached --full-name",
         "RequireCleanGitWorkTree",
@@ -149,6 +158,38 @@ foreach ($expectedTimeoutBoundary in @(
     if ($rabbitMqText -cnotmatch [regex]::Escape($expectedTimeoutBoundary)) {
         throw "Staged Agent RabbitMQ verification is missing timeout boundary '$expectedTimeoutBoundary'."
     }
+}
+foreach ($expectedCleanupBoundary in @(
+        "CleanupRunScopedWindowsAgentServicesAndIdentities",
+        "openlineops-agent-service-cleanup",
+        "Assert-RunScopeAbsent",
+        "SourceExists",
+        "Assert-NoReparseAncestors",
+        "SetOwner",
+        "AreAccessRulesProtected",
+        "accountSid",
+        "PreserveManifest")) {
+    if ($agentServiceCleanupText -cnotmatch [regex]::Escape($expectedCleanupBoundary)) {
+        throw "Run-scoped Agent service cleanup is missing boundary '$expectedCleanupBoundary'."
+    }
+}
+foreach ($expectedAbortBoundary in @(
+        "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_GATE",
+        "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH",
+        "Get-DescendantProcessIds",
+        "/T /F",
+        "Assert-RunScopeGone",
+        "-PreserveManifest")) {
+    if ($externalAbortText -cnotmatch [regex]::Escape($expectedAbortBoundary)) {
+        throw "External-abort Agent service proof is missing boundary '$expectedAbortBoundary'."
+    }
+}
+if ($rabbitMqText -cnotmatch '(?s)finally\s*\{.*?&\s*\$cleanupScript' `
+    -or $studioText -cnotmatch '(?s)finally\s*\{.*?serviceCleanupScript.*?Invoke-StudioCompensation') {
+    throw "RabbitMQ and Studio wrappers must run the shared service scavenger from finally before Studio compensation."
+}
+if ($studioText -cmatch 'Invoke-TemporaryAccountPreflight|New-LocalUser|Remove-LocalUser') {
+    throw "Studio wrapper still contains destructive account preflight outside the strict scavenger contract."
 }
 
 $stageFormatter = Get-FunctionDefinition -Ast $stageAst -Name "Format-CommandArgumentsForLog"
