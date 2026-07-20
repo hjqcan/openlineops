@@ -281,7 +281,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | color-convert | 2.0.1 | MIT | npm:package-lock |
 | color-name | 1.1.4 | MIT | npm:package-lock |
 | combined-stream | 1.0.8 | MIT | npm:package-lock |
-| concurrently | 9.2.3 | MIT | npm:package-lock |
+| concurrently | 9.2.4 | MIT | npm:package-lock |
 | concurrently/node_modules/rxjs | 7.8.2 | Apache-2.0 | npm:package-lock |
 | convert-source-map | 2.0.0 | MIT | npm:package-lock |
 | css-tree | 3.2.1 | MIT | npm:package-lock |
@@ -378,7 +378,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | scheduler | 0.27.0 | MIT | npm:package-lock |
 | semver | 6.3.1 | ISC | npm:package-lock |
 | set-cookie-parser | 2.7.2 | MIT | npm:package-lock |
-| shell-quote | 1.8.4 | MIT | npm:package-lock |
+| shell-quote | 1.9.0 | MIT | npm:package-lock |
 | source-map-js | 1.2.1 | BSD-3-Clause | npm:package-lock |
 | string-width | 4.2.3 | MIT | npm:package-lock |
 | strip-ansi | 6.0.1 | MIT | npm:package-lock |
