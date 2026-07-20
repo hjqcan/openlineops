@@ -280,8 +280,74 @@ function Set-StagedExactTestHash {
     }
 }
 
+function Set-StagedMaterialArrivalIpcField {
+    param(
+        [Parameter(Mandatory = $true)][string] $Field,
+        [Parameter(Mandatory = $true)] $Value
+    )
+
+    $evidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+    $rawPath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+    $raw = Get-Content -LiteralPath $rawPath -Raw | ConvertFrom-Json
+    if ($evidence.rabbitMqTransportCoverage.materialArrivalIpc.PSObject.Properties.Name `
+        -cnotcontains $Field `
+        -or $raw.materialArrivalIpc.PSObject.Properties.Name -cnotcontains $Field) {
+        throw "Unknown staged Agent material-arrival IPC fixture field '$Field'."
+    }
+
+    $evidence.rabbitMqTransportCoverage.materialArrivalIpc.$Field = $Value
+    $raw.materialArrivalIpc.$Field = $Value
+    Write-Json -Path $rawPath -Value $raw
+    $evidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawPath
+    Write-Json -Path $stagedEvidencePath -Value $evidence
+}
+
+function Set-StagedImmutableContentCacheField {
+    param(
+        [Parameter(Mandatory = $true)][string] $Field,
+        [Parameter(Mandatory = $true)] $Value
+    )
+
+    $evidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+    $rawPath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+    $raw = Get-Content -LiteralPath $rawPath -Raw | ConvertFrom-Json
+    if ($evidence.rabbitMqTransportCoverage.immutableContentCache.PSObject.Properties.Name `
+        -cnotcontains $Field `
+        -or $raw.immutableContentCache.PSObject.Properties.Name -cnotcontains $Field) {
+        throw "Unknown staged Agent immutable content-cache fixture field '$Field'."
+    }
+
+    $evidence.rabbitMqTransportCoverage.immutableContentCache.$Field = $Value
+    $raw.immutableContentCache.$Field = $Value
+    Write-Json -Path $rawPath -Value $raw
+    $evidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawPath
+    Write-Json -Path $stagedEvidencePath -Value $evidence
+}
+
 Reset-ProductionFixture
 & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed
+
+Reset-ProductionFixture
+$summaryPath = Join-Path $productionRunRoot "summary.json"
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.externalProgramTrial.directoryImport.entryPoint = "files/bin/not-imported.exe"
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production external program entry point missing from imported directory" `
+    -Pattern "directory import entry point or file inventory" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.externalProgramTrial.directoryImport.preservedSameBasenames[1] =
+    $summary.externalProgramTrial.directoryImport.entryPoint
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production external program nested same-basename proof is false" `
+    -Pattern "same basename" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
 
 Reset-ProductionFixture
 $summaryPath = Join-Path $productionRunRoot "summary.json"
@@ -670,6 +736,76 @@ Invoke-ExpectedFailure `
 Reset-ProductionFixture
 $packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
 $packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+Add-ZipTextEntry $packagePath "source/CON.txt" "reserved"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive contains Windows reserved segment" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+Add-ZipTextEntry $packagePath "source/invalid?.json" "invalid"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive contains invalid Windows path character" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+$nonNormalizedEntry = "source/e$([char]0x0301).json"
+Add-ZipTextEntry $packagePath $nonNormalizedEntry "non-normalized"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive path is not NFC" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+$oversizedSegmentEntry = "source/$(('a' * 251)).json"
+Add-ZipTextEntry $packagePath $oversizedSegmentEntry "oversized-segment"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive segment exceeds UTF-8 limit" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+$longSegment = 'a' * 250
+$oversizedPathEntry = "$longSegment/$longSegment/$longSegment/$longSegment/$longSegment.txt"
+Add-ZipTextEntry $packagePath $oversizedPathEntry "oversized-path"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive path exceeds UTF-8 limit" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
+Add-ZipTextEntry $packagePath "source/ leading.json" "leading-whitespace"
+Update-SummaryFileReference $productionRunRoot $packageRelativePath
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "Station package archive segment starts with whitespace" `
+    -Pattern "canonical Station package path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$packagePath = @(Get-ChildItem -LiteralPath (Join-Path $productionRunRoot "public-release/station-packages") -File)[0].FullName
+$packageRelativePath = "public-release/station-packages/$([System.IO.Path]::GetFileName($packagePath))"
 $packageManifest = Read-ZipTextEntry $packagePath "package.manifest.json" | ConvertFrom-Json
 $unsafeConfigurationText = ([ordered]@{
         schema = "openlineops.fixture-station-configuration"
@@ -734,8 +870,74 @@ Invoke-ExpectedFailure `
 Reset-StagedAgentFixture
 & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot
 
-Reset-StagedAgentFixture
 $stagedEvidencePath = Join-Path $stagedAgentRoot "evidence.json"
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.entryPointProbes[0].exitCode = $false
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent service startup exit code is a false boolean" `
+    -Pattern "entry-point probe.*value- and hash-bound|non-zero integer" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.entryPointProbes[0].exitCode = "1"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent service startup exit code is a truthy string" `
+    -Pattern "entry-point probe.*value- and hash-bound|non-zero integer" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.entryPointProbes[0] |
+    Add-Member -NotePropertyName legacyStartupAccepted -NotePropertyValue $true
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent service startup probe public compatibility field rejected" `
+    -Pattern "entry-point probe.*exact strict-schema properties" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.entryPointProbes[0].outputContract = "WindowsServiceName"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent service startup output contract weakened" `
+    -Pattern "entry-point probe.*value- and hash-bound" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.entryPoints[0].sha256 = "f" * 64
+$stagedEvidence.entryPointProbes[0].executableSha256 = "f" * 64
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent public entry-point hash rebinding rejected" `
+    -Pattern "public evidence is not value- and hash-bound to its raw probe evidence" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEntryPointRawPath = Join-Path `
+    $stagedAgentRoot `
+    $stagedEvidence.entryPointProbeEvidence.evidence
+$stagedEntryPointRaw = Get-Content -LiteralPath $stagedEntryPointRawPath -Raw |
+    ConvertFrom-Json
+$stagedEntryPointRaw.probes[0] |
+    Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
+Write-Json -Path $stagedEntryPointRawPath -Value $stagedEntryPointRaw
+$stagedEvidence.entryPointProbeEvidence.evidenceSha256 =
+    Get-FileSha256 $stagedEntryPointRawPath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent raw entry-point compatibility field rejected after hash rebinding" `
+    -Pattern "raw entry-point probe.*exact strict-schema properties" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
 $stagedEvidence.exactTestEvidence[0].fullyQualifiedName =
     "OpenLineOps.Agent.Tests.FakeGate.Passes"
@@ -836,16 +1038,233 @@ Invoke-ExpectedFailure `
     -Pattern "RabbitMQ|service|closure" `
     -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 
+foreach ($mutation in @(
+        [pscustomobject]@{
+            Name = "staged Agent service token material-arrival connection not verified"
+            Field = "serviceTokenConnected"
+        },
+        [pscustomobject]@{
+            Name = "staged Agent material-arrival pipe exact ACL not verified"
+            Field = "pipeExactAclVerified"
+        },
+        [pscustomobject]@{
+            Name = "staged Agent material arrival not durably published"
+            Field = "durablePublicationVerified"
+        },
+        [pscustomobject]@{
+            Name = "staged Agent ordinary CI token not explicitly denied"
+            Field = "ordinaryCiTokenExplicitAccessDenied"
+        })) {
+    Reset-StagedAgentFixture
+    Set-StagedMaterialArrivalIpcField -Field $mutation.Field -Value $false
+    Invoke-ExpectedFailure `
+        -Name $mutation.Name `
+        -Pattern "material-arrival IPC" `
+        -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+}
+
+Reset-StagedAgentFixture
+Set-StagedMaterialArrivalIpcField -Field "serviceTokenConnected" -Value 1
+Invoke-ExpectedFailure `
+    -Name "staged Agent material-arrival proof uses a truthy integer" `
+    -Pattern "JSON boolean true" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.windowsServiceLifecycleVerified = "true"
+$rawEvidence.windowsServiceLifecycleVerified = "true"
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent transport lifecycle proof uses a truthy string" `
+    -Pattern "JSON boolean true" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative = 1
+$rawEvidence.agentHostIdentity.NonAdministrative = 1
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent identity proof uses a truthy integer" `
+    -Pattern "JSON boolean true" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted = "true"
+$rawEvidence.presence.startedAndHeartbeatPersisted = "true"
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent presence proof uses a truthy string" `
+    -Pattern "JSON boolean true" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$rawEvidence.broker.tls = 1
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent raw broker TLS proof uses a truthy integer" `
+    -Pattern "JSON boolean" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.materialArrivalIpc |
+    Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
+$rawEvidence.materialArrivalIpc |
+    Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent material-arrival IPC compatibility field rejected" `
+    -Pattern "exact strict-schema properties" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+$immutableContentCacheFields = @(
+    "packagedProvisionCommandVerified",
+    "runningServiceAdministrationRejected",
+    "serviceTokenReadExecuteVerified",
+    "sealedMutationAccessDenied",
+    "deepAncestorMutationAccessDenied",
+    "preSealRecoveryVerified",
+    "cleanupCrashResumeVerified",
+    "committedAdminRemovalVerified",
+    "packagedRemovalCommandVerified",
+    "cacheNamespaceRemoved")
+foreach ($field in $immutableContentCacheFields) {
+    Reset-StagedAgentFixture
+    Set-StagedImmutableContentCacheField -Field $field -Value $false
+    Invoke-ExpectedFailure `
+        -Name "staged Agent immutable content-cache proof '$field' is false" `
+        -Pattern "immutable content-cache|JSON boolean true" `
+        -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+}
+
+foreach ($truthyMutation in @(1, 0, "true", "false")) {
+    Reset-StagedAgentFixture
+    Set-StagedImmutableContentCacheField `
+        -Field "serviceTokenReadExecuteVerified" `
+        -Value $truthyMutation
+    Invoke-ExpectedFailure `
+        -Name "staged Agent immutable content-cache proof rejects non-boolean '$truthyMutation'" `
+        -Pattern "JSON boolean true" `
+        -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+}
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.immutableContentCache |
+    Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
+$rawEvidence.immutableContentCache |
+    Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent immutable content-cache compatibility field rejected" `
+    -Pattern "exact strict-schema properties" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
 Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
 $stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy =
-    "temporary-standard-account"
+    "temporary-standard-service-account"
 $stagedEvidence.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy =
-    "temporary-standard-account"
+    "temporary-standard-service-account"
 Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
 Invoke-ExpectedFailure `
     -Name "staged Agent legacy identity strategy rejected" `
     -Pattern "service account|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.hasRestrictions = $false
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent unrestricted token rejected" `
+    -Pattern "service-SID|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.serviceLogonSidEnabled = $false
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent disabled service logon SID rejected" `
+    -Pattern "service-SID|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.exactServiceSidRestricted = $false
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent missing restricted SID membership rejected" `
+    -Pattern "service-SID|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.serviceAccountSid = "S-1-5-20"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent non-LocalService account SID rejected" `
+    -Pattern "service-SID|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceSid =
+    "S-1-5-80-1-2-3-4-5"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent restart service SID mismatch rejected" `
+    -Pattern "differs|identity" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.serviceSid =
+    "S-1-5-80-1-2-3-4-5"
+$stagedEvidence.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceSid =
+    "S-1-5-80-1-2-3-4-5"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent service SID not derived from service name rejected" `
+    -Pattern "service SID|service name" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity | Add-Member userSid "S-1-5-19"
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent legacy identity field rejected" `
+    -Pattern "exactly|identity" `
     -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 
 Reset-StagedAgentFixture

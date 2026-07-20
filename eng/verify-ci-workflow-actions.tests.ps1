@@ -79,6 +79,12 @@ $cases = @(
         ExpectedFailure = "tracked-only release staging"
     },
     [pscustomobject]@{
+        Name = "Station content-cache provisioning contract"
+        Search = "./eng/verify-station-agent-content-cache-contract.ps1"
+        Replacement = "Write-Host 'Station content-cache provisioning disabled'"
+        ExpectedFailure = "administrator-only Station content-cache provisioning contract"
+    },
+    [pscustomobject]@{
         Name = "Coordinator API runtime restore"
         Search = "dotnet restore src/OpenLineOps.Api/OpenLineOps.Api.csproj --runtime win-x64"
         Replacement = "dotnet restore src/OpenLineOps.Api/OpenLineOps.Api.csproj"
@@ -196,7 +202,13 @@ $cases = @(
         Name = "Agent service cleanup scope preparation"
         Search = '"OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File'
         Replacement = '"BROKEN_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File'
-        ExpectedFailure = "allocate private 32-hex RabbitMQ, external-abort, and Studio cleanup scopes"
+        ExpectedFailure = "allocate private 32-hex RabbitMQ, external-abort, Studio, and Runner cleanup scopes"
+    },
+    [pscustomobject]@{
+        Name = "Runner service cleanup scope preparation"
+        Search = '"OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE=$runnerScope" | Out-File'
+        Replacement = '"BROKEN_CI_RUNNER_SERVICE_SCOPE=$runnerScope" | Out-File'
+        ExpectedFailure = "allocate private 32-hex RabbitMQ, external-abort, Studio, and Runner cleanup scopes"
     },
     [pscustomobject]@{
         Name = "staged Agent always cleanup"
@@ -265,6 +277,18 @@ $cases = @(
         ExpectedFailure = "run and independently scan the staged Runner"
     },
     [pscustomobject]@{
+        Name = "Runner staged-Agent cleanup scope binding"
+        Search = "OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE: `${{ env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE }}"
+        Replacement = "OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE: deadbeefdeadbeefdeadbeefdeadbeef"
+        ExpectedFailure = "run and independently scan the staged Runner"
+    },
+    [pscustomobject]@{
+        Name = "Runner staged-Agent always cleanup"
+        Search = "if: `${{ always() && env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE != '' }}"
+        Replacement = "if: `${{ success() }}"
+        ExpectedFailure = "always run the bounded external Runner Agent service scavenger"
+    },
+    [pscustomobject]@{
         Name = "Runner staged-Agent finite timeout"
         Search = "      - name: Run staged Runner production closure`n        shell: powershell`n        timeout-minutes: 15"
         Replacement = "      - name: Run staged Runner production closure`n        shell: powershell"
@@ -301,6 +325,12 @@ $cases = @(
         ExpectedFailure = "deterministic TRX for the production integration proof"
     },
     [pscustomobject]@{
+        Name = "Linux Station package source-boundary security gate"
+        Search = '--filter FullyQualifiedName~OpenLineOps.Projects.Tests.StationPackageBuilderSecurityTests'
+        Replacement = '--filter FullyQualifiedName~OpenLineOps.Projects.Tests.NonexistentSecurityTests'
+        ExpectedFailure = "strict Station package source-boundary security gates on Linux"
+    },
+    [pscustomobject]@{
         Name = "production integration proof writer"
         Search = './eng/write-production-integration-evidence.ps1 -TrxPath output/production-integration-evidence/production-integration.trx'
         Replacement = "Write-Host 'integration proof disabled'"
@@ -323,6 +353,12 @@ $cases = @(
         Search = "npm run test:extension-import-security"
         Replacement = "npm run test:trace-artifact-save"
         ExpectedFailure = "trusted main-process ZIP selection"
+    },
+    [pscustomobject]@{
+        Name = "External program directory import gate"
+        Search = "npm run test:external-program-directory-import"
+        Replacement = "npm run test:trace-artifact-save"
+        ExpectedFailure = "bounded, portable, atomic external program directory imports"
     },
     [pscustomobject]@{
         Name = "Flow problem location gate"

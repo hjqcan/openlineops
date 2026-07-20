@@ -52,21 +52,19 @@ export interface SelectProjectFileOptions {
   buttonLabel?: string;
 }
 
-export interface SelectExternalProgramFilesOptions {
-  title?: string;
-  defaultPath?: string;
-  buttonLabel?: string;
-  multiple?: boolean;
-}
-
-export interface SelectFilesResult {
-  canceled: boolean;
-  paths: string[];
-}
-
-export interface ExternalProgramUploadFile {
-  sourcePath: string;
+export interface ExternalProgramDirectoryInventoryFile {
+  relativePath: string;
   resourceRelativePath: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface ExternalProgramDirectorySelectionResult {
+  canceled: boolean;
+  selectionId: string | null;
+  directoryName: string | null;
+  totalBytes: number | null;
+  files: ExternalProgramDirectoryInventoryFile[];
 }
 
 export interface TraceArtifactSaveOptions {
@@ -101,12 +99,18 @@ export interface OpenLineOpsDesktopApi {
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
   selectApplicationProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
-  selectExternalProgramFiles(options?: SelectExternalProgramFilesOptions): Promise<SelectFilesResult>;
-  uploadExternalProgram<T = unknown>(
-    path: string,
-    definition: unknown | null,
-    files: ExternalProgramUploadFile[],
-    headers?: Record<string, string>
+  selectExternalProgramDirectory(
+    projectId: string,
+    applicationId: string,
+    resourceId: string
+  ): Promise<ExternalProgramDirectorySelectionResult>;
+  releaseExternalProgramDirectorySelection(selectionId: string): Promise<void>;
+  importExternalProgramDirectory<T = unknown>(
+    projectId: string,
+    applicationId: string,
+    definition: unknown,
+    selectionId: string,
+    write?: EditorDocumentWriteOptions
   ): Promise<ApiResponse<T>>;
   importApplicationExtension<T = unknown>(
     projectId: string,

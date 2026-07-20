@@ -68,6 +68,7 @@ const childLogs = [];
 const cdpEvents = [];
 const maxLogLines = 160;
 const maxCdpEvents = 80;
+const electronRendererTargetTimeoutMilliseconds = 90_000;
 let previewProcess;
 let electronProcess;
 let cdp;
@@ -164,7 +165,9 @@ async function main() {
   const target = await waitForCdpTarget(
     cdpPort,
     previewUrl,
-    packagedMode ? 90000 : 30000);
+    electronRendererTargetTimeoutMilliseconds,
+    electronProcess,
+    'electron');
   if (packagedMode) {
     console.log(`Packaged Electron renderer target ready in ${Date.now() - electronLaunchStartedAt} ms.`);
   }
@@ -1571,9 +1574,20 @@ async function main() {
     30000,
     'engineering workbench to render its mutable source actions');
   await clickByTestId('new-engineering-configuration');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="engineering-station-system"]')?.value === ${JSON.stringify(`${openedApplication.applicationId}.station.1`)}`
+    + ' && document.querySelector("[data-testid=\\"engineering-device-owner-system\\"]")?.value === ""'
+    + ' && document.querySelector("[data-testid=\\"engineering-device-capability\\"]")?.value === "")()',
+    15000,
+    'new engineering source reset to commit before selecting its topology binding');
   await setSelectByTestId(
     'engineering-device-owner-system',
     `${openedApplication.applicationId}.station.1`);
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="engineering-device-owner-system"]')?.value === ${JSON.stringify(`${openedApplication.applicationId}.station.1`)}`
+    + ` && Array.from(document.querySelector('[data-testid="engineering-device-capability"]')?.options ?? []).some(option => option.value === ${JSON.stringify(capabilityId)}))()`,
+    15000,
+    'engineering owner selection to expose its declared capability');
   await setSelectByTestId('engineering-device-capability', capabilityId);
   await waitForExpression(
     '(() => document.querySelector("[data-testid=\\"save-engineering-source\\"]")?.disabled === false'
@@ -1724,6 +1738,7 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
 
   await closeElectronForPackagedRestart();
   const restartCdpPort = await getFreePort();
+  const restartLaunchStartedAt = Date.now();
   electronProcess = spawnLogged(
     packagedExecutable,
     packagedElectronArguments(restartCdpPort),
@@ -1732,7 +1747,14 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
       env: packagedElectronEnvironment(rendererNonce)
     },
     'electron-restart');
-  const target = await waitForCdpTarget(restartCdpPort, null, 30000);
+  const target = await waitForCdpTarget(
+    restartCdpPort,
+    null,
+    electronRendererTargetTimeoutMilliseconds,
+    electronProcess,
+    'electron-restart');
+  console.log(
+    `Packaged Electron restart renderer target ready in ${Date.now() - restartLaunchStartedAt} ms.`);
   cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
   await cdp.send('Runtime.enable');
   await cdp.send('Log.enable');
@@ -1824,6 +1846,16 @@ async function closeElectronForPackagedRestart() {
   }
   const closingCdp = cdp;
   const closingProcess = electronProcess;
+  const stoppedBackend = await withTimeout(
+    evaluate('window.openlineopsDesktop.stopBackend()'),
+    15000,
+    'packaged backend process-tree stop before restart');
+  if (stoppedBackend.isRunning
+      || stoppedBackend.pid !== null
+      || stoppedBackend.apiBaseUrl !== null) {
+    throw new Error(
+      `Packaged backend did not confirm a complete stop before restart: ${JSON.stringify(stoppedBackend)}`);
+  }
   let closeRequestError = null;
   try {
     await withTimeout(
@@ -3627,7 +3659,7 @@ async function collectDiagnostics() {
   }
 }
 
-async function waitForCdpTarget(port, previewUrl, timeoutMs) {
+async function waitForCdpTarget(port, previewUrl, timeoutMs, child, label) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -3642,10 +3674,29 @@ async function waitForCdpTarget(port, previewUrl, timeoutMs) {
       // Electron may still be starting.
     }
 
+    if (child && (child.exitCode !== null || child.signalCode !== null)) {
+      throw new Error(
+        `${label} exited before exposing its renderer CDP target on port ${port}. `
+        + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`);
+    }
+
     await delay(500);
   }
 
-  throw new Error(`Timed out waiting for Electron CDP target on port ${port}.`);
+  throw new Error(
+    `Timed out waiting for ${label} renderer CDP target on port ${port}. `
+    + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`);
+}
+
+function childProcessDiagnostics(child, label) {
+  return {
+    pid: child?.pid ?? null,
+    exitCode: child?.exitCode ?? null,
+    signalCode: child?.signalCode ?? null,
+    recentProcessLogs: childLogs
+      .filter(line => line.startsWith(`[${label}] `))
+      .slice(-40)
+  };
 }
 
 async function waitForHttp(url, timeoutMs, description) {

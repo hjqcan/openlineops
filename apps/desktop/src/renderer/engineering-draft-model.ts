@@ -14,6 +14,28 @@ export interface EngineeringDraft {
   processVersionId: string;
 }
 
+export interface EngineeringDeviceOwnerOption {
+  value: string;
+  label: string;
+}
+
+export function createEngineeringDeviceOwnerOptions(
+  systems: readonly { systemId: string; displayName: string }[]
+): EngineeringDeviceOwnerOption[] {
+  return [
+    {
+      value: '',
+      label: systems.length === 0
+        ? 'No System in selected Station'
+        : 'Select a device owner System'
+    },
+    ...systems.map(system => ({
+      value: system.systemId,
+      label: `${system.displayName} (${system.systemId})`
+    }))
+  ];
+}
+
 export function engineeringSourceDraftsEqual(
   left: EngineeringDraft,
   right: EngineeringDraft

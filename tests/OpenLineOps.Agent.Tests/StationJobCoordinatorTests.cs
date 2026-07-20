@@ -1,4 +1,6 @@
 using System.IO.Pipes;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using System.Text.Json;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
@@ -6,11 +8,13 @@ using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.StationRuntime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
 
+[SupportedOSPlatform("windows")]
 public sealed class StationJobCoordinatorTests
 {
     private static readonly JsonSerializerOptions MessageJsonOptions =
@@ -25,7 +29,10 @@ public sealed class StationJobCoordinatorTests
         var first = CreateAcceptedJob(42).ToSnapshot();
         await ApplyLeaseAsync(validator, first);
         Assert.True((await validator.ValidateCurrentAsync(first)).Accepted);
-        var authority = new StationResourceFenceAuthorityServer(first, validator);
+        var authority = new StationResourceFenceAuthorityServer(
+            first,
+            validator,
+            CurrentUserSid());
         using var cancellation = new CancellationTokenSource();
         var server = authority.RunAsync(cancellation.Token);
 
@@ -40,6 +47,54 @@ public sealed class StationJobCoordinatorTests
 
             Assert.False(stale.Accepted);
             Assert.Contains("does not exactly match", stale.RejectionReason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await cancellation.CancelAsync();
+            await server;
+        }
+    }
+
+    [Fact]
+    public async Task SlowCallerCannotOccupyOrPreemptTheFenceAuthority()
+    {
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        var job = CreateAcceptedJob(42).ToSnapshot();
+        await ApplyLeaseAsync(validator, job);
+        var principalSid = CurrentUserSid();
+        var authority = new StationResourceFenceAuthorityServer(
+            job,
+            validator,
+            principalSid,
+            TimeSpan.FromMilliseconds(100));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var server = authority.RunAsync(cancellation.Token);
+
+        try
+        {
+            await using (var blocker = new NamedPipeClientStream(
+                             ".",
+                             authority.Descriptor.PipeName,
+                             PipeDirection.InOut,
+                             PipeOptions.Asynchronous))
+            {
+                await blocker.ConnectAsync(cancellation.Token);
+                WindowsIdentityBoundNamedPipe.Verify(blocker, principalSid);
+                await Task.Delay(300, cancellation.Token);
+            }
+
+            var duplicate = Record.Exception(() =>
+                WindowsIdentityBoundNamedPipe.CreateServer(
+                    authority.Descriptor.PipeName,
+                    principalSid,
+                    maximumServerInstances: 1,
+                    inputBufferSize: 4096,
+                    outputBufferSize: 4096));
+            Assert.NotNull(duplicate);
+            Assert.True(
+                duplicate is IOException or UnauthorizedAccessException,
+                $"Unexpected duplicate fence pipe exception: {duplicate}");
+            Assert.True((await ValidateViaAuthorityAsync(authority, job)).Accepted);
         }
         finally
         {
@@ -758,6 +813,9 @@ public sealed class StationJobCoordinatorTests
             PipeDirection.InOut,
             PipeOptions.Asynchronous);
         await pipe.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        WindowsIdentityBoundNamedPipe.Verify(
+            pipe,
+            authority.Descriptor.AuthorizedPrincipalSid);
         await StationResourceFenceAuthorityWire.WriteAsync(
             pipe,
             new StationResourceFenceValidationRequest(
@@ -772,11 +830,19 @@ public sealed class StationJobCoordinatorTests
                     fence.FencingToken,
                     fence.ExpiresAtUtc)).ToArray()),
             CancellationToken.None);
-        return await StationResourceFenceAuthorityWire
+        var response = await StationResourceFenceAuthorityWire
             .ReadAsync<StationResourceFenceValidationResponse>(pipe, CancellationToken.None)
             .AsTask()
             .WaitAsync(TimeSpan.FromSeconds(5));
+        await StationResourceFenceAuthorityWire.WriteResponseReceiptAsync(
+            pipe,
+            CancellationToken.None);
+        return response;
     }
+
+    private static string CurrentUserSid() =>
+        WindowsIdentity.GetCurrent(TokenAccessLevels.Query).User?.Value
+        ?? throw new InvalidOperationException("Current test token has no user SID.");
 
     private static StationOperationExecutionResult Success() => new(
         ExecutionStatus.Completed,

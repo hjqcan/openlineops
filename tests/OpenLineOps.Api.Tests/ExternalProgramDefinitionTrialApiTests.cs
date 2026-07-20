@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,11 +16,120 @@ namespace OpenLineOps.Api.Tests;
 public sealed class ExternalProgramDefinitionTrialApiTests
     : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
+    private static readonly JsonSerializerOptions WebSerializerOptions =
+        new(JsonSerializerDefaults.Web);
+
     private readonly OpenLineOpsApiWebApplicationFactory _factory;
 
     public ExternalProgramDefinitionTrialApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
+    }
+
+    [Fact]
+    public async Task DirectoryImportPersistsCanonicalNestedInventoryThroughHttpBoundary()
+    {
+        using var client = _factory.CreateAuthenticatedClient();
+        var workspace = await CreateWorkspaceAsync(client);
+        try
+        {
+            var executable = Encoding.UTF8.GetBytes("executable");
+            var support = Encoding.UTF8.GetBytes("support");
+            var definition = new
+            {
+                resourceId = "program.vendor-helper",
+                displayName = "Vendor Helper",
+                capabilityId = "device.vendor-helper",
+                commandName = "Run",
+                launchKind = "ApplicationExecutable",
+                entryPoint = "files/bin/vendor-helper.exe",
+                providerKind = (string?)null,
+                providerKey = (string?)null,
+                argumentTemplates = new[] { "--serial", "{{input.serial}}" },
+                inputMappings = new[]
+                {
+                    new { source = "$product.identity", target = "serial" },
+                    new { source = "$product.model", target = "model" }
+                },
+                resultMappings = new[]
+                {
+                    new { sourcePath = "$.outcome", targetKey = "vendor.outcome", valueKind = "Text" }
+                },
+                outcomeMapping = new
+                {
+                    sourcePath = "$.outcome",
+                    passedToken = "Passed",
+                    failedToken = "Failed",
+                    abortedToken = "Aborted"
+                },
+                permissionProfile = new
+                {
+                    profileName = "Restricted",
+                    networkAccessAllowed = false,
+                    allowedEnvironmentVariables = Array.Empty<string>()
+                },
+                executionLimits = new
+                {
+                    timeoutMilliseconds = 30_000L,
+                    maximumProcessCount = 2,
+                    maximumWorkingSetBytes = 256L * 1024 * 1024,
+                    maximumCpuTimeMilliseconds = 30_000L,
+                    maximumStandardOutputBytes = 1024 * 1024,
+                    maximumStandardErrorBytes = 1024 * 1024,
+                    maximumArtifactCount = 8,
+                    maximumArtifactBytes = 4L * 1024 * 1024,
+                    maximumTotalArtifactBytes = 16L * 1024 * 1024
+                }
+            };
+            var manifest = new[]
+            {
+                new
+                {
+                    fieldName = "file-1",
+                    resourceRelativePath = "files/bin/vendor-helper.exe",
+                    sizeBytes = (long)executable.Length,
+                    sha256 = Sha256(executable)
+                },
+                new
+                {
+                    fieldName = "file-2",
+                    resourceRelativePath = "files/lib/shared.settings.json",
+                    sizeBytes = (long)support.Length,
+                    sha256 = Sha256(support)
+                }
+            };
+            using var form = new MultipartFormDataContent();
+            form.Add(new StringContent(JsonSerializer.Serialize(definition)), "definition");
+            form.Add(new StringContent(JsonSerializer.Serialize(manifest)), "uploadManifest");
+            form.Add(new ByteArrayContent(executable), "file-1", "vendor-helper.exe");
+            form.Add(new ByteArrayContent(support), "file-2", "shared.settings.json");
+
+            using var response = await client.PostAsync(
+                $"/api/automation-projects/{workspace.ProjectId}"
+                    + $"/applications/{workspace.ApplicationId}/external-programs/directory-import",
+                form);
+            var responseText = await response.Content.ReadAsStringAsync();
+
+            Assert.True(
+                response.StatusCode == HttpStatusCode.Created,
+                $"Expected a created directory import but received {(int)response.StatusCode}: {responseText}");
+            var body = JsonSerializer.Deserialize<ImportedExternalProgramBody>(
+                responseText,
+                WebSerializerOptions);
+            Assert.NotNull(body);
+            Assert.Equal("ApplicationExecutable", body.LaunchKind);
+            Assert.Equal("files/bin/vendor-helper.exe", body.EntryPoint);
+            Assert.Equal(
+                ["files/bin/vendor-helper.exe", "files/lib/shared.settings.json"],
+                body.Files.Select(file => file.RelativePath).ToArray());
+        }
+        finally
+        {
+            if (Directory.Exists(workspace.RootPath))
+            {
+                Directory.Delete(workspace.RootPath, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -122,6 +233,66 @@ public sealed class ExternalProgramDefinitionTrialApiTests
         }
     }
 
+    [Theory]
+    [InlineData("definition")]
+    [InlineData("uploadManifest")]
+    public async Task DirectoryImportRejectsDuplicateSingletonMultipartValueWithBadRequest(string duplicatedField)
+    {
+        using var client = _factory.CreateAuthenticatedClient();
+        var workspace = await CreateWorkspaceAsync(client);
+        try
+        {
+            using var form = new MultipartFormDataContent();
+            form.Add(new StringContent("{}"), "definition");
+            form.Add(new StringContent("[]"), "uploadManifest");
+            form.Add(new StringContent(duplicatedField == "definition" ? "{}" : "[]"), duplicatedField);
+            form.Add(new ByteArrayContent([1]), "file-1", "helper.exe");
+
+            using var response = await client.PostAsync(
+                $"/api/automation-projects/{workspace.ProjectId}"
+                    + $"/applications/{workspace.ApplicationId}/external-programs/directory-import",
+                form);
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+        finally
+        {
+            if (Directory.Exists(workspace.RootPath))
+            {
+                Directory.Delete(workspace.RootPath, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryImportRejectsUnexpectedMultipartValueWithBadRequest()
+    {
+        using var client = _factory.CreateAuthenticatedClient();
+        var workspace = await CreateWorkspaceAsync(client);
+        try
+        {
+            using var form = new MultipartFormDataContent();
+            form.Add(new StringContent("{}"), "definition");
+            form.Add(new StringContent("[]"), "uploadManifest");
+            form.Add(new StringContent("unexpected"), "sourcePath");
+            form.Add(new ByteArrayContent([1]), "file-1", "helper.exe");
+
+            using var response = await client.PostAsync(
+                $"/api/automation-projects/{workspace.ProjectId}"
+                    + $"/applications/{workspace.ApplicationId}/external-programs/directory-import",
+                form);
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+        finally
+        {
+            if (Directory.Exists(workspace.RootPath))
+            {
+                Directory.Delete(workspace.RootPath, recursive: true);
+            }
+        }
+    }
+
     private static async Task<TestWorkspace> CreateWorkspaceAsync(HttpClient client)
     {
         var suffix = Guid.NewGuid().ToString("N");
@@ -184,4 +355,14 @@ public sealed class ExternalProgramDefinitionTrialApiTests
         string Judgement);
 
     private sealed record ExternalProgramResourceBody(string ResourceId);
+
+    private sealed record ImportedExternalProgramBody(
+        string LaunchKind,
+        string EntryPoint,
+        IReadOnlyCollection<ImportedExternalProgramFileBody> Files);
+
+    private sealed record ImportedExternalProgramFileBody(string RelativePath);
+
+    private static string Sha256(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }

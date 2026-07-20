@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("rabbitmq", "studio-two-agent")]
+    [ValidateSet("rabbitmq", "runner", "studio-two-agent")]
     [string] $Kind,
 
     [Parameter(Mandatory = $true)]
@@ -32,7 +32,10 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $TestProject = Join-Path $RepoRoot "tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj"
-$CleanupExactTest = "OpenLineOps.Agent.Tests.StagedAgentRabbitMqProcessE2ETests.CleanupRunScopedWindowsAgentServicesAndIdentities"
+$CleanupExactTest = "OpenLineOps.Agent.Tests.StagedAgentRabbitMqProcessE2ETests.CleanupRunScopedWindowsAgentServicesAndAccess"
+$LocalServiceAccountName = "NT AUTHORITY\LocalService"
+$LocalServiceAccountSid = "S-1-5-19"
+$RestrictedServiceSidType = "Restricted"
 
 function Assert-LowerHex {
     param(
@@ -96,6 +99,41 @@ function Resolve-PrivateManifestPath {
         throw "ManifestPath must be a direct child of the deterministic private cleanup base."
     }
     return $resolved
+}
+
+function Get-ManifestPathKind {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    try {
+        $attributes = [System.IO.File]::GetAttributes($Path)
+    }
+    catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) {
+            $failure = $failure.InnerException
+        }
+        if ($failure -is [System.IO.FileNotFoundException] `
+            -or $failure -is [System.IO.DirectoryNotFoundException]) {
+            return "Absent"
+        }
+        throw
+    }
+
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return "ReparsePoint"
+    }
+    if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+        return "Directory"
+    }
+    if (($attributes -band [System.IO.FileAttributes]::Device) -ne 0) {
+        return "Other"
+    }
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item -isnot [System.IO.FileInfo]) {
+        return "Other"
+    }
+    return "RegularFile"
 }
 
 function Assert-NoReparseAncestors {
@@ -162,6 +200,30 @@ function Get-TextSha256 {
     }
 }
 
+function Get-ServiceSidFromName {
+    param([Parameter(Mandatory = $true)][string] $ServiceName)
+
+    if ([string]::IsNullOrWhiteSpace($ServiceName) `
+        -or $ServiceName.Length -gt 256 `
+        -or $ServiceName.IndexOfAny([char[]]@('/', '\')) -ge 0) {
+        throw "ServiceName cannot be represented by the Windows Service Control Manager."
+    }
+
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($ServiceName.ToUpperInvariant())
+        $hash = $sha.ComputeHash($bytes)
+        $subAuthorities = @(for ($offset = 0; $offset -lt 20; $offset += 4) {
+                [System.BitConverter]::ToUInt32($hash, $offset).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+            })
+        return "S-1-5-80-$($subAuthorities -join '-')"
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Get-ExpectedManifest {
     param([Parameter(Mandatory = $true)][string] $ResolvedAgentBundleRoot)
 
@@ -174,35 +236,34 @@ function Get-ExpectedManifest {
     Assert-LowerHex -Value $agentSha256 -Length 64 -Name "Agent executable SHA-256"
 
     $windowsTemp = [System.IO.Path]::GetFullPath((Join-Path $env:SystemRoot "Temp"))
-    $ownedRoot = [System.IO.Path]::GetFullPath((Join-Path $windowsTemp $(
-                if ($Kind -ceq "rabbitmq") {
-                    "olo-staged-agent-rmq-$Scope"
-                }
-                else {
-                    "olo-studio-two-agent-$Scope"
-                })))
-    $roles = if ($Kind -ceq "rabbitmq") { @("rabbitmq") } else { @("entry", "downstream") }
+    $ownedRootName = switch ($Kind) {
+        "rabbitmq" { "olo-staged-agent-rmq-$Scope" }
+        "runner" { "olo-runner-staged-agent-$Scope" }
+        "studio-two-agent" { "olo-studio-two-agent-$Scope" }
+    }
+    $ownedRoot = [System.IO.Path]::GetFullPath((Join-Path $windowsTemp $ownedRootName))
+    $roles = switch ($Kind) {
+        "rabbitmq" { @("rabbitmq") }
+        "runner" { @("runner") }
+        "studio-two-agent" { @("entry", "downstream") }
+    }
     $entries = @($roles | ForEach-Object {
             $role = $_
-            $serviceSuffix = if ($Kind -ceq "rabbitmq") {
+            $serviceSuffix = if ($Kind -in @("rabbitmq", "runner")) {
                 $Scope
             }
             else {
                 (Get-TextSha256 "$role-service`:$Scope").Substring(0, 32)
             }
-            $accountSuffix = if ($Kind -ceq "rabbitmq") {
-                $Scope
-            }
-            else {
-                (Get-TextSha256 "$role-account`:$Scope").Substring(0, 32)
-            }
+            $serviceName = "OpenLineOpsAgentE2E-$serviceSuffix"
             [ordered]@{
                 role = $role
                 serviceSuffix = $serviceSuffix
-                accountSuffix = $accountSuffix
-                serviceName = "OpenLineOpsAgentE2E-$serviceSuffix"
-                accountName = "oloe2e$($accountSuffix.Substring(0, 10))"
-                accountSid = $null
+                serviceName = $serviceName
+                serviceAccountName = $LocalServiceAccountName
+                serviceAccountSid = $LocalServiceAccountSid
+                serviceSid = Get-ServiceSidFromName $serviceName
+                serviceSidType = $RestrictedServiceSidType
                 executablePath = [System.IO.Path]::GetFullPath(
                     (Join-Path $ownedRoot "agent-bundle/OpenLineOps.Agent.exe"))
                 executableSha256 = $agentSha256
@@ -289,13 +350,9 @@ function Set-PrivateAcl {
 function Assert-RunScopeAbsent {
     param([Parameter(Mandatory = $true)] $Expected)
 
-    $profileListPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
     foreach ($entry in @($Expected.entries)) {
         if ($null -ne (Get-Service -Name $entry.serviceName -ErrorAction SilentlyContinue)) {
             throw "Run-scoped Agent service remains without a cleanup manifest: $($entry.serviceName)"
-        }
-        if ($null -ne (Get-LocalUser -Name $entry.accountName -ErrorAction SilentlyContinue)) {
-            throw "Run-scoped Agent account remains without a cleanup manifest: $($entry.accountName)"
         }
         if (Test-Path -LiteralPath $entry.ownedRoot) {
             throw "Run-scoped Agent owned root remains without a cleanup manifest: $($entry.ownedRoot)"
@@ -311,31 +368,13 @@ function Assert-RunScopeAbsent {
         if ([System.Diagnostics.EventLog]::SourceExists($entry.serviceName)) {
             throw "Run-scoped Agent EventLog source exists under a non-canonical log and cannot be adopted."
         }
-        $defaultProfilePath = Join-Path (Join-Path $env:SystemDrive "Users") $entry.accountName
-        if (Test-Path -LiteralPath $defaultProfilePath) {
-            throw "Run-scoped Agent account profile remains without a cleanup manifest."
-        }
-        if (Test-Path -LiteralPath $profileListPath) {
-            foreach ($profileKey in @(Get-ChildItem -LiteralPath $profileListPath -ErrorAction Stop)) {
-                $profileImagePath = [string](Get-ItemProperty `
-                        -LiteralPath $profileKey.PSPath `
-                        -Name ProfileImagePath `
-                        -ErrorAction SilentlyContinue).ProfileImagePath
-                if (-not [string]::IsNullOrWhiteSpace($profileImagePath) `
-                    -and [System.IO.Path]::GetFileName(
-                        [System.Environment]::ExpandEnvironmentVariables($profileImagePath)) -ceq $entry.accountName) {
-                    throw "Run-scoped Agent profile registry entry remains without a cleanup manifest."
-                }
-            }
-        }
     }
 }
 
 function Assert-ManifestMatches {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)] $Expected,
-        [switch] $AllowRecordedAccountSid
+        [Parameter(Mandatory = $true)] $Expected
     )
 
     $raw = Get-Content -LiteralPath $Path -Raw -Encoding utf8
@@ -344,20 +383,6 @@ function Assert-ManifestMatches {
         throw "Agent service cleanup manifest contains forbidden secret-bearing data."
     }
     $actual = $raw | ConvertFrom-Json
-    foreach ($entry in @($actual.entries)) {
-        if ($AllowRecordedAccountSid) {
-            if ($null -ne $entry.accountSid `
-                -and (([string]$entry.accountSid -cnotmatch '^S-1-(?:[0-9]+-)+[0-9]+$') `
-                    -or [System.Security.Principal.SecurityIdentifier]::new(
-                        [string]$entry.accountSid).Value -cne [string]$entry.accountSid)) {
-                throw "Agent service cleanup manifest contains a non-canonical recorded account SID."
-            }
-            $entry.accountSid = $null
-        }
-        elseif ($null -ne $entry.accountSid) {
-            throw "Fresh Agent service cleanup manifest must not pre-authorize an account SID."
-        }
-    }
     $actualCompressed = ConvertTo-Json $actual -Depth 8 -Compress
     $expectedCompressed = ConvertTo-Json $Expected -Depth 8 -Compress
     if ($actualCompressed -cne $expectedCompressed) {
@@ -416,16 +441,23 @@ Assert-LowerHex -Value $Scope -Length 32 -Name "Scope"
 $resolvedManifestPath = Resolve-PrivateManifestPath $ManifestPath
 $resolvedAgentBundleRoot = Resolve-CanonicalDirectory $AgentBundleRoot "AgentBundleRoot"
 $expectedManifest = Get-ExpectedManifest -ResolvedAgentBundleRoot $resolvedAgentBundleRoot
+$manifestPathKind = Get-ManifestPathKind $resolvedManifestPath
+if ($manifestPathKind -cnotin @("Absent", "RegularFile")) {
+    throw "Run-scoped Agent cleanup manifest path must be absent or an ordinary non-reparse file; found '$manifestPathKind'."
+}
 Assert-NoReparseAncestors $resolvedManifestPath
 
-if (-not $PrepareManifest -and -not (Test-Path -LiteralPath $resolvedManifestPath -PathType Leaf)) {
+if (-not $PrepareManifest -and $manifestPathKind -ceq "Absent") {
     Assert-RunScopeAbsent $expectedManifest
+    if ((Get-ManifestPathKind $resolvedManifestPath) -cne "Absent") {
+        throw "Run-scoped Agent cleanup manifest path changed while proving its exact service scope absent."
+    }
     Write-Host "Run-scoped Agent cleanup manifest is absent and its exact service scope is clean."
     return
 }
 
 if ($PrepareManifest) {
-    if (Test-Path -LiteralPath $resolvedManifestPath) {
+    if ($manifestPathKind -cne "Absent") {
         throw "Run-scoped Agent cleanup manifest already exists."
     }
     foreach ($entry in @($expectedManifest.entries)) {
@@ -460,8 +492,7 @@ if ($PrepareManifest) {
 
 Assert-ManifestMatches `
     -Path $resolvedManifestPath `
-    -Expected $expectedManifest `
-    -AllowRecordedAccountSid
+    -Expected $expectedManifest
 Assert-NoReparseAncestors $resolvedManifestPath
 $cleanupRoot = Join-Path `
     (Split-Path -Parent $resolvedManifestPath) `
@@ -494,7 +525,8 @@ $argumentText = (($arguments | ForEach-Object {
 $previousGate = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE
 $previousManifest = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH
 $previousScope = $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE
-$previousStudioScope = $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX
+$previousRunnerScope = $env:OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE
+$previousStudioScope = $env:OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE
 $previousCliLanguage = $env:DOTNET_CLI_UI_LANGUAGE
 $previousVsLanguage = $env:VSLANG
 $process = $null
@@ -502,8 +534,11 @@ try {
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = "true"
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $resolvedManifestPath
     $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE = $Scope
+    if ($Kind -ceq "runner") {
+        $env:OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE = $Scope
+    }
     if ($Kind -ceq "studio-two-agent") {
-        $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX = $Scope
+        $env:OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE = $Scope
     }
     $env:DOTNET_CLI_UI_LANGUAGE = "en-US"
     $env:VSLANG = "1033"
@@ -545,7 +580,8 @@ finally {
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $previousGate
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $previousManifest
     $env:OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE = $previousScope
-    $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX = $previousStudioScope
+    $env:OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE = $previousRunnerScope
+    $env:OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE = $previousStudioScope
     $env:DOTNET_CLI_UI_LANGUAGE = $previousCliLanguage
     $env:VSLANG = $previousVsLanguage
 }

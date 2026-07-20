@@ -36,6 +36,7 @@ export interface EditorDocumentRegistration {
   problems: EditorProblem[];
   conflict: EditorDocumentConflict | null;
   saving: boolean;
+  busy: boolean;
   saveError: string | null;
 }
 
@@ -287,6 +288,7 @@ function createRegistration(title: string): EditorDocumentRegistration {
     problems: [],
     conflict: null,
     saving: false,
+    busy: false,
     saveError: null
   };
 }

@@ -155,6 +155,20 @@ The same signed launcher exposes one strict installer operation,
 `provision-python-runtime --runtime-dll <absolute-path>`, which an administrator
 runs after installing or updating Python. Normal worker launch only verifies
 that capability ACL and never edits the host Python installation.
+The Agent entry point likewise exposes the administrator-only
+`--provision-content-cache` deployment operation. The release template requires
+an explicit empty `PackageCacheDirectory`; staging and candidate inspection
+reject a missing field or any preconfigured machine path. An administrator
+sets the final canonical local fixed-NTFS path together with the exact
+`WindowsServiceName`, runs
+the command once before starting the service, and normal Agent startup only
+verifies the resulting dedicated namespace anchor and cache root.
+The same entry point exposes
+`--remove-content-cache-package <lowercaseSha256>` for a fully stopped installed
+service. Provisioning and protected removal are mutually exclusive
+administrator operations; release static gates, executable tests, staging, and
+candidate inspection require both commands and their packaged deployment
+instructions.
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.
 
@@ -198,32 +212,36 @@ termination, profile deletion, and stale-profile recovery. No custom launcher,
 argument template, `runas`, password prompt, or test-only `ExternalProcess`
 exception is part of this production proof. The same staged gate executes the
 full `OpenLineOps.Agent.exe` message-delivery run against the supplied real
-RabbitMQ broker from a temporary, non-administrative Windows service account.
-It installs the extracted executable as a uniquely named demand-start service,
-keeps broker configuration in the protected per-service environment instead of
-the frozen bundle or `ImagePath`, and proves SCM start, stop, restart, and
-deletion. Public evidence is rejected unless it binds the canonical service
-name and verified lifecycle to the raw RabbitMQ evidence. The separate
+RabbitMQ broker from a uniquely named demand-start Windows service. The service
+runs as `NT AUTHORITY\LocalService` with `SERVICE_SID_TYPE_RESTRICTED`; the gate
+proves the LocalService SID, enabled service-logon SID, and exact enabled and
+restricted service SID from the process token. It keeps broker configuration
+in the protected per-service environment instead of the frozen bundle or
+`ImagePath`, and proves SCM start, stop, restart, and deletion. Public evidence
+is rejected unless it binds the canonical service name, exact identity, and
+verified lifecycle to the raw RabbitMQ evidence. The separate
 production-integration CI job proves the durable PostgreSQL Coordinator and
 RabbitMQ composition across Coordinator restart.
 
-The RabbitMQ and Studio wrappers create separate strict cleanup manifests in a
-private runner-temporary directory before any service mutation. Every manifest
-authorizes only deterministic 32-hex run-scoped names, the copied Agent image
-and SHA-256, and the exact Windows Temp owned root; the created account SID is
-atomically recorded before SCM installation. Wrapper `finally` blocks and
-independent `if: always()` workflow steps run the same bounded scavenger. The
+The RabbitMQ, Studio, and Runner wrappers create separate strict cleanup
+manifests in a private runner-temporary directory before any service mutation.
+Every manifest authorizes only a role, deterministic 32-hex run-scoped service
+name, fixed LocalService name/SID, independently derived service SID,
+`serviceSidType=Restricted`, copied Agent image/hash, and exact Windows Temp
+owned root. Wrapper `finally` blocks and independent `if: always()` workflow
+steps run the same bounded scavenger. The
 external-abort gate additionally kills the full `dotnet test` driver tree,
 including all testhost descendants, after
 the Agent service reaches Running, proves every snapshotted child is gone and
 the service survives that host failure,
-then removes and independently verifies every service, registry, account,
-profile, logon-right, process, and filesystem residue before an idempotent
+then removes and independently verifies every service, registry, EventLog
+source, process, ACL, and filesystem residue before an idempotent
 second cleanup.
 
 The formal Windows production closure is one ordered chain. It uses the same
 staged release, PostgreSQL service, and RabbitMQ broker for the packaged Studio
-handoff, two distinct non-administrative Station Agent accounts, and the
+handoff, two Station Agent services sharing LocalService but using distinct
+restricted service SIDs, and the
 headless Runner:
 
 ```powershell
@@ -241,12 +259,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-age
 
 The combined Studio command is the only formal packaged entry point: its
 one-shot private handoff is consumed by the exact two-Agent test and is deleted
-even on failure. Its public evidence proves distinct Windows SIDs, no
-administrative token, parallel resource leases and fencing tokens, Coordinator
+even on failure. Its public evidence proves the shared LocalService name/SID,
+distinct restricted service-SID hashes, no administrative token, parallel
+resource leases and fencing tokens, Coordinator
 restart, three terminal unloads bound to PostgreSQL, vendor evidence, and
 bounded cleanup. The Runner evidence binds the staged Runner and Agent images,
 its exact one-Passed/zero-Skipped TRX, PostgreSQL, RabbitMQ, Agent SQLite, Trace,
-and process-tree cleanup. Each public root has its own fail-closed scanner and
+the Agent SCM lifecycle and restricted token, Runner process-tree cleanup, and
+Agent service deletion. Each public root has its own fail-closed scanner and
 upload condition. Publication generation embeds the Studio evidence and
 manifest plus the Runner evidence and TRX; downloaded-bundle inspection reruns
 both strict validators and verifies source/embedded byte identity.

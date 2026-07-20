@@ -1,16 +1,40 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Application.StationJobs;
+using OpenLineOps.ContentProtection;
 
 namespace OpenLineOps.Agent.Infrastructure.Transport;
 
 public sealed record StationMaterialArrivalLocalIpcOptions(
     string PipeName,
+    string AuthorizedPrincipalSid,
     int MaximumRequestBytes = 64 * 1024,
     TimeSpan RequestFrameTimeout = default)
 {
+    public static StationMaterialArrivalLocalIpcOptions ForStationServiceSid(
+        string stationServiceSid,
+        int maximumRequestBytes = 64 * 1024,
+        TimeSpan requestFrameTimeout = default) =>
+        new(
+            DerivePipeName(stationServiceSid),
+            stationServiceSid,
+            maximumRequestBytes,
+            requestFrameTimeout);
+
+    public static string DerivePipeName(string stationServiceSid)
+    {
+        var canonicalSid = WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+            stationServiceSid,
+            nameof(stationServiceSid));
+        return "openlineops-material-"
+               + Convert.ToHexStringLower(
+                   SHA256.HashData(Encoding.ASCII.GetBytes(canonicalSid)));
+    }
+
     public TimeSpan ResolveRequestFrameTimeout()
     {
         if (RequestFrameTimeout == default)
@@ -39,13 +63,22 @@ public sealed class StationMaterialArrivalLocalIpcServer(
     StationMaterialArrivalLocalIpcOptions options,
     StationMaterialArrivalReporter reporter)
 {
+    private const byte ResponseReceipt = 0xA5;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true
     };
 
     private readonly string _pipeName = RequirePipeName(options.PipeName);
+    private readonly string _authorizedPrincipalSid =
+        string.IsNullOrWhiteSpace(options.AuthorizedPrincipalSid)
+            ? throw new ArgumentException(
+                "Material arrival IPC authorized principal SID is required.",
+                nameof(options))
+            : options.AuthorizedPrincipalSid;
     private readonly int _maximumRequestBytes = options.MaximumRequestBytes is > 0 and <= 1024 * 1024
         ? options.MaximumRequestBytes
         : throw new ArgumentOutOfRangeException(
@@ -57,9 +90,9 @@ public sealed class StationMaterialArrivalLocalIpcServer(
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
+        await using var pipe = CreateServer();
         while (!cancellationToken.IsCancellationRequested)
         {
-            await using var pipe = CreateServer();
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -73,17 +106,35 @@ public sealed class StationMaterialArrivalLocalIpcServer(
             {
                 // The connected local caller disconnected before completing the protocol.
             }
+            catch (InvalidDataException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The connected local caller sent an invalid response receipt.
+            }
+            finally
+            {
+                if (pipe.IsConnected)
+                {
+                    pipe.Disconnect();
+                }
+            }
         }
     }
 
-    private NamedPipeServerStream CreateServer() => new(
-        _pipeName,
-        PipeDirection.InOut,
-        maxNumberOfServerInstances: 1,
-        PipeTransmissionMode.Byte,
-        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-        inBufferSize: _maximumRequestBytes + sizeof(int),
-        outBufferSize: 4096);
+    private NamedPipeServerStream CreateServer()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Material arrival IPC requires a Windows identity-bound named pipe.");
+        }
+
+        return WindowsIdentityBoundNamedPipe.CreateServer(
+            _pipeName,
+            _authorizedPrincipalSid,
+            maximumServerInstances: 1,
+            inputBufferSize: _maximumRequestBytes + sizeof(int),
+            outputBufferSize: 4096);
+    }
 
     private async Task ProcessConnectionAsync(
         Stream pipe,
@@ -133,11 +184,36 @@ public sealed class StationMaterialArrivalLocalIpcServer(
                     JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions),
                     cancellationToken)
                 .ConfigureAwait(false);
+            await ReadResponseReceiptAsync(pipe, cancellationToken).ConfigureAwait(false);
         }
         catch (IOException)
         {
             // The local caller disconnected after submission; the durable outbox remains authoritative.
         }
+    }
+
+    internal async ValueTask ReadResponseReceiptAsync(
+        Stream pipe,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_requestFrameTimeout);
+        var receipt = new byte[1];
+        await pipe.ReadExactlyAsync(receipt, deadline.Token).ConfigureAwait(false);
+        if (receipt[0] != ResponseReceipt)
+        {
+            throw new InvalidDataException(
+                "Material arrival IPC response receipt is invalid.");
+        }
+    }
+
+    internal static async ValueTask WriteResponseReceiptAsync(
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
+        await stream.WriteAsync(new[] { ResponseReceipt }, cancellationToken)
+            .ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<byte[]> ReadRequestFrameAsync(
@@ -216,12 +292,19 @@ public sealed class StationMaterialArrivalLocalIpcClient(
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true
     };
 
     private readonly string _pipeName = string.IsNullOrWhiteSpace(options.PipeName)
         ? throw new ArgumentException("Material arrival IPC pipe name is required.", nameof(options))
         : options.PipeName;
+    private readonly string _authorizedPrincipalSid =
+        string.IsNullOrWhiteSpace(options.AuthorizedPrincipalSid)
+            ? throw new ArgumentException(
+                "Material arrival IPC authorized principal SID is required.",
+                nameof(options))
+            : options.AuthorizedPrincipalSid;
     private readonly int _maximumRequestBytes = options.MaximumRequestBytes;
 
     public async ValueTask<StationMaterialArrivalLocalIpcResponse> ReportAsync(
@@ -247,6 +330,7 @@ public sealed class StationMaterialArrivalLocalIpcClient(
             {
                 return await ReportOnceAsync(
                         payload,
+                        signal.MessageId,
                         connectTimeout,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -263,6 +347,7 @@ public sealed class StationMaterialArrivalLocalIpcClient(
 
     private async ValueTask<StationMaterialArrivalLocalIpcResponse> ReportOnceAsync(
         ReadOnlyMemory<byte> payload,
+        Guid expectedMessageId,
         TimeSpan connectTimeout,
         CancellationToken cancellationToken)
     {
@@ -279,16 +364,71 @@ public sealed class StationMaterialArrivalLocalIpcClient(
         var responsePayload = await StationMaterialArrivalLocalIpcServer
             .ReadFrameAsync(pipe, 4096, cancellationToken)
             .ConfigureAwait(false);
-        return JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
-                   responsePayload,
-                   JsonOptions)
-               ?? throw new InvalidDataException("Material arrival IPC response is null.");
+        StationMaterialArrivalLocalIpcResponse response;
+        try
+        {
+            response = JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
+                           responsePayload,
+                           JsonOptions)
+                       ?? throw new InvalidDataException(
+                           "Material arrival IPC response is null.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException(
+                "Material arrival IPC response violates the strict protocol schema.",
+                exception);
+        }
+
+        ValidateResponse(response, expectedMessageId);
+        await StationMaterialArrivalLocalIpcServer.WriteResponseReceiptAsync(
+                pipe,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return response;
+    }
+
+    private static void ValidateResponse(
+        StationMaterialArrivalLocalIpcResponse response,
+        Guid expectedMessageId)
+    {
+        if (response.MessageId != expectedMessageId)
+        {
+            throw new InvalidDataException(
+                "Material arrival IPC response does not match the submitted message.");
+        }
+
+        if (response.Accepted)
+        {
+            if (response.FailureCode is not null)
+            {
+                throw new InvalidDataException(
+                    "Accepted material arrival IPC response cannot contain a failure code.");
+            }
+
+            return;
+        }
+
+        if (response.Replayed
+            || response.FailureCode is not (
+                "Agent.MaterialArrivalSignalRejected"
+                or "Agent.MaterialArrivalSignalUnavailable"))
+        {
+            throw new InvalidDataException(
+                "Rejected material arrival IPC response is inconsistent.");
+        }
     }
 
     private async ValueTask<NamedPipeClientStream> ConnectPipeAsync(
         TimeSpan connectTimeout,
         CancellationToken cancellationToken)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Material arrival IPC requires a Windows identity-bound named pipe.");
+        }
+
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(connectTimeout);
         while (true)
@@ -297,10 +437,17 @@ public sealed class StationMaterialArrivalLocalIpcClient(
                 ".",
                 _pipeName,
                 PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                PipeOptions.Asynchronous);
             try
             {
                 await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
+                if (!OperatingSystem.IsWindows())
+                {
+                    throw new PlatformNotSupportedException(
+                        "Material arrival IPC requires a Windows identity-bound named pipe.");
+                }
+
+                WindowsIdentityBoundNamedPipe.Verify(pipe, _authorizedPrincipalSid);
                 return pipe;
             }
             catch (OperationCanceledException) when (

@@ -4,7 +4,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
@@ -241,7 +240,8 @@ public sealed class WindowsProcessLauncherTests
     [Fact]
     public async Task AppContainerExecutesFromProtectedContentWithDualPrincipalAcl()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows()
+            || !TryGetStationServiceIdentity(out var stationIdentity))
         {
             return;
         }
@@ -250,9 +250,6 @@ public sealed class WindowsProcessLauncherTests
         var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
         var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
-        using var currentIdentity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var hostReaderSid = currentIdentity.User?.Value
-                            ?? throw new InvalidOperationException("Current process identity has no SID.");
         var sourceExecutable = HelperExecutablePath();
         var sourceDirectory = Path.GetDirectoryName(sourceExecutable)!;
         var cacheRoot = NewPath("protected-cache");
@@ -288,10 +285,13 @@ public sealed class WindowsProcessLauncherTests
         }
 
         var protector = new ImmutableContentProtector();
+        var protectionPolicy = new ImmutableContentProtectionPolicy(
+            contentCapabilitySid,
+            stationIdentity.ServiceSid);
         await protector.ProtectAsync(
             contentDirectory,
             inventory,
-            new ImmutableContentProtectionPolicy(contentCapabilitySid, hostReaderSid));
+            protectionPolicy);
         WindowsContentAccessAuthorizer.GrantWorkspaceModify(workspace, appContainerSid);
         try
         {
@@ -339,8 +339,12 @@ public sealed class WindowsProcessLauncherTests
         }
         finally
         {
-            protector.DeleteProtectedInstallation(cacheRoot, contentDirectory);
-            Directory.Delete(cacheRoot);
+            BestEffortDeleteTestTree(contentDirectory);
+            if (Directory.Exists(cacheRoot)
+                && !Directory.EnumerateFileSystemEntries(cacheRoot).Any())
+            {
+                Directory.Delete(cacheRoot);
+            }
             Directory.Delete(workspace, recursive: true);
             WindowsAppContainerIdentity.DeleteProfile(profileName);
         }
@@ -349,7 +353,8 @@ public sealed class WindowsProcessLauncherTests
     [Fact]
     public async Task LongProtectedApplicationPathWithSpacesLaunchesWithExactArguments()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows()
+            || !TryGetStationServiceIdentity(out var stationIdentity))
         {
             return;
         }
@@ -358,9 +363,6 @@ public sealed class WindowsProcessLauncherTests
         var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
         var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
-        using var currentIdentity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var hostReaderSid = currentIdentity.User?.Value
-                            ?? throw new InvalidOperationException("Current process identity has no SID.");
         var sourceExecutable = HelperExecutablePath();
         var sourceDirectory = Path.GetDirectoryName(sourceExecutable)!;
         var longRoot = Path.Combine(
@@ -391,10 +393,13 @@ public sealed class WindowsProcessLauncherTests
         var executable = Path.Combine(contentDirectory, "OpenLineOps.VendorTestHelper.exe");
         Assert.True(executable.Length > 260);
         var protector = new ImmutableContentProtector();
+        var protectionPolicy = new ImmutableContentProtectionPolicy(
+            contentCapabilitySid,
+            stationIdentity.ServiceSid);
         await protector.ProtectAsync(
             contentDirectory,
             inventory,
-            new ImmutableContentProtectionPolicy(contentCapabilitySid, hostReaderSid));
+            protectionPolicy);
         WindowsContentAccessAuthorizer.GrantWorkspaceModify(workspace, appContainerSid);
         try
         {
@@ -435,8 +440,12 @@ public sealed class WindowsProcessLauncherTests
         }
         finally
         {
-            protector.DeleteProtectedInstallation(cacheRoot, contentDirectory);
-            Directory.Delete(cacheRoot);
+            BestEffortDeleteTestTree(contentDirectory);
+            if (Directory.Exists(cacheRoot)
+                && !Directory.EnumerateFileSystemEntries(cacheRoot).Any())
+            {
+                Directory.Delete(cacheRoot);
+            }
             Directory.Delete(workspace, recursive: true);
             Directory.Delete(longRoot, recursive: true);
             WindowsAppContainerIdentity.DeleteProfile(profileName);
@@ -881,6 +890,53 @@ public sealed class WindowsProcessLauncherTests
             detectEncodingFromByteOrderMarks: true,
             leaveOpen: true);
         return await reader.ReadToEndAsync(cancellationToken);
+    }
+
+    private static bool TryGetStationServiceIdentity(
+        out WindowsStationServiceIdentity identity)
+    {
+        identity = null!;
+        var configuredServiceName = Environment.GetEnvironmentVariable(
+            "OPENLINEOPS_TEST_WINDOWS_SERVICE_NAME");
+        if (!OperatingSystem.IsWindows()
+            || !WindowsStationServiceIdentityReader.IsCanonicalServiceName(
+                configuredServiceName))
+        {
+            return false;
+        }
+
+        try
+        {
+            identity = WindowsStationServiceIdentityReader.ReadRequired(
+                WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                    configuredServiceName!));
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static void BestEffortDeleteTestTree(string root)
+    {
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(
+                         root,
+                         "*",
+                         SearchOption.AllDirectories))
+            {
+                File.SetAttributes(entry, File.GetAttributes(entry) & ~FileAttributes.ReadOnly);
+            }
+
+            File.SetAttributes(root, File.GetAttributes(root) & ~FileAttributes.ReadOnly);
+            Directory.Delete(root, recursive: true);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Restricted-token SCM tests leave sealed content for their elevated harness.
+        }
     }
 
     private static JsonSerializerOptions JsonOptions() => new(JsonSerializerDefaults.Web)

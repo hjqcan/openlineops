@@ -463,15 +463,56 @@ function Assert-StationPackageSignature {
     if (-not $valid) { throw "Station package RSA-PSS signature verification failed." }
 }
 
+function Test-StationPackageReservedSegment {
+    param([Parameter(Mandatory = $true)][string] $Segment)
+    $dotIndex = $Segment.IndexOf('.')
+    $stem = if ($dotIndex -ge 0) { $Segment.Substring(0, $dotIndex) } else { $Segment }
+    if ($stem -ieq 'CON' -or $stem -ieq 'PRN' -or $stem -ieq 'AUX' -or $stem -ieq 'NUL') {
+        return $true
+    }
+    if ($stem.Length -ne 4) {
+        return $false
+    }
+    $prefix = $stem.Substring(0, 3)
+    $suffix = $stem[3]
+    return ($prefix -ieq 'COM' -or $prefix -ieq 'LPT') `
+        -and ($suffix -in @('1', '2', '3', '4', '5', '6', '7', '8', '9',
+                [char]0x00b9, [char]0x00b2, [char]0x00b3))
+}
+
 function Assert-CanonicalPackagePath {
     param([Parameter(Mandatory = $true)][string] $Path, [string] $Description)
-    if ([string]::IsNullOrWhiteSpace($Path) `
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $invalid = [string]::IsNullOrWhiteSpace($Path) `
         -or $Path.Contains('\') `
         -or $Path.StartsWith('/', [System.StringComparison]::Ordinal) `
         -or $Path.EndsWith('/', [System.StringComparison]::Ordinal) `
-        -or @($Path.Split('/') | Where-Object {
-                $_.Length -eq 0 -or $_ -in @('.', '..') -or $_.EndsWith(' ') -or $_.EndsWith('.')
-            }).Count -ne 0) {
+        -or -not $Path.IsNormalized([System.Text.NormalizationForm]::FormC)
+    if (-not $invalid) {
+        try {
+            $invalid = $strictUtf8.GetByteCount($Path) -gt 1024
+        }
+        catch [System.Text.EncoderFallbackException] {
+            $invalid = $true
+        }
+    }
+    if (-not $invalid) {
+        foreach ($segment in $Path.Split('/')) {
+            $invalid = $segment.Length -eq 0 `
+                -or $segment -in @('.', '..') `
+                -or [char]::IsWhiteSpace($segment[0]) `
+                -or [char]::IsWhiteSpace($segment[$segment.Length - 1]) `
+                -or $segment.EndsWith('.', [System.StringComparison]::Ordinal) `
+                -or $strictUtf8.GetByteCount($segment) -gt 255 `
+                -or $segment.IndexOfAny(':<>"|?*'.ToCharArray()) -ge 0 `
+                -or @($segment.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -ne 0 `
+                -or (Test-StationPackageReservedSegment $segment)
+            if ($invalid) {
+                break
+            }
+        }
+    }
+    if ($invalid) {
         throw "$Description is not a canonical Station package path."
     }
 }
@@ -484,31 +525,75 @@ function Assert-CanonicalPackageText {
     }
 }
 
+function Write-StationPackageCanonicalInt32 {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][int] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-StationPackageCanonicalInt64 {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][long] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-StationPackageCanonicalText {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][string] $Value)
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    [byte[]]$bytes = $strictUtf8.GetBytes($Value)
+    Write-StationPackageCanonicalInt32 -Stream $Stream -Value $bytes.Length
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
 function Get-StationPackageCanonicalContentSha256 {
     param([Parameter(Mandatory = $true)] $Manifest)
-    $builder = [System.Text.StringBuilder]::new()
-    foreach ($value in @(
-            [string]$Manifest.projectId,
-            [string]$Manifest.applicationId,
-            [string]$Manifest.projectSnapshotId,
-            [string]$Manifest.productionLineDefinitionId,
-            [string]$Manifest.stationSystemId)) {
-        [void]$builder.Append($value).Append("`n")
-    }
-    foreach ($entry in @($Manifest.entries)) {
-        [void]$builder.Append([string]$entry.path).Append("`n")
-        [void]$builder.Append(([long]$entry.length).ToString(
-                [System.Globalization.CultureInfo]::InvariantCulture)).Append("`n")
-        [void]$builder.Append([string]$entry.sha256).Append("`n")
-        [void]$builder.Append([string]$entry.mediaType).Append("`n")
-    }
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    [object[]]$entries = @($Manifest.entries)
+    $entryComparer = [System.Collections.Generic.Comparer[object]]::Create(
+        [System.Comparison[object]]{
+            param($left, $right)
+            return [System.StringComparer]::Ordinal.Compare(
+                [string]$left.path,
+                [string]$right.path)
+        })
+    [System.Array]::Sort($entries, $entryComparer)
+    $stream = [System.IO.MemoryStream]::new()
     try {
-        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace(
-            '-', '').ToLowerInvariant()
+        Write-StationPackageCanonicalText $stream "openlineops.station-package-content"
+        foreach ($value in @(
+                [string]$Manifest.projectId,
+                [string]$Manifest.applicationId,
+                [string]$Manifest.projectSnapshotId,
+                [string]$Manifest.productionLineDefinitionId,
+                [string]$Manifest.stationSystemId)) {
+            Write-StationPackageCanonicalText $stream $value
+        }
+        Write-StationPackageCanonicalInt32 $stream $entries.Count
+        foreach ($entry in $entries) {
+            Write-StationPackageCanonicalText $stream ([string]$entry.path)
+            Write-StationPackageCanonicalInt64 $stream ([long]$entry.length)
+            Write-StationPackageCanonicalText $stream ([string]$entry.sha256)
+            Write-StationPackageCanonicalText $stream ([string]$entry.mediaType)
+        }
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString(
+                    $algorithm.ComputeHash($stream.ToArray()))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $algorithm.Dispose() }
     }
-    finally { $algorithm.Dispose() }
+    finally { $stream.Dispose() }
 }
 
 function Get-DeploymentCatalogFileName {
@@ -518,13 +603,22 @@ function Get-DeploymentCatalogFileName {
         [string] $ProjectSnapshotId,
         [string] $StationSystemId
     )
-    $identity = @($ProjectId, $ApplicationId, $ProjectSnapshotId, $StationSystemId) -join [char]0x1f
-    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.MemoryStream]::new()
     try {
-        $hash = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($identity))
-        return ([System.BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant() + ".json"
+        Write-StationPackageCanonicalText $stream `
+            "openlineops.station-package-deployment-catalog"
+        foreach ($value in @($ProjectId, $ApplicationId, $ProjectSnapshotId, $StationSystemId)) {
+            Write-StationPackageCanonicalText $stream $value
+        }
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $algorithm.ComputeHash($stream.ToArray())
+            return ([System.BitConverter]::ToString($hash)).Replace(
+                '-', '').ToLowerInvariant() + ".json"
+        }
+        finally { $algorithm.Dispose() }
     }
-    finally { $algorithm.Dispose() }
+    finally { $stream.Dispose() }
 }
 
 function Test-StationPackage {
@@ -1343,8 +1437,11 @@ function Assert-PublicProductionSummary {
     }
     if ($null -ne $Summary.externalProgramTrial) {
         Assert-ExactProperties $Summary.externalProgramTrial @(
-            "status", "executionStatus", "judgement", "artifactCount") `
+            "status", "executionStatus", "judgement", "artifactCount", "directoryImport") `
             "Production closure external program trial"
+        Assert-ExactProperties $Summary.externalProgramTrial.directoryImport @(
+            "entryPoint", "files", "preservedSameBasenames") `
+            "Production closure external program directory import"
     }
     if ($null -ne $Summary.studioAuthoring) {
         Assert-ExactProperties $Summary.studioAuthoring @(
@@ -1489,6 +1586,32 @@ function Assert-ProductionSummary {
             -and $Summary.externalProgramTrial.judgement -ceq "Passed" `
             -and $Summary.externalProgramTrial.artifactCount -gt 0) `
         "External program protocol trial evidence is incomplete."
+    $directoryImport = $Summary.externalProgramTrial.directoryImport
+    $importedFiles = @($directoryImport.files)
+    $preservedSameBasenames = @($directoryImport.preservedSameBasenames)
+    Assert-Condition ($directoryImport.entryPoint -is [string] `
+            -and $directoryImport.entryPoint -cmatch '^files/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.exe$' `
+            -and @($importedFiles | Where-Object { $_ -isnot [string] }).Count -eq 0 `
+            -and $importedFiles.Count -ge 3 `
+            -and @($importedFiles | Where-Object {
+                    $_ -cnotmatch '^files/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$'
+                }).Count -eq 0 `
+            -and @($importedFiles | Select-Object -Unique).Count -eq $importedFiles.Count `
+            -and @($importedFiles | Where-Object {
+                    $_ -ceq $directoryImport.entryPoint
+                }).Count -eq 1) `
+        "External program directory import entry point or file inventory is invalid."
+    Assert-Condition (@($preservedSameBasenames | Where-Object { $_ -isnot [string] }).Count -eq 0 `
+            -and $preservedSameBasenames.Count -eq 2 `
+            -and $preservedSameBasenames[0] -cne $preservedSameBasenames[1] `
+            -and @($preservedSameBasenames | Where-Object {
+                    $importedFiles -cnotcontains $_
+                }).Count -eq 0 `
+            -and $preservedSameBasenames[0].Split('/')[-1] `
+                -ceq $preservedSameBasenames[1].Split('/')[-1] `
+            -and ($preservedSameBasenames[0].Split('/')[0..($preservedSameBasenames[0].Split('/').Count - 2)] -join '/') `
+                -cne ($preservedSameBasenames[1].Split('/')[0..($preservedSameBasenames[1].Split('/').Count - 2)] -join '/')) `
+        "External program directory import did not preserve two distinct nested files with the same basename."
     Assert-Condition ($Summary.studioAuthoring.status -ceq "passed" `
             -and $Summary.studioAuthoring.operationCount -eq 2 `
             -and $Summary.studioAuthoring.terminalCount -eq 2 `

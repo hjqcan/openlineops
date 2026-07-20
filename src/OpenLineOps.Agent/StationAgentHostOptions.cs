@@ -22,7 +22,6 @@ internal sealed record StationAgentHostOptions(
     string PackageDistributionDirectory,
     string PackageCacheDirectory,
     string MaterialArrivalPackageContentSha256,
-    string MaterialArrivalPipeName,
     IReadOnlyDictionary<string, string> TrustedPackagePublicKeys,
     string RuntimeExecutablePath,
     string PluginHostExecutablePath,
@@ -34,8 +33,6 @@ internal sealed record StationAgentHostOptions(
     TimeSpan ArtifactUploadTimeout,
     TimeSpan RuntimeTimeout,
     int MaximumRuntimeOutputBytes,
-    IReadOnlyCollection<string> AllowedRestrictedExternalProgramHostAccounts,
-    IReadOnlyCollection<string> AllowedRestrictedExternalProgramHostSids,
     string ExternalProgramAppContainerProfileNamespace,
     string SafetyExecutablePath,
     string SafetyWorkingDirectory,
@@ -128,18 +125,6 @@ internal sealed record StationAgentHostOptions(
             safetyExecutablePath,
             "OpenLineOps:Agent:SafetyExecutablePath must be an independently reviewed "
             + "safety actuator, not OpenLineOps.StationRuntime.");
-        var allowedExternalProgramAccounts = CanonicalCollection(
-            section.GetSection("AllowedRestrictedExternalProgramHostAccounts").Get<string[]>() ?? [],
-            "OpenLineOps:Agent:AllowedRestrictedExternalProgramHostAccounts");
-        var allowedExternalProgramSids = CanonicalCollection(
-            section.GetSection("AllowedRestrictedExternalProgramHostSids").Get<string[]>() ?? [],
-            "OpenLineOps:Agent:AllowedRestrictedExternalProgramHostSids");
-        if (allowedExternalProgramAccounts.Length == 0 && allowedExternalProgramSids.Length == 0)
-        {
-            throw new InvalidDataException(
-                "OpenLineOps Agent requires at least one restricted external program host account or SID.");
-        }
-
         var coordinatorBaseUri = ParseCoordinatorBaseUri(
             section["CoordinatorBaseUri"],
             "OpenLineOps:Agent:CoordinatorBaseUri");
@@ -147,6 +132,29 @@ internal sealed record StationAgentHostOptions(
             section["ArtifactUploadBearerToken"],
             "OpenLineOps:Agent:ArtifactUploadBearerToken");
         ValidateBearerToken(artifactUploadBearerToken);
+
+        var packageDistributionDirectory = ResolvePath(Required(
+            section["PackageDistributionDirectory"],
+            "OpenLineOps:Agent:PackageDistributionDirectory"));
+        var packageCacheDirectory = StationAgentPackageCachePath.RequireCanonicalAbsolute(Required(
+            section["PackageCacheDirectory"],
+            "OpenLineOps:Agent:PackageCacheDirectory"));
+        var runtimeWorkingDirectory = ResolvePath(
+            section["RuntimeWorkingDirectory"],
+            Path.Combine(dataDirectory, "work"));
+        var artifactDirectory = ResolvePath(
+            section["ArtifactDirectory"],
+            Path.Combine(dataDirectory, "artifacts"));
+        var safetyWorkingDirectory = ResolvePath(
+            section["SafetyWorkingDirectory"],
+            Path.Combine(dataDirectory, "safety"));
+        EnsureMutableRootsOutsidePackageCacheNamespace(
+            packageCacheDirectory,
+            (dataDirectory, "OpenLineOps:Agent:DataDirectory"),
+            (packageDistributionDirectory, "OpenLineOps:Agent:PackageDistributionDirectory"),
+            (runtimeWorkingDirectory, "OpenLineOps:Agent:RuntimeWorkingDirectory"),
+            (artifactDirectory, "OpenLineOps:Agent:ArtifactDirectory"),
+            (safetyWorkingDirectory, "OpenLineOps:Agent:SafetyWorkingDirectory"));
 
         return new StationAgentHostOptions(
             agentId,
@@ -160,22 +168,17 @@ internal sealed record StationAgentHostOptions(
             requireBrokerTls,
             UShort(section["PrefetchCount"], 8, "OpenLineOps:Agent:PrefetchCount"),
             UShort(section["MaximumConcurrentJobs"], 4, "OpenLineOps:Agent:MaximumConcurrentJobs"),
-            ResolvePath(Required(
-                section["PackageDistributionDirectory"],
-                "OpenLineOps:Agent:PackageDistributionDirectory")),
-            ResolvePath(section["PackageCacheDirectory"], Path.Combine(dataDirectory, "content")),
+            packageDistributionDirectory,
+            packageCacheDirectory,
             Sha256(
                 section["MaterialArrivalPackageContentSha256"],
                 "OpenLineOps:Agent:MaterialArrivalPackageContentSha256"),
-            PipeName(
-                section["MaterialArrivalPipeName"],
-                "OpenLineOps:Agent:MaterialArrivalPipeName"),
             trustedKeys,
             runtimeExecutablePath,
             pluginHostExecutablePath,
             pythonScript,
-            ResolvePath(section["RuntimeWorkingDirectory"], Path.Combine(dataDirectory, "work")),
-            ResolvePath(section["ArtifactDirectory"], Path.Combine(dataDirectory, "artifacts")),
+            runtimeWorkingDirectory,
+            artifactDirectory,
             coordinatorBaseUri,
             artifactUploadBearerToken,
             Duration(
@@ -190,13 +193,11 @@ internal sealed record StationAgentHostOptions(
                 section["MaximumRuntimeOutputBytes"],
                 1024 * 1024,
                 "OpenLineOps:Agent:MaximumRuntimeOutputBytes"),
-            allowedExternalProgramAccounts,
-            allowedExternalProgramSids,
             Required(
                 section["ExternalProgramAppContainerProfileNamespace"],
                 "OpenLineOps:Agent:ExternalProgramAppContainerProfileNamespace"),
             safetyExecutablePath,
-            ResolvePath(section["SafetyWorkingDirectory"], Path.Combine(dataDirectory, "safety")),
+            safetyWorkingDirectory,
             Duration(
                 section["SafetyTimeout"],
                 TimeSpan.FromSeconds(5),
@@ -329,6 +330,59 @@ internal sealed record StationAgentHostOptions(
         var value = configured ?? fallback
             ?? throw new InvalidDataException("A required Agent path is missing.");
         return Path.GetFullPath(value, AppContext.BaseDirectory);
+    }
+
+    private static void EnsureMutableRootsOutsidePackageCacheNamespace(
+        string packageCacheDirectory,
+        params (string Path, string SettingName)[] mutableRoots)
+    {
+        var cacheAnchor = Directory.GetParent(packageCacheDirectory)?.FullName
+            ?? throw new InvalidDataException(
+                "OpenLineOps:Agent:PackageCacheDirectory must have a dedicated namespace anchor.");
+        var cacheAnchorRoot = Path.GetPathRoot(cacheAnchor)
+            ?? throw new InvalidDataException(
+                "OpenLineOps:Agent:PackageCacheDirectory must have a rooted dedicated namespace anchor.");
+        if (string.Equals(
+                Path.TrimEndingDirectorySeparator(cacheAnchor),
+                Path.TrimEndingDirectorySeparator(cacheAnchorRoot),
+                OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "OpenLineOps:Agent:PackageCacheDirectory must be beneath a non-root dedicated namespace anchor.");
+        }
+        foreach (var (path, settingName) in mutableRoots)
+        {
+            if (PathsOverlap(path, cacheAnchor))
+            {
+                throw new InvalidDataException(
+                    $"{settingName} must be outside the dedicated PackageCacheDirectory namespace anchor.");
+            }
+        }
+    }
+
+    private static bool PathsOverlap(string left, string right)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var canonicalLeft = Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
+        var canonicalRight = Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
+        return string.Equals(canonicalLeft, canonicalRight, comparison)
+               || IsDescendantPath(canonicalLeft, canonicalRight, comparison)
+               || IsDescendantPath(canonicalRight, canonicalLeft, comparison);
+    }
+
+    private static bool IsDescendantPath(
+        string candidate,
+        string ancestor,
+        StringComparison comparison)
+    {
+        var prefix = Path.EndsInDirectorySeparator(ancestor)
+            ? ancestor
+            : ancestor + Path.DirectorySeparatorChar;
+        return candidate.StartsWith(prefix, comparison);
     }
 
     private static string ResolveBundledExecutable(
@@ -538,36 +592,6 @@ internal sealed record StationAgentHostOptions(
                    character is >= '0' and <= '9' or >= 'a' and <= 'f')
             ? canonical
             : throw new InvalidDataException($"{name} must be lowercase hexadecimal SHA-256.");
-    }
-
-    private static string PipeName(string? value, string name)
-    {
-        var canonical = Required(value, name);
-        return canonical.Length <= 128
-               && canonical.All(static character =>
-                   char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_')
-            ? canonical
-            : throw new InvalidDataException(
-                $"{name} may contain only ASCII letters, digits, dot, dash, or underscore.");
-    }
-
-    private static string[] CanonicalCollection(
-        IReadOnlyCollection<string> values,
-        string name)
-    {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var value in values)
-        {
-            if (string.IsNullOrWhiteSpace(value)
-                || char.IsWhiteSpace(value[0])
-                || char.IsWhiteSpace(value[^1])
-                || !result.Add(value))
-            {
-                throw new InvalidDataException($"{name} must contain unique canonical values.");
-            }
-        }
-
-        return result.ToArray();
     }
 
     private static TimeSpan Duration(string? value, TimeSpan defaultValue, string name) =>

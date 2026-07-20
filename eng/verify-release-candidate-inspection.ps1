@@ -178,6 +178,10 @@ function New-TestWindowsBundleZip {
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
         [switch] $OmitAgentStationSystemId,
+        [switch] $OmitAgentPackageCacheDirectory,
+        [switch] $OmitAgentWindowsServiceName,
+        [string] $AgentWindowsServiceName = "",
+        [string] $AgentPackageCacheDirectory = "",
         [string] $AgentHeartbeatInterval = "00:00:05",
         [string] $AgentBrokerUri = "amqps://localhost:5671",
         [bool] $AgentRequireBrokerTls = $true,
@@ -228,6 +232,9 @@ function New-TestWindowsBundleZip {
             if (-not $OmitAgentStationSystemId) {
                 $agentConfiguration["StationSystemId"] = ""
             }
+            if (-not $OmitAgentPackageCacheDirectory) {
+                $agentConfiguration["PackageCacheDirectory"] = $AgentPackageCacheDirectory
+            }
             if ($EmbedAgentArtifactUploadBearerToken) {
                 $agentConfiguration["ArtifactUploadBearerToken"] =
                     "embedded-release-template-secret"
@@ -236,11 +243,26 @@ function New-TestWindowsBundleZip {
                 $agentConfiguration["SafetyExecutablePath"] = $AgentSafetyExecutablePath
             }
 
+            $openLineOpsConfiguration = [ordered]@{
+                Agent = $agentConfiguration
+            }
+            if (-not $OmitAgentWindowsServiceName) {
+                $openLineOpsConfiguration["WindowsServiceName"] = $AgentWindowsServiceName
+            }
             ([ordered]@{
-                OpenLineOps = [ordered]@{
-                    Agent = $agentConfiguration
-                }
+                OpenLineOps = $openLineOpsConfiguration
             } | ConvertTo-Json -Depth 8 -Compress)
+        }
+        elseif ($relativePath -ceq "DEPLOYMENT.md" -and $ArtifactKind -ceq "agent") {
+            @'
+# Station Agent Deployment
+
+Provision the dedicated content-cache namespace from an elevated Windows prompt:
+
+OpenLineOps.Agent.exe --provision-content-cache --OpenLineOps:WindowsServiceName OpenLineOpsStationAgent-LineA --OpenLineOps:Agent:PackageCacheDirectory C:\ProgramData\OpenLineOps\StationCaches\LineA\content-anchor\content
+
+OpenLineOps.Agent.exe --remove-content-cache-package 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --OpenLineOps:WindowsServiceName OpenLineOpsStationAgent-LineA --OpenLineOps:Agent:PackageCacheDirectory C:\ProgramData\OpenLineOps\StationCaches\LineA\content-anchor\content
+'@
         }
         else {
             "test content for $relativePath"
@@ -586,6 +608,10 @@ function New-MinimalReleaseCandidate {
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
         [switch] $OmitAgentStationSystemId,
+        [switch] $OmitAgentPackageCacheDirectory,
+        [switch] $OmitAgentWindowsServiceName,
+        [string] $AgentWindowsServiceName = "",
+        [string] $AgentPackageCacheDirectory = "",
         [string] $AgentHeartbeatInterval = "00:00:05",
         [string] $AgentBrokerUri = "amqps://localhost:5671",
         [bool] $AgentRequireBrokerTls = $true,
@@ -627,6 +653,7 @@ function New-MinimalReleaseCandidate {
         "eng/verify-evidence-validation.tests.ps1",
         "eng/evidence-validation-test-fixtures.ps1",
         "eng/verify-solution-project-coverage.ps1",
+        "eng/verify-station-agent-content-cache-contract.ps1",
         "eng/inspect-ci-release-artifact.ps1",
         "eng/inspect-release-candidate.ps1",
         "eng/prepare-final-publication.ps1",
@@ -675,6 +702,10 @@ function New-MinimalReleaseCandidate {
         -ExposeRemovedAgentContainerSetting:$ExposeRemovedAgentContainerSetting `
         -OmitAgentSafetyExecutablePath:$OmitAgentSafetyExecutablePath `
         -OmitAgentStationSystemId:$OmitAgentStationSystemId `
+        -OmitAgentPackageCacheDirectory:$OmitAgentPackageCacheDirectory `
+        -OmitAgentWindowsServiceName:$OmitAgentWindowsServiceName `
+        -AgentWindowsServiceName $AgentWindowsServiceName `
+        -AgentPackageCacheDirectory $AgentPackageCacheDirectory `
         -AgentHeartbeatInterval $AgentHeartbeatInterval `
         -AgentBrokerUri $AgentBrokerUri `
         -AgentRequireBrokerTls $AgentRequireBrokerTls `
@@ -856,6 +887,38 @@ Assert-InspectionFails `
     -Root $configuredAgentSafetyExecutablePathRoot `
     -Name "configured-agent-safety-executable-path" `
     -ExpectedPattern "SafetyExecutablePath release template must be empty"
+
+$missingAgentPackageCacheDirectoryRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-package-cache-directory" `
+    -OmitAgentPackageCacheDirectory
+Assert-InspectionFails `
+    -Root $missingAgentPackageCacheDirectoryRoot `
+    -Name "missing-agent-package-cache-directory" `
+    -ExpectedPattern "PackageCacheDirectory release template must be present and empty"
+
+$configuredAgentPackageCacheDirectoryRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-package-cache-directory" `
+    -AgentPackageCacheDirectory "C:\\ProgramData\\OpenLineOps\\content"
+Assert-InspectionFails `
+    -Root $configuredAgentPackageCacheDirectoryRoot `
+    -Name "configured-agent-package-cache-directory" `
+    -ExpectedPattern "PackageCacheDirectory release template must be present and empty"
+
+$missingAgentWindowsServiceNameRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-windows-service-name" `
+    -OmitAgentWindowsServiceName
+Assert-InspectionFails `
+    -Root $missingAgentWindowsServiceNameRoot `
+    -Name "missing-agent-windows-service-name" `
+    -ExpectedPattern "WindowsServiceName release template must be present and empty"
+
+$configuredAgentWindowsServiceNameRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-windows-service-name" `
+    -AgentWindowsServiceName "OpenLineOpsStationAgent-LineA"
+Assert-InspectionFails `
+    -Root $configuredAgentWindowsServiceNameRoot `
+    -Name "configured-agent-windows-service-name" `
+    -ExpectedPattern "WindowsServiceName release template must be present and empty"
 
 $missingAgentStationSystemIdRoot = New-MinimalReleaseCandidate `
     -Name "missing-agent-station-system-id" `

@@ -8,7 +8,6 @@ import {
   openAsBlob,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync
 } from 'node:fs';
 import {
@@ -28,11 +27,10 @@ import type {
   ApplicationExtensionImportResult,
   BackendStatus,
   DesktopConfig,
-  ExternalProgramUploadFile,
+  EditorDocumentWriteOptions,
+  ExternalProgramDirectorySelectionResult,
   SelectDirectoryOptions,
   SelectDirectoryResult,
-  SelectExternalProgramFilesOptions,
-  SelectFilesResult,
   SelectProjectFileOptions,
   TraceArtifactSaveOptions
 } from '../shared/desktop-api.js';
@@ -66,6 +64,11 @@ import {
   deriveApplicationExtensionPortableId,
   inspectApplicationExtensionArchive
 } from './application-extension-import-security.js';
+import {
+  assertExternalProgramDirectoryUnchanged,
+  inspectExternalProgramDirectory,
+  type ExternalProgramDirectoryIdentity
+} from './external-program-directory-import-security.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -138,6 +141,20 @@ interface ActiveBackendSession {
   safetyToken: string;
   nonce: string;
 }
+
+interface PendingExternalProgramDirectory {
+  identity: ExternalProgramDirectoryIdentity;
+  backendSessionNonce: string;
+  projectId: string;
+  applicationId: string;
+  resourceId: string;
+  inFlight: boolean;
+  expiresAtMilliseconds: number;
+}
+
+const pendingExternalProgramDirectories = new Map<string, PendingExternalProgramDirectory>();
+const externalProgramDirectorySelectionLifetimeMilliseconds = 30 * 60 * 1000;
+const maximumPendingExternalProgramDirectories = 16;
 
 interface BackendHandshakeDocument {
   ProcessId: number;
@@ -920,6 +937,7 @@ function clearBackendSession(child?: ChildProcessWithoutNullStreams): void {
   if (activeBackendSession !== null
       && (child === undefined || activeBackendSession.process === child)) {
     activeBackendSession = null;
+    pendingExternalProgramDirectories.clear();
   }
   if (pendingHandshakePath !== null) {
     cleanupBackendHandshakeFile(pendingHandshakePath);
@@ -1068,39 +1086,44 @@ ipcMain.handle('desktop:select-application-project-file', async (
     path: result.filePaths[0] ?? null
   };
 });
-ipcMain.handle('desktop:select-external-program-files', async (
+ipcMain.handle('desktop:select-external-program-directory', async (
   event,
-  options?: SelectExternalProgramFilesOptions
-): Promise<SelectFilesResult> => {
+  projectId: string,
+  applicationId: string,
+  resourceId: string
+): Promise<ExternalProgramDirectorySelectionResult> => {
   assertTrustedRendererIpcSender(event);
-  const properties: Array<'openFile' | 'multiSelections'> = ['openFile'];
-  if (options?.multiple) {
-    properties.push('multiSelections');
+  return selectExternalProgramDirectory(projectId, applicationId, resourceId);
+});
+ipcMain.handle('desktop:release-external-program-directory-selection', (
+  event,
+  selectionId: string
+): void => {
+  assertTrustedRendererIpcSender(event);
+  if (!/^[a-f0-9]{64}$/u.test(selectionId)) {
+    throw new Error('External program directory selection identity is invalid.');
   }
-  const dialogOptions = {
-    title: options?.title ?? 'Import external program files',
-    defaultPath: options?.defaultPath,
-    buttonLabel: options?.buttonLabel ?? 'Import',
-    properties
-  };
-  const result = mainWindow
-    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
-    : await dialog.showOpenDialog(dialogOptions);
-  return { canceled: result.canceled, paths: result.filePaths };
+  pendingExternalProgramDirectories.delete(selectionId);
 });
 ipcMain.handle('api:request', async (event, requestPath: string, options?: ApiRequestOptions) => {
   assertTrustedRendererIpcSender(event);
   return apiRequest(requestPath, options);
 });
-ipcMain.handle('api:upload-external-program', async (
+ipcMain.handle('api:import-external-program-directory', async (
   event,
-  requestPath: string,
-  definition: unknown | null,
-  files: ExternalProgramUploadFile[],
-  headers?: Record<string, string>
+  projectId: string,
+  applicationId: string,
+  definition: unknown,
+  selectionId: string,
+  write?: EditorDocumentWriteOptions
 ) => {
   assertTrustedRendererIpcSender(event);
-  return uploadExternalProgram(requestPath, definition, files, headers);
+  return importExternalProgramDirectory(
+    projectId,
+    applicationId,
+    definition,
+    selectionId,
+    write);
 });
 ipcMain.handle('api:import-application-extension', async (
   event,
@@ -1250,41 +1273,139 @@ async function apiRequest<T = unknown>(
   };
 }
 
-async function uploadExternalProgram<T = unknown>(
-  requestPath: string,
-  definition: unknown | null,
-  files: ExternalProgramUploadFile[],
-  requestHeaders: Record<string, string> = {}
-): Promise<ApiResponse<T>> {
+async function selectExternalProgramDirectory(
+  projectId: string,
+  applicationId: string,
+  resourceId: string
+): Promise<ExternalProgramDirectorySelectionResult> {
+  assertCanonicalApplicationScopeValue(projectId, 'Project');
+  assertCanonicalApplicationScopeValue(applicationId, 'Application');
+  assertCanonicalExternalProgramResourceId(resourceId);
   const initialSession = requireActiveBackendSession();
-  resolveCanonicalBackendApiUrl(initialSession.apiBaseUrl, requestPath);
-  if (files.length === 0 || files.length > 64) {
-    throw new Error('External program uploads require between one and 64 files.');
-  }
-
-  const form = new FormData();
-  if (definition !== null) {
-    form.set('definition', JSON.stringify(definition));
-  }
-  const manifest = [];
-  for (const [index, file] of files.entries()) {
-    const fieldName = `file-${index + 1}`;
-    const metadata = statSync(file.sourcePath, { throwIfNoEntry: false });
-    if (!metadata?.isFile()) {
-      throw new Error(`External program upload source is not a regular file: ${file.sourcePath}`);
+  const automatedDirectoryPath = process.env.OPENLINEOPS_E2E_EXTERNAL_PROGRAM_DIRECTORY_PATH;
+  let selectedPath: string | null;
+  if (process.env.OPENLINEOPS_E2E_ALLOW_EXTERNAL_PROGRAM_DIRECTORY_DIALOG_BYPASS === '1'
+      && automatedDirectoryPath) {
+    selectedPath = path.resolve(automatedDirectoryPath);
+  } else {
+    const dialogOptions = {
+      title: 'Select external program directory',
+      buttonLabel: 'Use Program Directory',
+      properties: ['openDirectory'] as Array<'openDirectory'>
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || result.filePaths.length === 0) {
+      return {
+        canceled: true,
+        selectionId: null,
+        directoryName: null,
+        totalBytes: null,
+        files: []
+      };
     }
-    const sha256 = await calculateFileSha256(file.sourcePath);
-    manifest.push({
-      fieldName,
-      resourceRelativePath: file.resourceRelativePath,
-      sizeBytes: metadata.size,
-      sha256
-    });
-    form.append(fieldName, await openAsBlob(file.sourcePath), path.basename(file.sourcePath));
+    if (result.filePaths.length !== 1) {
+      throw new Error('External program import accepts exactly one directory.');
+    }
+    selectedPath = result.filePaths[0];
   }
-  form.set('uploadManifest', JSON.stringify(manifest));
 
+  const identity = await inspectExternalProgramDirectory(selectedPath);
+  assertSameActiveBackendSession(initialSession);
+  pruneExpiredExternalProgramDirectories();
+  for (const [existingSelectionId, pending] of pendingExternalProgramDirectories) {
+    if (!pending.inFlight
+        && pending.backendSessionNonce === initialSession.nonce
+        && pending.projectId === projectId
+        && pending.applicationId === applicationId
+        && pending.resourceId === resourceId) {
+      pendingExternalProgramDirectories.delete(existingSelectionId);
+    }
+  }
+  if (pendingExternalProgramDirectories.size >= maximumPendingExternalProgramDirectories) {
+    throw new Error(
+      'Too many external program directories are pending; save or close an existing editor before selecting another.');
+  }
+  const selectionId = randomBytes(32).toString('hex');
+  pendingExternalProgramDirectories.set(selectionId, {
+    identity,
+    backendSessionNonce: initialSession.nonce,
+    projectId,
+    applicationId,
+    resourceId,
+    inFlight: false,
+    expiresAtMilliseconds: Date.now() + externalProgramDirectorySelectionLifetimeMilliseconds
+  });
+  return {
+    canceled: false,
+    selectionId,
+    directoryName: identity.directoryName,
+    totalBytes: identity.totalBytes,
+    files: identity.files.map(file => ({
+      relativePath: file.relativePath,
+      resourceRelativePath: file.resourceRelativePath,
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256
+    }))
+  };
+}
+
+async function importExternalProgramDirectory<T = unknown>(
+  projectId: string,
+  applicationId: string,
+  definition: unknown,
+  selectionId: string,
+  write?: EditorDocumentWriteOptions
+): Promise<ApiResponse<T>> {
+  assertCanonicalApplicationScopeValue(projectId, 'Project');
+  assertCanonicalApplicationScopeValue(applicationId, 'Application');
+  if (!/^[a-f0-9]{64}$/u.test(selectionId)) {
+    throw new Error('External program directory selection identity is invalid.');
+  }
+  const requestHeaders = editorDocumentWriteHeaders(write);
+  const resourceId = externalProgramDefinitionResourceId(definition);
+  const initialSession = requireActiveBackendSession();
+  pruneExpiredExternalProgramDirectories();
+  const pending = pendingExternalProgramDirectories.get(selectionId);
+  if (!pending
+      || pending.backendSessionNonce !== initialSession.nonce
+      || pending.projectId !== projectId
+      || pending.applicationId !== applicationId
+      || pending.resourceId !== resourceId
+      || pending.expiresAtMilliseconds <= Date.now()) {
+    pendingExternalProgramDirectories.delete(selectionId);
+    throw new Error('The external program directory selection expired; select the directory again.');
+  }
+  if (pending.inFlight) {
+    throw new Error('The external program directory selection is already being imported.');
+  }
+  pending.inFlight = true;
   try {
+    await assertExternalProgramDirectoryUnchanged(pending.identity);
+    const form = new FormData();
+    form.set('definition', JSON.stringify(definition));
+    const manifest = [];
+    for (const [index, file] of pending.identity.files.entries()) {
+      const fieldName = `file-${index + 1}`;
+      manifest.push({
+        fieldName,
+        resourceRelativePath: file.resourceRelativePath,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256
+      });
+      form.append(fieldName, await openAsBlob(file.path), path.basename(file.path));
+    }
+    form.set('uploadManifest', JSON.stringify(manifest));
+    await assertExternalProgramDirectoryUnchanged(pending.identity);
+    assertSameActiveBackendSession(initialSession);
+    if (pendingExternalProgramDirectories.get(selectionId) !== pending) {
+      throw new Error('The external program directory selection was released before import dispatch.');
+    }
+
+    const requestPath = `/api/automation-projects/${encodeURIComponent(projectId)}`
+      + `/applications/${encodeURIComponent(applicationId)}/external-programs/directory-import`;
+    resolveCanonicalBackendApiUrl(initialSession.apiBaseUrl, requestPath);
     const session = requireActiveBackendSession();
     if (session !== initialSession) {
       throw new Error('Backend session changed while external program files were prepared.');
@@ -1299,6 +1420,11 @@ async function uploadExternalProgram<T = unknown>(
       init: { method: 'POST', body: form, headers: requestHeaders }
     });
     const text = await response.text();
+    if (response.ok) {
+      pendingExternalProgramDirectories.delete(selectionId);
+    } else if (pendingExternalProgramDirectories.get(selectionId) === pending) {
+      pending.inFlight = false;
+    }
     return {
       ok: response.ok,
       status: response.status,
@@ -1306,6 +1432,9 @@ async function uploadExternalProgram<T = unknown>(
       text
     };
   } catch (error) {
+    if (pendingExternalProgramDirectories.get(selectionId) === pending) {
+      pending.inFlight = false;
+    }
     return {
       ok: false,
       status: 0,
@@ -1313,6 +1442,45 @@ async function uploadExternalProgram<T = unknown>(
       text: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function externalProgramDefinitionResourceId(definition: unknown): string {
+  if (definition === null
+      || typeof definition !== 'object'
+      || Array.isArray(definition)
+      || !('resourceId' in definition)) {
+    throw new Error('External program directory import definition has no resource identity.');
+  }
+  const resourceId = definition.resourceId;
+  assertCanonicalExternalProgramResourceId(resourceId as string);
+  return resourceId as string;
+}
+
+function pruneExpiredExternalProgramDirectories(): void {
+  const now = Date.now();
+  const activeSessionNonce = activeBackendSession?.nonce;
+  for (const [selectionId, pending] of pendingExternalProgramDirectories) {
+    if (pending.expiresAtMilliseconds <= now
+        || pending.backendSessionNonce !== activeSessionNonce) {
+      pendingExternalProgramDirectories.delete(selectionId);
+    }
+  }
+}
+
+function editorDocumentWriteHeaders(write?: EditorDocumentWriteOptions): Record<string, string> {
+  if (write === undefined) {
+    return {};
+  }
+  if (!/^[a-f0-9]{64}$/u.test(write.revision)
+      || write.force !== undefined && typeof write.force !== 'boolean') {
+    throw new Error('External program directory import revision is invalid.');
+  }
+  return write.force
+    ? {
+      'If-Match': '*',
+      'X-OpenLineOps-Conflict-Resolution': 'overwrite'
+    }
+    : { 'If-Match': `"${write.revision}"` };
 }
 
 async function selectAndImportApplicationExtension<T = unknown>(
@@ -1478,6 +1646,13 @@ function assertCanonicalApplicationScopeValue(value: string, label: string): voi
       || value.includes('#')
       || [...value].some(character => character.charCodeAt(0) < 32)) {
     throw new Error(`${label} identity is not one canonical API path segment.`);
+  }
+}
+
+function assertCanonicalExternalProgramResourceId(value: string): void {
+  if (typeof value !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/u.test(value)) {
+    throw new Error('External program resource identity must start with an ASCII letter or digit and use at most 96 letters, digits, dot, dash, or underscore characters.');
   }
 }
 

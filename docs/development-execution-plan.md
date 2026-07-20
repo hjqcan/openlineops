@@ -169,6 +169,7 @@ powershell -NoProfile -File eng/verify-third-party-license-metadata.ps1
 powershell -NoProfile -File eng/verify-dotnet-package-vulnerabilities.ps1
 powershell -NoProfile -File eng/verify-dotnet-package-vulnerabilities.tests.ps1
 powershell -NoProfile -File eng/verify-release-staging-security.ps1
+powershell -NoProfile -File eng/verify-station-agent-content-cache-contract.ps1
 $env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
 $env:OPENLINEOPS_POSTGRES_CONNECTION_STRING = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=<ephemeral-password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
@@ -178,6 +179,7 @@ npm --prefix apps/desktop run test:process-problem-location
 npm --prefix apps/desktop run test:draft-transition-guard
 npm --prefix apps/desktop run test:topology-draft-workspace
 npm --prefix apps/desktop run test:configuration-draft-workspace
+npm --prefix apps/desktop run test:external-program-directory-import
 npm --prefix apps/desktop run test:runtime-data-binding
 npm --prefix apps/desktop run test:production-route-runtime
 npm --prefix apps/desktop run smoke:e2e:packaged-existing
@@ -214,16 +216,21 @@ they fail when their real PostgreSQL/RabbitMQ inputs are absent or unreachable.
 Their evidence must pass
 `eng/verify-staged-agent-evidence.ps1`, including authenticated central Artifact
 upload and Operator GET/hash verification, offline durable completion,
-once-only redelivery, an exact temporary standard service-account identity, a
-canonical unique Windows service name, SCM start/stop/restart/delete lifecycle,
-the raw evidence hash, and an external `dotnet test` driver-tree abort cleanup
-proof, including testhost descendants, under a separate run scope. Strict
-private cleanup manifests bind deterministic service,
-account, recorded SID, copied Agent hash, and Windows Temp root; wrapper
-`finally` blocks and independent workflow `always()` steps invoke the same
-bounded, idempotent scavenger. `eng/verify-studio-two-agent-production-evidence.ps1`
-and `eng/verify-runner-staged-agent-evidence.ps1` bind the two-Agent and Runner
-public roots. The production-closure scanner accepts only its exact
+once-only redelivery, the fixed `NT AUTHORITY\LocalService` account and SID, a
+canonical unique Windows service name and derived service SID, an enabled
+service-logon SID, an enabled-and-restricted exact service SID, SCM
+start/stop/restart/delete lifecycle, the raw evidence hash, and an external
+`dotnet test` driver-tree abort cleanup proof, including testhost descendants,
+under a separate run scope. Strict private cleanup manifests bind only role,
+service suffix/name, fixed LocalService identity, derived service SID and
+`Restricted` type, copied Agent path/hash, and the exact Windows Temp root;
+wrapper `finally` blocks and independent workflow `always()` steps invoke the
+same bounded, idempotent scavenger. Studio's two Station services share the
+LocalService base account but must expose distinct restricted service SIDs.
+`eng/verify-studio-two-agent-production-evidence.ps1` and
+`eng/verify-runner-staged-agent-evidence.ps1` bind that two-Agent proof and the
+Runner-to-SCM-Agent proof to their public roots. The production-closure scanner
+accepts only its exact
 public manifest: summary, screenshots, verified Trace saves, frozen manifest,
 public signing key, two `.olopkg` files, and two deployment catalogs. Studio
 user data, project working files, tokens, private keys, browser profiles, and

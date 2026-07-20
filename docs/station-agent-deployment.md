@@ -16,39 +16,123 @@ the archive. After extraction, verify `bundle-manifest.json` and
 production release, all four executable entry points and the internal least-
 privilege launcher must have valid Authenticode signatures.
 
-## Service account and directories
+## Service identity and directories
 
-Create a dedicated non-administrative local or domain account for each Station.
-Do not use LocalSystem, an administrator, an interactive operator, the
-Coordinator identity, or an account shared by multiple Stations. Configure the
-Windows service to load the account profile. Record its stable SID and place
-that SID in `AllowedRestrictedExternalProgramHostSids`; the Agent fails closed
-when neither an account nor SID allowlist is configured.
+Install every Station as a uniquely named SCM service under the built-in
+`NT AUTHORITY\LocalService` account (`S-1-5-19`) and set its service SID type to
+`Restricted`. The LocalService account is intentionally shared; Station
+isolation comes from the distinct `S-1-5-80-...` SID derived by Windows from
+each service name. Set that exact SCM name in `OpenLineOps:WindowsServiceName`;
+it is the sole service-identity configuration source, and the Agent derives the
+SID itself. Startup verifies LocalService as the token user, enabled
+non-deny-only service-logon SID `S-1-5-6`, a restricted token, and the derived
+service SID as both enabled and restricted. Do not use LocalSystem, an
+administrator, an interactive operator, the Coordinator identity, or a
+separately managed service account.
 
 Install the bundle in a read-only program directory such as
-`C:\Program Files\OpenLineOps\StationAgent`. Grant the service account read and
+`C:\Program Files\OpenLineOps\StationAgent`. Grant the exact service SID read and
 execute access there. Create separate writable directories for:
 
 - Agent state and SQLite (`DataDirectory`);
 - signed `.olopkg` distribution (`PackageDistributionDirectory`);
-- content-addressed package cache (`PackageCacheDirectory`, when overridden);
 - Station Runtime work (`RuntimeWorkingDirectory`, when overridden);
 - retained trace artifacts (`ArtifactDirectory`, when overridden);
 - independent safety work (`SafetyWorkingDirectory`, when overridden).
 
-Grant only the service account, SYSTEM, and the intended administrators the
+Grant only the exact service SID, SYSTEM, and the intended administrators the
 required access. Vendor AppContainer identities receive access only to their
 per-invocation workspace and verified immutable package content, never the Agent
 state, package distribution, or artifact roots.
 
-The dedicated service SID is also the exact owner of the package-cache boundary
-and every frozen object. It is the trusted installation and bounded-cleanup
-control plane. Vendor processes receive only the separate OpenLineOps content
-capability SID, which is denied writes, deletion, ACL changes, and ownership
-changes. Agent and Station Runtime compromise is outside this immutability
-boundary because both use the trusted host identity; every operation therefore
-revalidates the package's complete inventory, hashes, owner, ACLs, and read-only
-attributes before Station Runtime is launched.
+`PackageCacheDirectory` is different: it is mandatory, has no fallback under
+`DataDirectory`, and must be the sole child of a dedicated immutable namespace
+anchor. For example, configure the cache root as
+`C:\ProgramData\OpenLineOps\StationCaches\LineA-Eol\content-anchor\content`;
+`content-anchor` may contain only `content`. Put data, work, artifacts,
+distribution, logs, and every other mutable directory outside that anchor. Do
+not grant the Station service deletion or permission/ownership-change authority
+over the anchor or cache root. The normal Agent does not create, repair, or
+relax this namespace.
+
+## Provision the content-cache namespace
+
+Run the bundled provisioning command once from an elevated PowerShell process
+before the service is started. The command accepts only the normal configuration
+keys; it does not introduce a second service SID or cache-path setting:
+
+```powershell
+$serviceName = 'OpenLineOpsStationAgent-LineA-Eol'
+$agent = 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.Agent.exe'
+$cacheRoot = 'C:\ProgramData\OpenLineOps\StationCaches\LineA-Eol\content-anchor\content'
+
+& $agent --provision-content-cache `
+  --OpenLineOps:WindowsServiceName $serviceName `
+  --OpenLineOps:Agent:PackageCacheDirectory $cacheRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "Station content-cache provisioning failed with exit code $LASTEXITCODE."
+}
+```
+
+The caller must be LocalSystem or an elevated member of Administrators. The
+cache path must already be an absolute canonical local drive path on a ready
+fixed NTFS volume. One trailing separator is normalized; relative, dot-segment,
+repeated-separator, UNC, device, network, removable, and non-NTFS paths are
+rejected; they cannot provide the local lock, file-identity, stream, and ACL
+guarantees used by the installer.
+The command fails on non-Windows hosts and under a non-elevated token. It derives
+the exact service SID from `WindowsServiceName`, derives the same external
+program content capability used during execution, and creates or verifies the
+anchor and cache root with their exact protected ACLs. It rejects a relative or
+noncanonical namespace, reparse points, alternate data streams, unexpected
+anchor children, owner or ACL drift, and unsafe pre-existing content. Repeating
+the command with the same inputs is idempotent; changing Station identity or
+moving an existing cache is an explicit administrator recovery operation.
+Provisioning is permitted only while the named service is absent (first
+deployment) or fully `Stopped` with no process. `StartPending`, `Running`,
+`StopPending`, paused, or any other installed state is rejected inside the
+content-protection API, closing the race between namespace changes and package
+installation.
+
+Persist the same `WindowsServiceName` and absolute `PackageCacheDirectory` in
+the service configuration. Normal startup only verifies this provisioned
+boundary and fails closed if it is absent or drifted. A package commit marker
+records installation transaction state only; it carries no package trust or
+provenance and is never treated as an authentication credential. The signed
+package, manifest, complete inventory, hashes, immutable ACLs, and exact marker
+are all revalidated before use.
+
+Protected package removal is also an explicit administrator operation; never
+delete a hash directory or its transaction marker manually. Stop the installed
+service, wait for the exact SCM state, and pass the lowercase package content
+SHA-256 to the same signed Agent entry point:
+
+```powershell
+$serviceName = 'OpenLineOpsStationAgent-LineA-Eol'
+$agent = 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.Agent.exe'
+$cacheRoot = 'C:\ProgramData\OpenLineOps\StationCaches\LineA-Eol\content-anchor\content'
+$contentSha256 = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+
+Stop-Service -Name $serviceName
+(Get-Service -Name $serviceName).WaitForStatus(
+  [System.ServiceProcess.ServiceControllerStatus]::Stopped,
+  [TimeSpan]::FromSeconds(30))
+& $agent --remove-content-cache-package $contentSha256 `
+  --OpenLineOps:WindowsServiceName $serviceName `
+  --OpenLineOps:Agent:PackageCacheDirectory $cacheRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "Protected Station package removal failed with exit code $LASTEXITCODE."
+}
+```
+
+Removal requires an installed, fully stopped service; unlike first-time
+provisioning, a missing SCM service is rejected. Under the same cross-process
+cache lock, the operation revalidates the name-to-SID binding, namespace, exact
+marker record and hash, plus the content directory's type, immutable ACL,
+stream, and single-link provenance. It then removes the marker before content
+and fails closed on uncertainty. Removal does not claim to reconstruct or
+rehash a package inventory from a content hash alone. Provision and removal
+switches are mutually exclusive.
 
 ## Required configuration
 
@@ -71,7 +155,9 @@ are intentional fail-fast placeholders. At minimum configure:
   unless the URI contains a non-`guest` username and a non-empty password;
   credentialless broker URIs are reserved for explicit
   `RequireBrokerTls=false` local/integration-test execution;
-- package distribution directories, plus an HTTPS `CoordinatorBaseUri` for
+- an absolute canonical local fixed-NTFS `PackageCacheDirectory`, explicitly
+  provisioned as described above; the package
+  distribution directory, plus an HTTPS `CoordinatorBaseUri` for
   central Trace upload. Provision `ArtifactUploadBearerToken` from the service
   secret store or environment at startup; never place it in the bundled
   `appsettings.json`, command line, diagnostics, or logs. The credential has
@@ -83,13 +169,19 @@ are intentional fail-fast placeholders. At minimum configure:
   `<PackageDistributionDirectory>\<sha256>.olopkg`, verifies its signature,
   complete inventory, and content hash, and derives Project, Application,
   Snapshot, Line, and Station identity only from that frozen manifest;
-- a canonical `MaterialArrivalPipeName` unique to the Station service. The
-  named pipe uses `PipeOptions.CurrentUserOnly`, so a scanner, PLC bridge, or
-  manual-entry adapter must run under the same dedicated Windows service
-  account to submit arrival signals;
+- the material-arrival pipe name is not configurable. The Agent derives it
+  deterministically from the exact Station service SID, preventing same-host
+  Station collisions and name drift. Its protected DACL and owner contain only
+  that SID, it uses first-instance protection, and it remains open for the
+  Agent lifetime. An in-process scanner/PLC adapter, or a child adapter launched
+  with the Station service token, may submit arrivals. An independent bridge
+  must use the authenticated Coordinator API; sharing LocalService is not
+  authorization;
 - one or more trusted RSA public-key files in
   `TrustedPackagePublicKeyFiles`, keyed by the exact release signing key ID;
-- an allowed restricted-host account or SID;
+- the exact unique SCM service name in `OpenLineOps:WindowsServiceName`; it must
+  match the installed service name and is the sole source of the derived
+  restricted service SID;
 - a stable `ExternalProgramAppContainerProfileNamespace`;
 - an absolute `SafetyExecutablePath` for the independently reviewed,
   machine-specific actuator; it must be different from
@@ -159,8 +251,8 @@ elevated PowerShell prompt with the signed launcher from the Agent bundle:
 
 The command recursively rejects reparse points, grants read-and-execute only
 to the stable `OpenLineOps.pythonRuntime` capability, and emits JSON containing
-the canonical runtime root, DLL, and capability SID. The service account does
-not need and must not receive `WRITE_DAC` on the Python installation. At run
+the canonical runtime root, DLL, and capability SID. The Agent service identity
+does not need and must not receive `WRITE_DAC` on the Python installation. At run
 time the launcher only verifies the inheritable capability ACE; a missing or
 drifted provision fails closed with the exact provisioning command instead of
 modifying `Program Files` or falling back to another Python runtime.
@@ -176,10 +268,10 @@ unique AppContainer SID, and the integrity RID is 4096. It also verifies
 cross-profile denial, network denial, descendant termination, profile deletion,
 and stale-profile recovery. Its staged RabbitMQ child gate installs the exact
 extracted Agent as a demand-start `WIN32_OWN_PROCESS` service named
-`OpenLineOpsAgentE2E-<32-lowercase-hex-guid>` under a dedicated temporary
-non-administrative standard service account. The gate grants that account only
-the service-logon right and supplies test configuration through the
-service-specific registry `Environment` value outside the frozen
+`OpenLineOpsAgentE2E-<32-lowercase-hex-guid>` under
+`NT AUTHORITY\LocalService`, configures `SERVICE_SID_TYPE_RESTRICTED`, and
+supplies test configuration through the service-specific registry
+`Environment` value outside the frozen
 bundle. The service key ACL is limited to SYSTEM, administrators, and the test
 principal; the broker credential is never written to the service `ImagePath`,
 command line, bundle, or evidence. The gate starts, stops, and restarts the
@@ -187,22 +279,22 @@ Agent through Windows SCM, stops the real broker while the signed frozen vendor
 helper is executing, proves the terminal result is durable in SQLite, restarts
 the broker, proves exactly-once result delivery, and proves the hardware action
 is not replayed after the service restart. Cleanup deletes the temporary
-service, service environment, any profile materialized by Windows, account,
-and service-logon grant. Commissioning evidence must also include the
+service, service environment, EventLog source, copied owned root, and any
+remaining service process. It never creates or deletes an account, profile, or
+service-logon grant. Commissioning evidence must also include the
 deployment-specific TLS peer, per-Station broker ACL, heartbeat Offline/Online
 transition, and independent safety actuator.
 
 Each formal CI invocation allocates an independent 32-hex service scope before
 the test starts. A protected manifest under the runner's private temporary root
-binds only the deterministic service/account names, Windows Temp owned root,
-copied Agent path and hash. Its `accountSid` starts as `null` and is atomically
-replaced with the created standard account SID before any service-logon grant,
-profile creation, or SCM installation. The manifest has no broker URI, token,
-password, or arbitrary cleanup path. Both the wrapper `finally` block and a
-separate `if: always()` workflow step invoke the same bounded cleanup Fact; a
-missing manifest is accepted only after the exact deterministic service,
-account, registry key, EventLog source, profile, and owned root are proven
-absent.
+binds only `role`, `serviceSuffix`, `serviceName`, the fixed LocalService name
+and SID, the derived service SID, `serviceSidType=Restricted`, the copied Agent
+path and hash, and the exact Windows Temp owned root. The manifest has no
+broker URI, token, password, account lifecycle, profile, logon-right, or
+arbitrary cleanup path. Both the wrapper `finally` block and a separate
+`if: always()` workflow step invoke the same bounded cleanup Fact; a missing
+manifest is accepted only after the exact deterministic service, process,
+registry key, EventLog source, and owned root are proven absent.
 
 CI also runs an external-abort proof under a third independent scope. After SCM
 reports the Agent Running and the protected marker binds the testhost PID,
@@ -211,8 +303,8 @@ complete `dotnet test` driver tree, including all testhost descendants. It
 proves every snapshotted child is gone while the SCM-hosted Agent remains
 alive, then launches cleanup
 from another `dotnet test` process, and verifies the process, service,
-per-service environment, EventLog source, account, profile, service-logon
-right, ACLs, and owned root are gone. The cleanup Fact then runs again against
+per-service environment, EventLog source, ACLs, and owned root are gone. The
+cleanup Fact then runs again against
 the same retained manifest to prove idempotency; the workflow-level always step
 is the final timeout/crash safety net.
 
@@ -230,8 +322,8 @@ passed vendor execution, authenticated central HTTP Artifact receipts and
 Operator GET/hash checks, all five Artifact kinds, durable offline Outbox
 state, exactly-once completion after reconnect, duplicate rejection before and
 after Agent restart, the canonical temporary SCM service name, a fully verified
-start/stop/restart/delete lifecycle, the same dedicated non-administrative
-standard service identity before and after restart, presence Offline/Online
+start/stop/restart/delete lifecycle, the same LocalService base identity and
+exact restricted service SID before and after restart, presence Offline/Online
 transitions, and a clean shutdown. `-RequireSanitizedRoot`
 additionally rejects reparse points, credentials, private keys, extracted
 runtime payloads, token diagnostics, logs, and any file outside the exact
@@ -240,21 +332,28 @@ top-level evidence, five TRX files, and raw RabbitMQ evidence references.
 ## Windows service installation
 
 From an elevated PowerShell prompt, create the service with an absolute binary
-path and the dedicated account:
+path, the fixed LocalService account, and a restricted service SID. Provision
+the dedicated content-cache namespace before the first service start:
 
 ```powershell
 $agent = 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.Agent.exe'
-sc.exe create OpenLineOpsStationAgent binPath= ('"' + $agent + '"') start= auto obj= 'DOMAIN\station-line-a' password= '<service-account-password>'
-sc.exe sidtype OpenLineOpsStationAgent unrestricted
-sc.exe failure OpenLineOpsStationAgent reset= 86400 actions= restart/5000/restart/15000/none/0
-sc.exe start OpenLineOpsStationAgent
+$serviceName = 'OpenLineOpsStationAgent-LineA-Eol'
+$cacheRoot = 'C:\ProgramData\OpenLineOps\StationCaches\LineA-Eol\content-anchor\content'
+& $agent --provision-content-cache `
+  --OpenLineOps:WindowsServiceName $serviceName `
+  --OpenLineOps:Agent:PackageCacheDirectory $cacheRoot
+if ($LASTEXITCODE -ne 0) { throw 'Content-cache provisioning failed.' }
+
+sc.exe create $serviceName binPath= ('"' + $agent + '"') start= auto obj= 'NT AUTHORITY\LocalService'
+sc.exe sidtype $serviceName restricted
+sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/none/0
+sc.exe start $serviceName
 ```
 
-Store the service password through the organization's managed service-account or
-credential process; never place it in `appsettings.json`, scripts, the package
-directory, logs, or release evidence. Validate the service identity, loaded
-profile, broker TLS peer, trusted signing-key IDs, directory ACLs, and package
-cache immutability before accepting production work.
+The service has no managed password or per-Station account lifecycle. Validate
+the LocalService account SID, the exact enabled-and-restricted service SID,
+broker TLS peer, trusted signing-key IDs, directory ACLs, and package-cache
+immutability before accepting production work.
 
 Operational recovery and Emergency Stop remain distinct. A process crash or
 uncertain non-idempotent action enters `RecoveryRequired` and is not replayed.

@@ -62,6 +62,128 @@ public sealed class StationAgentHostOptionsTests : IDisposable
         Assert.True(options.PythonScript.Sandbox.RequireLeastPrivilegeExecution);
         Assert.Equal("station-system-1", options.StationSystemId);
         Assert.Equal(TimeSpan.FromSeconds(5), options.HeartbeatInterval);
+        Assert.Equal(
+            Path.Combine(_tempDirectory, "content-anchor", "content"),
+            options.PackageCacheDirectory);
+    }
+
+    [Fact]
+    public void LoadRejectsMissingPackageCacheDirectory()
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:PackageCacheDirectory"] = null
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "OpenLineOps:Agent:PackageCacheDirectory is required",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadRejectsRelativePackageCacheDirectory()
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:PackageCacheDirectory"] = "content-cache"
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "fully-qualified canonical path",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("OpenLineOps:Agent:DataDirectory")]
+    [InlineData("OpenLineOps:Agent:PackageDistributionDirectory")]
+    [InlineData("OpenLineOps:Agent:RuntimeWorkingDirectory")]
+    [InlineData("OpenLineOps:Agent:ArtifactDirectory")]
+    [InlineData("OpenLineOps:Agent:SafetyWorkingDirectory")]
+    public void LoadRejectsMutableRootInsideDedicatedPackageCacheAnchor(string settingName)
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            [settingName] = Path.Combine(_tempDirectory, "content-anchor", "mutable")
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "must be outside the dedicated PackageCacheDirectory namespace anchor",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadRejectsMutableRootContainingDedicatedPackageCacheAnchor()
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:DataDirectory"] = _tempDirectory
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "must be outside the dedicated PackageCacheDirectory namespace anchor",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("OpenLineOps:Agent:DataDirectory")]
+    [InlineData("OpenLineOps:Agent:PackageDistributionDirectory")]
+    [InlineData("OpenLineOps:Agent:RuntimeWorkingDirectory")]
+    [InlineData("OpenLineOps:Agent:ArtifactDirectory")]
+    [InlineData("OpenLineOps:Agent:SafetyWorkingDirectory")]
+    public void LoadRejectsMutableVolumeRootContainingDedicatedPackageCacheAnchor(
+        string settingName)
+    {
+        var volumeRoot = Path.GetPathRoot(_tempDirectory)
+            ?? throw new InvalidOperationException("Test temp directory has no volume root.");
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            [settingName] = volumeRoot
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "must be outside the dedicated PackageCacheDirectory namespace anchor",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadRejectsPackageCacheWhoseAnchorIsTheVolumeRoot()
+    {
+        var volumeRoot = Path.GetPathRoot(_tempDirectory)
+            ?? throw new InvalidOperationException("Test temp directory has no volume root.");
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Agent:PackageCacheDirectory"] = Path.Combine(
+                volumeRoot,
+                "openlineops-content")
+        });
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            StationAgentHostOptions.Load(configuration));
+
+        Assert.Contains(
+            "beneath a non-root dedicated namespace anchor",
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -287,8 +409,11 @@ public sealed class StationAgentHostOptionsTests : IDisposable
             ["OpenLineOps:Agent:PackageDistributionDirectory"] = Path.Combine(
                 _tempDirectory,
                 "packages"),
+            ["OpenLineOps:Agent:PackageCacheDirectory"] = Path.Combine(
+                _tempDirectory,
+                "content-anchor",
+                "content"),
             ["OpenLineOps:Agent:MaterialArrivalPackageContentSha256"] = new string('a', 64),
-            ["OpenLineOps:Agent:MaterialArrivalPipeName"] = "openlineops-test-arrival",
             ["OpenLineOps:Agent:TrustedPackagePublicKeyFiles:release"] = _trustedKeyPath,
             ["OpenLineOps:Agent:RuntimeExecutablePath"] =
                 StationAgentHostOptions.RuntimeExecutableFileName,
@@ -307,8 +432,6 @@ public sealed class StationAgentHostOptionsTests : IDisposable
             ["OpenLineOps:Agent:CoordinatorBaseUri"] = "https://coordinator.test:7443/",
             ["OpenLineOps:Agent:ArtifactUploadBearerToken"] = ArtifactUploadToken,
             ["OpenLineOps:Agent:ArtifactUploadTimeout"] = "00:05:00",
-            ["OpenLineOps:Agent:AllowedRestrictedExternalProgramHostAccounts:0"] =
-                "OPENLINEOPS\\vendor-host",
             ["OpenLineOps:Agent:ExternalProgramAppContainerProfileNamespace"] =
                 "openlineops-test",
             ["OpenLineOps:Agent:SafetyExecutablePath"] = _safetyExecutablePath

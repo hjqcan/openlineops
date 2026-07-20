@@ -7,11 +7,15 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
+using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 using Npgsql;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.ContentProtection;
@@ -37,6 +41,10 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         "OPENLINEOPS_RUNNER_AGENT_GATE_ENABLED";
     private const string GateScopeIdVariable =
         "OPENLINEOPS_RUNNER_AGENT_GATE_SCOPE_ID";
+    private const string RunnerServiceScopeVariable =
+        "OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE";
+    private const string AgentServiceCleanupManifestPathVariable =
+        "OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH";
     private const string StationSystemId = "station.main";
     private const string SigningKeyId = "runner-process-e2e-signing";
     private const string ExactTestName =
@@ -47,6 +55,36 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+
+    [Fact]
+    public void CleanupDiscoveryIncludesStagingOnlyPackageTransactions()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-runner-cleanup-discovery-{Guid.NewGuid():N}");
+        var contentSha256 = new string('a', 64);
+        Directory.CreateDirectory(root);
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(
+                root,
+                $".{contentSha256}.{Guid.NewGuid():N}.committing"));
+
+            Assert.Equal(
+                contentSha256,
+                Assert.Single(ImmutableContentCacheCleanupDiscovery
+                    .DiscoverPackageContentHashes(root)));
+
+            Directory.CreateDirectory(Path.Combine(root, "unexpected"));
+            Assert.Throws<InvalidDataException>(() =>
+                ImmutableContentCacheCleanupDiscovery
+                    .DiscoverPackageContentHashes(root));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 
     [Fact]
     [SupportedOSPlatform("windows")]
@@ -65,14 +103,18 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         }
 
         var suffix = prerequisites.ScopeId;
-        var root = Path.Combine(
-            Path.GetTempPath(),
-            "openlineops-runner-staged-agent-gates",
-            suffix,
-            "test-work");
+        var root = prerequisites.Service.OwnedRoot;
+        var stagedAgentBundleRoot = Path.GetDirectoryName(
+            prerequisites.Service.ExecutablePath)
+            ?? throw new InvalidDataException(
+                "Runner Agent cleanup contract executable has no parent directory.");
         var projectRoot = Path.Combine(root, "project");
         var agentDataRoot = Path.Combine(root, "agent-data");
-        var agentPackageCacheRoot = Path.Combine(root, "agent-package-cache");
+        var agentPackageCacheRoot = Path.Combine(
+            Path.GetDirectoryName(root)
+            ?? throw new InvalidDataException("Runner Agent owned root has no parent."),
+            $"olo-runner-staged-agent-content-{suffix}",
+            "content");
         var agentRuntimeRoot = Path.Combine(root, "agent-runtime");
         var agentArtifactRoot = Path.Combine(root, "agent-artifacts");
         var coordinatorId = $"runner-agent-{suffix}";
@@ -85,10 +127,14 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         GateObservation? observation = null;
         PostgreSqlGateScope? postgres = null;
         RabbitMqGateTopology? rabbitMq = null;
-        GateProcess? agent = null;
+        RunnerAgentWindowsService? agent = null;
         GateProcessCapture? runnerCapture = null;
+        var serviceInstallationAttempted = false;
+        var serviceDeletionProven = false;
 
         EnsureNoReparseInPath(Path.GetDirectoryName(root)!);
+        Directory.CreateDirectory(root);
+        ProtectRunnerServiceRoot(root);
         Directory.CreateDirectory(projectRoot);
         try
         {
@@ -97,11 +143,46 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 "runner",
                 "headless-runner",
                 "OpenLineOps.Runner.exe");
-            var agentBundle = AttestBundle(
+            var releaseAgentBundle = AttestBundle(
                 prerequisites.AgentBundleRoot,
                 "agent",
                 "station-agent-service",
                 "OpenLineOps.Agent.exe");
+            CopyFrozenBundle(prerequisites.AgentBundleRoot, stagedAgentBundleRoot);
+            var agentBundle = AttestBundle(
+                stagedAgentBundleRoot,
+                "agent",
+                "station-agent-service",
+                "OpenLineOps.Agent.exe");
+            if (!string.Equals(
+                    agentBundle.ExecutableSha256,
+                    releaseAgentBundle.ExecutableSha256,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    agentBundle.ManifestSha256,
+                    releaseAgentBundle.ManifestSha256,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    agentBundle.ChecksumsSha256,
+                    releaseAgentBundle.ChecksumsSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The Runner Agent service copy differs from its staged release bundle.");
+            }
+
+            if (!string.Equals(
+                    agentBundle.ExecutablePath,
+                    prerequisites.Service.ExecutablePath,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    agentBundle.ExecutableSha256,
+                    prerequisites.Service.ExecutableSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The Runner Agent service copy differs from its strict cleanup contract.");
+            }
             var safetyExecutable = AttestIndependentSafetyExecutable();
 
             PublishedRunnerProject published;
@@ -129,9 +210,10 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
 
             var closedArtifactPort = FindClosedLoopbackPort();
             Assert.False(await CanConnectToLoopbackPortAsync(closedArtifactPort));
-            agent = GateProcess.Start(
-                Path.Combine(prerequisites.AgentBundleRoot, "OpenLineOps.Agent.exe"),
-                prerequisites.AgentBundleRoot,
+            serviceInstallationAttempted = true;
+            agent = RunnerAgentWindowsService.InstallAndStart(
+                prerequisites.Service,
+                stagedAgentBundleRoot,
                 CreateAgentEnvironment(
                     root,
                     agentDataRoot,
@@ -147,8 +229,16 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     suffix,
                     closedArtifactPort,
                     safetyExecutable.ExecutablePath),
-                expectedExecutableSha256: agentBundle.ExecutableSha256);
+                agentPackageCacheRoot,
+                [
+                    agentDataRoot,
+                    agentRuntimeRoot,
+                    agentArtifactRoot,
+                    Path.Combine(root, "agent-temp"),
+                    Path.Combine(root, "safety-work")
+                ]);
             await rabbitMq.WaitForAgentConsumerAsync(agent, TimeSpan.FromSeconds(45));
+            agent.VerifyProvisionedPackageCache();
 
             runnerCapture = await RunStagedRunnerAsync(
                 runnerBundle.ExecutablePath,
@@ -176,7 +266,11 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 published,
                 productionRunId);
 
-            await agent.StopAsync(TimeSpan.FromSeconds(15));
+            await agent.StopAsync(TimeSpan.FromSeconds(45));
+            agent.Dispose();
+            serviceDeletionProven = agent.ServiceDeletionVerified;
+            Assert.True(serviceDeletionProven);
+            Assert.True(agent.ServiceLifecycleVerified);
             Assert.False(await CanConnectToLoopbackPortAsync(closedArtifactPort));
 
             var postgresEvidence = await ReadPostgreSqlEvidenceAsync(
@@ -206,9 +300,19 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 runnerCapture.MainModuleBound,
                 agent.MainModuleBound,
                 runnerCapture.JobObjectBound,
-                agent.JobObjectBound,
                 runnerCapture.ProcessTreeTerminated,
-                agent.ProcessTreeTerminated,
+                agent.ServiceName,
+                agent.ServiceLifecycleVerified,
+                agent.ServiceAccountName,
+                agent.ServiceAccountSid,
+                agent.ServiceSidSha256,
+                agent.TokenEvidence.HasRestrictions,
+                agent.TokenEvidence.ServiceLogonSidPresent,
+                agent.TokenEvidence.ServiceLogonSidEnabled,
+                agent.TokenEvidence.ExactServiceSidPresent,
+                agent.TokenEvidence.ExactServiceSidEnabled,
+                agent.TokenEvidence.ExactServiceSidRestricted,
+                agent.TokenEvidence.NonAdministrative,
                 terminal,
                 postgresEvidence,
                 agentEvidence,
@@ -226,7 +330,11 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             {
                 try
                 {
-                    await agent.StopAsync(TimeSpan.FromSeconds(15));
+                    if (!agent.ServiceLifecycleVerified)
+                    {
+                        await agent.StopAsync(TimeSpan.FromSeconds(45));
+                    }
+
                     var agentOutput = await agent.GetCapturedOutputAsync();
                     executionFailure = new InvalidOperationException(
                         $"{exception.Message} Agent stdout: {agentOutput.StandardOutput} "
@@ -246,13 +354,19 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         {
             await CaptureCleanupFailureAsync(cleanupFailures, async () =>
             {
-                if (agent is not null)
+                if (agent is not null && !agent.ServiceLifecycleVerified)
                 {
-                    await agent.StopAsync(TimeSpan.FromSeconds(15));
+                    await agent.StopAsync(TimeSpan.FromSeconds(45));
                 }
             });
-            CaptureCleanupFailure(cleanupFailures, () => agent?.Dispose());
-            agent = null;
+            CaptureCleanupFailure(cleanupFailures, () =>
+            {
+                agent?.Dispose();
+                if (agent is not null)
+                {
+                    serviceDeletionProven = agent.ServiceDeletionVerified;
+                }
+            });
 
             await CaptureCleanupFailureAsync(cleanupFailures, async () =>
             {
@@ -277,9 +391,21 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 }
             });
 
-            CaptureCleanupFailure(
-                cleanupFailures,
-                () => DeleteGateRoot(root, agentPackageCacheRoot));
+            if (!serviceInstallationAttempted || serviceDeletionProven)
+            {
+                CaptureCleanupFailure(
+                    cleanupFailures,
+                    () => DeleteGateRoot(
+                        root,
+                        agentPackageCacheRoot,
+                        suffix,
+                        prerequisites.Service.ServiceSid));
+            }
+            else
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    "Runner Agent SCM cleanup is unproven; preserving its owned root for the independent cleanup gate."));
+            }
         }
 
         if (executionFailure is not null)
@@ -309,7 +435,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         Assert.True(rabbitMq.QueuesDeleted);
         Assert.False(Directory.Exists(root));
         Assert.True(runnerCapture.ProcessTreeTerminated);
-        Assert.True(observation.AgentProcessTreeTerminated);
+        Assert.True(observation.AgentServiceLifecycleVerified);
         Assert.NotEqual(runnerCapture.ProcessId, observation.AgentProcessId);
         await WriteGateEvidenceAsync(
             prerequisites.EvidencePath,
@@ -317,10 +443,11 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             postgres.SchemaDropped,
             rabbitMq.QueuesDeleted,
             runnerCapture.ProcessTreeTerminated,
-            agentTreeTerminated: observation.AgentProcessTreeTerminated,
+            agentServiceDeleted: observation.AgentServiceLifecycleVerified,
             temporaryRootDeleted: true);
     }
 
+    [SupportedOSPlatform("windows")]
     private static StagedAgentPrerequisites? ResolveStagedAgentPrerequisites()
     {
         var values = new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -332,7 +459,11 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             [RabbitMqUriVariable] = Environment.GetEnvironmentVariable(RabbitMqUriVariable),
             [EvidencePathVariable] = Environment.GetEnvironmentVariable(EvidencePathVariable),
             [GateEnabledVariable] = Environment.GetEnvironmentVariable(GateEnabledVariable),
-            [GateScopeIdVariable] = Environment.GetEnvironmentVariable(GateScopeIdVariable)
+            [GateScopeIdVariable] = Environment.GetEnvironmentVariable(GateScopeIdVariable),
+            [RunnerServiceScopeVariable] =
+                Environment.GetEnvironmentVariable(RunnerServiceScopeVariable),
+            [AgentServiceCleanupManifestPathVariable] =
+                Environment.GetEnvironmentVariable(AgentServiceCleanupManifestPathVariable)
         };
         if (values.Values.All(static value => value is null))
         {
@@ -420,13 +551,262 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 $"{GateScopeIdVariable} must be 32 lowercase hexadecimal characters.");
         }
 
+        var serviceScope = RequiredGateText(
+            values[RunnerServiceScopeVariable],
+            RunnerServiceScopeVariable);
+        if (!string.Equals(serviceScope, scopeId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{RunnerServiceScopeVariable} must equal {GateScopeIdVariable}.");
+        }
+
+        var service = ReadRunnerServiceContract(
+            RequiredGateText(
+                values[AgentServiceCleanupManifestPathVariable],
+                AgentServiceCleanupManifestPathVariable),
+            serviceScope,
+            agentBundleRoot);
+
         return new StagedAgentPrerequisites(
             runnerBundleRoot,
             agentBundleRoot,
             postgres,
             rabbitUri,
             evidencePath,
-            scopeId);
+            scopeId,
+            service);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static RunnerAgentServiceContract ReadRunnerServiceContract(
+        string manifestValue,
+        string expectedScope,
+        string releaseAgentBundleRoot)
+    {
+        if (!Path.IsPathFullyQualified(manifestValue))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceCleanupManifestPathVariable} must be a canonical absolute file path.");
+        }
+
+        var manifestPath = Path.GetFullPath(manifestValue);
+        if (!string.Equals(manifestPath, manifestValue, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(manifestPath))
+        {
+            throw new InvalidDataException(
+                $"{AgentServiceCleanupManifestPathVariable} must identify an existing canonical file.");
+        }
+
+        EnsureNoReparseInPath(manifestPath);
+        using var document = JsonDocument.Parse(
+            File.ReadAllBytes(manifestPath),
+            new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 8
+            });
+        var root = document.RootElement;
+        RunnerRequireExactJsonProperties(
+            root,
+            "Runner Agent service cleanup manifest",
+            "schema",
+            "schemaVersion",
+            "kind",
+            "scope",
+            "entries");
+        RequireJsonString(root, "schema", "openlineops-agent-service-cleanup");
+        RequireJsonInt(root, "schemaVersion", 1);
+        RequireJsonString(root, "kind", "runner");
+        RequireJsonString(root, "scope", expectedScope);
+        var entries = root.GetProperty("entries");
+        if (entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() != 1)
+        {
+            throw new InvalidDataException(
+                "Runner Agent service cleanup manifest must contain exactly one entry.");
+        }
+
+        var entry = entries[0];
+        RunnerRequireExactJsonProperties(
+            entry,
+            "Runner Agent service cleanup entry",
+            "role",
+            "serviceSuffix",
+            "serviceName",
+            "serviceAccountName",
+            "serviceAccountSid",
+            "serviceSid",
+            "serviceSidType",
+            "executablePath",
+            "executableSha256",
+            "ownedRoot");
+        RequireJsonString(entry, "role", "runner");
+        RequireJsonString(entry, "serviceSuffix", expectedScope);
+        var expectedServiceName = $"OpenLineOpsAgentE2E-{expectedScope}";
+        RequireJsonString(entry, "serviceName", expectedServiceName);
+        RequireJsonString(entry, "serviceAccountName", @"NT AUTHORITY\LocalService");
+        RequireJsonString(entry, "serviceAccountSid", "S-1-5-19");
+        RequireJsonString(entry, "serviceSidType", "Restricted");
+        var serviceSid = RequiredJsonText(entry, "serviceSid");
+        var expectedServiceSid = WindowsStationServiceIdentityReader
+            .ServiceSidFromNameRequired(expectedServiceName);
+        if (!string.Equals(serviceSid, expectedServiceSid, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract service SID does not match its exact service name.");
+        }
+
+        var windowsTemp = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "Temp"));
+        var expectedOwnedRoot = Path.Combine(
+            windowsTemp,
+            $"olo-runner-staged-agent-{expectedScope}");
+        var ownedRoot = Path.GetFullPath(RequiredJsonText(entry, "ownedRoot"));
+        if (!string.Equals(ownedRoot, expectedOwnedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract owned root is outside its exact Windows Temp scope.");
+        }
+
+        var executablePath = Path.GetFullPath(RequiredJsonText(entry, "executablePath"));
+        var expectedExecutablePath = Path.Combine(
+            ownedRoot,
+            "agent-bundle",
+            "OpenLineOps.Agent.exe");
+        if (!string.Equals(
+                executablePath,
+                expectedExecutablePath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract executable path differs from its exact owned bundle path.");
+        }
+
+        var executableSha256 = RequiredSha256(
+            RequiredJsonText(entry, "executableSha256"),
+            "Runner Agent cleanup contract executable SHA-256");
+        var releaseExecutable = RequiredDirectFile(
+            releaseAgentBundleRoot,
+            "OpenLineOps.Agent.exe");
+        if (!string.Equals(
+                executableSha256,
+                FileSha256(releaseExecutable),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract executable hash differs from the staged release Agent.");
+        }
+
+        return new RunnerAgentServiceContract(
+            manifestPath,
+            expectedScope,
+            expectedServiceName,
+            @"NT AUTHORITY\LocalService",
+            "S-1-5-19",
+            serviceSid,
+            executablePath,
+            executableSha256,
+            ownedRoot);
+    }
+
+    private static void RunnerRequireExactJsonProperties(
+        JsonElement element,
+        string description,
+        params string[] names)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException($"{description} must be an object.");
+        }
+
+        var expected = names.ToHashSet(StringComparer.Ordinal);
+        var observed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!observed.Add(property.Name) || !expected.Contains(property.Name))
+            {
+                throw new InvalidDataException(
+                    $"{description} contains a duplicate or unexpected property '{property.Name}'.");
+            }
+        }
+
+        if (!observed.SetEquals(expected))
+        {
+            throw new InvalidDataException($"{description} is missing a required property.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ProtectRunnerServiceRoot(string root)
+    {
+        var directory = new DirectoryInfo(Path.GetFullPath(root));
+        if (!directory.Exists)
+        {
+            throw new DirectoryNotFoundException(
+                $"Runner Agent service root '{directory.FullName}' does not exist.");
+        }
+
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "Runner gate identity has no Windows SID.");
+        var security = new DirectorySecurity();
+        security.SetOwner(currentSid);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (var sid in new[]
+                 {
+                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                     new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                     currentSid
+                 }.Distinct())
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        FileSystemAclExtensions.SetAccessControl(directory, security);
+    }
+
+    private static void CopyFrozenBundle(string sourceRoot, string destinationRoot)
+    {
+        var source = Path.GetFullPath(sourceRoot);
+        var destination = Path.GetFullPath(destinationRoot);
+        if (Directory.Exists(destination) || File.Exists(destination))
+        {
+            throw new InvalidDataException(
+                "Runner Agent service bundle destination must not pre-exist.");
+        }
+
+        EnsureNoReparseTree(source);
+        Directory.CreateDirectory(destination);
+        foreach (var sourceDirectory in Directory.EnumerateDirectories(
+                     source,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, sourceDirectory);
+            Directory.CreateDirectory(Path.Combine(destination, relative));
+        }
+
+        foreach (var sourceFile in Directory.EnumerateFiles(
+                     source,
+                     "*",
+                     SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, sourceFile);
+            var destinationFile = Path.Combine(destination, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            File.Copy(sourceFile, destinationFile, overwrite: false);
+            File.SetAttributes(
+                destinationFile,
+                File.GetAttributes(destinationFile) | FileAttributes.ReadOnly);
+        }
+
+        EnsureNoReparseTree(destination);
     }
 
     private static BundleAttestation AttestBundle(
@@ -597,7 +977,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         int closedArtifactPort,
         string safetyExecutablePath)
     {
-        var environment = CreateIsolatedProcessEnvironment(Path.Combine(root, "agent-temp"));
+        var environment = CreateWindowsServiceEnvironment(Path.Combine(root, "agent-temp"));
         Set("AgentId", agentId);
         Set("StationId", stationId);
         Set("StationSystemId", StationSystemId);
@@ -610,7 +990,6 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         Set("PackageDistributionDirectory", distributionRoot);
         Set("PackageCacheDirectory", packageCacheRoot);
         Set("MaterialArrivalPackageContentSha256", packageContentSha256);
-        Set("MaterialArrivalPipeName", $"olo-runner-agent-{suffix}");
         Set($"TrustedPackagePublicKeyFiles__{SigningKeyId}", publicKeyPath);
         Set("RuntimeExecutablePath", "OpenLineOps.StationRuntime.exe");
         Set("PluginHostExecutablePath", "OpenLineOps.PluginHost.exe");
@@ -631,7 +1010,6 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         Set("ArtifactUploadTimeout", "00:00:05");
         Set("RuntimeTimeout", "00:00:30");
         Set("MaximumRuntimeOutputBytes", (2 * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
-        Set("AllowedRestrictedExternalProgramHostSids__0", "S-1-5-32-545");
         Set("ExternalProgramAppContainerProfileNamespace", $"OpenLineOps.RunnerAgent.{suffix}");
         Set("SafetyExecutablePath", safetyExecutablePath);
         Set("SafetyWorkingDirectory", Path.Combine(root, "safety-work"));
@@ -993,7 +1371,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         bool postgresSchemaDropped,
         bool rabbitQueuesDeleted,
         bool runnerTreeTerminated,
-        bool agentTreeTerminated,
+        bool agentServiceDeleted,
         bool temporaryRootDeleted)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
@@ -1042,8 +1420,18 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     bundleChecksumsSha256 = observation.AgentBundle.ChecksumsSha256,
                     observation.AgentBundle.ManifestBound,
                     mainModuleBound = observation.AgentMainModuleBound,
-                    jobObjectBound = observation.AgentJobObjectBound,
-                    processTreeTerminated = observation.AgentProcessTreeTerminated
+                    serviceName = observation.AgentServiceName,
+                    serviceLifecycleVerified = observation.AgentServiceLifecycleVerified,
+                    serviceAccountName = observation.AgentServiceAccountName,
+                    serviceAccountSid = observation.AgentServiceAccountSid,
+                    serviceSidSha256 = observation.AgentServiceSidSha256,
+                    hasRestrictions = observation.AgentHasRestrictions,
+                    serviceLogonSidPresent = observation.AgentServiceLogonSidPresent,
+                    serviceLogonSidEnabled = observation.AgentServiceLogonSidEnabled,
+                    exactServiceSidPresent = observation.AgentExactServiceSidPresent,
+                    exactServiceSidEnabled = observation.AgentExactServiceSidEnabled,
+                    exactServiceSidRestricted = observation.AgentExactServiceSidRestricted,
+                    nonAdministrative = observation.AgentNonAdministrative
                 },
                 terminal = new
                 {
@@ -1058,6 +1446,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             },
             stationPackage = new
             {
+                stationSystemId = StationSystemId,
                 observation.Package.PackageFileName,
                 packageContentSha256 = observation.Package.ContentSha256,
                 observation.Package.PackageFileSha256,
@@ -1152,7 +1541,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 postgresSchemaDropped,
                 rabbitQueuesDeleted,
                 runnerTreeTerminated,
-                agentTreeTerminated,
+                agentServiceDeleted,
                 temporaryRootDeleted,
                 reparsePointsTraversed = false
             }
@@ -1196,6 +1585,33 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         environment["ASPNETCORE_ENVIRONMENT"] = "Production";
         environment["ASPNETCORE_PREVENTHOSTINGSTARTUP"] = "true";
         environment["DOTNET_EnableDiagnostics"] = "0";
+        return environment;
+    }
+
+    private static Dictionary<string, string> CreateWindowsServiceEnvironment(string tempRoot)
+    {
+        Directory.CreateDirectory(tempRoot);
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in new[]
+                 {
+                     "ALLUSERSPROFILE", "COMSPEC", "CommonProgramFiles",
+                     "CommonProgramFiles(x86)", "CommonProgramW6432", "DOTNET_ROOT",
+                     "DOTNET_ROOT_X64", "NUMBER_OF_PROCESSORS", "OS", "PATH", "PATHEXT",
+                     "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL",
+                     "PROCESSOR_REVISION", "ProgramData", "ProgramFiles",
+                     "ProgramFiles(x86)", "ProgramW6432", "PYTHONNET_PYDLL", "SystemDrive",
+                     "SystemRoot", "WINDIR"
+                 })
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value))
+            {
+                environment[name] = value;
+            }
+        }
+
+        environment["TEMP"] = tempRoot;
+        environment["TMP"] = tempRoot;
         return environment;
     }
 
@@ -1263,49 +1679,36 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         return Path.GetFullPath(path);
     }
 
-    private static void DeleteGateRoot(string root, string packageCacheRoot)
+    [SupportedOSPlatform("windows")]
+    private static void DeleteGateRoot(
+        string root,
+        string packageCacheRoot,
+        string serviceScope,
+        string stationServiceSid)
     {
+        var dedicatedBase = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "Temp"));
+        var expectedRoot = Path.Combine(
+            dedicatedBase,
+            $"olo-runner-staged-agent-{serviceScope}");
+        if (!string.Equals(
+                Path.GetFullPath(root),
+                expectedRoot,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The gate refuses recursive cleanup outside its exact Windows Temp service scope.");
+        }
+
+        DeleteProvisionedCacheNamespace(packageCacheRoot);
         if (!Directory.Exists(root))
         {
             return;
         }
 
-        var dedicatedBase = Path.GetFullPath(Path.Combine(
-            Path.GetTempPath(),
-            "openlineops-runner-staged-agent-gates"));
-        var relative = Path.GetRelativePath(dedicatedBase, Path.GetFullPath(root));
-        var segments = relative.Split(
-            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-            StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length != 2
-            || segments[0].Length != 32
-            || segments[0].Any(character =>
-                character is not (>= '0' and <= '9' or >= 'a' and <= 'f'))
-            || !string.Equals(segments[1], "test-work", StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "The gate refuses recursive cleanup outside its dedicated temporary scope.");
-        }
-
         EnsureNoReparseTree(root);
-        if (Directory.Exists(packageCacheRoot))
-        {
-            var protector = new ImmutableContentProtector();
-            foreach (var contentDirectory in Directory.GetDirectories(packageCacheRoot))
-            {
-                var leaf = Path.GetFileName(contentDirectory);
-                if (leaf.Length == 64
-                    && leaf.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
-                {
-                    protector.DeleteProtectedInstallation(packageCacheRoot, contentDirectory);
-                }
-            }
-
-            if (Directory.Exists(packageCacheRoot))
-            {
-                Directory.Delete(packageCacheRoot, recursive: true);
-            }
-        }
+        RemoveRunnerServiceSidAccess(root, stationServiceSid);
 
         foreach (var entry in Directory.EnumerateFileSystemEntries(
                      root,
@@ -1317,6 +1720,118 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
 
         File.SetAttributes(root, File.GetAttributes(root) & ~FileAttributes.ReadOnly);
         Directory.Delete(root, recursive: true);
+    }
+
+    private static void DeleteProvisionedCacheNamespace(string packageCacheRoot)
+    {
+        if (!Directory.Exists(packageCacheRoot))
+        {
+            return;
+        }
+
+        if (Directory.EnumerateFileSystemEntries(packageCacheRoot).Any())
+        {
+            throw new InvalidOperationException(
+                "Runner provisioned package cache is not empty after paired removal.");
+        }
+
+        var anchor = Directory.GetParent(packageCacheRoot)?.FullName
+                     ?? throw new InvalidDataException(
+                         "Runner provisioned package cache has no dedicated anchor.");
+        EnsureNoReparseInPath(packageCacheRoot);
+        if (Directory.EnumerateFileSystemEntries(anchor).Count() != 1)
+        {
+            throw new InvalidOperationException(
+                "Runner package cache anchor is not dedicated to its content root.");
+        }
+
+        Directory.Delete(packageCacheRoot);
+        Directory.Delete(anchor);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RemoveProtectedPackageInstallations(
+        string packageCacheRoot,
+        string stationServiceName,
+        string stationServiceSid)
+    {
+        if (!Directory.Exists(packageCacheRoot))
+        {
+            return;
+        }
+
+        var protector = new ImmutableContentProtector();
+        var protectionPolicy = new ImmutableContentProtectionPolicy(
+            WindowsAppContainerIdentity.EnsureCapabilitySid(
+                WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+            stationServiceSid);
+        IReadOnlyList<string> contentHashes = ImmutableContentCacheCleanupDiscovery
+            .DiscoverPackageContentHashes(packageCacheRoot);
+        foreach (var contentHash in contentHashes)
+        {
+            protector.RemoveProtectedPackageInstallationAsync(
+                    packageCacheRoot,
+                    contentHash,
+                    stationServiceName,
+                    protectionPolicy)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RemoveRunnerServiceSidAccess(
+        string root,
+        string serviceSidValue)
+    {
+        var serviceSid = new SecurityIdentifier(serviceSidValue);
+        var paths = Directory.EnumerateFileSystemEntries(
+                root,
+                "*",
+                SearchOption.AllDirectories)
+            .OrderByDescending(static path => path.Length)
+            .Append(root)
+            .ToArray();
+        foreach (var path in paths)
+        {
+            if (Directory.Exists(path))
+            {
+                var directory = new DirectoryInfo(path);
+                var security = FileSystemAclExtensions.GetAccessControl(directory);
+                security.PurgeAccessRules(serviceSid);
+                FileSystemAclExtensions.SetAccessControl(directory, security);
+            }
+            else if (File.Exists(path))
+            {
+                var file = new FileInfo(path);
+                var security = FileSystemAclExtensions.GetAccessControl(file);
+                security.PurgeAccessRules(serviceSid);
+                FileSystemAclExtensions.SetAccessControl(file, security);
+            }
+        }
+
+        foreach (var path in paths)
+        {
+            FileSystemSecurity security = Directory.Exists(path)
+                ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
+                : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+            var hasServiceSid = security.GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: true,
+                    typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .Any(rule => rule.IdentityReference is SecurityIdentifier identity
+                             && string.Equals(
+                                 identity.Value,
+                                 serviceSid.Value,
+                                 StringComparison.Ordinal));
+            if (hasServiceSid)
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent service SID remained on '{path}' after ACL cleanup.");
+            }
+        }
     }
 
     private static void CaptureCleanupFailure(List<Exception> failures, Action action)
@@ -1757,7 +2272,9 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         }
 
         [SupportedOSPlatform("windows")]
-        public async Task WaitForAgentConsumerAsync(GateProcess agent, TimeSpan timeout)
+        public async Task WaitForAgentConsumerAsync(
+            RunnerAgentWindowsService agent,
+            TimeSpan timeout)
         {
             var stopwatch = Stopwatch.StartNew();
             while (stopwatch.Elapsed < timeout)
@@ -1846,6 +2363,1808 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             await _channel.DisposeAsync();
             await _connection.DisposeAsync();
         }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private sealed class RunnerAgentWindowsService : IDisposable
+    {
+        private const uint ScManagerConnect = 0x0001;
+        private const uint ScManagerCreateService = 0x0002;
+        private const uint DeleteAccess = 0x00010000;
+        private const uint ServiceQueryConfig = 0x0001;
+        private const uint ServiceChangeConfig = 0x0002;
+        private const uint ServiceQueryStatus = 0x0004;
+        private const uint ServiceStart = 0x0010;
+        private const uint ServiceStop = 0x0020;
+        private const uint ServiceWin32OwnProcess = 0x00000010;
+        private const uint ServiceDemandStart = 0x00000003;
+        private const uint ServiceErrorNormal = 0x00000001;
+        private const uint ServiceControlStop = 0x00000001;
+        private const uint ScStatusProcessInfo = 0;
+        private const uint ServiceConfigServiceSidInfo = 5;
+        private const uint ServiceSidTypeRestricted = 3;
+        private const uint ServiceStopped = 0x00000001;
+        private const uint ServiceStartPending = 0x00000002;
+        private const uint ServiceStopPending = 0x00000003;
+        private const uint ServiceRunning = 0x00000004;
+        private const uint ProcessTerminate = 0x0001;
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint Synchronize = 0x00100000;
+        private const uint TokenQuery = 0x0008;
+        private const uint GroupEnabled = 0x00000004;
+        private const uint GroupUseForDenyOnly = 0x00000010;
+        private const uint GroupLogonId = 0xC0000000;
+        private const uint WaitObject0 = 0;
+        private const uint WaitTimeout = 258;
+        private const uint WaitFailed = uint.MaxValue;
+        private const int ErrorInsufficientBuffer = 122;
+        private const int ErrorServiceDoesNotExist = 1060;
+        private const int ErrorServiceNotActive = 1062;
+        private const int ErrorServiceMarkedForDelete = 1072;
+        private const string ServiceRegistryPrefix =
+            @"SYSTEM\CurrentControlSet\Services\";
+        private const string EventLogSourceRegistryPrefix =
+            @"SYSTEM\CurrentControlSet\Services\EventLog\Application\";
+
+        private readonly RunnerAgentServiceContract _contract;
+        private readonly string[] _environmentEntries;
+        private readonly string _packageCacheRoot;
+        private readonly SafeServiceHandle _manager;
+        private SafeServiceHandle? _service;
+        private readonly SafeProcessHandle _processHandle;
+        private bool _stopped;
+        private bool _cleanStopVerified;
+        private bool _forcedCleanupUsed;
+        private bool _disposed;
+
+        private RunnerAgentWindowsService(
+            RunnerAgentServiceContract contract,
+            string[] environmentEntries,
+            string packageCacheRoot,
+            SafeServiceHandle manager,
+            SafeServiceHandle service,
+            SafeProcessHandle processHandle,
+            int processId,
+            string runningImageSha256,
+            RunnerAgentTokenEvidence tokenEvidence)
+        {
+            _contract = contract;
+            _environmentEntries = environmentEntries;
+            _packageCacheRoot = packageCacheRoot;
+            _manager = manager;
+            _service = service;
+            _processHandle = processHandle;
+            ProcessId = processId;
+            RunningImageSha256 = runningImageSha256;
+            TokenEvidence = tokenEvidence;
+        }
+
+        public int ProcessId { get; }
+
+        public bool HasExited => WaitForProcessExit(_processHandle, TimeSpan.Zero);
+
+        public string RunningImageSha256 { get; }
+
+        public bool MainModuleBound { get; } = true;
+
+        public string ServiceName => _contract.ServiceName;
+
+        public string ServiceAccountName => _contract.ServiceAccountName;
+
+        public string ServiceAccountSid => _contract.ServiceAccountSid;
+
+        public string ServiceSidSha256 => Utf8Sha256(_contract.ServiceSid);
+
+        public RunnerAgentTokenEvidence TokenEvidence { get; }
+
+        public bool ServiceDeletionVerified { get; private set; }
+
+        public bool ServiceLifecycleVerified =>
+            ServiceDeletionVerified
+            && _cleanStopVerified
+            && !_forcedCleanupUsed;
+
+        public void VerifyProvisionedPackageCache() =>
+            VerifyProvisionedPackageCache(
+                _packageCacheRoot,
+                _contract.ServiceSid);
+
+        public static RunnerAgentWindowsService InstallAndStart(
+            RunnerAgentServiceContract contract,
+            string contentRoot,
+            Dictionary<string, string> environment,
+            string packageCacheRoot,
+            IReadOnlyCollection<string> writableRoots)
+        {
+            ArgumentNullException.ThrowIfNull(contract);
+            ArgumentNullException.ThrowIfNull(environment);
+            ArgumentException.ThrowIfNullOrWhiteSpace(packageCacheRoot);
+            ArgumentNullException.ThrowIfNull(writableRoots);
+            var canonicalContentRoot = Path.GetFullPath(contentRoot);
+            var canonicalPackageCacheRoot = Path.GetFullPath(packageCacheRoot);
+            if (!string.Equals(
+                    Path.GetDirectoryName(contract.ExecutablePath),
+                    canonicalContentRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(contract.ExecutablePath)
+                || !string.Equals(
+                    FileSha256(contract.ExecutablePath),
+                    contract.ExecutableSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Runner Agent service executable is not the cleanup-contract-bound frozen image.");
+            }
+
+            var expectedPackageCacheRoot = Path.Combine(
+                Path.GetDirectoryName(contract.OwnedRoot)
+                ?? throw new InvalidDataException("Runner Agent owned root has no parent."),
+                $"olo-runner-staged-agent-content-{contract.Scope}",
+                "content");
+            if (!string.Equals(
+                    canonicalPackageCacheRoot,
+                    expectedPackageCacheRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || Directory.Exists(canonicalPackageCacheRoot)
+                || File.Exists(canonicalPackageCacheRoot))
+            {
+                throw new InvalidDataException(
+                    "Runner Agent package cache must be the absent content root of its dedicated administrative namespace.");
+            }
+
+            var serviceSid = new SecurityIdentifier(contract.ServiceSid);
+            var aclRoots = new List<string>();
+            SafeServiceHandle? manager = null;
+            SafeServiceHandle? service = null;
+            SafeProcessHandle? processHandle = null;
+            var serviceCreated = false;
+            var eventSourceCreated = false;
+            var serviceEnvironmentProtected = false;
+            string[]? environmentEntries = null;
+            try
+            {
+                GrantDirectoryAccess(
+                    contract.OwnedRoot,
+                    serviceSid,
+                    FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
+                aclRoots.Add(contract.OwnedRoot);
+                foreach (var writableRoot in writableRoots
+                             .Select(Path.GetFullPath)
+                             .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!IsRunnerOwnedPath(writableRoot, contract.OwnedRoot))
+                    {
+                        throw new InvalidDataException(
+                            "Runner Agent writable root escaped its strict owned service root.");
+                    }
+
+                    Directory.CreateDirectory(writableRoot);
+                    GrantDirectoryAccess(
+                        writableRoot,
+                        serviceSid,
+                        FileSystemRights.Modify | FileSystemRights.Synchronize,
+                        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
+                    aclRoots.Add(writableRoot);
+                }
+
+                var serviceEnvironment = environment.ToDictionary(
+                    static pair => pair.Key,
+                    static pair => pair.Value,
+                    StringComparer.OrdinalIgnoreCase);
+                serviceEnvironment.Add("OpenLineOps__WindowsServiceName", contract.ServiceName);
+                serviceEnvironment.Add("DOTNET_CONTENTROOT", canonicalContentRoot);
+                environmentEntries = CreateServiceEnvironmentEntries(serviceEnvironment);
+
+                manager = OpenSCManager(
+                    machineName: null,
+                    databaseName: null,
+                    ScManagerConnect | ScManagerCreateService);
+                if (manager.IsInvalid)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not open SCM for the Runner staged Agent service.");
+                }
+
+                service = CreateService(
+                    manager,
+                    contract.ServiceName,
+                    contract.ServiceName,
+                    DeleteAccess
+                    | ServiceQueryConfig
+                    | ServiceChangeConfig
+                    | ServiceQueryStatus
+                    | ServiceStart
+                    | ServiceStop,
+                    ServiceWin32OwnProcess,
+                    ServiceDemandStart,
+                    ServiceErrorNormal,
+                    QuoteServiceBinaryPath(contract.ExecutablePath),
+                    loadOrderGroup: null,
+                    IntPtr.Zero,
+                    dependencies: null,
+                    contract.ServiceAccountName,
+                    password: null);
+                if (service.IsInvalid)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not install Runner Agent service '{contract.ServiceName}'.");
+                }
+
+                serviceCreated = true;
+                var sidInfo = new ServiceSidInfo
+                {
+                    ServiceSidType = ServiceSidTypeRestricted
+                };
+                if (!ChangeServiceConfig2(
+                        service,
+                        ServiceConfigServiceSidInfo,
+                        ref sidInfo))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not restrict Runner Agent service SID for '{contract.ServiceName}'.");
+                }
+
+                VerifyServiceConfiguration(service, contract);
+                RegisterEventLogSource(contract.ServiceName, serviceSid);
+                eventSourceCreated = true;
+                ProtectAndWriteServiceEnvironment(contract.ServiceName, environmentEntries);
+                serviceEnvironmentProtected = true;
+                VerifyServiceEnvironment(contract.ServiceName, environmentEntries);
+                new ImmutableContentProtector().ProvisionCacheNamespace(
+                    canonicalPackageCacheRoot,
+                    contract.ServiceName,
+                    new ImmutableContentProtectionPolicy(
+                        WindowsAppContainerIdentity.EnsureCapabilitySid(
+                            WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+                        contract.ServiceSid));
+
+                if (!StartService(service, 0, IntPtr.Zero))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not start Runner Agent service '{contract.ServiceName}'.");
+                }
+
+                var running = WaitForServiceState(
+                    service,
+                    contract.ServiceName,
+                    ServiceRunning,
+                    TimeSpan.FromSeconds(45));
+                if (running.ProcessId == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Runner Agent SCM service reached Running without a PID.");
+                }
+
+                processHandle = OpenProcess(
+                    ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+                    inheritHandle: false,
+                    running.ProcessId);
+                if (processHandle.IsInvalid)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not open the Runner Agent SCM process.");
+                }
+
+                var confirmed = QueryServiceStatus(service, contract.ServiceName);
+                if (confirmed.CurrentState != ServiceRunning
+                    || confirmed.ProcessId != running.ProcessId)
+                {
+                    throw new InvalidOperationException(
+                        "Runner Agent SCM identity changed while securing its process handle.");
+                }
+
+                var executablePath = ReadProcessExecutablePath(processHandle);
+                if (!string.Equals(
+                        executablePath,
+                        contract.ExecutablePath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Runner Agent SCM process image differs from its strict cleanup contract.");
+                }
+
+                var runningImageSha256 = FileSha256(executablePath);
+                if (!string.Equals(
+                        runningImageSha256,
+                        contract.ExecutableSha256,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        "Runner Agent SCM process image hash differs from its release attestation.");
+                }
+
+                var tokenEvidence = ReadRequiredTokenEvidence(
+                    processHandle,
+                    contract.ServiceAccountSid,
+                    contract.ServiceSid);
+                var result = new RunnerAgentWindowsService(
+                    contract,
+                    environmentEntries,
+                    canonicalPackageCacheRoot,
+                    manager,
+                    service,
+                    processHandle,
+                    checked((int)running.ProcessId),
+                    runningImageSha256,
+                    tokenEvidence);
+                manager = null;
+                service = null;
+                processHandle = null;
+                return result;
+            }
+            catch (Exception exception)
+            {
+                var failures = new List<Exception> { exception };
+                if (service is { IsInvalid: false, IsClosed: false })
+                {
+                    var cleanupFailureCount = failures.Count;
+                    CaptureCleanupFailure(
+                        failures,
+                        () => StopServiceForCleanup(
+                            service,
+                            contract.ServiceName,
+                            processHandle,
+                            TimeSpan.FromSeconds(45)));
+                    if (failures.Count == cleanupFailureCount)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => RemoveProtectedPackageInstallations(
+                                canonicalPackageCacheRoot,
+                                contract.ServiceName,
+                                contract.ServiceSid));
+                    }
+
+                    if (failures.Count == cleanupFailureCount)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteProvisionedCacheNamespace(canonicalPackageCacheRoot));
+                    }
+
+                    if (failures.Count == cleanupFailureCount
+                        && serviceEnvironmentProtected
+                        && environmentEntries is not null)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteServiceEnvironment(
+                                contract.ServiceName,
+                                environmentEntries));
+                    }
+                    if (failures.Count == cleanupFailureCount && eventSourceCreated)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteEventLogSource(
+                                contract.ServiceName,
+                                serviceSid));
+                    }
+
+                    if (failures.Count == cleanupFailureCount && serviceCreated)
+                    {
+                        CaptureCleanupFailure(failures, () => DeleteServiceRequired(
+                            service,
+                            contract.ServiceName));
+                    }
+                }
+
+                CaptureCleanupFailure(failures, () => processHandle?.Dispose());
+                CaptureCleanupFailure(failures, () => service?.Dispose());
+                if (manager is not null)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => WaitForServiceDeletion(
+                            contract.ServiceName,
+                            TimeSpan.FromSeconds(45)));
+                }
+
+                CaptureCleanupFailure(failures, () => manager?.Dispose());
+                if (failures.Count == 1)
+                {
+                    foreach (var aclRoot in aclRoots.AsEnumerable().Reverse())
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => RemoveDirectoryAccess(aclRoot, serviceSid));
+                    }
+                }
+
+                if (failures.Count == 1)
+                {
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                        .Capture(exception)
+                        .Throw();
+                }
+
+                throw new AggregateException(
+                    "Runner Agent SCM installation failed and cleanup was incomplete.",
+                    failures);
+            }
+        }
+
+        public async Task StopAsync(TimeSpan timeout)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_stopped)
+            {
+                return;
+            }
+
+            await Task.Run(() =>
+            {
+                StopServiceCleanly(
+                    RequiredService(),
+                    ServiceName,
+                    _processHandle,
+                    timeout);
+                _stopped = true;
+                _cleanStopVerified = true;
+            });
+        }
+
+        public Task<ProcessOutput> GetCapturedOutputAsync()
+        {
+            var status = _service is { IsInvalid: false, IsClosed: false }
+                ? QueryServiceStatus(_service, ServiceName)
+                : default;
+            return Task.FromResult(new ProcessOutput(
+                string.Empty,
+                $"service={ServiceName};state={status.CurrentState};win32Exit={status.Win32ExitCode};serviceExit={status.ServiceSpecificExitCode}"));
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var failures = new List<Exception>();
+            if (!_stopped)
+            {
+                CaptureCleanupFailure(
+                    failures,
+                    () =>
+                    {
+                        _forcedCleanupUsed |= StopServiceForCleanup(
+                            RequiredService(),
+                            ServiceName,
+                            _processHandle,
+                            TimeSpan.FromSeconds(45));
+                        _stopped = true;
+                    });
+            }
+
+            if (_stopped)
+            {
+                var transitionFailureCount = failures.Count;
+                CaptureCleanupFailure(failures, () =>
+                {
+                    if (!WaitForProcessExit(_processHandle, TimeSpan.FromSeconds(45)))
+                    {
+                        throw new TimeoutException(
+                            "Runner Agent retained process handle did not signal after SCM stop.");
+                    }
+                });
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => RemoveProtectedPackageInstallations(
+                            _packageCacheRoot,
+                            ServiceName,
+                            _contract.ServiceSid));
+                }
+
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteProvisionedCacheNamespace(_packageCacheRoot));
+                }
+
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteServiceEnvironment(ServiceName, _environmentEntries));
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEventLogSource(
+                            ServiceName,
+                            new SecurityIdentifier(_contract.ServiceSid)));
+                    var service = _service;
+                    if (service is not null)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteServiceRequired(service, ServiceName));
+                        CaptureCleanupFailure(failures, service.Dispose);
+                        _service = null;
+                    }
+
+                    CaptureCleanupFailure(
+                        failures,
+                        () => WaitForServiceDeletion(
+                            ServiceName,
+                            TimeSpan.FromSeconds(45)));
+                }
+            }
+
+            CaptureCleanupFailure(failures, _processHandle.Dispose);
+            CaptureCleanupFailure(failures, _manager.Dispose);
+            ServiceDeletionVerified = _stopped && failures.Count == 0;
+            _disposed = true;
+            if (failures.Count == 1)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                    .Capture(failures[0])
+                    .Throw();
+            }
+
+            if (failures.Count > 1)
+            {
+                throw new AggregateException(
+                    $"Runner Agent service '{ServiceName}' cleanup was incomplete.",
+                    failures);
+            }
+        }
+
+        private SafeServiceHandle RequiredService() =>
+            _service is { IsInvalid: false, IsClosed: false } service
+                ? service
+                : throw new ObjectDisposedException(nameof(RunnerAgentWindowsService));
+
+        private static string[] CreateServiceEnvironmentEntries(
+            Dictionary<string, string> environment)
+        {
+            if (environment.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "Runner Agent service environment cannot be empty.");
+            }
+
+            return environment
+                .OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(static pair =>
+                {
+                    if (string.IsNullOrWhiteSpace(pair.Key)
+                        || pair.Key.Contains('=')
+                        || pair.Key.Contains('\0')
+                        || pair.Value.Contains('\0')
+                        || pair.Value.Contains('\r')
+                        || pair.Value.Contains('\n'))
+                    {
+                        throw new InvalidDataException(
+                            "Runner Agent service environment contains an invalid name or value.");
+                    }
+
+                    return $"{pair.Key}={pair.Value}";
+                })
+                .ToArray();
+        }
+
+        private static void ProtectAndWriteServiceEnvironment(
+            string serviceName,
+            string[] environmentEntries)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                RegistryKeyPermissionCheck.ReadWriteSubTree,
+                RegistryRights.FullControl)
+                ?? throw new InvalidOperationException(
+                    "Runner Agent SCM registry key is missing after service creation.");
+            var currentSid = WindowsIdentity.GetCurrent().User
+                             ?? throw new InvalidOperationException(
+                                 "Runner gate identity has no SID for service-key ACL protection.");
+            var allowedSids = ServiceRegistryFullControlSids(currentSid);
+            var security = new RegistrySecurity();
+            security.SetOwner(currentSid);
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            foreach (var sid in allowedSids)
+            {
+                security.AddAccessRule(new RegistryAccessRule(
+                    sid,
+                    RegistryRights.FullControl,
+                    InheritanceFlags.ContainerInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+
+            key.SetAccessControl(security);
+            key.SetValue("Environment", environmentEntries, RegistryValueKind.MultiString);
+            key.Flush();
+            VerifyServiceRegistryAcl(key, allowedSids, currentSid);
+        }
+
+        private static void VerifyServiceEnvironment(
+            string serviceName,
+            string[] expected)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                writable: false)
+                ?? throw new InvalidOperationException(
+                    "Runner Agent SCM registry key is missing during environment verification.");
+            var currentSid = WindowsIdentity.GetCurrent().User
+                             ?? throw new InvalidOperationException(
+                                 "Runner gate identity has no SID for service-key ACL verification.");
+            VerifyServiceRegistryAcl(
+                key,
+                ServiceRegistryFullControlSids(currentSid),
+                currentSid);
+            var actual = key.GetValue(
+                "Environment",
+                null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string[];
+            if (actual is null || !actual.SequenceEqual(expected, StringComparer.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Runner Agent SCM environment differs from the exact in-memory launch contract.");
+            }
+        }
+
+        private static void DeleteServiceEnvironment(
+            string serviceName,
+            string[] expectedEnvironmentEntries)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                ServiceRegistryPrefix + serviceName,
+                RegistryKeyPermissionCheck.ReadWriteSubTree,
+                RegistryRights.FullControl)
+                ?? throw new InvalidOperationException(
+                    "Runner Agent SCM registry key is missing before environment cleanup.");
+            var currentSid = WindowsIdentity.GetCurrent().User
+                             ?? throw new InvalidOperationException(
+                                 "Runner gate identity has no SID for service-key cleanup.");
+            VerifyServiceRegistryAcl(
+                key,
+                ServiceRegistryFullControlSids(currentSid),
+                currentSid);
+            var actual = key.GetValue(
+                "Environment",
+                null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string[];
+            if (actual is null
+                || !actual.SequenceEqual(expectedEnvironmentEntries, StringComparer.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Runner Agent SCM environment changed before cleanup.");
+            }
+
+            key.DeleteValue("Environment", throwOnMissingValue: false);
+            key.Flush();
+            if (key.GetValue("Environment", null) is not null)
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent SCM environment remained after cleanup.");
+            }
+        }
+
+        private static SecurityIdentifier[] ServiceRegistryFullControlSids(
+            SecurityIdentifier currentSid) =>
+            new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                currentSid
+            }.Distinct().ToArray();
+
+        private static void VerifyServiceRegistryAcl(
+            RegistryKey key,
+            IReadOnlyCollection<SecurityIdentifier> allowedSids,
+            SecurityIdentifier expectedOwner)
+        {
+            var security = key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            if (!security.AreAccessRulesProtected
+                || security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                || !string.Equals(owner.Value, expectedOwner.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent service registry key inherits access or has an unexpected owner.");
+            }
+
+            var allowed = allowedSids
+                .Select(static sid => sid.Value)
+                .ToHashSet(StringComparer.Ordinal);
+            var rules = security.GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: true,
+                    typeof(SecurityIdentifier))
+                .Cast<RegistryAccessRule>()
+                .ToArray();
+            if (rules.Length != allowed.Count
+                || rules.Any(rule => rule.IsInherited
+                                     || rule.AccessControlType != AccessControlType.Allow
+                                     || rule.IdentityReference is not SecurityIdentifier sid
+                                     || !allowed.Contains(sid.Value)
+                                     || rule.RegistryRights != RegistryRights.FullControl
+                                     || rule.InheritanceFlags != InheritanceFlags.ContainerInherit
+                                     || rule.PropagationFlags != PropagationFlags.None))
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent service registry ACL is not the exact protected privileged-principal contract.");
+            }
+
+            foreach (var sid in allowed)
+            {
+                if (rules.Count(rule =>
+                        rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(identity.Value, sid, StringComparison.Ordinal)) != 1)
+                {
+                    throw new InvalidOperationException(
+                        $"Runner Agent service registry ACL lacks one exact FullControl rule for '{sid}'.");
+                }
+            }
+        }
+
+        private static void RegisterEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceSid)
+        {
+            if (EventLog.SourceExists(serviceName))
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent EventLog source '{serviceName}' already exists.");
+            }
+
+            var created = false;
+            try
+            {
+                EventLog.CreateEventSource(serviceName, "Application");
+                created = true;
+                using var key = Registry.LocalMachine.OpenSubKey(
+                    EventLogSourceRegistryPrefix + serviceName,
+                    RegistryKeyPermissionCheck.ReadWriteSubTree,
+                    RegistryRights.FullControl)
+                    ?? throw new InvalidOperationException(
+                        "Runner Agent EventLog source registry key is missing after creation.");
+                var currentSid = WindowsIdentity.GetCurrent().User
+                                 ?? throw new InvalidOperationException(
+                                     "Runner gate identity has no SID for EventLog ownership.");
+                var security = new RegistrySecurity();
+                security.SetOwner(currentSid);
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+                foreach (var sid in new[]
+                         {
+                             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                             new SecurityIdentifier(
+                                 WellKnownSidType.BuiltinAdministratorsSid,
+                                 null),
+                             currentSid
+                         }.Distinct())
+                {
+                    security.AddAccessRule(new RegistryAccessRule(
+                        sid,
+                        RegistryRights.FullControl,
+                        InheritanceFlags.ContainerInherit,
+                        PropagationFlags.None,
+                        AccessControlType.Allow));
+                }
+
+                security.AddAccessRule(new RegistryAccessRule(
+                    serviceSid,
+                    RegistryRights.ReadKey,
+                    InheritanceFlags.None,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                key.SetAccessControl(security);
+                key.Flush();
+                VerifyEventLogSource(serviceName, serviceSid, currentSid);
+            }
+            catch (Exception exception)
+            {
+                if (!created)
+                {
+                    throw;
+                }
+
+                try
+                {
+                    EventLog.DeleteEventSource(serviceName);
+                }
+                catch (Exception cleanupException)
+                {
+                    throw new AggregateException(
+                        "Runner Agent EventLog registration failed and rollback was incomplete.",
+                        exception,
+                        cleanupException);
+                }
+
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                    .Capture(exception)
+                    .Throw();
+                throw;
+            }
+        }
+
+        private static void VerifyEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceSid,
+            SecurityIdentifier currentSid)
+        {
+            if (!EventLog.SourceExists(serviceName)
+                || !string.Equals(
+                    EventLog.LogNameFromSourceName(serviceName, "."),
+                    "Application",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent EventLog source '{serviceName}' is not bound to Application.");
+            }
+
+            using var key = Registry.LocalMachine.OpenSubKey(
+                EventLogSourceRegistryPrefix + serviceName,
+                writable: false)
+                ?? throw new InvalidOperationException(
+                    "Runner Agent EventLog source registry key is missing.");
+            var security = key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            if (!security.AreAccessRulesProtected
+                || security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                || !string.Equals(owner.Value, currentSid.Value, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent EventLog source inherits access or has an unexpected owner.");
+            }
+
+            var fullControlSids = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
+                currentSid.Value
+            }.ToHashSet(StringComparer.Ordinal);
+            var rules = security.GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: true,
+                    typeof(SecurityIdentifier))
+                .Cast<RegistryAccessRule>()
+                .ToArray();
+            if (rules.Any(rule => rule.IsInherited
+                                  || rule.AccessControlType != AccessControlType.Allow
+                                  || rule.IdentityReference is not SecurityIdentifier sid
+                                  || !fullControlSids.Contains(sid.Value)
+                                  && !string.Equals(
+                                      sid.Value,
+                                      serviceSid.Value,
+                                      StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent EventLog source ACL contains an unexpected rule.");
+            }
+
+            foreach (var sid in fullControlSids)
+            {
+                if (!rules.Any(rule =>
+                        rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(identity.Value, sid, StringComparison.Ordinal)
+                        && rule.RegistryRights == RegistryRights.FullControl))
+                {
+                    throw new InvalidOperationException(
+                        $"Runner Agent EventLog source lacks exact FullControl for '{sid}'.");
+                }
+            }
+
+            var serviceRules = rules.Where(rule =>
+                    rule.IdentityReference is SecurityIdentifier identity
+                    && string.Equals(
+                        identity.Value,
+                        serviceSid.Value,
+                        StringComparison.Ordinal))
+                .ToArray();
+            if (serviceRules.Length != 1
+                || serviceRules[0].RegistryRights != RegistryRights.ReadKey)
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent EventLog source must grant its exact service SID one ReadKey rule.");
+            }
+        }
+
+        private static void DeleteEventLogSource(
+            string serviceName,
+            SecurityIdentifier serviceSid)
+        {
+            if (EventLog.SourceExists(serviceName))
+            {
+                var currentSid = WindowsIdentity.GetCurrent().User
+                                 ?? throw new InvalidOperationException(
+                                     "Runner gate identity has no SID for EventLog cleanup.");
+                VerifyEventLogSource(serviceName, serviceSid, currentSid);
+                EventLog.DeleteEventSource(serviceName);
+            }
+
+            using var key = Registry.LocalMachine.OpenSubKey(
+                EventLogSourceRegistryPrefix + serviceName,
+                writable: false);
+            if (key is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent EventLog source '{serviceName}' remained after cleanup.");
+            }
+        }
+
+        private static void VerifyServiceConfiguration(
+            SafeServiceHandle service,
+            RunnerAgentServiceContract contract)
+        {
+            if (!QueryServiceConfig(
+                    service,
+                    IntPtr.Zero,
+                    0,
+                    out var requiredBytes)
+                && Marshal.GetLastWin32Error() != ErrorInsufficientBuffer)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not size Runner Agent SCM configuration.");
+            }
+
+            var buffer = Marshal.AllocHGlobal(checked((int)requiredBytes));
+            try
+            {
+                if (!QueryServiceConfig(
+                        service,
+                        buffer,
+                        requiredBytes,
+                        out _))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not read Runner Agent SCM configuration.");
+                }
+
+                var config = Marshal.PtrToStructure<QueryServiceConfiguration>(buffer);
+                var binaryPath = Marshal.PtrToStringUni(config.BinaryPathName);
+                var accountName = Marshal.PtrToStringUni(config.ServiceStartName);
+                if (config.ServiceType != ServiceWin32OwnProcess
+                    || config.StartType != ServiceDemandStart
+                    || !string.Equals(
+                        binaryPath,
+                        QuoteServiceBinaryPath(contract.ExecutablePath),
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        accountName,
+                        contract.ServiceAccountName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Runner Agent SCM configuration differs from its exact service contract.");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+
+            var sidInfo = default(ServiceSidInfo);
+            if (!QueryServiceConfig2(
+                    service,
+                    ServiceConfigServiceSidInfo,
+                    ref sidInfo,
+                    checked((uint)Marshal.SizeOf<ServiceSidInfo>()),
+                    out _)
+                || sidInfo.ServiceSidType != ServiceSidTypeRestricted)
+            {
+                throw new InvalidDataException(
+                    "Runner Agent SCM service SID type is not Restricted.");
+            }
+        }
+
+        private static void StopServiceCleanly(
+            SafeServiceHandle service,
+            string serviceName,
+            SafeProcessHandle processHandle,
+            TimeSpan timeout)
+        {
+            ValidateServiceTransitionTimeout(timeout);
+            var status = QueryServiceStatus(service, serviceName);
+            if (status.CurrentState != ServiceRunning)
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent service '{serviceName}' was not Running when its clean SCM stop was requested; state was {status.CurrentState}.");
+            }
+
+            if (!ControlService(service, ServiceControlStop, out _))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not cleanly stop Runner Agent service '{serviceName}'.");
+            }
+
+            var stopped = WaitForServiceState(
+                service,
+                serviceName,
+                ServiceStopped,
+                timeout);
+            if (!WaitForProcessExit(processHandle, timeout))
+            {
+                throw new TimeoutException(
+                    "Runner Agent SCM process remained alive after its clean service stop.");
+            }
+
+            VerifyCleanServiceExit(stopped, processHandle, serviceName);
+        }
+
+        private static bool StopServiceForCleanup(
+            SafeServiceHandle service,
+            string serviceName,
+            SafeProcessHandle? processHandle,
+            TimeSpan timeout)
+        {
+            ValidateServiceTransitionTimeout(timeout);
+            var forcedTerminationUsed = false;
+            var status = QueryServiceStatus(service, serviceName);
+            if (status.CurrentState != ServiceStopped
+                && status.CurrentState != ServiceStopPending
+                && !ControlService(service, ServiceControlStop, out _))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != ErrorServiceNotActive)
+                {
+                    throw new Win32Exception(
+                        error,
+                        $"Could not stop Runner Agent service '{serviceName}'.");
+                }
+            }
+
+            try
+            {
+                _ = WaitForServiceState(
+                    service,
+                    serviceName,
+                    ServiceStopped,
+                    timeout);
+            }
+            catch (TimeoutException) when (processHandle is not null)
+            {
+                if (!WaitForProcessExit(processHandle, TimeSpan.Zero))
+                {
+                    if (!TerminateProcess(processHandle, 1))
+                    {
+                        if (!WaitForProcessExit(processHandle, TimeSpan.Zero))
+                        {
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "Could not terminate the Runner Agent SCM process after a stop timeout.");
+                        }
+                    }
+                    else
+                    {
+                        forcedTerminationUsed = true;
+                    }
+                }
+
+                if (!WaitForProcessExit(processHandle, timeout))
+                {
+                    throw new TimeoutException(
+                        "Runner Agent SCM process did not exit after forced termination.");
+                }
+
+                _ = WaitForServiceState(
+                    service,
+                    serviceName,
+                    ServiceStopped,
+                    timeout);
+            }
+
+            if (processHandle is not null
+                && !WaitForProcessExit(processHandle, timeout))
+            {
+                throw new TimeoutException(
+                    "Runner Agent SCM process remained alive after service stop.");
+            }
+
+            return forcedTerminationUsed;
+        }
+
+        private static void VerifyCleanServiceExit(
+            ServiceStatusProcess status,
+            SafeProcessHandle processHandle,
+            string serviceName)
+        {
+            if (status.CurrentState != ServiceStopped
+                || status.Win32ExitCode != 0
+                || status.ServiceSpecificExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent service '{serviceName}' did not report a zero clean SCM exit "
+                    + $"(state {status.CurrentState}, Win32 {status.Win32ExitCode}, service {status.ServiceSpecificExitCode}).");
+            }
+
+            if (!GetExitCodeProcess(processHandle, out var exitCode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not read the Runner Agent SCM process exit code after clean stop.");
+            }
+
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Runner Agent service '{serviceName}' process exited with {exitCode}, not zero.");
+            }
+        }
+
+        private static void ValidateServiceTransitionTimeout(TimeSpan timeout)
+        {
+            if (timeout <= TimeSpan.Zero
+                || timeout.TotalMilliseconds > uint.MaxValue - 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "Runner Agent service transition timeout must be positive and representable by Win32.");
+            }
+        }
+
+        private static ServiceStatusProcess WaitForServiceState(
+            SafeServiceHandle service,
+            string serviceName,
+            uint requiredState,
+            TimeSpan timeout)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.Elapsed < timeout)
+            {
+                var status = QueryServiceStatus(service, serviceName);
+                if (status.CurrentState == requiredState)
+                {
+                    return status;
+                }
+
+                if (requiredState == ServiceRunning
+                    && status.CurrentState == ServiceStopped)
+                {
+                    throw new InvalidOperationException(
+                        $"Runner Agent service '{serviceName}' stopped during startup "
+                        + $"(Win32 {status.Win32ExitCode}, service {status.ServiceSpecificExitCode}).");
+                }
+
+                Thread.Sleep(100);
+            }
+
+            throw new TimeoutException(
+                $"Runner Agent service '{serviceName}' did not reach state {requiredState} within {timeout}.");
+        }
+
+        private static ServiceStatusProcess QueryServiceStatus(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            var status = default(ServiceStatusProcess);
+            if (!QueryServiceStatusEx(
+                    service,
+                    ScStatusProcessInfo,
+                    ref status,
+                    checked((uint)Marshal.SizeOf<ServiceStatusProcess>()),
+                    out _))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not query Runner Agent service '{serviceName}'.");
+            }
+
+            return status;
+        }
+
+        private static void DeleteServiceRequired(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            if (!DeleteService(service))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != ErrorServiceMarkedForDelete)
+                {
+                    throw new Win32Exception(
+                        error,
+                        $"Could not delete Runner Agent service '{serviceName}'.");
+                }
+            }
+        }
+
+        private static void WaitForServiceDeletion(
+            string serviceName,
+            TimeSpan timeout)
+        {
+            using var manager = OpenSCManager(
+                machineName: null,
+                databaseName: null,
+                ScManagerConnect);
+            if (manager.IsInvalid)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not open a fresh SCM handle to prove Runner Agent deletion.");
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.Elapsed < timeout)
+            {
+                using var service = OpenService(manager, serviceName, ServiceQueryStatus);
+                if (service.IsInvalid)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error == ErrorServiceDoesNotExist)
+                    {
+                        using var key = Registry.LocalMachine.OpenSubKey(
+                            ServiceRegistryPrefix + serviceName,
+                            writable: false);
+                        if (key is null)
+                        {
+                            return;
+                        }
+                    }
+                    else if (error != ErrorServiceMarkedForDelete)
+                    {
+                        throw new Win32Exception(
+                            error,
+                            $"Could not prove Runner Agent service '{serviceName}' deletion.");
+                    }
+                }
+
+                Thread.Sleep(100);
+            }
+
+            throw new TimeoutException(
+                $"Runner Agent service '{serviceName}' was not fully deleted within {timeout}.");
+        }
+
+        private static string ReadProcessExecutablePath(SafeProcessHandle processHandle)
+        {
+            const int maximumWindowsPathLength = 32_768;
+            var path = new StringBuilder(maximumWindowsPathLength);
+            var length = checked((uint)path.Capacity);
+            if (!QueryFullProcessImageName(
+                    processHandle,
+                    flags: 0,
+                    path,
+                    ref length)
+                || length == 0)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not read Runner Agent SCM process image path.");
+            }
+
+            return Path.GetFullPath(path.ToString(0, checked((int)length)));
+        }
+
+        private static RunnerAgentTokenEvidence ReadRequiredTokenEvidence(
+            SafeProcessHandle processHandle,
+            string expectedAccountSid,
+            string expectedServiceSid)
+        {
+            if (!OpenProcessToken(processHandle, TokenQuery, out var token))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not open Runner Agent SCM process token.");
+            }
+
+            using (token)
+            {
+                var userSid = ReadTokenUserSid(token);
+                var groups = ReadTokenGroups(token, TokenInformationClass.TokenGroups);
+                var restricted = ReadTokenGroups(
+                    token,
+                    TokenInformationClass.TokenRestrictedSids);
+                var administratorSid = new SecurityIdentifier(
+                    WellKnownSidType.BuiltinAdministratorsSid,
+                    null).Value;
+                var administrator = groups.SingleOrDefault(group => string.Equals(
+                    group.Sid,
+                    administratorSid,
+                    StringComparison.Ordinal));
+                var serviceLogon = groups.SingleOrDefault(group => string.Equals(
+                    group.Sid,
+                    "S-1-5-6",
+                    StringComparison.Ordinal));
+                var exactService = groups.SingleOrDefault(group => string.Equals(
+                    group.Sid,
+                    expectedServiceSid,
+                    StringComparison.Ordinal));
+                var exactRestricted = restricted.Any(group => string.Equals(
+                    group.Sid,
+                    expectedServiceSid,
+                    StringComparison.Ordinal));
+                var logonSid = groups.SingleOrDefault(group =>
+                    (group.Attributes & GroupLogonId) == GroupLogonId);
+                var requiredRestrictedSids = logonSid is null
+                    ? []
+                    : new[] { "S-1-1-0", "S-1-5-33", logonSid.Sid };
+                var evidence = new RunnerAgentTokenEvidence(
+                    userSid,
+                    IsPrimaryToken: ReadTokenInt32(token, TokenInformationClass.TokenType) == 1,
+                    IsElevated: ReadTokenInt32(token, TokenInformationClass.TokenElevation) != 0,
+                    HasRestrictions: ReadTokenInt32(
+                        token,
+                        TokenInformationClass.TokenHasRestrictions) != 0
+                        && IsTokenRestricted(token),
+                    AdministratorGroupPresent: administrator is not null,
+                    AdministratorGroupEnabled: IsEnabled(administrator),
+                    AdministratorGroupDenyOnly: administrator is not null
+                                                && (administrator.Attributes
+                                                    & GroupUseForDenyOnly) != 0,
+                    ServiceLogonSidPresent: serviceLogon is not null,
+                    ServiceLogonSidEnabled: IsEnabled(serviceLogon),
+                    ExactServiceSidPresent: exactService is not null,
+                    ExactServiceSidEnabled: IsEnabled(exactService),
+                    ExactServiceSidRestricted: exactRestricted,
+                    RequiredRestrictedSidsPresent: logonSid is not null
+                                                   && requiredRestrictedSids.All(sid =>
+                                                       restricted.Any(group => string.Equals(
+                                                           group.Sid,
+                                                           sid,
+                                                           StringComparison.Ordinal))),
+                    IsSystem: string.Equals(userSid, "S-1-5-18", StringComparison.Ordinal));
+                if (!string.Equals(userSid, expectedAccountSid, StringComparison.Ordinal)
+                    || !evidence.NonAdministrative)
+                {
+                    throw new InvalidOperationException(
+                        "Runner Agent SCM token did not prove LocalService plus its exact enabled restricted service SID. "
+                        + JsonSerializer.Serialize(evidence));
+                }
+
+                return evidence;
+            }
+
+            static bool IsEnabled(TokenGroup? group) => group is not null
+                                                        && (group.Attributes & GroupEnabled) != 0
+                                                        && (group.Attributes
+                                                            & GroupUseForDenyOnly) == 0;
+        }
+
+        private static string ReadTokenUserSid(SafeAccessTokenHandle token)
+        {
+            using var buffer = ReadTokenBuffer(token, TokenInformationClass.TokenUser);
+            var tokenUser = Marshal.PtrToStructure<TokenUser>(buffer.DangerousGetHandle());
+            return new SecurityIdentifier(tokenUser.User.Sid).Value;
+        }
+
+        private static List<TokenGroup> ReadTokenGroups(
+            SafeAccessTokenHandle token,
+            TokenInformationClass informationClass)
+        {
+            using var buffer = ReadTokenBuffer(token, informationClass);
+            var pointer = buffer.DangerousGetHandle();
+            var count = Marshal.ReadInt32(pointer);
+            var offset = Marshal.OffsetOf<TokenGroupsHeader>(
+                nameof(TokenGroupsHeader.Groups)).ToInt32();
+            var size = Marshal.SizeOf<SidAndAttributes>();
+            var result = new List<TokenGroup>(count);
+            for (var index = 0; index < count; index++)
+            {
+                var item = Marshal.PtrToStructure<SidAndAttributes>(
+                    IntPtr.Add(pointer, checked(offset + index * size)));
+                result.Add(new TokenGroup(
+                    new SecurityIdentifier(item.Sid).Value,
+                    item.Attributes));
+            }
+
+            return result;
+        }
+
+        private static int ReadTokenInt32(
+            SafeAccessTokenHandle token,
+            TokenInformationClass informationClass)
+        {
+            using var buffer = ReadTokenBuffer(token, informationClass);
+            return Marshal.ReadInt32(buffer.DangerousGetHandle());
+        }
+
+        private static SafeHGlobalHandle ReadTokenBuffer(
+            SafeAccessTokenHandle token,
+            TokenInformationClass informationClass)
+        {
+            _ = GetTokenInformation(
+                token,
+                informationClass,
+                IntPtr.Zero,
+                0,
+                out var requiredBytes);
+            if (requiredBytes == 0 || Marshal.GetLastWin32Error() != ErrorInsufficientBuffer)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not size Runner Agent token information {informationClass}.");
+            }
+
+            var buffer = new SafeHGlobalHandle(checked((int)requiredBytes));
+            if (!GetTokenInformation(
+                    token,
+                    informationClass,
+                    buffer.DangerousGetHandle(),
+                    requiredBytes,
+                    out _))
+            {
+                var error = Marshal.GetLastWin32Error();
+                buffer.Dispose();
+                throw new Win32Exception(
+                    error,
+                    $"Could not read Runner Agent token information {informationClass}.");
+            }
+
+            return buffer;
+        }
+
+        private static bool WaitForProcessExit(
+            SafeProcessHandle processHandle,
+            TimeSpan timeout)
+        {
+            var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
+            return WaitForSingleObject(processHandle, milliseconds) switch
+            {
+                WaitObject0 => true,
+                WaitTimeout => false,
+                WaitFailed => throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not wait for Runner Agent SCM process exit."),
+                var result => throw new InvalidOperationException(
+                    $"Unexpected Runner Agent process wait result 0x{result:x8}.")
+            };
+        }
+
+        private static bool IsRunnerOwnedPath(string path, string ownedRoot)
+        {
+            var prefix = Path.TrimEndingDirectorySeparator(Path.GetFullPath(ownedRoot))
+                         + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(path).StartsWith(
+                prefix,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsDirectRunnerOwnedPath(string path, string ownedRoot)
+        {
+            var canonicalRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(ownedRoot));
+            var canonicalPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            return string.Equals(
+                Path.GetDirectoryName(canonicalPath),
+                canonicalRoot,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void VerifyProvisionedPackageCache(
+            string packageCacheRoot,
+            string stationServiceSid)
+        {
+            if (!Directory.Exists(packageCacheRoot) || File.Exists(packageCacheRoot))
+            {
+                throw new InvalidOperationException(
+                    "Runner Agent administrative package cache provisioning is missing.");
+            }
+
+            EnsureNoReparseInPath(packageCacheRoot);
+            new ImmutableContentProtector().VerifyCacheBoundary(
+                packageCacheRoot,
+                new ImmutableContentProtectionPolicy(
+                    WindowsAppContainerIdentity.EnsureCapabilitySid(
+                        WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+                    stationServiceSid));
+        }
+
+        private static void GrantDirectoryAccess(
+            string path,
+            SecurityIdentifier sid,
+            FileSystemRights rights,
+            InheritanceFlags inheritanceFlags)
+        {
+            var directory = new DirectoryInfo(Path.GetFullPath(path));
+            var security = FileSystemAclExtensions.GetAccessControl(directory);
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                rights,
+                inheritanceFlags,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            FileSystemAclExtensions.SetAccessControl(directory, security);
+        }
+
+        private static void RemoveDirectoryAccess(
+            string path,
+            SecurityIdentifier sid)
+        {
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            var directory = new DirectoryInfo(Path.GetFullPath(path));
+            var security = FileSystemAclExtensions.GetAccessControl(directory);
+            security.PurgeAccessRules(sid);
+            FileSystemAclExtensions.SetAccessControl(directory, security);
+        }
+
+        private static string QuoteServiceBinaryPath(string executablePath)
+        {
+            if (executablePath.Contains('"') || executablePath.Contains('\0'))
+            {
+                throw new InvalidDataException(
+                    "Runner Agent service executable path cannot be represented by SCM.");
+            }
+
+            return $"\"{executablePath}\"";
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle OpenSCManager(
+            string? machineName,
+            string? databaseName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle CreateService(
+            SafeServiceHandle serviceControlManager,
+            string serviceName,
+            string displayName,
+            uint desiredAccess,
+            uint serviceType,
+            uint startType,
+            uint errorControl,
+            string binaryPathName,
+            string? loadOrderGroup,
+            IntPtr tagId,
+            string? dependencies,
+            string serviceStartName,
+            string? password);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern SafeServiceHandle OpenService(
+            SafeServiceHandle serviceControlManager,
+            string serviceName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool StartService(
+            SafeServiceHandle service,
+            uint argumentCount,
+            IntPtr argumentVectors);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ControlService(
+            SafeServiceHandle service,
+            uint control,
+            out ServiceStatus serviceStatus);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceStatusEx(
+            SafeServiceHandle service,
+            uint infoLevel,
+            ref ServiceStatusProcess serviceStatus,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig(
+            SafeServiceHandle service,
+            IntPtr queryServiceConfig,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ChangeServiceConfig2(
+            SafeServiceHandle service,
+            uint infoLevel,
+            ref ServiceSidInfo info);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig2(
+            SafeServiceHandle service,
+            uint infoLevel,
+            ref ServiceSidInfo buffer,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteService(SafeServiceHandle service);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessToken(
+            SafeProcessHandle processHandle,
+            uint desiredAccess,
+            out SafeAccessTokenHandle tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            SafeAccessTokenHandle tokenHandle,
+            TokenInformationClass tokenInformationClass,
+            IntPtr tokenInformation,
+            uint tokenInformationLength,
+            out uint returnLength);
+
+        [DllImport("advapi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsTokenRestricted(SafeAccessTokenHandle tokenHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern SafeProcessHandle OpenProcess(
+            uint desiredAccess,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+            uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        [SuppressMessage(
+            "Performance",
+            "CA1838:Avoid StringBuilder parameters for P/Invokes",
+            Justification = "QueryFullProcessImageNameW writes into a caller-owned Win32 buffer.")]
+        private static extern bool QueryFullProcessImageName(
+            SafeProcessHandle processHandle,
+            uint flags,
+            StringBuilder executablePath,
+            ref uint executablePathLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool TerminateProcess(
+            SafeProcessHandle processHandle,
+            uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetExitCodeProcess(
+            SafeProcessHandle processHandle,
+            out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(
+            SafeProcessHandle handle,
+            uint milliseconds);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceStatus
+        {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceStatusProcess
+        {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+            public uint ProcessId;
+            public uint ServiceFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct QueryServiceConfiguration
+        {
+            public uint ServiceType;
+            public uint StartType;
+            public uint ErrorControl;
+            public IntPtr BinaryPathName;
+            public IntPtr LoadOrderGroup;
+            public uint TagId;
+            public IntPtr Dependencies;
+            public IntPtr ServiceStartName;
+            public IntPtr DisplayName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceSidInfo
+        {
+            public uint ServiceSidType;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SidAndAttributes
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenUser
+        {
+            public SidAndAttributes User;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenGroupsHeader
+        {
+            public uint GroupCount;
+            public SidAndAttributes Groups;
+        }
+
+        private enum TokenInformationClass
+        {
+            TokenUser = 1,
+            TokenGroups = 2,
+            TokenType = 8,
+            TokenRestrictedSids = 11,
+            TokenElevation = 20,
+            TokenHasRestrictions = 21
+        }
+
+        private sealed record TokenGroup(string Sid, uint Attributes);
+
+        private sealed class SafeServiceHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeServiceHandle()
+                : base(ownsHandle: true)
+            {
+            }
+
+            protected override bool ReleaseHandle() => CloseServiceHandle(handle);
+
+            [DllImport("advapi32.dll")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool CloseServiceHandle(IntPtr serviceHandle);
+        }
+
+        private sealed class SafeHGlobalHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeHGlobalHandle(int size)
+                : base(ownsHandle: true)
+            {
+                SetHandle(Marshal.AllocHGlobal(size));
+            }
+
+            protected override bool ReleaseHandle()
+            {
+                Marshal.FreeHGlobal(handle);
+                return true;
+            }
+        }
+    }
+
+    private sealed record RunnerAgentTokenEvidence(
+        string UserSid,
+        bool IsPrimaryToken,
+        bool IsElevated,
+        bool HasRestrictions,
+        bool AdministratorGroupPresent,
+        bool AdministratorGroupEnabled,
+        bool AdministratorGroupDenyOnly,
+        bool ServiceLogonSidPresent,
+        bool ServiceLogonSidEnabled,
+        bool ExactServiceSidPresent,
+        bool ExactServiceSidEnabled,
+        bool ExactServiceSidRestricted,
+        bool RequiredRestrictedSidsPresent,
+        bool IsSystem)
+    {
+        public bool NonAdministrative =>
+            IsPrimaryToken
+            && !IsElevated
+            && HasRestrictions
+            && !AdministratorGroupEnabled
+            && (!AdministratorGroupPresent || AdministratorGroupDenyOnly)
+            && ServiceLogonSidPresent
+            && ServiceLogonSidEnabled
+            && ExactServiceSidPresent
+            && ExactServiceSidEnabled
+            && ExactServiceSidRestricted
+            && RequiredRestrictedSidsPresent
+            && !IsSystem;
     }
 
     [SupportedOSPlatform("windows")]
@@ -2240,7 +4559,19 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         string PostgreSqlConnectionString,
         Uri RabbitMqUri,
         string EvidencePath,
-        string ScopeId);
+        string ScopeId,
+        RunnerAgentServiceContract Service);
+
+    private sealed record RunnerAgentServiceContract(
+        string ManifestPath,
+        string Scope,
+        string ServiceName,
+        string ServiceAccountName,
+        string ServiceAccountSid,
+        string ServiceSid,
+        string ExecutablePath,
+        string ExecutableSha256,
+        string OwnedRoot);
 
     private sealed record BundleAttestation(
         string Kind,
@@ -2337,9 +4668,19 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         bool RunnerMainModuleBound,
         bool AgentMainModuleBound,
         bool RunnerJobObjectBound,
-        bool AgentJobObjectBound,
         bool RunnerProcessTreeTerminated,
-        bool AgentProcessTreeTerminated,
+        string AgentServiceName,
+        bool AgentServiceLifecycleVerified,
+        string AgentServiceAccountName,
+        string AgentServiceAccountSid,
+        string AgentServiceSidSha256,
+        bool AgentHasRestrictions,
+        bool AgentServiceLogonSidPresent,
+        bool AgentServiceLogonSidEnabled,
+        bool AgentExactServiceSidPresent,
+        bool AgentExactServiceSidEnabled,
+        bool AgentExactServiceSidRestricted,
+        bool AgentNonAdministrative,
         RunnerTerminalEvidence RunnerTerminal,
         PostgreSqlGateEvidence PostgreSql,
         AgentSqliteGateEvidence AgentSqlite,

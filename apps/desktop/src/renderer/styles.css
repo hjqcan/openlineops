@@ -176,6 +176,9 @@
 }
 
 .external-program-editor {
+  min-width: 0;
+  margin: 0;
+  border: 0;
   overflow: auto;
   padding: 18px;
 }
@@ -256,6 +259,32 @@
   display: flex;
   gap: 8px;
   padding: 0 15px 14px;
+}
+
+.external-program-directory-stage {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 10px;
+  margin: 0 15px 12px;
+  padding: 10px 12px;
+  border: 1px solid #9db6ac;
+  border-radius: 6px;
+  background: #edf6f0;
+  color: #25463a;
+}
+
+.external-program-directory-stage span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.external-program-directory-stage small,
+.external-program-directory-stage em {
+  color: #587068;
+  font-size: 11px;
+  font-style: normal;
 }
 
 .external-program-mappings {

@@ -1,14 +1,21 @@
 using System.Collections;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Agent.Infrastructure.Transport;
+using OpenLineOps.ContentProtection;
+using OpenLineOps.ProcessIsolation;
 using RabbitMQ.Client;
 
 namespace OpenLineOps.Agent.Tests;
@@ -59,9 +66,30 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         bool Succeeded,
         int QueueCount);
 
+    internal sealed record StudioMaterialArrivalIpcIsolationEvidence(
+        bool EntryServiceTokenConnected,
+        bool EntryPipeExactAclVerified,
+        bool DownstreamServiceTokenExplicitAccessDenied,
+        bool BothServicesRunningOnOriginalPids);
+
     [SupportedOSPlatform("windows")]
     internal sealed class StudioTwoAgentExternalProcessHarness : IAsyncDisposable
     {
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint ScManagerConnect = 0x0001;
+        private const uint ServiceQueryStatus = 0x0004;
+        private const uint ServiceRunning = 0x00000004;
+        private const uint TokenDuplicate = 0x0002;
+        private const uint TokenImpersonate = 0x0004;
+        private const uint TokenQuery = 0x0008;
+        private const uint ScStatusProcessInfo = 0;
+        private const int ErrorAccessDenied = 5;
+        private const int ErrorFileNotFound = 2;
+        private const int ErrorPipeBusy = 231;
+
+        private static readonly TimeSpan MaterialArrivalPipeConnectTimeout =
+            TimeSpan.FromSeconds(10);
+
         private static readonly string[] SafeAgentEnvironmentVariables =
         [
             "ALLUSERSPROFILE",
@@ -101,6 +129,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private WindowsAgentService? _downstreamService;
         private WindowsAgentProcess? _entryProcess;
         private WindowsAgentProcess? _downstreamProcess;
+        private StudioMaterialArrivalIpcIsolationEvidence? _materialArrivalIpcIsolation;
         private StudioRabbitMqCleanupEvidence _rabbitCleanup = new(false, false, 0);
         private bool _rabbitProbeDisposed;
         private bool _disposed;
@@ -174,13 +203,35 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             _downstreamProcess?.TokenEvidence.NonAdministrative
             ?? throw new InvalidOperationException("Downstream Agent has not started.");
 
-        public string EntryAgentWindowsSid => _entryProcess?.TokenEvidence.UserSid
-            ?? throw new InvalidOperationException("Entry Agent has not started.");
+        public string ServiceAccountName
+        {
+            get
+            {
+                _ = ServiceAccountSid;
+                return _entryIdentity.AccountName;
+            }
+        }
 
-        public string DownstreamAgentWindowsSid => _downstreamProcess?.TokenEvidence.UserSid
-            ?? throw new InvalidOperationException("Downstream Agent has not started.");
+        public string ServiceAccountSid => SharedServiceAccountValue(
+            static evidence => evidence.UserSid,
+            "account SID");
+
+        public string EntryAgentServiceSid => StartedServiceSid(
+            _entryProcess,
+            _entryIdentity,
+            "Entry");
+
+        public string DownstreamAgentServiceSid => StartedServiceSid(
+            _downstreamProcess,
+            _downstreamIdentity,
+            "Downstream");
 
         public StudioRabbitMqCleanupEvidence RabbitMqCleanup => _rabbitCleanup;
+
+        public StudioMaterialArrivalIpcIsolationEvidence MaterialArrivalIpcIsolation =>
+            _materialArrivalIpcIsolation
+            ?? throw new InvalidOperationException(
+                "Cross-Station material-arrival IPC isolation has not been verified.");
 
         public StudioApiCredential OperatorCredential => Credentials.Single(
             credential => string.Equals(credential.Role, "Operator", StringComparison.Ordinal));
@@ -214,7 +265,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string agentBundleRoot,
             string expectedAgentExecutableSha256,
             Uri brokerUri,
-            string identitySuffix,
+            string serviceScope,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(fixture);
@@ -266,17 +317,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "Studio two-Agent plaintext RabbitMQ is restricted to loopback; remote brokers require amqps.");
             }
 
-            var suffix = identitySuffix;
-            if (suffix.Length != 32
-                || suffix.Any(static character =>
+            var scope = serviceScope;
+            if (scope.Length != 32
+                || scope.Any(static character =>
                     character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             {
                 throw new InvalidDataException(
-                    "Studio two-Agent identity suffix must be 32 lowercase hexadecimal characters.");
+                    "Studio two-Agent service scope must be 32 lowercase hexadecimal characters.");
             }
             var cleanupContract = ReadRequiredAgentServiceCleanupContract(
                 expectedKind: "studio-two-agent",
-                expectedScope: suffix);
+                expectedScope: scope);
             if (cleanupContract.Entries.Any(entry => !string.Equals(
                     entry.ExecutableSha256,
                     canonicalExpectedAgentSha256,
@@ -291,12 +342,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 ?? throw new InvalidDataException(
                     "Studio cleanup manifest Agent bundle path has no parent.");
             var entryIdentity = RestrictedAgentIdentity.CreateRequired(
-                AgentServiceScopedSuffix("entry-account", suffix));
+                AgentServiceScopedSuffix("entry-service", scope));
             RestrictedAgentIdentity? downstreamIdentity = null;
             var root = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.Windows),
                 "Temp",
-                $"olo-studio-two-agent-{suffix}");
+                $"olo-studio-two-agent-{scope}");
             if (!string.Equals(
                     root,
                     cleanupContract.Entries[0].OwnedRoot,
@@ -313,14 +364,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             try
             {
                 downstreamIdentity = RestrictedAgentIdentity.CreateRequired(
-                    AgentServiceScopedSuffix("downstream-account", suffix));
+                    AgentServiceScopedSuffix("downstream-service", scope));
                 if (string.Equals(
                         entryIdentity.Sid,
                         downstreamIdentity.Sid,
                         StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException(
-                        "The production closure requires two distinct non-administrative Windows accounts.");
+                        "The production closure requires two distinct restricted service SIDs.");
                 }
 
                 Directory.CreateDirectory(root);
@@ -381,12 +432,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 var entryAgent = CreateEndpoint(
                     fixture.EntryStation,
                     "preparation",
-                    suffix,
+                    scope,
                     root);
                 var downstreamAgent = CreateEndpoint(
                     fixture.DownstreamStation,
                     "vendor",
-                    suffix,
+                    scope,
                     root);
                 CreateStudioAgentWritableTree(entryAgent);
                 CreateStudioAgentWritableTree(downstreamAgent);
@@ -413,29 +464,29 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 observer = await StudioVendorProcessStartObserver.StartAsync(
                     Path.Combine(root, "vendor-process-observer"),
                     cancellationToken);
-                var coordinatorId = $"coordinator-studio-{suffix}";
+                var coordinatorId = $"coordinator-studio-{scope}";
                 probe = await StudioRabbitMqConsumerProbe.CreateAsync(
                     brokerUri,
                     coordinatorId,
                     cancellationToken);
                 var operatorCredential = CreateCredential(
-                    $"studio-operator-{suffix}",
-                    $"studio.operator.{suffix}",
+                    $"studio-operator-{scope}",
+                    $"studio.operator.{scope}",
                     "Operator",
                     stationId: null);
                 var safetyCredential = CreateCredential(
-                    $"studio-safety-{suffix}",
-                    $"studio.safety.{suffix}",
+                    $"studio-safety-{scope}",
+                    $"studio.safety.{scope}",
                     "Safety",
                     stationId: null);
                 var entryCredential = CreateCredential(
-                    $"studio-agent-entry-{suffix}",
+                    $"studio-agent-entry-{scope}",
                     entryAgent.AgentId,
                     "StationAgent",
                     entryAgent.StationId,
                     entryAgent.Token);
                 var downstreamCredential = CreateCredential(
-                    $"studio-agent-downstream-{suffix}",
+                    $"studio-agent-downstream-{scope}",
                     downstreamAgent.AgentId,
                     "StationAgent",
                     downstreamAgent.StationId,
@@ -541,7 +592,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 {
                     try
                     {
-                        DeleteRunScopedOwnedRoot("studio-two-agent", root);
+                        DeleteRunScopedOwnedRoot(
+                            "studio-two-agent",
+                            root,
+                            cleanupContract.Entries.ToDictionary(
+                                static entry => entry.Role,
+                                static entry => new RunScopedPackageCacheBinding(
+                                    entry.ServiceSid,
+                                    PackageCacheRootForCleanupEntry(entry)),
+                                StringComparer.Ordinal));
                     }
                     catch (Exception exception)
                     {
@@ -573,12 +632,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             var entryEnvironment = CreateStudioAgentEnvironment(
                 EntryAgent,
                 Fixture.EntryStation,
-                _entryIdentity,
                 coordinatorBaseUri);
             var downstreamEnvironment = CreateStudioAgentEnvironment(
                 DownstreamAgent,
                 Fixture.DownstreamStation,
-                _downstreamIdentity,
                 coordinatorBaseUri);
             try
             {
@@ -588,7 +645,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     _agentBundleRoot,
                     entryEnvironment,
                     _entryIdentity,
-                    AgentServiceScopedSuffix("entry-service", EntryAgent.AgentId[^32..]));
+                    AgentServiceScopedSuffix("entry-service", EntryAgent.AgentId[^32..]),
+                    EntryAgent.PackageCachePath);
+                ProvisionPackageCache(
+                    EntryAgent.PackageCachePath,
+                    _entryService.ServiceName,
+                    _entryIdentity.Sid);
                 _entryProcess = _entryService.Start();
                 VerifyStartedAgentProcess(_entryProcess, "entry");
                 VerifyAgentExecutableHash();
@@ -599,9 +661,23 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     _downstreamIdentity,
                     AgentServiceScopedSuffix(
                         "downstream-service",
-                        DownstreamAgent.AgentId[^32..]));
+                        DownstreamAgent.AgentId[^32..]),
+                    DownstreamAgent.PackageCachePath);
+                ProvisionPackageCache(
+                    DownstreamAgent.PackageCachePath,
+                    _downstreamService.ServiceName,
+                    _downstreamIdentity.Sid);
                 _downstreamProcess = _downstreamService.Start();
                 VerifyStartedAgentProcess(_downstreamProcess, "downstream");
+                if (string.Equals(
+                        _entryIdentity.Sid,
+                        _downstreamIdentity.Sid,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "The two Station services resolved to the same restricted service SID.");
+                }
+
                 VerifyAgentExecutableHash();
                 await Task.WhenAll(
                     _consumerProbe.WaitForConsumerAsync(
@@ -614,6 +690,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         _downstreamProcess,
                         TimeSpan.FromSeconds(30),
                         cancellationToken));
+                _materialArrivalIpcIsolation =
+                    VerifyCrossStationMaterialArrivalIpcIsolation(cancellationToken);
             }
             catch (Exception primaryFailure)
             {
@@ -820,7 +898,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             if (nativeResidue)
             {
                 failures.Add(new InvalidOperationException(
-                    "Studio Agent process or SCM service residue prevents safe recursive root, SeServiceLogonRight, and account cleanup."));
+                    "Studio Agent process or SCM service residue prevents safe service-SID ACL and owned-root cleanup."));
             }
             else
             {
@@ -865,7 +943,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 {
                     try
                     {
-                        DeleteRunScopedOwnedRoot("studio-two-agent", RootPath);
+                        DeleteRunScopedOwnedRoot(
+                            "studio-two-agent",
+                            RootPath,
+                            new Dictionary<string, RunScopedPackageCacheBinding>(StringComparer.Ordinal)
+                            {
+                                ["entry"] = new(
+                                    _entryIdentity.Sid,
+                                    EntryAgent.PackageCachePath),
+                                ["downstream"] = new(
+                                    _downstreamIdentity.Sid,
+                                    DownstreamAgent.PackageCachePath)
+                            });
                     }
                     catch (Exception exception)
                     {
@@ -993,6 +1082,315 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
         }
 
+        private StudioMaterialArrivalIpcIsolationEvidence
+            VerifyCrossStationMaterialArrivalIpcIsolation(
+                CancellationToken cancellationToken)
+        {
+            var entryProcess = _entryProcess
+                               ?? throw new InvalidOperationException(
+                                   "Entry Agent has not started.");
+            var downstreamProcess = _downstreamProcess
+                                    ?? throw new InvalidOperationException(
+                                        "Downstream Agent has not started.");
+            var entryService = _entryService
+                               ?? throw new InvalidOperationException(
+                                   "Entry Agent service has not started.");
+            var downstreamService = _downstreamService
+                                    ?? throw new InvalidOperationException(
+                                        "Downstream Agent service has not started.");
+            if (entryProcess.HasExited || downstreamProcess.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "Both Station Agents must remain alive during local IPC isolation verification.");
+            }
+
+            RequireElevatedTestProcess();
+            var entryServiceSid = EntryAgentServiceSid;
+            var downstreamServiceSid = DownstreamAgentServiceSid;
+            if (string.Equals(
+                    entryServiceSid,
+                    downstreamServiceSid,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Cross-Station local IPC isolation requires distinct restricted service SIDs.");
+            }
+
+            var entryPipeName = StationMaterialArrivalLocalIpcOptions.DerivePipeName(
+                entryServiceSid);
+            using var entryToken = DuplicateServiceProcessImpersonationToken(
+                entryProcess.Id,
+                "entry");
+            var entryImpersonationEntered = false;
+            var entryServiceTokenConnected = false;
+            var entryPipeExactAclVerified = false;
+            WindowsIdentity.RunImpersonated(entryToken, () =>
+            {
+                entryImpersonationEntered = true;
+                cancellationToken.ThrowIfCancellationRequested();
+                using var pipe = new NamedPipeClientStream(
+                    ".",
+                    entryPipeName,
+                    PipeDirection.InOut,
+                    PipeOptions.None);
+                pipe.Connect(checked((int)MaterialArrivalPipeConnectTimeout.TotalMilliseconds));
+                entryServiceTokenConnected = pipe.IsConnected;
+                WindowsIdentityBoundNamedPipe.Verify(pipe, entryServiceSid);
+                entryPipeExactAclVerified = true;
+            });
+            if (!entryImpersonationEntered
+                || !entryServiceTokenConnected
+                || !entryPipeExactAclVerified)
+            {
+                throw new InvalidOperationException(
+                    "The entry Station process token did not connect to and verify the exact material-arrival pipe ACL.");
+            }
+
+            using var downstreamToken = DuplicateServiceProcessImpersonationToken(
+                downstreamProcess.Id,
+                "downstream");
+            var downstreamImpersonationEntered = false;
+            var crossStationFailure = WindowsIdentity.RunImpersonated(
+                downstreamToken,
+                () =>
+                {
+                    downstreamImpersonationEntered = true;
+                    return ProbeCrossStationPipeUntilTerminalResult(
+                        entryPipeName,
+                        MaterialArrivalPipeConnectTimeout,
+                        cancellationToken);
+                });
+            if (!downstreamImpersonationEntered)
+            {
+                throw new InvalidOperationException(
+                    "The downstream Station process token was not applied to the cross-Station pipe probe.");
+            }
+
+            if (crossStationFailure is null)
+            {
+                throw new UnauthorizedAccessException(
+                    "The downstream Station service token connected to the entry Station material-arrival pipe.");
+            }
+
+            if (!IsExplicitAccessDenied(crossStationFailure))
+            {
+                var nativeError = WindowsErrorCode(crossStationFailure);
+                var reason = nativeError switch
+                {
+                    ErrorFileNotFound => "the entry pipe was absent",
+                    ErrorPipeBusy => "the entry pipe was busy",
+                    _ when crossStationFailure is TimeoutException =>
+                        "the cross-Station connection timed out",
+                    _ => "the connection failed without an explicit access-denied result"
+                };
+                throw new InvalidOperationException(
+                    $"Cross-Station material-arrival isolation was not proven because {reason}.",
+                    crossStationFailure);
+            }
+
+            VerifyServiceStillRunning(
+                entryService.ServiceName,
+                entryProcess.Id,
+                "entry");
+            VerifyServiceStillRunning(
+                downstreamService.ServiceName,
+                downstreamProcess.Id,
+                "downstream");
+            if (entryProcess.HasExited || downstreamProcess.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "A Station Agent exited during local IPC isolation verification.");
+            }
+
+            return new StudioMaterialArrivalIpcIsolationEvidence(
+                entryServiceTokenConnected,
+                entryPipeExactAclVerified,
+                DownstreamServiceTokenExplicitAccessDenied: true,
+                BothServicesRunningOnOriginalPids: true);
+        }
+
+        internal static bool IsExplicitAccessDenied(Exception exception)
+        {
+            ArgumentNullException.ThrowIfNull(exception);
+            return WindowsErrorCode(exception) == ErrorAccessDenied;
+        }
+
+        internal static bool IsRetryablePipeAvailabilityFailure(Exception exception)
+        {
+            ArgumentNullException.ThrowIfNull(exception);
+            return WindowsErrorCode(exception) is ErrorFileNotFound or ErrorPipeBusy;
+        }
+
+        private static Exception? ProbeCrossStationPipeUntilTerminalResult(
+            string pipeName,
+            TimeSpan totalTimeout,
+            CancellationToken cancellationToken)
+        {
+            var elapsed = Stopwatch.StartNew();
+            Exception? lastAvailabilityFailure = null;
+            while (elapsed.Elapsed < totalTimeout)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var pipe = new NamedPipeClientStream(
+                    ".",
+                    pipeName,
+                    PipeDirection.InOut,
+                    PipeOptions.None);
+                var remaining = totalTimeout - elapsed.Elapsed;
+                try
+                {
+                    pipe.Connect(Math.Max(
+                        1,
+                        checked((int)Math.Ceiling(remaining.TotalMilliseconds))));
+                    return null;
+                }
+                catch (Exception exception) when (exception is IOException
+                                                   or UnauthorizedAccessException
+                                                   or Win32Exception
+                                                   or TimeoutException)
+                {
+                    if (!IsRetryablePipeAvailabilityFailure(exception))
+                    {
+                        return exception;
+                    }
+
+                    lastAvailabilityFailure = exception;
+                }
+
+                remaining = totalTimeout - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                Thread.Sleep(remaining < TimeSpan.FromMilliseconds(25)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(25));
+            }
+
+            return new TimeoutException(
+                "The cross-Station material-arrival pipe did not become available before its total probe deadline.",
+                lastAvailabilityFailure);
+        }
+
+        private static int? WindowsErrorCode(Exception exception) => exception switch
+        {
+            Win32Exception win32Exception => win32Exception.NativeErrorCode,
+            IOException ioException => ioException.HResult & 0xFFFF,
+            UnauthorizedAccessException unauthorizedAccessException =>
+                unauthorizedAccessException.HResult & 0xFFFF,
+            _ => null
+        };
+
+        private static void RequireElevatedTestProcess()
+        {
+            using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+            var principal = new WindowsPrincipal(identity);
+            if (!principal.IsInRole(WindowsBuiltInRole.Administrator))
+            {
+                throw new InvalidOperationException(
+                    "The formal two-Agent SCM gate must run in an elevated test process before it can duplicate Station service tokens.");
+            }
+        }
+
+        private static SafeAccessTokenHandle DuplicateServiceProcessImpersonationToken(
+            int processId,
+            string role)
+        {
+            using var process = OpenProcess(
+                ProcessQueryLimitedInformation,
+                inheritHandle: false,
+                checked((uint)processId));
+            if (process.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    $"Could not open the {role} Station Agent process for token duplication.");
+            }
+
+            if (!OpenProcessToken(
+                    process,
+                    TokenQuery | TokenDuplicate,
+                    out var sourceToken))
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    $"Could not open the {role} Station Agent token with TOKEN_QUERY | TOKEN_DUPLICATE.");
+            }
+
+            using (sourceToken)
+            {
+                if (!DuplicateTokenEx(
+                        sourceToken,
+                        TokenQuery | TokenImpersonate,
+                        IntPtr.Zero,
+                        NativeSecurityImpersonationLevel.SecurityImpersonation,
+                        NativeTokenType.TokenImpersonation,
+                        out var impersonationToken))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        $"Could not create the {role} Station Agent SecurityImpersonation TokenImpersonation token.");
+                }
+
+                return impersonationToken;
+            }
+        }
+
+        private static void VerifyServiceStillRunning(
+            string serviceName,
+            int expectedProcessId,
+            string role)
+        {
+            using var manager = OpenSCManager(
+                machineName: null,
+                databaseName: null,
+                ScManagerConnect);
+            if (manager.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    "Could not open the Service Control Manager while verifying local IPC isolation.");
+            }
+
+            using var service = OpenService(
+                manager,
+                serviceName,
+                ServiceQueryStatus);
+            if (service.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    $"Could not open the {role} Station service after local IPC isolation verification.");
+            }
+
+            var status = new NativeServiceStatusProcess();
+            if (!QueryServiceStatusEx(
+                    service,
+                    ScStatusProcessInfo,
+                    ref status,
+                    checked((uint)Marshal.SizeOf<NativeServiceStatusProcess>()),
+                    out _))
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    $"Could not query the {role} Station service after local IPC isolation verification.");
+            }
+
+            if (status.CurrentState != ServiceRunning
+                || status.ProcessId != checked((uint)expectedProcessId))
+            {
+                throw new InvalidOperationException(
+                    $"The {role} Station service was not still Running on its original PID after local IPC isolation verification.");
+            }
+        }
+
         private void VerifyStartedAgentProcess(
             WindowsAgentProcess process,
             string role)
@@ -1014,7 +1412,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private Dictionary<string, string> CreateStudioAgentEnvironment(
             StudioAgentEndpoint endpoint,
             StudioStationFixture station,
-            RestrictedAgentIdentity identity,
             Uri coordinatorBaseUri)
         {
             var environment = new Dictionary<string, string>(
@@ -1046,9 +1443,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             Set("PackageCacheDirectory", endpoint.PackageCachePath);
             Set("MaterialArrivalPackageContentSha256", endpoint.PackageContentSha256);
             Set(
-                "MaterialArrivalPipeName",
-                $"olo-studio-{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(endpoint.AgentId)))[..20]}");
-            Set(
                 $"TrustedPackagePublicKeyFiles__{station.SigningKeyId}",
                 TrustedSigningKeyPath);
             Set("RuntimeExecutablePath", "OpenLineOps.StationRuntime.exe");
@@ -1072,7 +1466,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             Set(
                 "MaximumRuntimeOutputBytes",
                 (2 * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
-            Set("AllowedRestrictedExternalProgramHostSids__0", identity.Sid);
             Set(
                 "ExternalProgramAppContainerProfileNamespace",
                 $"OpenLineOps.Studio.{endpoint.AgentId[^20..]}");
@@ -1087,6 +1480,61 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 environment[$"OpenLineOps__Agent__{key}"] = value;
         }
 
+        private string SharedServiceAccountValue(
+            Func<AgentHostTokenEvidence, string> selector,
+            string description)
+        {
+            var entryEvidence = _entryProcess?.TokenEvidence
+                                ?? throw new InvalidOperationException(
+                                    "Entry Agent has not started.");
+            var downstreamEvidence = _downstreamProcess?.TokenEvidence
+                                     ?? throw new InvalidOperationException(
+                                         "Downstream Agent has not started.");
+            var entryValue = selector(entryEvidence);
+            var downstreamValue = selector(downstreamEvidence);
+            if (!string.Equals(entryValue, downstreamValue, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Studio Agent LocalService {description} differs across Station services.");
+            }
+
+            if (!string.Equals(
+                    entryValue,
+                    _entryIdentity.ServiceAccountSid,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    downstreamValue,
+                    _downstreamIdentity.ServiceAccountSid,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Studio Agent token {description} is not the configured LocalService identity.");
+            }
+
+            return entryValue;
+        }
+
+        private static string StartedServiceSid(
+            WindowsAgentProcess? process,
+            RestrictedAgentIdentity identity,
+            string role)
+        {
+            if (process is null)
+            {
+                throw new InvalidOperationException($"{role} Agent has not started.");
+            }
+
+            if (!process.TokenEvidence.ExactServiceSidPresent
+                || !process.TokenEvidence.ExactServiceSidEnabled
+                || !process.TokenEvidence.ExactServiceSidRestricted)
+            {
+                throw new InvalidOperationException(
+                    $"{role} Agent token does not carry its enabled restricted service SID.");
+            }
+
+            return identity.Sid;
+        }
+
         private static StudioAgentEndpoint CreateEndpoint(
             StudioStationFixture station,
             string role,
@@ -1094,6 +1542,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string root)
         {
             var agentRoot = Path.Combine(root, $"{role}-agent");
+            var serviceRole = string.Equals(role, "preparation", StringComparison.Ordinal)
+                ? "entry"
+                : "downstream";
+            var serviceSuffix = AgentServiceScopedSuffix($"{serviceRole}-service", suffix);
+            var cacheAnchor = Path.Combine(
+                Path.GetDirectoryName(root)
+                ?? throw new InvalidDataException("Studio harness root has no parent."),
+                $"olo-studio-two-agent-{serviceRole}-content-{serviceSuffix}");
             return new StudioAgentEndpoint(
                 $"agent.studio.{role}.{suffix}",
                 station.StationId,
@@ -1102,8 +1558,22 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 StudioToken($"agent-{role}-{suffix}"),
                 agentRoot,
                 Path.Combine(agentRoot, "data"),
-                Path.Combine(agentRoot, "package-cache"),
+                Path.Combine(cacheAnchor, "content"),
                 Path.Combine(agentRoot, "runtime-work"));
+        }
+
+        private static void ProvisionPackageCache(
+            string packageCacheRoot,
+            string serviceName,
+            string serviceSid)
+        {
+            new ImmutableContentProtector().ProvisionCacheNamespace(
+                packageCacheRoot,
+                serviceName,
+                new ImmutableContentProtectionPolicy(
+                    WindowsAppContainerIdentity.EnsureCapabilitySid(
+                        WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+                    serviceSid));
         }
 
         private static void CreateStudioAgentWritableTree(StudioAgentEndpoint endpoint)
@@ -1112,7 +1582,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                      {
                          endpoint.RootPath,
                          endpoint.DataPath,
-                         endpoint.PackageCachePath,
                          endpoint.RuntimeWorkPath,
                          Path.Combine(endpoint.RootPath, "artifacts"),
                          Path.Combine(endpoint.RootPath, "private-temp"),
@@ -1160,6 +1629,92 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static void ProtectStudioHarnessRoot(string root)
             => ProtectRunScopedRoot(root);
+
+        private enum NativeSecurityImpersonationLevel
+        {
+            SecurityAnonymous,
+            SecurityIdentification,
+            SecurityImpersonation,
+            SecurityDelegation
+        }
+
+        private enum NativeTokenType
+        {
+            TokenPrimary = 1,
+            TokenImpersonation
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeServiceStatusProcess
+        {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+            public uint ProcessId;
+            public uint ServiceFlags;
+        }
+
+        private sealed class SafeNativeServiceHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeNativeServiceHandle()
+                : base(ownsHandle: true)
+            {
+            }
+
+            protected override bool ReleaseHandle() => CloseServiceHandle(handle);
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern SafeProcessHandle OpenProcess(
+            uint desiredAccess,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+            uint processId);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessToken(
+            SafeProcessHandle processHandle,
+            uint desiredAccess,
+            out SafeAccessTokenHandle tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateTokenEx(
+            SafeAccessTokenHandle existingToken,
+            uint desiredAccess,
+            IntPtr tokenAttributes,
+            NativeSecurityImpersonationLevel impersonationLevel,
+            NativeTokenType tokenType,
+            out SafeAccessTokenHandle newToken);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeNativeServiceHandle OpenSCManager(
+            string? machineName,
+            string? databaseName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeNativeServiceHandle OpenService(
+            SafeNativeServiceHandle serviceControlManager,
+            string serviceName,
+            uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceStatusEx(
+            SafeNativeServiceHandle service,
+            uint infoLevel,
+            ref NativeServiceStatusProcess serviceStatus,
+            uint bufferSize,
+            out uint bytesNeeded);
+
+        [DllImport("advapi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseServiceHandle(IntPtr serviceHandle);
 
         private static string RequireStudioSha256(string value, string name) =>
             value.Length == 64
@@ -1754,7 +2309,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             : throw new InvalidDataException($"'{propertyName}' must be a non-negative Int32.");
     }
 
-    private static void DeleteStudioAgentHarnessRoot(string root)
+    [SupportedOSPlatform("windows")]
+    private static void DeleteStudioAgentHarnessRoot(
+        string root)
     {
         if (!Directory.Exists(root))
         {
@@ -1794,10 +2351,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "Studio Agent harness root");
         RejectStudioTreeReparsePoints(canonicalRoot, "Studio Agent harness root");
 
-        foreach (var agentDirectory in new[] { "preparation-agent", "vendor-agent" })
+        foreach (var agentDirectory in new[]
+                 {
+                     "preparation-agent",
+                     "vendor-agent"
+                 })
         {
             var agentRoot = Path.Combine(root, agentDirectory);
-            DeleteWorkRoot(agentRoot, Path.Combine(agentRoot, "package-cache"));
+            DeleteWorkRoot(agentRoot);
         }
 
         foreach (var path in Directory.EnumerateFileSystemEntries(

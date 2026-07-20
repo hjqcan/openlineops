@@ -30,6 +30,20 @@ function Assert-ExactProperties {
     }
 }
 
+function Assert-JsonBooleanProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    foreach ($field in $Expected.Keys) {
+        Assert-Condition ($Value.$field -is [bool] `
+                -and $Value.$field -eq $Expected[$field]) `
+            "$Description field '$field' must be the JSON boolean $($Expected[$field].ToString().ToLowerInvariant())."
+    }
+}
+
 function Assert-Sha256 {
     param([AllowNull()][string] $Value, [string] $Description)
     Assert-Condition ($Value -cmatch '^[0-9a-f]{64}$') "$Description must be lowercase SHA-256."
@@ -191,6 +205,9 @@ Assert-ExactProperties $applicationPortability @(
     "sourceBeforeCopyTreeSha256", "copiedTreeSha256", "afterImportTreeSha256",
     "afterPublishTreeSha256", "afterExecutionTreeSha256", "sourceAfterExecutionTreeSha256",
     "unchanged") "Studio source Application portability"
+Assert-JsonBooleanProperties $applicationPortability ([ordered]@{
+        unchanged = $true
+    }) "Studio source Application portability"
 Assert-Condition (-not [string]::IsNullOrWhiteSpace([string]$applicationPortability.sourceProjectId) `
         -and -not [string]::IsNullOrWhiteSpace([string]$applicationPortability.targetProjectId) `
         -and $applicationPortability.sourceProjectId -cne $applicationPortability.targetProjectId `
@@ -217,6 +234,9 @@ Assert-Condition (@($applicationPortabilityHashes | Select-Object -Unique).Count
 $immutable = $source.immutableRunTrace
 Assert-ExactProperties $immutable @("before", "after", "unchanged", "terminalCompletedAtUtc", "unloadAtUtc") `
     "Studio source immutable Run Trace"
+Assert-JsonBooleanProperties $immutable ([ordered]@{
+        unchanged = $true
+    }) "Studio source immutable Run Trace"
 foreach ($phase in @("before", "after")) {
     Assert-ExactProperties $immutable.$phase @("sizeBytes", "sha256") "Studio immutable Run Trace $phase"
     Assert-Sha256 $immutable.$phase.sha256 "Studio immutable Run Trace $phase"
@@ -266,6 +286,10 @@ Assert-ExactProperties $coordinator @(
     "processIds", "startOrdinals", "environmentSha256", "onlyApiWasRestarted",
     "persistentStateRestored", "runBeforeRestartSha256", "restoredRunSha256") `
     "Studio Coordinator evidence"
+Assert-JsonBooleanProperties $coordinator ([ordered]@{
+        onlyApiWasRestarted = $true
+        persistentStateRestored = $true
+    }) "Studio Coordinator evidence"
 Assert-Condition (@($coordinator.processIds).Count -eq 3 `
         -and @($coordinator.processIds | Select-Object -Unique).Count -eq 3 `
         -and @($coordinator.startOrdinals).Count -eq 3 `
@@ -290,6 +314,9 @@ foreach ($agent in $agents) {
         "role", "agentId", "stationId", "stationSystemId", "processId",
         "credentialTokenSha256", "nonAdministrativeToken", "exitCode") `
         "Studio Agent evidence"
+    Assert-JsonBooleanProperties $agent ([ordered]@{
+            nonAdministrativeToken = $true
+        }) "Studio Agent evidence"
     Assert-Sha256 $agent.credentialTokenSha256 "Studio Agent credential token hash"
     Assert-Condition ($agent.nonAdministrativeToken -eq $true -and $agent.exitCode -eq 0) `
         "Studio Agent did not run and exit under a non-administrative token."
@@ -308,14 +335,31 @@ Assert-Condition ((@($agents.role) -join ',') -ceq 'entry,downstream' `
 
 $identity = $evidence.windowsIdentity
 Assert-ExactProperties $identity @(
-    "sharedRestrictedTestAccount", "entrySidSha256", "downstreamSidSha256", "distinctOsAccounts") `
+    "sharedLocalServiceAccount", "serviceAccountName", "serviceAccountSid",
+    "entryServiceSidSha256", "downstreamServiceSidSha256", "distinctRestrictedServiceSids",
+    "entryServiceTokenConnected", "entryPipeExactAclVerified",
+    "downstreamServiceTokenExplicitAccessDenied", "bothServicesRunningOnOriginalPids") `
     "Studio Windows identity evidence"
-Assert-Sha256 $identity.entrySidSha256 "Studio entry Agent SID"
-Assert-Sha256 $identity.downstreamSidSha256 "Studio downstream Agent SID"
-Assert-Condition ($identity.sharedRestrictedTestAccount -eq $false `
-        -and $identity.distinctOsAccounts -eq $true `
-        -and $identity.entrySidSha256 -cne $identity.downstreamSidSha256) `
-    "Studio Agents did not use distinct Windows accounts."
+Assert-JsonBooleanProperties $identity ([ordered]@{
+        sharedLocalServiceAccount = $true
+        distinctRestrictedServiceSids = $true
+        entryServiceTokenConnected = $true
+        entryPipeExactAclVerified = $true
+        downstreamServiceTokenExplicitAccessDenied = $true
+        bothServicesRunningOnOriginalPids = $true
+    }) "Studio Windows identity evidence"
+Assert-Sha256 $identity.entryServiceSidSha256 "Studio entry Agent service SID"
+Assert-Sha256 $identity.downstreamServiceSidSha256 "Studio downstream Agent service SID"
+Assert-Condition ($identity.sharedLocalServiceAccount -eq $true `
+        -and $identity.serviceAccountName -ceq "NT AUTHORITY\LocalService" `
+        -and $identity.serviceAccountSid -ceq "S-1-5-19" `
+        -and $identity.distinctRestrictedServiceSids -eq $true `
+        -and $identity.entryServiceSidSha256 -cne $identity.downstreamServiceSidSha256 `
+        -and $identity.entryServiceTokenConnected -eq $true `
+        -and $identity.entryPipeExactAclVerified -eq $true `
+        -and $identity.downstreamServiceTokenExplicitAccessDenied -eq $true `
+        -and $identity.bothServicesRunningOnOriginalPids -eq $true) `
+    "Studio Agents must share LocalService, retain distinct restricted service SIDs, and prove service-token material-arrival IPC isolation while remaining Running."
 
 $broker = $evidence.broker
 Assert-ExactProperties $broker @(
@@ -324,6 +368,12 @@ Assert-ExactProperties $broker @(
 Assert-Sha256 $broker.snapshotSha256 "Studio broker snapshot"
 Assert-PositiveInteger $broker.port "Studio broker port"
 Assert-PositiveInteger $broker.snapshotSizeBytes "Studio broker snapshot size"
+$expectedBrokerTls = $broker.scheme -ceq 'amqps'
+Assert-JsonBooleanProperties $broker ([ordered]@{
+        tls = $expectedBrokerTls
+        snapshotValidatedFromPrivateBrokerState = $true
+        allQueuesDrained = $true
+    }) "Studio broker evidence"
 Assert-Condition ($broker.scheme -cin @('amqp', 'amqps') `
         -and -not [string]::IsNullOrWhiteSpace([string]$broker.host) `
         -and $broker.tls -eq ($broker.scheme -ceq 'amqps')) "Studio broker endpoint evidence is invalid."
@@ -345,6 +395,10 @@ Assert-ExactProperties $parallel @(
     "observed", "lineStateSha256", "entryResourceCount", "downstreamResourceCount",
     "entryResourceIdentityHashes", "downstreamResourceIdentityHashes", "entryFencingTokens",
     "downstreamFencingTokens", "resourceIdentitiesDisjoint") "Studio parallel execution"
+Assert-JsonBooleanProperties $parallel ([ordered]@{
+        observed = $true
+        resourceIdentitiesDisjoint = $true
+    }) "Studio parallel execution"
 Assert-Condition ($parallel.observed -eq $true `
         -and $parallel.resourceIdentitiesDisjoint -eq $true `
         -and $parallel.entryResourceCount -ge 2 `
@@ -387,6 +441,9 @@ Assert-ExactProperties $vendor @(
     "executableName", "boundStartCount", "uniqueProcessIds", "ledgerSizeBytes", "ledgerSha256",
     "starts", "rootInvocationCount", "noAutomaticReplayAfterActiveCoordinatorCrash") `
     "Studio vendor execution"
+Assert-JsonBooleanProperties $vendor ([ordered]@{
+        noAutomaticReplayAfterActiveCoordinatorCrash = $true
+    }) "Studio vendor execution"
 Assert-Sha256 $vendor.ledgerSha256 "Studio vendor process ledger"
 $starts = @($vendor.starts)
 Assert-Condition ($vendor.executableName -ceq "OpenLineOps.VendorTestHelper.exe" `
@@ -404,6 +461,14 @@ foreach ($start in $starts) {
     Assert-NonNegativeInteger $start.parentProcessId "Studio vendor parent process ID"
     Assert-NonNegativeInteger $start.ancestorDepth "Studio vendor process ancestor depth"
     Assert-UtcTimestamp ([string]$start.startedAtUtc) "Studio vendor process start time" | Out-Null
+    Assert-Condition ($start.boundToDownstreamAgent -is [bool] `
+            -and $start.boundToEntryAgent -is [bool]) `
+        "Studio vendor process binding fields must be JSON booleans."
+    $expectedDownstreamBinding = [bool]$start.boundToDownstreamAgent
+    Assert-JsonBooleanProperties $start ([ordered]@{
+            boundToDownstreamAgent = $expectedDownstreamBinding
+            boundToEntryAgent = -not $expectedDownstreamBinding
+        }) "Studio vendor process start"
     Assert-Condition ($start.boundToDownstreamAgent -ne $start.boundToEntryAgent) `
         "Studio vendor process must be bound to exactly one staged Agent."
 }
@@ -416,6 +481,9 @@ foreach ($artifact in $artifacts) {
     Assert-ExactProperties $artifact @(
         "name", "storageKeySha256", "sizeBytes", "sha256", "mediaType",
         "hashRecomputedFromCoordinatorDownload") "Studio artifact evidence"
+    Assert-JsonBooleanProperties $artifact ([ordered]@{
+            hashRecomputedFromCoordinatorDownload = $true
+        }) "Studio artifact evidence"
     Assert-Condition ($requiredArtifactNames -ccontains $artifact.name `
             -and $artifact.hashRecomputedFromCoordinatorDownload -eq $true) `
         "Studio artifact was not recomputed from a Coordinator download."
@@ -431,6 +499,9 @@ Assert-Condition ($apiProofs.Count -eq 13) "Studio evidence must contain 13 API 
 foreach ($proof in $apiProofs) {
     Assert-ExactProperties $proof @("name", "sizeBytes", "sha256", "validatedFromPrivateResponseBytes") `
         "Studio API response proof"
+    Assert-JsonBooleanProperties $proof ([ordered]@{
+            validatedFromPrivateResponseBytes = $true
+        }) "Studio API response proof"
     Assert-Sha256 $proof.sha256 "Studio API response proof"
     Assert-PositiveInteger $proof.sizeBytes "Studio API response proof size"
     Assert-Condition ($proof.validatedFromPrivateResponseBytes -eq $true) `
@@ -495,6 +566,10 @@ Assert-ExactProperties $recovery @(
     "replayObservationWindowMilliseconds", "operationCountAfterReplayWindow",
     "stationJobCountAfterReplayWindow", "stationJobResultCountAfterReplayWindow",
     "auditEntryPresent", "noAutomaticReplay") "Studio recovery evidence"
+Assert-JsonBooleanProperties $recovery ([ordered]@{
+        auditEntryPresent = $true
+        noAutomaticReplay = $true
+    }) "Studio recovery evidence"
 Assert-Condition ($recovery.operationCount -eq 1 `
         -and $recovery.operationCountAfterReplayWindow -eq 1 `
         -and $recovery.rootInvocationCountBeforeReconcile -eq $recovery.rootInvocationCountAfterReconcile `
@@ -550,6 +625,14 @@ Assert-ExactProperties $cleanup @(
     "privateStudioHandoffDeleted", "privateStudioProjectDeleted", "privateAgentHarnessDeleted",
     "postgresSchemaDropped", "rabbitQueueCleanupAttempted", "rabbitQueueCleanupSucceeded",
     "rabbitQueueCleanupCount") "Studio cleanup evidence"
+Assert-JsonBooleanProperties $cleanup ([ordered]@{
+        privateStudioHandoffDeleted = $true
+        privateStudioProjectDeleted = $true
+        privateAgentHarnessDeleted = $true
+        postgresSchemaDropped = $true
+        rabbitQueueCleanupAttempted = $true
+        rabbitQueueCleanupSucceeded = $true
+    }) "Studio cleanup evidence"
 Assert-Condition ($cleanup.privateStudioHandoffDeleted -eq $true `
         -and $cleanup.privateStudioProjectDeleted -eq $true `
         -and $cleanup.privateAgentHarnessDeleted -eq $true `

@@ -73,7 +73,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName])
                 : null;
             contentReaderSid = appContainerPolicy is null
-                ? hostIdentity.Sid
+                ? hostIdentity.ServiceSid
                 : WindowsAppContainerIdentity.EnsureCapabilitySid(
                     WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
             resourceRootPath = ResolveFrozenPath(
@@ -115,7 +115,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     resourceRootPath,
                     immutableInventory,
                     contentReaderSid,
-                    hostIdentity.Sid,
+                    hostIdentity.ServiceSid,
                     cancellationToken)
                 .ConfigureAwait(false);
             executablePath = ResolveFrozenPath(
@@ -195,7 +195,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                         resourceRootPath,
                         immutableInventory,
                         contentReaderSid,
-                        hostIdentity.Sid,
+                        hostIdentity.ServiceSid,
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -680,14 +680,35 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         EffectiveExternalProgramPolicy policy)
     {
-        try
+        return InspectOutputDirectoryWithBoundedSnapshotRetries(
+            () => InspectOutputDirectory(outputDirectory, policy));
+    }
+
+    internal static string? InspectOutputDirectoryWithBoundedSnapshotRetries(
+        Func<string?> inspectSnapshot)
+    {
+        ArgumentNullException.ThrowIfNull(inspectSnapshot);
+
+        const int maximumSnapshotAttempts = 4;
+        for (var attempt = 1; attempt <= maximumSnapshotAttempts; attempt++)
         {
-            return InspectOutputDirectory(outputDirectory, policy);
+            try
+            {
+                return inspectSnapshot();
+            }
+            catch (Exception exception) when (
+                attempt < maximumSnapshotAttempts
+                && exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                Thread.Yield();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return $"output workspace could not be inspected: {exception.Message}";
+            }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return $"output workspace could not be inspected: {exception.Message}";
-        }
+
+        throw new InvalidOperationException("The bounded output workspace inspection did not terminate.");
     }
 
     private static string? InspectOutputDirectory(
@@ -875,7 +896,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string resourceRootPath,
         IReadOnlyCollection<ImmutableContentFile> inventory,
         string contentReaderSid,
-        string contentHostReaderSid,
+        string stationServiceSid,
         CancellationToken cancellationToken)
     {
         if (_options.RequireImmutableContentProtection)
@@ -883,7 +904,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             await _contentProtector.VerifyAsync(
                 resourceRootPath,
                 inventory,
-                new ImmutableContentProtectionPolicy(contentReaderSid, contentHostReaderSid),
+                new ImmutableContentProtectionPolicy(contentReaderSid, stationServiceSid),
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -1038,6 +1059,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             || request.ResourceRootRelativePath.Contains('\\')
             || request.ResourceRootRelativePath.Split('/').Any(segment => segment is "" or "." or "..")
             || !IsCanonical(request.EntryPointRelativePath)
+            || !request.EntryPointRelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
             || request.EntryPointSizeBytes < 0
             || !IsLowercaseSha256(request.EntryPointSha256)
             || request.Files is null

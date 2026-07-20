@@ -417,7 +417,7 @@ foreach ($root in @($resolvedStagedWorkRoot, $resolvedProductionRoot, $resolvedE
 }
 Assert-NoReparseTree $resolvedStagedWorkRoot
 
-$requestedSuffix = $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX
+$requestedSuffix = $env:OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE
 $suffix = if ([string]::IsNullOrWhiteSpace($requestedSuffix)) {
     [System.Guid]::NewGuid().ToString('N')
 }
@@ -425,7 +425,7 @@ else {
     $requestedSuffix
 }
 if ($suffix -cnotmatch '^[0-9a-f]{32}$') {
-    throw "OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX must contain exactly 32 lowercase hexadecimal characters."
+    throw "OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE must contain exactly 32 lowercase hexadecimal characters."
 }
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $privateGateBase = Join-Path $tempRoot 'openlineops-studio-two-agent-gates'
@@ -469,7 +469,7 @@ $gateVariables = @(
     'OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH',
     'OPENLINEOPS_STUDIO_TWO_AGENT_FORMAL_GATE',
     'OPENLINEOPS_STUDIO_TWO_AGENT_CLEANUP_GATE',
-    'OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX',
+    'OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE',
     'OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE',
     'OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH',
     'OPENLINEOPS_STUDIO_TWO_AGENT_EVIDENCE_PATH',
@@ -525,7 +525,7 @@ try {
     $evidencePath = Join-Path $resolvedEvidenceRoot 'evidence-manifest.json'
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_FORMAL_GATE = 'true'
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_CLEANUP_GATE = $null
-    $env:OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX = $suffix
+    $env:OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE = $suffix
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $null
     $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $cleanupManifestPath
     $env:OPENLINEOPS_STUDIO_TWO_AGENT_EVIDENCE_PATH = $evidencePath

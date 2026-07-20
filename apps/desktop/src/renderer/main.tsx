@@ -543,6 +543,14 @@ function App(): React.ReactElement {
     documentIds: ReadonlySet<string> | null = null,
     cancel?: () => void
   ) => {
+    const inFlightDocuments = documentRegistry.entries().filter(([id, document]) =>
+      (documentIds === null || documentIds.has(id))
+      && (document.busy || document.saving));
+    if (inFlightDocuments.length > 0) {
+      setMessage(`Wait for the in-progress editor operation to finish: ${inFlightDocuments.map(([, document]) => document.title).join(', ')}`);
+      cancel?.();
+      return;
+    }
     if (documentRegistry.dirtyEntries(documentIds ?? undefined).length === 0) {
       proceed();
       return;
@@ -1022,6 +1030,7 @@ function App(): React.ReactElement {
       return (
         <React.Suspense fallback={<WorkbenchLoading label="program resources" />}>
           <ExternalProgramWorkbench
+            key={`${activeWorkspace?.project.projectId ?? 'no-project'}:${activeApplication?.applicationId ?? 'no-application'}`}
             activeWorkspace={activeWorkspace}
             activeApplicationId={activeApplication?.applicationId ?? null}
             isBackendHealthy={backendStatus?.health === 'Healthy'}

@@ -264,7 +264,10 @@ function Assert-ExactMarker {
         "schemaVersion",
         "scope",
         "serviceName",
-        "accountName",
+        "serviceAccountName",
+        "serviceAccountSid",
+        "serviceSid",
+        "serviceSidType",
         "testHostProcessId",
         "agentProcessId",
         "executablePath",
@@ -274,7 +277,10 @@ function Assert-ExactMarker {
         -or $Marker.schemaVersion -ne 1 `
         -or $Marker.scope -cne $Scope `
         -or $Marker.serviceName -cne $Entry.serviceName `
-        -or $Marker.accountName -cne $Entry.accountName `
+        -or $Marker.serviceAccountName -cne $Entry.serviceAccountName `
+        -or $Marker.serviceAccountSid -cne $Entry.serviceAccountSid `
+        -or $Marker.serviceSid -cne $Entry.serviceSid `
+        -or $Marker.serviceSidType -cne $Entry.serviceSidType `
         -or $Marker.testHostProcessId -isnot [int] `
         -or $Marker.testHostProcessId -le 0 `
         -or $Marker.agentProcessId -isnot [int] `
@@ -288,9 +294,7 @@ function Assert-ExactMarker {
 function Assert-RunScopeGone {
     param(
         [Parameter(Mandatory = $true)] $Entry,
-        [Parameter(Mandatory = $true)][int] $AgentProcessId,
-        [Parameter(Mandatory = $true)][string] $AccountSid,
-        [string] $ProfilePath
+        [Parameter(Mandatory = $true)][int] $AgentProcessId
     )
 
     Wait-ProcessAbsent -ProcessId $AgentProcessId -TimeoutSeconds 15
@@ -298,30 +302,8 @@ function Assert-RunScopeGone {
         -or (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$($Entry.serviceName)") `
         -or (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\$($Entry.serviceName)") `
         -or [System.Diagnostics.EventLog]::SourceExists([string]$Entry.serviceName) `
-        -or $null -ne (Get-LocalUser -Name $Entry.accountName -ErrorAction SilentlyContinue) `
-        -or (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$AccountSid") `
-        -or (-not [string]::IsNullOrWhiteSpace($ProfilePath) -and (Test-Path -LiteralPath $ProfilePath)) `
         -or (Test-Path -LiteralPath $Entry.ownedRoot)) {
-        throw "External-abort cleanup left a process, service, registry key, EventLog source, account, profile, or owned root."
-    }
-
-    $rightsPath = Join-Path `
-        ([System.IO.Path]::GetDirectoryName($ReadyPath)) `
-        "rights-$Scope-$([System.Guid]::NewGuid().ToString('N')).inf"
-    try {
-        $seceditOutput = @(& secedit.exe /export /cfg $rightsPath /areas USER_RIGHTS /quiet 2>&1)
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $rightsPath -PathType Leaf)) {
-            throw "Could not export Local Security Policy for external-abort cleanup verification: $($seceditOutput -join ' ')"
-        }
-        $rightsText = Get-Content -LiteralPath $rightsPath -Raw
-        if ($rightsText -match [regex]::Escape($AccountSid)) {
-            throw "External-abort cleanup left the service account SID in Local Security Policy."
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $rightsPath) {
-            Remove-Item -LiteralPath $rightsPath -Force
-        }
+        throw "External-abort cleanup left a process, service, registry key, EventLog source, or owned root."
     }
 }
 
@@ -452,21 +434,14 @@ try {
         throw "External-abort marker must identify the child testhost, not the dotnet driver process."
     }
 
-    $account = Get-LocalUser -Name $entry.accountName -ErrorAction Stop
-    $accountSid = $account.SID.Value
     Assert-PrivateFileAcl $resolvedManifestPath
     $updatedManifest = Get-Content -LiteralPath $resolvedManifestPath -Raw | ConvertFrom-Json
     if ($updatedManifest.entries.Count -ne 1 `
-        -or $updatedManifest.entries[0].accountSid -cne $accountSid) {
-        throw "External-abort cleanup manifest did not atomically bind the created account SID."
-    }
-    $profileRegistryPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$accountSid"
-    $profilePath = if (Test-Path -LiteralPath $profileRegistryPath) {
-        [System.Environment]::ExpandEnvironmentVariables(
-            [string](Get-ItemProperty -LiteralPath $profileRegistryPath -Name ProfileImagePath).ProfileImagePath)
-    }
-    else {
-        $null
+        -or $updatedManifest.entries[0].serviceAccountName -cne "NT AUTHORITY\LocalService" `
+        -or $updatedManifest.entries[0].serviceAccountSid -cne "S-1-5-19" `
+        -or $updatedManifest.entries[0].serviceSid -cne $entry.serviceSid `
+        -or $updatedManifest.entries[0].serviceSidType -cne "Restricted") {
+        throw "External-abort cleanup manifest lost its exact LocalService and restricted service-SID binding."
     }
     $service = Get-CimInstance `
         -ClassName Win32_Service `
@@ -520,9 +495,7 @@ try {
         -CleanupTimeoutSeconds $CleanupTimeoutSeconds
     Assert-RunScopeGone `
         -Entry $entry `
-        -AgentProcessId ([int]$marker.agentProcessId) `
-        -AccountSid $accountSid `
-        -ProfilePath $profilePath
+        -AgentProcessId ([int]$marker.agentProcessId)
     & $CleanupScript `
         -Kind rabbitmq `
         -Scope $Scope `

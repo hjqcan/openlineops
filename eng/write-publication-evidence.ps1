@@ -265,6 +265,62 @@ function Test-ExactJsonProperties {
     return $true
 }
 
+function Test-ExactTrueBooleanJsonObject {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()] $Value,
+        [Parameter(Mandatory = $true)][string] $Description,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedProperties
+    )
+
+    if ($null -eq $Value) {
+        $InternalFailures.Add("$Description must be a JSON object.") | Out-Null
+        return $false
+    }
+
+    if (-not (Test-ExactJsonProperties `
+            -Value $Value `
+            -Description $Description `
+            -ExpectedProperties $ExpectedProperties)) {
+        return $false
+    }
+
+    $valid = $true
+    foreach ($property in $ExpectedProperties) {
+        if ($Value.$property -isnot [bool] -or $Value.$property -ne $true) {
+            $InternalFailures.Add(
+                "$Description property '$property' must be the JSON boolean true.") | Out-Null
+            $valid = $false
+        }
+    }
+
+    return $valid
+}
+
+function Test-ExpectedJsonBooleanProperties {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()] $Value,
+        [Parameter(Mandatory = $true)][string] $Description,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Expected
+    )
+
+    if ($null -eq $Value) {
+        $InternalFailures.Add("$Description must be a JSON object.") | Out-Null
+        return $false
+    }
+
+    $valid = $true
+    foreach ($property in $Expected.Keys) {
+        if ($Value.$property -isnot [bool] `
+            -or $Value.$property -ne $Expected[$property]) {
+            $InternalFailures.Add(
+                "$Description property '$property' must be the JSON boolean $($Expected[$property].ToString().ToLowerInvariant()).") | Out-Null
+            $valid = $false
+        }
+    }
+
+    return $valid
+}
+
 function Get-RepoRelativePath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -489,6 +545,17 @@ $manifestPath = Join-Path $resolvedArtifactsRoot "release-manifest.json"
 $provenancePath = Join-Path $resolvedArtifactsRoot "release-provenance.json"
 
 $stagedAgentEvidencePath = Join-Path $resolvedStagedAgentEvidenceRoot "evidence.json"
+$immutableContentCacheFields = @(
+    "packagedProvisionCommandVerified",
+    "runningServiceAdministrationRejected",
+    "serviceTokenReadExecuteVerified",
+    "sealedMutationAccessDenied",
+    "deepAncestorMutationAccessDenied",
+    "preSealRecoveryVerified",
+    "cleanupCrashResumeVerified",
+    "committedAdminRemovalVerified",
+    "packagedRemovalCommandVerified",
+    "cacheNamespaceRemoved")
 try {
     & (Join-Path $PSScriptRoot "verify-staged-agent-evidence.ps1") `
         -EvidenceRoot $resolvedStagedAgentEvidenceRoot `
@@ -503,31 +570,95 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
     try {
         $stagedAgentDocument = Get-Content -LiteralPath $stagedAgentEvidencePath -Raw |
             ConvertFrom-Json
+        $immutableContentCacheValid = Test-ExactTrueBooleanJsonObject `
+            -Value $stagedAgentDocument.rabbitMqTransportCoverage.immutableContentCache `
+            -Description "Staged Agent publication immutable content-cache evidence" `
+            -ExpectedProperties $immutableContentCacheFields
+        $stagedTransportBooleansValid = Test-ExpectedJsonBooleanProperties `
+            -Value $stagedAgentDocument.rabbitMqTransportCoverage `
+            -Description "Staged Agent publication transport evidence" `
+            -Expected ([ordered]@{
+                coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $true
+                windowsServiceLifecycleVerified = $true
+            })
+        $stagedIdentityExpectedBooleans = [ordered]@{
+            nonAdministrative = $true
+            isPrimaryToken = $true
+            isElevated = $false
+            hasRestrictions = $true
+            administratorGroupPresent = $false
+            administratorGroupEnabled = $false
+            administratorGroupDenyOnly = $false
+            serviceLogonSidPresent = $true
+            serviceLogonSidEnabled = $true
+            exactServiceSidPresent = $true
+            exactServiceSidEnabled = $true
+            exactServiceSidRestricted = $true
+            isAuthenticated = $true
+            isSystem = $false
+        }
+        $stagedInitialIdentityBooleansValid = Test-ExpectedJsonBooleanProperties `
+            -Value $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity `
+            -Description "Staged Agent publication initial identity" `
+            -Expected $stagedIdentityExpectedBooleans
+        $stagedRestartedIdentityBooleansValid = Test-ExpectedJsonBooleanProperties `
+            -Value $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity `
+            -Description "Staged Agent publication restarted identity" `
+            -Expected $stagedIdentityExpectedBooleans
+        $stagedPresenceBooleansValid = Test-ExpectedJsonBooleanProperties `
+            -Value $stagedAgentDocument.rabbitMqTransportCoverage.presence `
+            -Description "Staged Agent publication presence" `
+            -Expected ([ordered]@{
+                startedAndHeartbeatPersisted = $true
+                expiredOfflineDuringBrokerOutage = $true
+                freshOnlineAfterReconnect = $true
+            })
         if ($stagedAgentDocument.schemaVersion -ne 1 `
             -or $stagedAgentDocument.product -cne "OpenLineOps" `
             -or $stagedAgentDocument.status -cne "passed" `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.status -cne "passed" `
+            -or -not $immutableContentCacheValid `
+            -or -not $stagedTransportBooleansValid `
+            -or -not $stagedInitialIdentityBooleansValid `
+            -or -not $stagedRestartedIdentityBooleansValid `
+            -or -not $stagedPresenceBooleansValid `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.hasRestrictions -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupDenyOnly -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.principalAdministratorMembership -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceLogonSidPresent -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceLogonSidEnabled -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.exactServiceSidPresent -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.exactServiceSidEnabled -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.exactServiceSidRestricted -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isAuthenticated -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isSystem -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.identityStrategy -cne "local-service-restricted-service-sid" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceAccountName -cne "NT AUTHORITY\LocalService" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceAccountSid -cne "S-1-5-19" `
+            -or [string]$stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceSid -cnotmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$' `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.hasRestrictions -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.principalAdministratorMembership -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceLogonSidPresent -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceLogonSidEnabled -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.exactServiceSidPresent -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.exactServiceSidEnabled -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.exactServiceSidRestricted -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isAuthenticated -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isSystem -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.identityStrategy -cne "local-service-restricted-service-sid" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceAccountName -cne "NT AUTHORITY\LocalService" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceAccountSid -cne "S-1-5-19" `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceSid -cne $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceSid `
             -or [string]$stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceLifecycleVerified -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted -ne $true `
@@ -575,8 +706,15 @@ else {
         $productionClosureDocument = Get-Content `
             -LiteralPath $productionSummaries[0].FullName `
             -Raw | ConvertFrom-Json
+        $productionClosureBooleansValid = Test-ExpectedJsonBooleanProperties `
+            -Value $productionClosureDocument.packagedBinaries `
+            -Description "Packaged production closure binary evidence" `
+            -Expected ([ordered]@{
+                unchangedDuringRun = $true
+            })
         if ($productionClosureDocument.schema -cne "openlineops.production-closure-e2e" `
             -or $productionClosureDocument.status -cne "passed" `
+            -or -not $productionClosureBooleansValid `
             -or $productionClosureDocument.packagedBinaries.unchangedDuringRun -ne $true) {
             $InternalFailures.Add("Packaged production closure E2E evidence is not passed and immutable.") | Out-Null
         }

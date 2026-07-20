@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Immutable;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
@@ -23,11 +24,47 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         "OPENLINEOPS_STUDIO_TWO_AGENT_EVIDENCE_PATH";
     private const string StudioTwoAgentFormalGateVariable =
         "OPENLINEOPS_STUDIO_TWO_AGENT_FORMAL_GATE";
-    private const string StudioTwoAgentAccountSuffixVariable =
-        "OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX";
+    private const string StudioTwoAgentServiceScopeVariable =
+        "OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE";
 
     private static readonly UTF8Encoding StudioUtf8WithoutBom =
         new(encoderShouldEmitUTF8Identifier: false);
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void StudioCrossStationIpcGateAcceptsOnlyExplicitAccessDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Assert.True(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(
+            new UnauthorizedAccessException()));
+        Assert.True(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(
+            new Win32Exception(5)));
+        Assert.True(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(
+            new IOException("access denied", HResultFromWin32(5))));
+        Assert.False(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(
+            new TimeoutException("connection timeout")));
+        var pipeAbsent = new IOException("pipe absent", HResultFromWin32(2));
+        var pipeBusy = new IOException("pipe busy", HResultFromWin32(231));
+        Assert.False(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(pipeAbsent));
+        Assert.False(StudioTwoAgentExternalProcessHarness.IsExplicitAccessDenied(pipeBusy));
+        Assert.True(
+            StudioTwoAgentExternalProcessHarness.IsRetryablePipeAvailabilityFailure(pipeAbsent));
+        Assert.True(
+            StudioTwoAgentExternalProcessHarness.IsRetryablePipeAvailabilityFailure(pipeBusy));
+        Assert.False(
+            StudioTwoAgentExternalProcessHarness.IsRetryablePipeAvailabilityFailure(
+                new UnauthorizedAccessException()));
+        Assert.False(
+            StudioTwoAgentExternalProcessHarness.IsRetryablePipeAvailabilityFailure(
+                new TimeoutException("connection timeout")));
+
+        static int HResultFromWin32(int error) => unchecked(
+            (int)(0x80070000u | checked((uint)error)));
+    }
 
     internal sealed record StudioStationFixture(
         string StationSystemId,

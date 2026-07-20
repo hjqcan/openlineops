@@ -5,12 +5,11 @@ import type {
   ApplicationExtensionImportResult,
   BackendStatus,
   DesktopConfig,
-  ExternalProgramUploadFile,
+  EditorDocumentWriteOptions,
+  ExternalProgramDirectorySelectionResult,
   OpenLineOpsDesktopApi,
   SelectDirectoryOptions,
   SelectDirectoryResult,
-  SelectExternalProgramFilesOptions,
-  SelectFilesResult,
   SelectProjectFileOptions,
   TraceArtifactSaveOptions,
   TraceArtifactSaveResult
@@ -35,14 +34,29 @@ const desktopApi: OpenLineOpsDesktopApi = {
     ipcRenderer.invoke('desktop:select-project-file', options) as Promise<SelectDirectoryResult>,
   selectApplicationProjectFile: (options?: SelectProjectFileOptions) =>
     ipcRenderer.invoke('desktop:select-application-project-file', options) as Promise<SelectDirectoryResult>,
-  selectExternalProgramFiles: (options?: SelectExternalProgramFilesOptions) =>
-    ipcRenderer.invoke('desktop:select-external-program-files', options) as Promise<SelectFilesResult>,
-  uploadExternalProgram: <T = unknown,>(
-    path: string,
-    definition: unknown | null,
-    files: ExternalProgramUploadFile[],
-    headers?: Record<string, string>
-  ) => ipcRenderer.invoke('api:upload-external-program', path, definition, files, headers) as Promise<ApiResponse<T>>,
+  selectExternalProgramDirectory: (projectId: string, applicationId: string, resourceId: string) =>
+    ipcRenderer.invoke(
+      'desktop:select-external-program-directory',
+      projectId,
+      applicationId,
+      resourceId
+    ) as Promise<ExternalProgramDirectorySelectionResult>,
+  releaseExternalProgramDirectorySelection: (selectionId: string) =>
+    ipcRenderer.invoke('desktop:release-external-program-directory-selection', selectionId) as Promise<void>,
+  importExternalProgramDirectory: <T = unknown,>(
+    projectId: string,
+    applicationId: string,
+    definition: unknown,
+    selectionId: string,
+    write?: EditorDocumentWriteOptions
+  ) => ipcRenderer.invoke(
+    'api:import-external-program-directory',
+    projectId,
+    applicationId,
+    definition,
+    selectionId,
+    write
+  ) as Promise<ApiResponse<T>>,
   importApplicationExtension: <T = unknown,>(projectId: string, applicationId: string) =>
     ipcRenderer.invoke(
       'api:import-application-extension',

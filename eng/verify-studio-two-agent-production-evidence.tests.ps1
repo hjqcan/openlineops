@@ -228,10 +228,16 @@ function New-StudioEvidence {
             New-Agent "entry" "50000000-0000-0000-0000-000000000001" "60000000-0000-0000-0000-000000000001" "70000000-0000-0000-0000-000000000001" 4201 $hash1
             New-Agent "downstream" "50000000-0000-0000-0000-000000000002" "60000000-0000-0000-0000-000000000002" "70000000-0000-0000-0000-000000000002" 4202 $hash2)
         windowsIdentity = [ordered]@{
-            sharedRestrictedTestAccount = $false
-            entrySidSha256 = $hash3
-            downstreamSidSha256 = $hash4
-            distinctOsAccounts = $true
+            sharedLocalServiceAccount = $true
+            serviceAccountName = "NT AUTHORITY\LocalService"
+            serviceAccountSid = "S-1-5-19"
+            entryServiceSidSha256 = $hash3
+            downstreamServiceSidSha256 = $hash4
+            distinctRestrictedServiceSids = $true
+            entryServiceTokenConnected = $true
+            entryPipeExactAclVerified = $true
+            downstreamServiceTokenExplicitAccessDenied = $true
+            bothServicesRunningOnOriginalPids = $true
         }
         broker = [ordered]@{
             scheme = "amqp"
@@ -389,27 +395,47 @@ if (-not [string]::IsNullOrWhiteSpace($FixtureOutputRoot)) {
 $root = Reset-Fixture
 & $Verifier -EvidenceRoot $root
 
+Invoke-Mutation "Application portability proof uses a truthy string" { param($e) $e.sourceStudioClosure.applicationPortability.unchanged = "true" } "JSON boolean true"
+Invoke-Mutation "immutable Trace proof uses a truthy integer" { param($e) $e.sourceStudioClosure.immutableRunTrace.unchanged = 1 } "JSON boolean true"
+Invoke-Mutation "Coordinator restart proof uses a truthy string" { param($e) $e.coordinator.onlyApiWasRestarted = "true" } "JSON boolean true"
+Invoke-Mutation "Agent token proof uses a truthy integer" { param($e) $e.agents[0].nonAdministrativeToken = 1 } "JSON boolean true"
+Invoke-Mutation "broker TLS false proof uses numeric zero" { param($e) $e.broker.tls = 0 } "JSON boolean false"
+Invoke-Mutation "parallel proof uses a truthy string" { param($e) $e.parallelExecution.observed = "true" } "JSON boolean true"
+Invoke-Mutation "vendor no-replay proof uses a truthy integer" { param($e) $e.vendorExecution.noAutomaticReplayAfterActiveCoordinatorCrash = 1 } "JSON boolean true"
+Invoke-Mutation "vendor entry binding false proof uses numeric zero" { param($e) $e.vendorExecution.starts[0].boundToEntryAgent = 0 } "JSON boolean"
+Invoke-Mutation "artifact hash proof uses a truthy string" { param($e) $e.artifacts[0].hashRecomputedFromCoordinatorDownload = "true" } "JSON boolean true"
+Invoke-Mutation "API response proof uses a truthy integer" { param($e) $e.apiResponseProofs[0].validatedFromPrivateResponseBytes = 1 } "JSON boolean true"
+Invoke-Mutation "recovery audit proof uses a truthy string" { param($e) $e.recovery.auditEntryPresent = "true" } "JSON boolean true"
+Invoke-Mutation "cleanup proof uses a truthy integer" { param($e) $e.cleanup.privateStudioHandoffDeleted = 1 } "JSON boolean true"
 Invoke-Mutation "raw Base64 property" { param($e) $e.recovery | Add-Member rawResponseBase64 "e30=" } "forbidden|exactly"
 Invoke-Mutation "absolute path string" { param($e) $e.broker.host = "C:\private\broker" } "unsafe"
 Invoke-Mutation "embedded absolute path string" { param($e) $e.release.version = "failure at C:\private\customer-project" } "unsafe"
 Invoke-Mutation "JSON decoded UNC string" { param($e) $e.release.version = "failure at \\server\share\customer-project" } "unsafe"
 Invoke-Mutation "credential-bearing broker URI" { param($e) $e.broker.host = "amqp://user:secret@host" } "unsafe"
-Invoke-Mutation "shared Windows account" { param($e) $e.windowsIdentity.sharedRestrictedTestAccount = $true } "distinct Windows accounts"
-Invoke-Mutation "same Windows SID" { param($e) $e.windowsIdentity.downstreamSidSha256 = $e.windowsIdentity.entrySidSha256 } "distinct Windows accounts"
-Invoke-Mutation "administrative Agent token" { param($e) $e.agents[0].nonAdministrativeToken = $false } "non-administrative"
+Invoke-Mutation "LocalService account not shared" { param($e) $e.windowsIdentity.sharedLocalServiceAccount = $false } "JSON boolean true|share LocalService"
+Invoke-Mutation "wrong shared service account" { param($e) $e.windowsIdentity.serviceAccountName = "NT AUTHORITY\NetworkService" } "share LocalService"
+Invoke-Mutation "same restricted service SID" { param($e) $e.windowsIdentity.downstreamServiceSidSha256 = $e.windowsIdentity.entryServiceSidSha256 } "distinct restricted service SIDs"
+Invoke-Mutation "distinct restricted service SID proof reduced" { param($e) $e.windowsIdentity.distinctRestrictedServiceSids = $false } "JSON boolean true|distinct restricted service SIDs"
+Invoke-Mutation "entry service token did not connect" { param($e) $e.windowsIdentity.entryServiceTokenConnected = $false } "JSON boolean true"
+Invoke-Mutation "entry pipe exact ACL not verified" { param($e) $e.windowsIdentity.entryPipeExactAclVerified = $false } "JSON boolean true"
+Invoke-Mutation "downstream token was not explicitly denied" { param($e) $e.windowsIdentity.downstreamServiceTokenExplicitAccessDenied = $false } "JSON boolean true"
+Invoke-Mutation "services did not remain on original PIDs" { param($e) $e.windowsIdentity.bothServicesRunningOnOriginalPids = $false } "JSON boolean true"
+Invoke-Mutation "entry service token proof uses a truthy integer" { param($e) $e.windowsIdentity.entryServiceTokenConnected = 1 } "JSON boolean true"
+Invoke-Mutation "entry pipe ACL proof uses a truthy string" { param($e) $e.windowsIdentity.entryPipeExactAclVerified = "true" } "JSON boolean true"
+Invoke-Mutation "administrative Agent token" { param($e) $e.agents[0].nonAdministrativeToken = $false } "JSON boolean true|non-administrative"
 Invoke-Mutation "Application copy uses one Project" { param($e) $e.sourceStudioClosure.applicationPortability.targetProjectId = $e.sourceStudioClosure.applicationPortability.sourceProjectId } "two Projects"
-Invoke-Mutation "Application copy changed" { param($e) $e.sourceStudioClosure.applicationPortability.unchanged = $false } "unchanged"
+Invoke-Mutation "Application copy changed" { param($e) $e.sourceStudioClosure.applicationPortability.unchanged = $false } "JSON boolean true|unchanged"
 Invoke-Mutation "Application publish phase changed" { param($e) $e.sourceStudioClosure.applicationPortability.afterPublishTreeSha256 = "f" * 64 } "phase hashes"
 Invoke-Mutation "Coordinator start removed" { param($e) $e.coordinator.processIds = @($e.coordinator.processIds | Select-Object -First 2) } "restart evidence"
 Invoke-Mutation "Rabbit queue not drained" { param($e) $e.broker.queues[2].messages = 1 } "not drained"
-Invoke-Mutation "Rabbit cleanup failed" { param($e) $e.cleanup.rabbitQueueCleanupSucceeded = $false } "cleanup evidence"
-Invoke-Mutation "parallel execution absent" { param($e) $e.parallelExecution.observed = $false } "parallel execution"
+Invoke-Mutation "Rabbit cleanup failed" { param($e) $e.cleanup.rabbitQueueCleanupSucceeded = $false } "JSON boolean true|cleanup evidence"
+Invoke-Mutation "parallel execution absent" { param($e) $e.parallelExecution.observed = $false } "JSON boolean true|parallel execution"
 Invoke-Mutation "vendor artifact removed" { param($e) $e.artifacts = @($e.artifacts | Select-Object -First 4) } "artifact"
-Invoke-Mutation "artifact hash not recomputed" { param($e) $e.artifacts[0].hashRecomputedFromCoordinatorDownload = $false } "recomputed"
-Invoke-Mutation "API proof not validated" { param($e) $e.apiResponseProofs[0].validatedFromPrivateResponseBytes = $false } "private bytes"
+Invoke-Mutation "artifact hash not recomputed" { param($e) $e.artifacts[0].hashRecomputedFromCoordinatorDownload = $false } "JSON boolean true|recomputed"
+Invoke-Mutation "API proof not validated" { param($e) $e.apiResponseProofs[0].validatedFromPrivateResponseBytes = $false } "JSON boolean true|private bytes"
 Invoke-Mutation "final unload PostgreSQL timestamp differs" { param($e) $e.postgresFinalUnloadEvidence[0].occurredAtUtc = "2026-07-15T00:09:00Z" } "API and PostgreSQL"
 Invoke-Mutation "recovery process replay" { param($e) $e.recovery.processStartCountAfterReconcile++ } "recovery/no-replay"
-Invoke-Mutation "recovery no replay flag reduced" { param($e) $e.recovery.noAutomaticReplay = $false } "recovery/no-replay"
+Invoke-Mutation "recovery no replay flag reduced" { param($e) $e.recovery.noAutomaticReplay = $false } "JSON boolean true|recovery/no-replay"
 Invoke-Mutation "public raw command line" { param($e) $e.vendorExecution.starts[0] | Add-Member commandLine "vendor.exe --secret" } "forbidden|exactly"
 
 $root = Reset-Fixture

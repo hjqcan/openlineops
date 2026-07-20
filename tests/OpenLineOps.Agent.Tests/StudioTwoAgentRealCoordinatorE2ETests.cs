@@ -52,14 +52,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var fixture = fixtureLease.Fixture;
         await using var postgres = await StudioPostgresSchemaLease.CreateAsync(
             gate.PostgreSqlConnectionString,
-            gate.AccountSuffix,
+            gate.ServiceScope,
             cancellationToken);
         await using var agents = await StudioTwoAgentExternalProcessHarness.PrepareAsync(
             fixture,
             gate.Prerequisites.AgentBundleRoot,
             gate.Release.Agent.EntrypointSha256,
             gate.Prerequisites.BrokerUri,
-            gate.AccountSuffix,
+            gate.ServiceScope,
             cancellationToken);
 
         AssertDistinctStationBoundary(agents);
@@ -106,18 +106,25 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             coordinatorOptions,
             cancellationToken);
         await agents.StartAgentsAsync(coordinator.BaseUri, cancellationToken);
+        var materialArrivalIpcIsolation = agents.MaterialArrivalIpcIsolation;
+        Assert.True(materialArrivalIpcIsolation.EntryServiceTokenConnected);
+        Assert.True(materialArrivalIpcIsolation.EntryPipeExactAclVerified);
+        Assert.True(materialArrivalIpcIsolation.DownstreamServiceTokenExplicitAccessDenied);
+        Assert.True(materialArrivalIpcIsolation.BothServicesRunningOnOriginalPids);
         var entryAgentPid = agents.EntryAgentProcessId;
         var downstreamAgentPid = agents.DownstreamAgentProcessId;
         Assert.NotEqual(entryAgentPid, downstreamAgentPid);
         var entryAgentNonAdministrative = agents.EntryAgentNonAdministrative;
         var downstreamAgentNonAdministrative = agents.DownstreamAgentNonAdministrative;
-        var sharedWindowsIdentity = string.Equals(
-            agents.EntryAgentWindowsSid,
-            agents.DownstreamAgentWindowsSid,
-            StringComparison.Ordinal);
+        var serviceAccountName = agents.ServiceAccountName;
+        var serviceAccountSid = agents.ServiceAccountSid;
+        var entryServiceSid = agents.EntryAgentServiceSid;
+        var downstreamServiceSid = agents.DownstreamAgentServiceSid;
         Assert.True(entryAgentNonAdministrative);
         Assert.True(downstreamAgentNonAdministrative);
-        Assert.False(sharedWindowsIdentity);
+        Assert.Equal(RestrictedAgentIdentity.LocalServiceAccountName, serviceAccountName);
+        Assert.Equal(RestrictedAgentIdentity.LocalServiceAccountSid, serviceAccountSid);
+        Assert.NotEqual(entryServiceSid, downstreamServiceSid);
 
         var clock = new StudioLogicalClock();
         using var operatorClient = coordinator.CreateOperatorClient();
@@ -573,9 +580,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string.Equals(credential.ActorId, agents.DownstreamAgent.AgentId, StringComparison.Ordinal))
             .TokenSha256;
         Assert.NotEqual(entryTokenHash, downstreamTokenHash);
-        var entryWindowsIdentitySidSha256 = StudioSha256Text(agents.EntryAgentWindowsSid);
-        var downstreamWindowsIdentitySidSha256 = StudioSha256Text(
-            agents.DownstreamAgentWindowsSid);
+        var entryServiceSidSha256 = StudioSha256Text(entryServiceSid);
+        var downstreamServiceSidSha256 = StudioSha256Text(downstreamServiceSid);
         var queueStateWithConsumers = await agents.ReadQueueStateAsync();
         Assert.All(queueStateWithConsumers, queue => Assert.Equal(0U, queue.Value.Messages));
         Assert.Equal(2, queueStateWithConsumers.Count(queue => queue.Value.Consumers == 1));
@@ -698,11 +704,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             agents.DownstreamAgent,
             entryTokenHash,
             downstreamTokenHash,
-            entryWindowsIdentitySidSha256,
-            downstreamWindowsIdentitySidSha256,
+            serviceAccountName,
+            serviceAccountSid,
+            entryServiceSidSha256,
+            downstreamServiceSidSha256,
+            materialArrivalIpcIsolation,
             entryAgentNonAdministrative,
             downstreamAgentNonAdministrative,
-            sharedWindowsIdentity,
             onlyApiWasRestarted,
             persistentStateRestored,
             runABeforeRestartSha256,
@@ -746,13 +754,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 $"{StudioTwoAgentCleanupGateVariable} must be exactly 'true'.");
         }
 
-        var suffix = RequiredText(
-            Environment.GetEnvironmentVariable(StudioTwoAgentAccountSuffixVariable),
-            StudioTwoAgentAccountSuffixVariable);
-        if (suffix.Length != 32 || suffix.Any(static character =>
+        var serviceScope = RequiredText(
+            Environment.GetEnvironmentVariable(StudioTwoAgentServiceScopeVariable),
+            StudioTwoAgentServiceScopeVariable);
+        if (serviceScope.Length != 32 || serviceScope.Any(static character =>
                 character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
         {
-            throw new InvalidDataException("Studio cleanup suffix is invalid.");
+            throw new InvalidDataException("Studio cleanup service scope is invalid.");
         }
 
         var handoffPath = RequiredText(
@@ -776,8 +784,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var fixture = fixtureLease.Fixture;
         var endpoints = new[]
         {
-            (AgentId: $"agent.studio.entry.{suffix}", fixture.EntryStation.StationId),
-            (AgentId: $"agent.studio.downstream.{suffix}", fixture.DownstreamStation.StationId)
+            (AgentId: $"agent.studio.entry.{serviceScope}", fixture.EntryStation.StationId),
+            (AgentId: $"agent.studio.downstream.{serviceScope}", fixture.DownstreamStation.StationId)
         };
         var queues = endpoints.SelectMany(endpoint => new[]
             {
@@ -795,12 +803,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     endpoint.StationId,
                     "job-cancel")
             })
-            .Append($"openlineops.coordinator.coordinator-studio-{suffix}.station-results")
+            .Append($"openlineops.coordinator.coordinator-studio-{serviceScope}.station-results")
             .ToArray();
         var factory = new ConnectionFactory
         {
             Uri = broker,
-            ClientProvidedName = $"openlineops-studio-cleanup-{suffix}",
+            ClientProvidedName = $"openlineops-studio-cleanup-{serviceScope}",
             AutomaticRecoveryEnabled = false,
             TopologyRecoveryEnabled = false,
             RequestedConnectionTimeout = TimeSpan.FromSeconds(5),
@@ -839,7 +847,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         await postgres.OpenAsync(cancellationToken);
         await using var command = postgres.CreateCommand();
         command.CommandTimeout = 10;
-        command.CommandText = $"DROP SCHEMA IF EXISTS \"olo_studio_{suffix}\" CASCADE;";
+        command.CommandText = $"DROP SCHEMA IF EXISTS \"olo_studio_{serviceScope}\" CASCADE;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         NpgsqlConnection.ClearPool(postgres);
     }
@@ -848,8 +856,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     {
         var formalGate = Environment.GetEnvironmentVariable(
             StudioTwoAgentFormalGateVariable);
-        var accountSuffix = Environment.GetEnvironmentVariable(
-            StudioTwoAgentAccountSuffixVariable);
+        var serviceScope = Environment.GetEnvironmentVariable(
+            StudioTwoAgentServiceScopeVariable);
         var handoff = Environment.GetEnvironmentVariable(ProductionClosureHandoffVariable);
         var postgres = Environment.GetEnvironmentVariable(PostgresConnectionStringVariable);
         var evidence = Environment.GetEnvironmentVariable(StudioTwoAgentEvidenceVariable);
@@ -859,7 +867,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             && postgres is null
             && evidence is null
             && releaseManifest is null
-            && accountSuffix is null)
+            && serviceScope is null)
         {
             return null;
         }
@@ -870,15 +878,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 $"{StudioTwoAgentFormalGateVariable} must be exactly 'true' whenever the formal two-Agent gate is invoked.");
         }
 
-        var canonicalAccountSuffix = RequiredText(
-            accountSuffix,
-            StudioTwoAgentAccountSuffixVariable);
-        if (canonicalAccountSuffix.Length != 32
-            || canonicalAccountSuffix.Any(static character =>
+        var canonicalServiceScope = RequiredText(
+            serviceScope,
+            StudioTwoAgentServiceScopeVariable);
+        if (canonicalServiceScope.Length != 32
+            || canonicalServiceScope.Any(static character =>
                 character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
         {
             throw new InvalidDataException(
-                $"{StudioTwoAgentAccountSuffixVariable} must be 32 lowercase hexadecimal characters.");
+                $"{StudioTwoAgentServiceScopeVariable} must be 32 lowercase hexadecimal characters.");
         }
 
         var prerequisites = ResolvePrerequisites()
@@ -936,7 +944,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             handoffPath,
             RequiredText(postgres, PostgresConnectionStringVariable),
             evidencePath,
-            canonicalAccountSuffix);
+            canonicalServiceScope);
     }
 
     [SupportedOSPlatform("windows")]
@@ -1976,11 +1984,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         StudioAgentEndpoint downstreamAgent,
         string entryTokenHash,
         string downstreamTokenHash,
-        string entryWindowsIdentitySidSha256,
-        string downstreamWindowsIdentitySidSha256,
+        string serviceAccountName,
+        string serviceAccountSid,
+        string entryServiceSidSha256,
+        string downstreamServiceSidSha256,
+        StudioMaterialArrivalIpcIsolationEvidence materialArrivalIpcIsolation,
         bool entryAgentNonAdministrative,
         bool downstreamAgentNonAdministrative,
-        bool sharedWindowsIdentity,
         bool onlyApiWasRestarted,
         bool persistentStateRestored,
         string runBeforeRestartSha256,
@@ -2127,10 +2137,23 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             },
             windowsIdentity = new
             {
-                sharedRestrictedTestAccount = sharedWindowsIdentity,
-                entrySidSha256 = entryWindowsIdentitySidSha256,
-                downstreamSidSha256 = downstreamWindowsIdentitySidSha256,
-                distinctOsAccounts = !sharedWindowsIdentity
+                sharedLocalServiceAccount = true,
+                serviceAccountName,
+                serviceAccountSid,
+                entryServiceSidSha256,
+                downstreamServiceSidSha256,
+                distinctRestrictedServiceSids = !string.Equals(
+                    entryServiceSidSha256,
+                    downstreamServiceSidSha256,
+                    StringComparison.Ordinal),
+                entryServiceTokenConnected =
+                    materialArrivalIpcIsolation.EntryServiceTokenConnected,
+                entryPipeExactAclVerified =
+                    materialArrivalIpcIsolation.EntryPipeExactAclVerified,
+                downstreamServiceTokenExplicitAccessDenied =
+                    materialArrivalIpcIsolation.DownstreamServiceTokenExplicitAccessDenied,
+                bothServicesRunningOnOriginalPids =
+                    materialArrivalIpcIsolation.BothServicesRunningOnOriginalPids
             },
             broker = new
             {
@@ -2339,7 +2362,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string HandoffPath,
         string PostgreSqlConnectionString,
         string EvidenceManifestPath,
-        string AccountSuffix);
+        string ServiceScope);
 
     private sealed record StudioRunIdentity(Guid UnitId, Guid RunId, string IdentityValue);
 
@@ -2478,7 +2501,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public static async Task<StudioPostgresSchemaLease> CreateAsync(
             string baseConnectionString,
-            string accountSuffix,
+            string serviceScope,
             CancellationToken cancellationToken)
         {
             var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString)
@@ -2486,7 +2509,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 SearchPath = string.Empty,
                 ApplicationName = "OpenLineOps.StudioTwoAgent.SchemaAdmin"
             };
-            var schemaName = $"olo_studio_{accountSuffix}";
+            var schemaName = $"olo_studio_{serviceScope}";
             await using (var connection = new NpgsqlConnection(adminBuilder.ConnectionString))
             {
                 await connection.OpenAsync(cancellationToken);

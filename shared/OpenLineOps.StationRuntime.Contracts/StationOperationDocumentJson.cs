@@ -10,6 +10,7 @@ public static class StationOperationDocumentJson
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true,
         Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
     };
 
@@ -63,6 +64,9 @@ public static class StationOperationDocumentJson
         ArgumentNullException.ThrowIfNull(request.ResourceFenceAuthority);
         RequirePipeName(request.ResourceFenceAuthority.PipeName);
         RequireSha256(request.ResourceFenceAuthority.AccessToken, nameof(request.ResourceFenceAuthority.AccessToken));
+        RequireWindowsSid(
+            request.ResourceFenceAuthority.AuthorizedPrincipalSid,
+            nameof(request.ResourceFenceAuthority.AuthorizedPrincipalSid));
         if (request.OperationAttempt <= 0)
         {
             throw new InvalidDataException("Operation attempt must be positive.");
@@ -417,6 +421,43 @@ public static class StationOperationDocumentJson
         if (value.Any(character => !char.IsAsciiLetter(character)))
         {
             throw new InvalidDataException($"{parameterName} must contain only ASCII letters.");
+        }
+    }
+
+    private static void RequireWindowsSid(string value, string parameterName)
+    {
+        RequireCanonical(value, parameterName, 184);
+        var parts = value.Split('-');
+        if (parts.Length is < 4 or > 18
+            || !string.Equals(parts[0], "S", StringComparison.Ordinal)
+            || !string.Equals(parts[1], "1", StringComparison.Ordinal)
+            || !ulong.TryParse(
+                parts[2],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var authority)
+            || !string.Equals(
+                authority.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                parts[2],
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"{parameterName} must be a canonical Windows SID.");
+        }
+
+        for (var index = 3; index < parts.Length; index++)
+        {
+            if (!uint.TryParse(
+                    parts[index],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var subAuthority)
+                || !string.Equals(
+                    subAuthority.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    parts[index],
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"{parameterName} must be a canonical Windows SID.");
+            }
         }
     }
 

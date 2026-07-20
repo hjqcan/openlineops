@@ -131,6 +131,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-release-staging-security.ps1
 
+      - name: Verify Station Agent content-cache provisioning contract
+        shell: powershell
+        run: ./eng/verify-station-agent-content-cache-contract.ps1
+
       - name: Verify open-source metadata
         shell: powershell
         run: ./eng/verify-open-source-metadata.ps1
@@ -196,6 +200,10 @@ jobs:
       - name: Test Application extension import boundary
         working-directory: apps/desktop
         run: npm run test:extension-import-security
+
+      - name: Test external program directory import boundary
+        working-directory: apps/desktop
+        run: npm run test:external-program-directory-import
 
       - name: Test verified Trace artifact save
         working-directory: apps/desktop
@@ -409,10 +417,12 @@ jobs:
           $rabbitScope = [System.Guid]::NewGuid().ToString("N")
           $externalAbortScope = [System.Guid]::NewGuid().ToString("N")
           $studioScope = [System.Guid]::NewGuid().ToString("N")
+          $runnerScope = [System.Guid]::NewGuid().ToString("N")
           $rabbitManifest = Join-Path $cleanupRoot "rabbitmq-$rabbitScope.json"
           $externalAbortManifest = Join-Path $cleanupRoot "rabbitmq-$externalAbortScope.json"
           $externalAbortReady = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.json"
           $studioManifest = Join-Path $cleanupRoot "studio-two-agent-$studioScope.json"
+          $runnerManifest = Join-Path $cleanupRoot "runner-$runnerScope.json"
           "OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=$rabbitScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=$rabbitManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -420,6 +430,8 @@ jobs:
           "OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=$externalAbortReady" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=$studioScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=$studioManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE=$runnerScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH=$runnerManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run staged Agent bundle E2E
         shell: powershell
@@ -467,7 +479,7 @@ jobs:
         shell: powershell
         timeout-minutes: 35
         env:
-          OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX: ${{ env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE }}
+          OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE }}
           OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
@@ -502,6 +514,9 @@ jobs:
       - name: Run staged Runner production closure
         shell: powershell
         timeout-minutes: 15
+        env:
+          OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
             throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
@@ -511,6 +526,14 @@ jobs:
           }
 
           ./eng/verify-runner-staged-agent-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup Runner staged-Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind runner -Scope $env:OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
 
       - name: Verify sanitized Runner staged-Agent evidence
         id: runner_staged_agent_evidence
@@ -595,6 +618,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.301
+
+      - name: Run Linux station package source-boundary security gates
+        run: dotnet test tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --filter FullyQualifiedName~OpenLineOps.Projects.Tests.StationPackageBuilderSecurityTests --verbosity minimal
 
       - name: Run real PostgreSQL and RabbitMQ integration gates
         run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal --logger "trx;LogFileName=production-integration.trx" --results-directory output/production-integration-evidence

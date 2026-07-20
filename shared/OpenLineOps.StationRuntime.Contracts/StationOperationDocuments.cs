@@ -63,7 +63,8 @@ public sealed record StationOperationResourceFence(
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record StationResourceFenceAuthorityDescriptor(
     string PipeName,
-    string AccessToken);
+    string AccessToken,
+    string AuthorizedPrincipalSid);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record StationResourceFenceValidationRequest(

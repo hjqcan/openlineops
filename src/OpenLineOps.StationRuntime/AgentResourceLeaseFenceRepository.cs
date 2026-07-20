@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -8,6 +9,8 @@ namespace OpenLineOps.StationRuntime;
 
 internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseRepository
 {
+    private static readonly TimeSpan AuthorityExchangeTimeout = TimeSpan.FromSeconds(5);
+
     private readonly StationOperationRequestDocument _request;
     private readonly Dictionary<ResourceRequirement, StationOperationResourceFence> _expected;
 
@@ -56,9 +59,21 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
             _request.ResourceFenceAuthority.PipeName,
             PipeDirection.InOut,
             PipeOptions.Asynchronous);
+        using var authorityDeadline =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        authorityDeadline.CancelAfter(AuthorityExchangeTimeout);
         try
         {
-            await pipe.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            await pipe.ConnectAsync(authorityDeadline.Token).ConfigureAwait(false);
+            if (!OperatingSystem.IsWindows())
+            {
+                return ResourceLeaseFenceValidationResult.Reject(
+                    "Agent resource fence authority requires a Windows identity-bound named pipe.");
+            }
+
+            WindowsIdentityBoundNamedPipe.Verify(
+                pipe,
+                _request.ResourceFenceAuthority.AuthorizedPrincipalSid);
             var authorityRequest = new StationResourceFenceValidationRequest(
                 StationOperationDocumentContract.ResourceFenceValidationRequestSchema,
                 _request.ResourceFenceAuthority.AccessToken,
@@ -77,12 +92,17 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
             await StationResourceFenceAuthorityWire.WriteAsync(
                     pipe,
                     authorityRequest,
-                    cancellationToken)
+                    authorityDeadline.Token)
                 .ConfigureAwait(false);
             var response = await StationResourceFenceAuthorityWire
-                .ReadAsync<StationResourceFenceValidationResponse>(pipe, cancellationToken)
+                .ReadAsync<StationResourceFenceValidationResponse>(
+                    pipe,
+                    authorityDeadline.Token)
                 .ConfigureAwait(false);
             StationOperationDocumentJson.Validate(response);
+            await StationResourceFenceAuthorityWire
+                .WriteResponseReceiptAsync(pipe, authorityDeadline.Token)
+                .ConfigureAwait(false);
             return response.Accepted
                 ? ResourceLeaseFenceValidationResult.Accept()
                 : ResourceLeaseFenceValidationResult.Reject(response.RejectionReason!);
@@ -94,6 +114,13 @@ internal sealed class AgentResourceLeaseFenceRepository : IResourceLeaseReposito
         {
             return ResourceLeaseFenceValidationResult.Reject(
                 $"Agent resource fence authority is unavailable: {exception.Message}");
+        }
+        catch (OperationCanceledException) when (
+            authorityDeadline.IsCancellationRequested
+            && !cancellationToken.IsCancellationRequested)
+        {
+            return ResourceLeaseFenceValidationResult.Reject(
+                $"Agent resource fence authority did not complete within {AuthorityExchangeTimeout}.");
         }
     }
 

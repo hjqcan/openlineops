@@ -364,6 +364,14 @@ function Assert-AgentBundleConfiguration {
     }
 
     $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    $openLineOpsConfiguration = $configuration.OpenLineOps
+    $openLineOpsConfigurationProperties = @(
+        $openLineOpsConfiguration.PSObject.Properties.Name)
+    if (-not ($openLineOpsConfigurationProperties -ccontains "WindowsServiceName") `
+        -or $openLineOpsConfiguration.WindowsServiceName -isnot [string] `
+        -or $openLineOpsConfiguration.WindowsServiceName -cne "") {
+        throw "OpenLineOps:WindowsServiceName must be present and empty in the release template for deployment-time binding."
+    }
     $agentConfiguration = $configuration.OpenLineOps.Agent
     $agentConfigurationProperties = @($agentConfiguration.PSObject.Properties.Name)
     if (-not ($agentConfigurationProperties -ccontains "StationSystemId") `
@@ -374,6 +382,11 @@ function Assert-AgentBundleConfiguration {
     if (-not ($agentConfigurationProperties -ccontains "HeartbeatInterval") `
         -or $agentConfiguration.HeartbeatInterval -cne "00:00:05") {
         throw "OpenLineOps:Agent:HeartbeatInterval must be exactly '00:00:05' in the release template."
+    }
+    if (-not ($agentConfigurationProperties -ccontains "PackageCacheDirectory") `
+        -or $agentConfiguration.PackageCacheDirectory -isnot [string] `
+        -or $agentConfiguration.PackageCacheDirectory -cne "") {
+        throw "OpenLineOps:Agent:PackageCacheDirectory must be present and empty in the release template for explicit administrator provisioning."
     }
     if ($agentConfiguration.RequireBrokerTls -ne $true `
         -or $agentConfiguration.BrokerUri -isnot [string]) {
@@ -480,6 +493,22 @@ function Assert-AgentBundleConfiguration {
     })
     if ($removedContainerProperties.Count -ne 0) {
         throw "The Station Agent release bundle must not expose removed Python Container settings."
+    }
+
+    $deploymentPath = Join-Path $Root "DEPLOYMENT.md"
+    if (-not (Test-Path -LiteralPath $deploymentPath -PathType Leaf)) {
+        throw "The Station Agent release bundle is missing DEPLOYMENT.md."
+    }
+    $deployment = Get-Content -LiteralPath $deploymentPath -Raw
+    foreach ($requiredProvisioningContract in @(
+            "--provision-content-cache",
+            "--remove-content-cache-package",
+            "OpenLineOps:WindowsServiceName",
+            "OpenLineOps:Agent:PackageCacheDirectory",
+            "dedicated content-cache namespace")) {
+        if ($deployment -cnotmatch [regex]::Escape($requiredProvisioningContract)) {
+            throw "The Station Agent deployment guide is missing content-cache provisioning contract '$requiredProvisioningContract'."
+        }
     }
 
     $executablePaths = @(

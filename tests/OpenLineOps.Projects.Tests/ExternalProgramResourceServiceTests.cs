@@ -147,17 +147,16 @@ public sealed class ExternalProgramResourceServiceTests
             string resourceId,
             CancellationToken cancellationToken = default) => Reject<ExternalProgramResource?>();
 
-        public ValueTask<ExternalProgramResource> SaveAsync(
+        public ValueTask<ExternalProgramResource> SaveDefinitionAsync(
             ProjectApplicationWorkspaceScope scope,
             SaveExternalProgramResourceRequest request,
-            IReadOnlyCollection<ExternalProgramFileUpload> uploads,
             DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken = default) => Reject<ExternalProgramResource>();
 
-        public ValueTask<ExternalProgramResource> ImportFileAsync(
+        public ValueTask<ExternalProgramResource> ImportDirectoryAsync(
             ProjectApplicationWorkspaceScope scope,
-            string resourceId,
-            ExternalProgramFileUpload upload,
+            SaveExternalProgramResourceRequest request,
+            IReadOnlyCollection<ExternalProgramFileUpload> files,
             DateTimeOffset updatedAtUtc,
             CancellationToken cancellationToken = default) => Reject<ExternalProgramResource>();
 

@@ -1,5 +1,8 @@
 using System.IO.Pipes;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,10 +14,12 @@ using OpenLineOps.Agent.Infrastructure.Packages;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Projects.Infrastructure.Releases;
 
 namespace OpenLineOps.Agent.Tests;
 
+[SupportedOSPlatform("windows")]
 public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions =
@@ -26,7 +31,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         $"openlineops-agent-material-host-{Guid.NewGuid():N}");
 
     [Fact]
-    public async Task CurrentUserPipeAndHostedOutboxSurviveColdRestartWithoutReordering()
+    public async Task IdentityBoundPipeAndHostedOutboxSurviveColdRestartWithoutReordering()
     {
         Directory.CreateDirectory(_root);
         var package = await BuildSignedPackageAsync();
@@ -54,7 +59,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                              ".",
                              pipeName,
                              PipeDirection.InOut,
-                             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+                             PipeOptions.Asynchronous))
             {
                 await partialFrame.ConnectAsync(5000);
                 await partialFrame.WriteAsync(new byte[] { 1, 0 });
@@ -63,7 +68,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
             }
 
             var response = await new StationMaterialArrivalLocalIpcClient(
-                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                    CreateIpcOptions(pipeName))
                 .ReportAsync(signal, TimeSpan.FromSeconds(5));
             Assert.True(response.Accepted);
             Assert.Equal(signal.MessageId, response.MessageId);
@@ -83,7 +88,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
             await WaitUntilAsync(() => onlinePublisher.PublishedMessageIds.Length == 1);
             Assert.Equal([signal.MessageId], onlinePublisher.PublishedMessageIds);
             var replay = await new StationMaterialArrivalLocalIpcClient(
-                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                    CreateIpcOptions(pipeName))
                 .ReportAsync(signal, TimeSpan.FromSeconds(5));
             Assert.True(replay.Accepted);
             Assert.True(replay.Replayed);
@@ -139,7 +144,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         try
         {
             var responseTask = new StationMaterialArrivalLocalIpcClient(
-                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                    CreateIpcOptions(pipeName))
                 .ReportAsync(signal, TimeSpan.FromSeconds(5))
                 .AsTask();
             await deploymentGate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
@@ -207,11 +212,12 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                         failureCode = (string?)null
                     }),
                 safety.Token);
+            await ReadMaterialArrivalResponseReceiptAsync(serverPipe, safety.Token);
         }, safety.Token);
 
         var connectTimeout = TimeSpan.FromMilliseconds(200);
         var responseTask = new StationMaterialArrivalLocalIpcClient(
-                new StationMaterialArrivalLocalIpcOptions(pipeName))
+                CreateIpcOptions(pipeName))
             .ReportAsync(signal, connectTimeout, safety.Token)
             .AsTask();
         try
@@ -254,7 +260,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
 
         await Assert.ThrowsAsync<TimeoutException>(() =>
             new StationMaterialArrivalLocalIpcClient(
-                    new StationMaterialArrivalLocalIpcOptions(pipeName))
+                    CreateIpcOptions(pipeName))
                 .ReportAsync(signal, TimeSpan.FromMilliseconds(200), safety.Token)
                 .AsTask());
     }
@@ -291,7 +297,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         }, safety.Token);
 
         var responseTask = new StationMaterialArrivalLocalIpcClient(
-                new StationMaterialArrivalLocalIpcOptions(pipeName))
+                CreateIpcOptions(pipeName))
             .ReportAsync(signal, TimeSpan.FromSeconds(5), caller.Token)
             .AsTask();
         try
@@ -350,16 +356,178 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                         failureCode = (string?)null
                     }),
                 timeout.Token);
+            await ReadMaterialArrivalResponseReceiptAsync(second, timeout.Token);
         }, timeout.Token);
 
         var response = await new StationMaterialArrivalLocalIpcClient(
-                new StationMaterialArrivalLocalIpcOptions(pipeName))
+                CreateIpcOptions(pipeName))
             .ReportAsync(signal, TimeSpan.FromSeconds(5), timeout.Token);
         await server;
 
         Assert.True(response.Accepted);
         Assert.True(response.Replayed);
         Assert.Equal(signal.MessageId, response.MessageId);
+    }
+
+    [Fact]
+    public void MaterialArrivalPipeNameIsDeterministicallyBoundToTheStationServiceSid()
+    {
+        const string firstSid = "S-1-5-80-123-456-789-1011-1213";
+        const string secondSid = "S-1-5-80-123-456-789-1011-1214";
+
+        var first = StationMaterialArrivalLocalIpcOptions.DerivePipeName(firstSid);
+
+        Assert.Equal(first, StationMaterialArrivalLocalIpcOptions.DerivePipeName(firstSid));
+        Assert.NotEqual(
+            first,
+            StationMaterialArrivalLocalIpcOptions.DerivePipeName(secondSid));
+        Assert.StartsWith("openlineops-material-", first, StringComparison.Ordinal);
+        Assert.Equal("openlineops-material-".Length + 64, first.Length);
+        Assert.Throws<InvalidDataException>(() =>
+            StationMaterialArrivalLocalIpcOptions.DerivePipeName(
+                new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null).Value));
+    }
+
+    [Theory]
+    [InlineData("wrong-message")]
+    [InlineData("accepted-with-failure")]
+    [InlineData("rejected-without-failure")]
+    [InlineData("rejected-replay")]
+    [InlineData("missing-replayed")]
+    public async Task ClientRejectsUnboundOrInconsistentAcknowledgement(string responseCase)
+    {
+        var pipeName = $"openlineops-material-invalid-ack-{Guid.NewGuid():N}";
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.invalid-acknowledgement",
+            Now);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var serverPipe = CreateTestPipe(pipeName);
+        var server = Task.Run(async () =>
+        {
+            await serverPipe.WaitForConnectionAsync(timeout.Token);
+            await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+                serverPipe,
+                64 * 1024,
+                timeout.Token);
+            if (string.Equals(responseCase, "missing-replayed", StringComparison.Ordinal))
+            {
+                await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
+                    serverPipe,
+                    JsonSerializer.SerializeToUtf8Bytes(
+                        new
+                        {
+                            messageId = signal.MessageId,
+                            accepted = true,
+                            failureCode = (string?)null
+                        },
+                        JsonOptions),
+                    timeout.Token);
+                return;
+            }
+
+            var response = responseCase switch
+            {
+                "wrong-message" => new StationMaterialArrivalLocalIpcResponse(
+                    Guid.NewGuid(),
+                    Accepted: true,
+                    Replayed: false,
+                    FailureCode: null),
+                "accepted-with-failure" => new StationMaterialArrivalLocalIpcResponse(
+                    signal.MessageId,
+                    Accepted: true,
+                    Replayed: false,
+                    FailureCode: "Agent.MaterialArrivalSignalRejected"),
+                "rejected-without-failure" => new StationMaterialArrivalLocalIpcResponse(
+                    signal.MessageId,
+                    Accepted: false,
+                    Replayed: false,
+                    FailureCode: null),
+                "rejected-replay" => new StationMaterialArrivalLocalIpcResponse(
+                    signal.MessageId,
+                    Accepted: false,
+                    Replayed: true,
+                    FailureCode: "Agent.MaterialArrivalSignalRejected"),
+                _ => throw new InvalidOperationException(
+                    $"Unknown response test case '{responseCase}'.")
+            };
+            await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
+                serverPipe,
+                JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions),
+                timeout.Token);
+        }, timeout.Token);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new StationMaterialArrivalLocalIpcClient(CreateIpcOptions(pipeName))
+                .ReportAsync(signal, TimeSpan.FromSeconds(5), timeout.Token)
+                .AsTask());
+        await server;
+    }
+
+    [Fact]
+    public void IdentityBoundPipeHasOneProtectedOwnerAndAccessRule()
+    {
+        var principal = new SecurityIdentifier(CurrentUserSid());
+        using var pipe = CreateTestPipe($"openlineops-material-acl-{Guid.NewGuid():N}");
+
+        var security = pipe.GetAccessControl();
+        Assert.True(security.AreAccessRulesProtected);
+        Assert.Equal(
+            principal,
+            Assert.IsType<SecurityIdentifier>(
+                security.GetOwner(typeof(SecurityIdentifier))));
+        var rule = Assert.Single(
+            security
+                .GetAccessRules(true, true, typeof(SecurityIdentifier))
+                .Cast<PipeAccessRule>());
+        Assert.False(rule.IsInherited);
+        Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+        Assert.Equal(principal, rule.IdentityReference);
+        Assert.Equal(PipeAccessRights.FullControl, rule.PipeAccessRights);
+    }
+
+    [Fact]
+    public async Task ClientRejectsAConnectedPipeOwnedByAnotherConfiguredIdentity()
+    {
+        var pipeName = $"openlineops-material-wrong-owner-{Guid.NewGuid():N}";
+        await using var server = CreateTestPipe(pipeName);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var connected = server.WaitForConnectionAsync(timeout.Token);
+        var signal = new StationMaterialArrivalSignal(
+            Guid.NewGuid(),
+            $"material-arrival/plc/{Guid.NewGuid():D}",
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D"),
+            StationMaterialArrivalSources.Plc,
+            "plc.reader.wrong-owner",
+            Now);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            new StationMaterialArrivalLocalIpcClient(
+                    new StationMaterialArrivalLocalIpcOptions(
+                        pipeName,
+                        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value))
+                .ReportAsync(signal, TimeSpan.FromSeconds(2), timeout.Token)
+                .AsTask());
+        await connected;
+    }
+
+    [Fact]
+    public void FirstPipeInstancePreventsNamePreemptionWhileBoundaryIsAlive()
+    {
+        var pipeName = $"openlineops-material-first-instance-{Guid.NewGuid():N}";
+        using var first = CreateTestPipe(pipeName);
+
+        var exception = Record.Exception(() => CreateTestPipe(pipeName));
+
+        Assert.NotNull(exception);
+        Assert.True(
+            exception is IOException or UnauthorizedAccessException,
+            $"Unexpected duplicate pipe exception: {exception}");
     }
 
     public ValueTask DisposeAsync()
@@ -372,12 +540,34 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    private static NamedPipeServerStream CreateTestPipe(string pipeName) => new(
-        pipeName,
-        PipeDirection.InOut,
-        maxNumberOfServerInstances: 1,
-        PipeTransmissionMode.Byte,
-        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    private static NamedPipeServerStream CreateTestPipe(string pipeName) =>
+        WindowsIdentityBoundNamedPipe.CreateServer(
+            pipeName,
+            CurrentUserSid(),
+            maximumServerInstances: 1,
+            inputBufferSize: 64 * 1024 + sizeof(int),
+            outputBufferSize: 4096);
+
+    private static async ValueTask ReadMaterialArrivalResponseReceiptAsync(
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
+        var receipt = new byte[1];
+        await stream.ReadExactlyAsync(receipt, cancellationToken);
+        Assert.Equal(0xA5, receipt[0]);
+    }
+
+    private static StationMaterialArrivalLocalIpcOptions CreateIpcOptions(
+        string pipeName,
+        TimeSpan requestFrameTimeout = default) =>
+        new(
+            pipeName,
+            CurrentUserSid(),
+            RequestFrameTimeout: requestFrameTimeout);
+
+    private static string CurrentUserSid() =>
+        WindowsIdentity.GetCurrent(TokenAccessLevels.Query).User?.Value
+        ?? throw new InvalidOperationException("Current test token has no user SID.");
 
     private IHost CreateHost(
         string databasePath,
@@ -403,7 +593,10 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                     ["host-test-signing"] = package.PublicKeyPem
-                })));
+                },
+                ImmutableStationServiceSid:
+                    AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+            new InventoryOnlyTestContentProtector()));
         builder.Services.AddSingleton<IStationMaterialArrivalDeploymentProvider>(serviceProvider =>
         {
             var provider = new SignedStationMaterialArrivalDeploymentProvider(
@@ -420,6 +613,7 @@ public sealed class StationMaterialArrivalHostTests : IAsyncDisposable
         builder.Services.AddSingleton<StationMaterialArrivalOutboxDispatcher>();
         builder.Services.AddSingleton(new StationMaterialArrivalLocalIpcOptions(
             pipeName,
+            CurrentUserSid(),
             RequestFrameTimeout: requestFrameTimeout ?? TimeSpan.FromMilliseconds(200)));
         builder.Services.AddSingleton<StationMaterialArrivalLocalIpcServer>();
         builder.Services.AddHostedService<StationMaterialArrivalWorker>();

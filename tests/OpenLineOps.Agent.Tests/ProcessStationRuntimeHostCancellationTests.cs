@@ -13,6 +13,8 @@ namespace OpenLineOps.Agent.Tests;
 
 public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 {
+    private const string RestrictedServiceSid =
+        "S-1-5-80-123-456-789-1011-1213";
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 10, 0, 0, TimeSpan.Zero);
     private readonly string _root = Path.Combine(
@@ -136,6 +138,94 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
             new AcceptingFenceValidator()));
 
         Assert.Contains("custom launcher", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StrictExternalProgramPolicyInjectsExactStationServiceEnvironment()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: false,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess);
+        var baseOptions = ConstructorOptions(sandbox);
+        var host = new ProcessStationRuntimeHost(
+            baseOptions with
+            {
+                RequireRestrictedExternalProgramHostIdentity = true,
+                RestrictedServiceSid = RestrictedServiceSid,
+                RequireExternalProgramAppContainerIsolation = true,
+                ExternalProgramAppContainerProfileNamespace = "OpenLineOps.Agent.Tests",
+                RequireImmutableExternalProgramContent = true
+            },
+            new AcceptingFenceValidator());
+
+        var environment = host.CreateRuntimeEnvironment(
+            Path.Combine(_root, "strict-runtime-work"),
+            "OpenLineOps.Agent.Tests.Profile");
+
+        Assert.Equal(
+            "true",
+            environment[
+                "OpenLineOps__Devices__ExternalProgramHost__RequireRestrictedHostIdentity"]);
+        Assert.Equal(
+            "true",
+            environment[
+                "OpenLineOps__Devices__ExternalProgramHost__RequireImmutableContentProtection"]);
+        Assert.Equal(
+            RestrictedServiceSid,
+            environment["OpenLineOps__Devices__ExternalProgramHost__RestrictedServiceSid"]);
+    }
+
+    [Fact]
+    public void ConstructorRejectsImmutableContentWithoutRestrictedStationServiceIdentity()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: false,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess);
+        var options = ConstructorOptions(sandbox) with
+        {
+            RequireImmutableExternalProgramContent = true
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            new ProcessStationRuntimeHost(options, new AcceptingFenceValidator()));
+
+        Assert.Contains("exact restricted Station service SID", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsRestrictedIdentityWithoutExactStationServiceSid()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: false,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess);
+        var options = ConstructorOptions(sandbox) with
+        {
+            RequireRestrictedExternalProgramHostIdentity = true
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            new ProcessStationRuntimeHost(options, new AcceptingFenceValidator()));
+
+        Assert.Contains("one exact Station service SID", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstructorRejectsImmutableContentWithoutAppContainerIsolation()
+    {
+        var sandbox = new StationRuntimePythonScriptSandboxOptions(
+            RequireLeastPrivilegeExecution: false,
+            IsolationMode: StationRuntimePythonScriptIsolationModes.ExternalProcess);
+        var options = ConstructorOptions(sandbox) with
+        {
+            RequireRestrictedExternalProgramHostIdentity = true,
+            RestrictedServiceSid = RestrictedServiceSid,
+            RequireImmutableExternalProgramContent = true
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            new ProcessStationRuntimeHost(options, new AcceptingFenceValidator()));
+
+        Assert.Contains("requires AppContainer isolation", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -295,6 +385,46 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
             WindowsAppContainerIdentity.DeleteProfile(targetProfile);
             WindowsAppContainerIdentity.DeleteProfile(otherAgentProfile);
         }
+    }
+
+    [Fact]
+    public async Task CleanupRetriesUntilTransientFileHandleReleases()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var job = CreateRunningJob(Path.Combine(_root, "unused-cleanup.pid"));
+        var workDirectory = Path.Combine(
+            _root,
+            "work",
+            $"{job.Id.Value:N}-{Guid.NewGuid():N}");
+        var nestedDirectory = Path.Combine(workDirectory, "external-program-workspaces");
+        Directory.CreateDirectory(nestedDirectory);
+        var lockedPath = Path.Combine(nestedDirectory, "vendor-output.txt");
+        await File.WriteAllTextAsync(lockedPath, "locked briefly after process exit");
+        var host = CreateHost(TimeSpan.FromSeconds(30));
+        var lockedFile = new FileStream(
+            lockedPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        try
+        {
+            var cleanup = host.CleanupAsync(job.ToSnapshot()).AsTask();
+            await Task.Delay(100);
+            Assert.False(cleanup.IsCompleted);
+
+            await lockedFile.DisposeAsync();
+            await cleanup.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            await lockedFile.DisposeAsync();
+        }
+
+        Assert.False(Directory.Exists(workDirectory));
     }
 
     private ProcessStationRuntimeHost CreateHost(

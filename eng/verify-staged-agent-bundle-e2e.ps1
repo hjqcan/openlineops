@@ -83,17 +83,23 @@ function Remove-PrivateStagedExecutionFiles {
     }
 
     foreach ($entry in Get-ChildItem -LiteralPath $Root -Force) {
-        if ($entry.Name -cin @("evidence.json", "test-results", "rabbitmq-process")) {
+        if ($entry.Name -cin @(
+                "evidence.json",
+                "test-results",
+                "rabbitmq-process",
+                "entry-point-probes")) {
             continue
         }
         Remove-Item -LiteralPath $entry.FullName -Recurse -Force
     }
-    $rabbitRoot = Join-Path $Root "rabbitmq-process"
-    foreach ($entry in Get-ChildItem -LiteralPath $rabbitRoot -Force) {
-        if ($entry.Name -ceq "evidence.json") {
-            continue
+    foreach ($publicEvidenceDirectory in @("rabbitmq-process", "entry-point-probes")) {
+        $publicEvidenceRoot = Join-Path $Root $publicEvidenceDirectory
+        foreach ($entry in Get-ChildItem -LiteralPath $publicEvidenceRoot -Force) {
+            if ($entry.Name -ceq "evidence.json") {
+                continue
+            }
+            Remove-Item -LiteralPath $entry.FullName -Recurse -Force
         }
-        Remove-Item -LiteralPath $entry.FullName -Recurse -Force
     }
 }
 
@@ -382,7 +388,14 @@ function Assert-AgentReleaseSecurityTemplate {
 
     $configuration = Get-Content -LiteralPath (Join-Path $BundleRoot "appsettings.json") -Raw |
         ConvertFrom-Json
-    $agent = $configuration.OpenLineOps.Agent
+    $openLineOps = $configuration.OpenLineOps
+    $openLineOpsProperties = @($openLineOps.PSObject.Properties.Name)
+    if (-not ($openLineOpsProperties -ccontains "WindowsServiceName") `
+        -or $openLineOps.WindowsServiceName -isnot [string] `
+        -or $openLineOps.WindowsServiceName -cne "") {
+        throw "Agent release template must expose an explicit empty WindowsServiceName for deployment-time binding."
+    }
+    $agent = $openLineOps.Agent
     $agentProperties = @($agent.PSObject.Properties.Name)
     if (-not ($agentProperties -ccontains "StationSystemId") `
         -or $agent.StationSystemId -isnot [string] `
@@ -390,6 +403,11 @@ function Assert-AgentReleaseSecurityTemplate {
         -or -not ($agentProperties -ccontains "HeartbeatInterval") `
         -or $agent.HeartbeatInterval -cne "00:00:05") {
         throw "Agent release template must expose an empty deployment StationSystemId and a 00:00:05 HeartbeatInterval."
+    }
+    if (-not ($agentProperties -ccontains "PackageCacheDirectory") `
+        -or $agent.PackageCacheDirectory -isnot [string] `
+        -or $agent.PackageCacheDirectory -cne "") {
+        throw "Agent release template must expose an explicit empty PackageCacheDirectory for administrator provisioning."
     }
     $brokerUri = $null
     if ($agent.RequireBrokerTls -ne $true `
@@ -476,7 +494,7 @@ function Invoke-EntryPointProbe {
     $startInfo.StandardOutputEncoding = $utf8WithoutBom
     $startInfo.StandardErrorEncoding = $utf8WithoutBom
     foreach ($key in @($startInfo.EnvironmentVariables.Keys)) {
-        if ($key -like "OpenLineOps__Agent__*" `
+        if ($key -like "OpenLineOps__*" `
             -or $key -ceq "DOTNET_ENVIRONMENT" `
             -or $key -ceq "ASPNETCORE_ENVIRONMENT") {
             $startInfo.EnvironmentVariables.Remove($key)
@@ -524,6 +542,7 @@ function Invoke-EntryPointProbe {
         return [pscustomobject][ordered]@{
             name = $Name
             executable = [System.IO.Path]::GetFileName($ExecutablePath)
+            executableSha256 = Get-FileSha256 $ExecutablePath
             exitCode = $process.ExitCode
             outputContract = $ExpectedOutputPattern
             status = "passed"
@@ -685,11 +704,7 @@ $probes += Invoke-EntryPointProbe `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.Agent.exe") `
     -WorkingDirectory $agentBundleRoot `
     -RequireNonZeroExit `
-    -ExpectedOutputPattern "BrokerUri must include a dedicated non-guest username" `
-    -EnvironmentOverrides @{
-        "OpenLineOps__Agent__AgentId" = "agent.release-probe"
-        "OpenLineOps__Agent__StationId" = "station.release-probe"
-    }
+    -ExpectedOutputPattern "^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"
 $probes += Invoke-EntryPointProbe `
     -Name "station-runtime" `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.StationRuntime.exe") `
@@ -791,6 +806,51 @@ if ($pythonTokenEvidenceProperties.Count -ne 5 `
     throw "The staged Python child evidence is not a unique Low Integrity AppContainer execution."
 }
 
+$publicEntryPoints = @($bundleManifest.entryPoints | ForEach-Object {
+        $entryPoint = $_
+        $file = @($bundleManifest.files | Where-Object {
+                $_.relativePath -ceq $entryPoint.relativePath
+            })
+        if ($file.Count -ne 1 `
+            -or [string]$file[0].sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Agent entry point '$($entryPoint.role)' is not bound to exactly one hashed bundle payload."
+        }
+
+        [pscustomobject][ordered]@{
+            role = [string]$entryPoint.role
+            relativePath = [string]$entryPoint.relativePath
+            sha256 = [string]$file[0].sha256
+        }
+    })
+foreach ($entryPoint in $publicEntryPoints) {
+    $probe = @($probes | Where-Object {
+            $_.name -ceq $entryPoint.role
+        })
+    if ($probe.Count -ne 1 `
+        -or $probe[0].executable -cne $entryPoint.relativePath `
+        -or $probe[0].executableSha256 -cne $entryPoint.sha256) {
+        throw "Agent entry point '$($entryPoint.role)' probe is not hash-bound to its exact bundle payload."
+    }
+}
+
+$entryPointProbeEvidenceRelativePath = "entry-point-probes/evidence.json"
+$entryPointProbeEvidencePath = Join-Path `
+    $resolvedWorkRoot `
+    $entryPointProbeEvidenceRelativePath
+[System.IO.Directory]::CreateDirectory(
+    [System.IO.Path]::GetDirectoryName($entryPointProbeEvidencePath)) | Out-Null
+$entryPointProbeEvidence = [ordered]@{
+    schema = "openlineops.staged-agent-entry-point-probe-evidence"
+    schemaVersion = 1
+    agentArtifactSha256 = [string]$agentArtifact.Entry.sha256
+    entryPoints = $publicEntryPoints
+    probes = $probes
+}
+[System.IO.File]::WriteAllText(
+    $entryPointProbeEvidencePath,
+    (($entryPointProbeEvidence | ConvertTo-Json -Depth 6) + "`r`n"),
+    [System.Text.UTF8Encoding]::new($false))
+
 $evidence = [ordered]@{
     schemaVersion = 1
     product = "OpenLineOps"
@@ -804,8 +864,12 @@ $evidence = [ordered]@{
         relativePath = $samplePluginArtifact.Entry.relativePath
         sha256 = $samplePluginArtifact.Entry.sha256
     }
-    entryPoints = @($bundleManifest.entryPoints)
+    entryPoints = $publicEntryPoints
     entryPointProbes = $probes
+    entryPointProbeEvidence = [ordered]@{
+        evidence = $entryPointProbeEvidenceRelativePath
+        evidenceSha256 = Get-FileSha256 $entryPointProbeEvidencePath
+    }
     exactTestEvidence = $testEvidence
     signedPackageProcessChains = @(
         [ordered]@{
@@ -866,30 +930,78 @@ $privateRabbitMqEvidence = Get-Content `
     -LiteralPath $rabbitMqEvidencePath `
     -Raw | ConvertFrom-Json
 $publicAgentIdentity = [ordered]@{
-    nonAdministrative = [bool]$privateRabbitMqEvidence.agentHostIdentity.nonAdministrative
-    isPrimaryToken = [bool]$privateRabbitMqEvidence.agentHostIdentity.isPrimaryToken
-    isElevated = [bool]$privateRabbitMqEvidence.agentHostIdentity.isElevated
-    administratorGroupPresent = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupPresent
-    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupEnabled
-    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.agentHostIdentity.administratorGroupDenyOnly
-    principalAdministratorMembership = [bool]$privateRabbitMqEvidence.agentHostIdentity.principalAdministratorMembership
-    isAuthenticated = [bool]$privateRabbitMqEvidence.agentHostIdentity.isAuthenticated
-    isSystem = [bool]$privateRabbitMqEvidence.agentHostIdentity.isSystem
+    nonAdministrative = [bool]$privateRabbitMqEvidence.agentHostIdentity.NonAdministrative
+    isPrimaryToken = [bool]$privateRabbitMqEvidence.agentHostIdentity.IsPrimaryToken
+    isElevated = [bool]$privateRabbitMqEvidence.agentHostIdentity.IsElevated
+    hasRestrictions = [bool]$privateRabbitMqEvidence.agentHostIdentity.HasRestrictions
+    administratorGroupPresent = [bool]$privateRabbitMqEvidence.agentHostIdentity.AdministratorGroupPresent
+    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.AdministratorGroupEnabled
+    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.agentHostIdentity.AdministratorGroupDenyOnly
+    serviceLogonSidPresent = [bool]$privateRabbitMqEvidence.agentHostIdentity.ServiceLogonSidPresent
+    serviceLogonSidEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.ServiceLogonSidEnabled
+    exactServiceSidPresent = [bool]$privateRabbitMqEvidence.agentHostIdentity.ExactServiceSidPresent
+    exactServiceSidEnabled = [bool]$privateRabbitMqEvidence.agentHostIdentity.ExactServiceSidEnabled
+    exactServiceSidRestricted = [bool]$privateRabbitMqEvidence.agentHostIdentity.ExactServiceSidRestricted
+    isAuthenticated = [bool]$privateRabbitMqEvidence.agentHostIdentity.IsAuthenticated
+    isSystem = [bool]$privateRabbitMqEvidence.agentHostIdentity.IsSystem
     identityStrategy = [string]$privateRabbitMqEvidence.agentHostIdentity.identityStrategy
-    userSid = [string]$privateRabbitMqEvidence.agentHostIdentity.userSid
+    serviceAccountName = [string]$privateRabbitMqEvidence.agentHostIdentity.serviceAccountName
+    serviceAccountSid = [string]$privateRabbitMqEvidence.agentHostIdentity.serviceAccountSid
+    serviceSid = [string]$privateRabbitMqEvidence.agentHostIdentity.serviceSid
 }
 $publicRestartedAgentIdentity = [ordered]@{
-    nonAdministrative = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.nonAdministrative
-    isPrimaryToken = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isPrimaryToken
-    isElevated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isElevated
-    administratorGroupPresent = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupPresent
-    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupEnabled
-    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.administratorGroupDenyOnly
-    principalAdministratorMembership = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.principalAdministratorMembership
-    isAuthenticated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isAuthenticated
-    isSystem = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.isSystem
+    nonAdministrative = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.NonAdministrative
+    isPrimaryToken = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.IsPrimaryToken
+    isElevated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.IsElevated
+    hasRestrictions = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.HasRestrictions
+    administratorGroupPresent = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.AdministratorGroupPresent
+    administratorGroupEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.AdministratorGroupEnabled
+    administratorGroupDenyOnly = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.AdministratorGroupDenyOnly
+    serviceLogonSidPresent = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.ServiceLogonSidPresent
+    serviceLogonSidEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.ServiceLogonSidEnabled
+    exactServiceSidPresent = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.ExactServiceSidPresent
+    exactServiceSidEnabled = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.ExactServiceSidEnabled
+    exactServiceSidRestricted = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.ExactServiceSidRestricted
+    isAuthenticated = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.IsAuthenticated
+    isSystem = [bool]$privateRabbitMqEvidence.restartedAgentHostIdentity.IsSystem
     identityStrategy = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.identityStrategy
-    userSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.userSid
+    serviceAccountName = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.serviceAccountName
+    serviceAccountSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.serviceAccountSid
+    serviceSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.serviceSid
+}
+$publicMaterialArrivalIpc = [ordered]@{
+    serviceTokenConnected = [bool]$privateRabbitMqEvidence.materialArrivalIpc.serviceTokenConnected
+    pipeExactAclVerified = [bool]$privateRabbitMqEvidence.materialArrivalIpc.pipeExactAclVerified
+    durablePublicationVerified = [bool]$privateRabbitMqEvidence.materialArrivalIpc.durablePublicationVerified
+    ordinaryCiTokenExplicitAccessDenied = `
+        [bool]$privateRabbitMqEvidence.materialArrivalIpc.ordinaryCiTokenExplicitAccessDenied
+}
+$immutableContentCacheFields = @(
+    "packagedProvisionCommandVerified",
+    "runningServiceAdministrationRejected",
+    "serviceTokenReadExecuteVerified",
+    "sealedMutationAccessDenied",
+    "deepAncestorMutationAccessDenied",
+    "preSealRecoveryVerified",
+    "cleanupCrashResumeVerified",
+    "committedAdminRemovalVerified",
+    "packagedRemovalCommandVerified",
+    "cacheNamespaceRemoved")
+$actualImmutableContentCacheFields = @(
+    $privateRabbitMqEvidence.immutableContentCache.PSObject.Properties.Name)
+if ($actualImmutableContentCacheFields.Count -ne $immutableContentCacheFields.Count `
+    -or @($immutableContentCacheFields | Where-Object {
+            $actualImmutableContentCacheFields -cnotcontains $_
+        }).Count -ne 0) {
+    throw "Private staged Agent immutable content-cache evidence must use exact strict-schema properties."
+}
+$publicImmutableContentCache = [ordered]@{}
+foreach ($field in $immutableContentCacheFields) {
+    $value = $privateRabbitMqEvidence.immutableContentCache.$field
+    if ($value -isnot [bool] -or $value -ne $true) {
+        throw "Private staged Agent immutable content-cache field '$field' must be the JSON boolean true."
+    }
+    $publicImmutableContentCache[$field] = $value
 }
 $publicPresence = [ordered]@{
     persistedStates = @($privateRabbitMqEvidence.presence.persistedStates)
@@ -940,6 +1052,8 @@ $rabbitMqEvidence = [ordered]@{
     vendorArtifacts = $publicVendorArtifacts
     agentHostIdentity = $publicAgentIdentity
     restartedAgentHostIdentity = $publicRestartedAgentIdentity
+    materialArrivalIpc = $publicMaterialArrivalIpc
+    immutableContentCache = $publicImmutableContentCache
     eventKinds = @($privateRabbitMqEvidence.eventKinds)
     progressPhases = @($privateRabbitMqEvidence.progressPhases)
     outageControlMode = [string]$privateRabbitMqEvidence.outageControlMode
@@ -965,6 +1079,8 @@ $evidence["rabbitMqTransportCoverage"] = [ordered]@{
         $rabbitMqEvidence.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
     agentHostIdentity = $rabbitMqEvidence.agentHostIdentity
     restartedAgentHostIdentity = $rabbitMqEvidence.restartedAgentHostIdentity
+    materialArrivalIpc = $rabbitMqEvidence.materialArrivalIpc
+    immutableContentCache = $rabbitMqEvidence.immutableContentCache
     agentId = $rabbitMqEvidence.AgentId
     stationId = $rabbitMqEvidence.StationId
     packageContentSha256 = $rabbitMqEvidence.packageContentSha256

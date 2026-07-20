@@ -46,6 +46,45 @@ function Get-TextSha256 {
     }
 }
 
+function Write-CatalogCanonicalInt32 {
+    param([System.IO.Stream] $Stream, [int] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-CatalogCanonicalText {
+    param([System.IO.Stream] $Stream, [string] $Value)
+    [byte[]]$bytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($Value)
+    Write-CatalogCanonicalInt32 $Stream $bytes.Length
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Get-CatalogFileName {
+    param(
+        [string] $ProjectId,
+        [string] $ApplicationId,
+        [string] $ProjectSnapshotId,
+        [string] $StationSystemId)
+    $stream = [System.IO.MemoryStream]::new()
+    try {
+        Write-CatalogCanonicalText $stream 'openlineops.station-package-deployment-catalog'
+        foreach ($value in @($ProjectId, $ApplicationId, $ProjectSnapshotId, $StationSystemId)) {
+            Write-CatalogCanonicalText $stream $value
+        }
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $algorithm.ComputeHash($stream.ToArray())
+            return ([System.BitConverter]::ToString($hash)).Replace(
+                '-', '').ToLowerInvariant() + '.json'
+        }
+        finally { $algorithm.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
 function New-ValidEvidence {
     param([Parameter(Mandatory = $true)][string] $Root)
 
@@ -72,6 +111,12 @@ function New-ValidEvidence {
     $productionRunId = '33333333-3333-3333-3333-333333333333'
     $stationJobId = '55555555-5555-5555-5555-555555555555'
     $stationResultMessageId = '66666666-6666-6666-6666-666666666666'
+    $stationSystemId = 'station.main'
+    $catalogFileName = Get-CatalogFileName `
+        'project-runner-fixture' `
+        'application-runner-fixture' `
+        'snapshot-runner-fixture' `
+        $stationSystemId
     $postgresCanonical = @(
         "productionRunId=$productionRunId",
         'productionRunCount=1',
@@ -141,8 +186,18 @@ function New-ValidEvidence {
                 bundleChecksumsSha256 = $sha
                 manifestBound = $true
                 mainModuleBound = $true
-                jobObjectBound = $true
-                processTreeTerminated = $true
+                serviceName = 'OpenLineOpsAgentE2E-0123456789abcdef0123456789abcdef'
+                serviceLifecycleVerified = $true
+                serviceAccountName = 'NT AUTHORITY\LocalService'
+                serviceAccountSid = 'S-1-5-19'
+                serviceSidSha256 = 'd3aa07b9acd0fdfc42a4f3c9a54ba4321b9883099f83fcaf76bca38804e1f221'
+                hasRestrictions = $true
+                serviceLogonSidPresent = $true
+                serviceLogonSidEnabled = $true
+                exactServiceSidPresent = $true
+                exactServiceSidEnabled = $true
+                exactServiceSidRestricted = $true
+                nonAdministrative = $true
             }
             terminal = [ordered]@{
                 executionStatus = 'Completed'
@@ -155,10 +210,11 @@ function New-ValidEvidence {
             }
         }
         stationPackage = [ordered]@{
+            stationSystemId = $stationSystemId
             packageFileName = "$sha.olopkg"
             packageContentSha256 = $sha
             packageFileSha256 = $sha
-            catalogFileName = 'station.main.json'
+            catalogFileName = $catalogFileName
             catalogFileSha256 = $sha
             signingKeyId = 'runner-process-e2e-signing'
             signatureAlgorithm = 'RSA-PSS-SHA256'
@@ -241,7 +297,7 @@ function New-ValidEvidence {
             postgresSchemaDropped = $true
             rabbitQueuesDeleted = $true
             runnerTreeTerminated = $true
-            agentTreeTerminated = $true
+            agentServiceDeleted = $true
             temporaryRootDeleted = $true
             reparsePointsTraversed = $false
         }
@@ -342,6 +398,66 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
 New-Item -ItemType Directory -Path $resolvedWorkRoot | Out-Null
 try {
     Invoke-Expected 'valid' { param($root) } $true
+    Invoke-Expected 'runner-boolean-truthy-integer' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.runner.manifestBound = 1
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-boolean-truthy-string' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.hasRestrictions = 'true'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'package-boolean-truthy-integer' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.stationPackage.manifestBound = 1
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'package-catalog-identity-filename-forged' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.stationPackage.catalogFileName = ('f' * 64) + '.json'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'postgres-boolean-truthy-string' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.postgresql.isolatedSchema = 'true'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'sqlite-boolean-truthy-integer' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.agentSqlite.onceOnly = 1
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'rabbit-boolean-truthy-string' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.rabbitMq.drained = 'true'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'artifact-false-boolean-numeric-zero' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.artifactTransport.endpointReachable = 0
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'safety-boolean-truthy-string' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.safetyChannel.configured = 'true'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'cleanup-boolean-truthy-integer' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.cleanup.agentServiceDeleted = 1
+        Write-Evidence $root $evidence
+    } $false
     Invoke-Expected 'extra-property' {
         param($root)
         $evidence = Read-Evidence $root
@@ -352,6 +468,78 @@ try {
         param($root)
         $evidence = Read-Evidence $root
         $evidence.execution.runner.executableSha256 = 'g' * 64
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-job-object-legacy-field' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent | Add-Member -NotePropertyName jobObjectBound -NotePropertyValue $true
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-tree-cleanup-legacy-field' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.cleanup | Add-Member -NotePropertyName agentTreeTerminated -NotePropertyValue $true
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-not-deleted' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.cleanup.agentServiceDeleted = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-lifecycle-not-verified' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.serviceLifecycleVerified = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-not-restricted' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.hasRestrictions = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-logon-sid-disabled' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.serviceLogonSidEnabled = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-exact-service-sid-not-restricted' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.exactServiceSidRestricted = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-account-not-local-service' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.serviceAccountName = 'NT AUTHORITY\NetworkService'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-account-sid-not-local-service' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.serviceAccountSid = 'S-1-5-20'
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-exact-service-sid-disabled' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.exactServiceSidEnabled = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-administrative-token' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.nonAdministrative = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-service-sid-hash-invalid' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.serviceSidSha256 = '0' * 64
         Write-Evidence $root $evidence
     } $false
     Invoke-Expected 'secret-text' {

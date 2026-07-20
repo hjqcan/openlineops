@@ -36,17 +36,13 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
             return [];
         }
 
-        RejectReparsePoint(root);
+        ValidateResourcesRoot(root);
+        RecoverAllInterruptedCommits(root);
+        var resourceIds = ValidateResourcesRoot(root);
         var resources = new List<ExternalProgramResource>();
-        foreach (var directory in Directory.EnumerateDirectories(root)
-                     .Where(path => !Path.GetFileName(path).StartsWith('.'))
-                     .Order(StringComparer.Ordinal))
+        foreach (var resourceId in resourceIds.Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RejectReparsePoint(directory);
-            var resourceId = ExternalProgramResourceContract.PortableId(
-                Path.GetFileName(directory),
-                nameof(directory));
             var resource = await ReadAsync(scope, resourceId, cancellationToken).ConfigureAwait(false);
             resources.Add(resource);
         }
@@ -64,28 +60,69 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         await using var lockHandle = await ApplicationLocks.AcquireAsync(
             scope.ApplicationRootPath,
             cancellationToken).ConfigureAwait(false);
+        var root = GetResourcesRoot(scope);
+        if (Directory.Exists(root))
+        {
+            ValidateResourcesRoot(root);
+            RecoverInterruptedCommit(root, resourceId);
+            ValidateResourcesRoot(root);
+        }
         var descriptorPath = GetDescriptorPath(scope, resourceId);
         return File.Exists(descriptorPath)
             ? await ReadAsync(scope, resourceId, cancellationToken).ConfigureAwait(false)
             : null;
     }
 
-    public async ValueTask<ExternalProgramResource> SaveAsync(
+    public async ValueTask<ExternalProgramResource> SaveDefinitionAsync(
         ProjectApplicationWorkspaceScope scope,
         SaveExternalProgramResourceRequest request,
-        IReadOnlyCollection<ExternalProgramFileUpload> uploads,
         DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(uploads);
         ExternalProgramResourceValidator.ValidateDefinition(request);
-        ValidateUploads(uploads);
         EnsureUtc(updatedAtUtc);
         await using var lockHandle = await ApplicationLocks.AcquireAsync(
             scope.ApplicationRootPath,
             cancellationToken).ConfigureAwait(false);
-        return await SaveLockedAsync(scope, request, uploads, updatedAtUtc, cancellationToken)
+        return await SaveLockedAsync(
+                scope,
+                request,
+                [],
+                replaceFileSet: request.LaunchKind == ExternalProgramLaunchKind.Provider,
+                updatedAtUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async ValueTask<ExternalProgramResource> ImportDirectoryAsync(
+        ProjectApplicationWorkspaceScope scope,
+        SaveExternalProgramResourceRequest request,
+        IReadOnlyCollection<ExternalProgramFileUpload> files,
+        DateTimeOffset updatedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(files);
+        ExternalProgramResourceValidator.ValidateDefinition(request);
+        if (request.LaunchKind != ExternalProgramLaunchKind.ApplicationExecutable)
+        {
+            throw new ArgumentException(
+                "External program directory imports require ApplicationExecutable launch kind.",
+                nameof(request));
+        }
+        ValidateUploads(files);
+        EnsureUtc(updatedAtUtc);
+        await using var lockHandle = await ApplicationLocks.AcquireAsync(
+            scope.ApplicationRootPath,
+            cancellationToken).ConfigureAwait(false);
+        return await SaveLockedAsync(
+                scope,
+                request,
+                files,
+                replaceFileSet: true,
+                updatedAtUtc,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -93,21 +130,40 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         ProjectApplicationWorkspaceScope scope,
         SaveExternalProgramResourceRequest request,
         IReadOnlyCollection<ExternalProgramFileUpload> uploads,
+        bool replaceFileSet,
         DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken)
     {
         var root = GetResourcesRoot(scope);
         Directory.CreateDirectory(root);
-        RejectReparsePoint(root);
+        ValidateResourcesRoot(root);
+        RecoverInterruptedCommit(root, request.ResourceId);
+        ValidateResourcesRoot(root);
         var finalDirectory = ResolveInside(root, request.ResourceId);
-        var stagingDirectory = ResolveInside(root, $".{request.ResourceId}.staging.{Guid.NewGuid():N}");
-        var backupDirectory = ResolveInside(root, $".{request.ResourceId}.backup.{Guid.NewGuid():N}");
+        var stagingDirectory = ResolveInside(root, $".{request.ResourceId}.staging");
+        var backupDirectory = ResolveInside(root, $".{request.ResourceId}.backup");
+        if (File.Exists(finalDirectory))
+        {
+            throw new InvalidDataException(
+                $"External program resource path '{finalDirectory}' must be a directory.");
+        }
+
+        var existingResource = Directory.Exists(finalDirectory)
+            ? await ReadAsync(scope, request.ResourceId, cancellationToken).ConfigureAwait(false)
+            : null;
+        AssertTransactionPathAbsent(stagingDirectory);
+        AssertTransactionPathAbsent(backupDirectory);
         try
         {
             Directory.CreateDirectory(stagingDirectory);
-            if (Directory.Exists(finalDirectory))
+            if (!replaceFileSet && existingResource is not null)
             {
-                CopyTree(finalDirectory, stagingDirectory, cancellationToken);
+                await CopyFrozenFileSetAsync(
+                        finalDirectory,
+                        stagingDirectory,
+                        existingResource.Files,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             foreach (var upload in uploads)
@@ -130,46 +186,7 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         finally
         {
             TryDeleteDirectory(stagingDirectory);
-            TryDeleteDirectory(backupDirectory);
         }
-    }
-
-    public async ValueTask<ExternalProgramResource> ImportFileAsync(
-        ProjectApplicationWorkspaceScope scope,
-        string resourceId,
-        ExternalProgramFileUpload upload,
-        DateTimeOffset updatedAtUtc,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(upload);
-        ExternalProgramResourceContract.PortableId(resourceId, nameof(resourceId));
-        ValidateUploads([upload]);
-        EnsureUtc(updatedAtUtc);
-        await using var lockHandle = await ApplicationLocks.AcquireAsync(
-            scope.ApplicationRootPath,
-            cancellationToken).ConfigureAwait(false);
-        var descriptorPath = GetDescriptorPath(scope, resourceId);
-        var current = File.Exists(descriptorPath)
-            ? await ReadAsync(scope, resourceId, cancellationToken).ConfigureAwait(false)
-            : throw new InvalidDataException($"External program resource {resourceId} was not found.");
-        var definition = new SaveExternalProgramResourceRequest(
-            current.ResourceId,
-            current.DisplayName,
-            current.CapabilityId,
-            current.CommandName,
-            current.LaunchKind,
-            current.EntryPoint,
-            current.ProviderKind,
-            current.ProviderKey,
-            current.ArgumentTemplates,
-            current.InputMappings,
-            current.ResultMappings,
-            current.OutcomeMapping,
-            current.PermissionProfile,
-            current.ExecutionLimits);
-        return await SaveLockedAsync(scope, definition, [upload], updatedAtUtc, cancellationToken)
-            .ConfigureAwait(false);
     }
 
     public async ValueTask DeleteAsync(
@@ -182,17 +199,24 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         await using var lockHandle = await ApplicationLocks.AcquireAsync(
             scope.ApplicationRootPath,
             cancellationToken).ConfigureAwait(false);
+        var resourcesRoot = GetResourcesRoot(scope);
+        if (Directory.Exists(resourcesRoot))
+        {
+            ValidateResourcesRoot(resourcesRoot);
+            RecoverInterruptedCommit(resourcesRoot, resourceId);
+            ValidateResourcesRoot(resourcesRoot);
+        }
         var directory = GetResourceDirectory(scope, resourceId);
         var tombstone = ResolveInside(
             GetResourcesRoot(scope),
-            $".{resourceId}.deleting.{Guid.NewGuid():N}");
+            $".{resourceId}.deleting");
         cancellationToken.ThrowIfCancellationRequested();
         if (!Directory.Exists(directory))
         {
             return;
         }
 
-        RejectTreeReparsePoints(directory);
+        ValidateResourceDirectoryLayout(directory, requireDescriptor: true);
         Directory.Move(directory, tombstone);
         TryDeleteDirectory(tombstone);
     }
@@ -203,7 +227,7 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         CancellationToken cancellationToken)
     {
         var directory = GetResourceDirectory(scope, resourceId);
-        RejectReparsePoint(directory);
+        ValidateResourceDirectoryLayout(directory, requireDescriptor: true);
         var descriptorPath = GetDescriptorPath(scope, resourceId);
         RejectReparsePoint(descriptorPath);
         await using var stream = new FileStream(
@@ -255,6 +279,7 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken)
     {
+        ValidateResourceDirectoryLayout(resourceDirectory, requireDescriptor: false);
         var files = await InventoryFilesAsync(resourceDirectory, cancellationToken).ConfigureAwait(false);
         return ExternalProgramResourceFactory.Create(request, files, updatedAtUtc);
     }
@@ -269,34 +294,102 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
             return [];
         }
 
-        RejectTreeReparsePoints(filesDirectory);
+        RejectReparsePoint(filesDirectory);
         var files = new List<ExternalProgramResourceFile>();
-        foreach (var filePath in Directory.EnumerateFiles(filesDirectory, "*", SearchOption.AllDirectories)
-                     .Order(StringComparer.Ordinal))
+        var pendingDirectories = new Stack<string>();
+        pendingDirectories.Push(filesDirectory);
+        var directoryCount = 1;
+        long totalBytes = 0;
+        while (pendingDirectories.Count > 0)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            RejectReparsePoint(filePath);
-            var info = new FileInfo(filePath);
-            await using var stream = new FileStream(
-                filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-            var relativePath = Path.GetRelativePath(resourceDirectory, filePath).Replace('\\', '/');
-            ExternalProgramResourceContract.CanonicalRelativePath(
-                relativePath,
-                nameof(relativePath),
-                ExternalProgramResourceContract.FilesDirectoryName);
-            files.Add(new ExternalProgramResourceFile(
-                relativePath,
-                info.Length,
-                Convert.ToHexString(hash).ToLowerInvariant()));
+            var directory = pendingDirectories.Pop();
+            foreach (var entryPath in Directory.EnumerateFileSystemEntries(directory))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RejectReparsePoint(entryPath);
+                var attributes = File.GetAttributes(entryPath);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    directoryCount++;
+                    if (directoryCount > ExternalProgramResourceContract.MaximumFrozenDirectoryCount)
+                    {
+                        throw new InvalidDataException(
+                            "External program directory inventory exceeds the supported limits.");
+                    }
+
+                    pendingDirectories.Push(entryPath);
+                    continue;
+                }
+
+                var inventory = await HashBoundedFileAsync(
+                        entryPath,
+                        files.Count,
+                        totalBytes,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                totalBytes = inventory.TotalBytes;
+                var relativePath = Path.GetRelativePath(resourceDirectory, entryPath).Replace('\\', '/');
+                ExternalProgramResourceContract.CanonicalRelativePath(
+                    relativePath,
+                    nameof(relativePath),
+                    ExternalProgramResourceContract.FilesDirectoryName);
+                files.Add(new ExternalProgramResourceFile(
+                    relativePath,
+                    inventory.SizeBytes,
+                    inventory.Sha256));
+            }
         }
 
-        return files;
+        return files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).ToArray();
+    }
+
+    private static async ValueTask<BoundedFileInventory> HashBoundedFileAsync(
+        string filePath,
+        int currentFileCount,
+        long accumulatedBytes,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var declaredLength = stream.Length;
+        var totalBytes = ExternalProgramResourceContract.AccumulateFrozenFileBytes(
+            currentFileCount,
+            accumulatedBytes,
+            declaredLength);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[64 * 1024];
+        long readBytes = 0;
+        while (readBytes < declaredLength)
+        {
+            var requested = (int)Math.Min(buffer.Length, declaredLength - readBytes);
+            var read = await stream.ReadAsync(buffer.AsMemory(0, requested), cancellationToken)
+                .ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new InvalidDataException(
+                    $"External program file '{filePath}' became shorter while it was inventoried.");
+            }
+
+            hash.AppendData(buffer.AsSpan(0, read));
+            readBytes += read;
+        }
+
+        if (await stream.ReadAsync(buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false) != 0
+            || stream.Length != declaredLength)
+        {
+            throw new InvalidDataException(
+                $"External program file '{filePath}' changed while it was inventoried.");
+        }
+
+        return new BoundedFileInventory(
+            declaredLength,
+            totalBytes,
+            Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant());
     }
 
     private static async ValueTask WriteDescriptorAsync(
@@ -385,34 +478,52 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         }
     }
 
-    private static void CopyTree(
+    private static async ValueTask CopyFrozenFileSetAsync(
         string sourceDirectory,
         string destinationDirectory,
+        IReadOnlyCollection<ExternalProgramResourceFile> expectedFiles,
         CancellationToken cancellationToken)
     {
-        RejectTreeReparsePoints(sourceDirectory);
-        foreach (var directory in Directory.EnumerateDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
+        ValidateResourceDirectoryLayout(sourceDirectory, requireDescriptor: true);
+        foreach (var file in expectedFiles.OrderBy(item => item.RelativePath, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var relative = Path.GetRelativePath(sourceDirectory, directory);
-            Directory.CreateDirectory(ResolveInside(destinationDirectory, relative));
+            var relativePath = ExternalProgramResourceContract.CanonicalRelativePath(
+                file.RelativePath,
+                nameof(file.RelativePath),
+                ExternalProgramResourceContract.FilesDirectoryName);
+            var sourcePath = ResolveInside(sourceDirectory, relativePath);
+            var attributes = GetNonReparseAttributes(sourcePath);
+            if ((attributes & FileAttributes.Directory) != 0)
+            {
+                throw new InvalidDataException(
+                    $"External program frozen file '{relativePath}' must be a regular file.");
+            }
+
+            await using var content = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await CopyUploadedFileAsync(
+                    destinationDirectory,
+                    new ExternalProgramFileUpload(
+                        relativePath,
+                        content,
+                        file.SizeBytes,
+                        file.Sha256),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        foreach (var file in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        ValidateResourceDirectoryLayout(sourceDirectory, requireDescriptor: true);
+        var actualFiles = await InventoryFilesAsync(sourceDirectory, cancellationToken).ConfigureAwait(false);
+        if (!FileInventoriesEqual(expectedFiles, actualFiles))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var relative = Path.GetRelativePath(sourceDirectory, file);
-            var destination = ResolveInside(destinationDirectory, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(file, destination, overwrite: false);
-        }
-
-        var existingDescriptor = ResolveInside(
-            destinationDirectory,
-            ExternalProgramResourceContract.DescriptorFileName);
-        if (File.Exists(existingDescriptor))
-        {
-            File.Delete(existingDescriptor);
+            throw new InvalidDataException(
+                "External program file inventory changed while its definition was being saved.");
         }
     }
 
@@ -421,6 +532,7 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         string finalDirectory,
         string backupDirectory)
     {
+        AssertTransactionPathAbsent(backupDirectory);
         var movedExisting = false;
         try
         {
@@ -445,6 +557,78 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         if (movedExisting)
         {
             TryDeleteDirectory(backupDirectory);
+        }
+    }
+
+    private static void RecoverAllInterruptedCommits(string resourcesRoot)
+    {
+        foreach (var transactionDirectory in Directory.EnumerateDirectories(
+                     resourcesRoot,
+                     ".*",
+                     SearchOption.TopDirectoryOnly))
+        {
+            var name = Path.GetFileName(transactionDirectory);
+            if (!TryReadTransactionResourceId(name, out var resourceId))
+            {
+                throw new InvalidDataException(
+                    $"External program recovery directory '{name}' is invalid.");
+            }
+
+            RecoverInterruptedCommit(resourcesRoot, resourceId);
+        }
+    }
+
+    private static void RecoverInterruptedCommit(string resourcesRoot, string resourceId)
+    {
+        ExternalProgramResourceContract.PortableId(resourceId, nameof(resourceId));
+        var finalDirectory = ResolveInside(resourcesRoot, resourceId);
+        var stagingDirectory = ResolveInside(resourcesRoot, $".{resourceId}.staging");
+        var backupDirectory = ResolveInside(resourcesRoot, $".{resourceId}.backup");
+        var deletingDirectory = ResolveInside(resourcesRoot, $".{resourceId}.deleting");
+
+        if (Directory.Exists(backupDirectory))
+        {
+            ValidateResourceDirectoryLayout(backupDirectory, requireDescriptor: true);
+            if (Directory.Exists(finalDirectory))
+            {
+                ValidateResourceDirectoryLayout(finalDirectory, requireDescriptor: true);
+                DeleteTransactionDirectoryOrThrow(backupDirectory);
+            }
+            else
+            {
+                Directory.Move(backupDirectory, finalDirectory);
+            }
+        }
+
+        if (Directory.Exists(stagingDirectory))
+        {
+            ValidateResourceDirectoryLayout(stagingDirectory, requireDescriptor: false);
+            DeleteTransactionDirectoryOrThrow(stagingDirectory);
+        }
+
+        if (Directory.Exists(deletingDirectory))
+        {
+            ValidateResourceDirectoryLayout(deletingDirectory, requireDescriptor: true);
+            DeleteTransactionDirectoryOrThrow(deletingDirectory);
+        }
+
+        AssertTransactionPathAbsent(stagingDirectory);
+        AssertTransactionPathAbsent(deletingDirectory);
+        AssertTransactionPathAbsent(backupDirectory);
+    }
+
+    private static void DeleteTransactionDirectoryOrThrow(string path)
+    {
+        TryDeleteDirectory(path);
+        AssertTransactionPathAbsent(path);
+    }
+
+    private static void AssertTransactionPathAbsent(string path)
+    {
+        if (Directory.Exists(path) || File.Exists(path))
+        {
+            throw new IOException(
+                $"External program transaction path '{path}' could not be recovered safely.");
         }
     }
 
@@ -479,23 +663,182 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         return fullPath;
     }
 
-    private static void RejectTreeReparsePoints(string root)
+    private static HashSet<string> ValidateResourcesRoot(string resourcesRoot)
     {
-        RejectReparsePoint(root);
-        foreach (var entry in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+        RejectReparsePoint(resourcesRoot);
+        var resourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(resourcesRoot))
         {
-            RejectReparsePoint(entry);
+            var attributes = GetNonReparseAttributes(entry);
+            if ((attributes & FileAttributes.Directory) == 0)
+            {
+                throw new InvalidDataException(
+                    $"External programs root entry '{Path.GetFileName(entry)}' must be a resource directory.");
+            }
+
+            var name = Path.GetFileName(entry);
+            if (!entryNames.Add(name))
+            {
+                throw new InvalidDataException(
+                    $"External programs root contains a portable path collision for '{name}'.");
+            }
+
+            if (TryReadTransactionResourceId(name, out _))
+            {
+                continue;
+            }
+
+            var resourceId = ExternalProgramResourceContract.PortableId(name, nameof(resourcesRoot));
+            if (!resourceIds.Add(resourceId))
+            {
+                throw new InvalidDataException(
+                    $"External programs root contains a case-insensitive resource identity collision for '{resourceId}'.");
+            }
+        }
+
+        return resourceIds;
+    }
+
+    private static bool TryReadTransactionResourceId(string name, out string resourceId)
+    {
+        resourceId = string.Empty;
+        if (!name.StartsWith('.'))
+        {
+            return false;
+        }
+
+        var suffix = name.EndsWith(".backup", StringComparison.Ordinal)
+            ? ".backup"
+            : name.EndsWith(".staging", StringComparison.Ordinal)
+                ? ".staging"
+                : name.EndsWith(".deleting", StringComparison.Ordinal)
+                    ? ".deleting"
+                    : null;
+        if (suffix is null || name.Length <= 1 + suffix.Length)
+        {
+            throw new InvalidDataException(
+                $"External program recovery directory '{name}' is invalid.");
+        }
+
+        resourceId = ExternalProgramResourceContract.PortableId(
+            name[1..^suffix.Length],
+            nameof(name));
+        return true;
+    }
+
+    private static void ValidateResourceDirectoryLayout(
+        string resourceDirectory,
+        bool requireDescriptor)
+    {
+        RejectReparsePoint(resourceDirectory);
+        var descriptorSeen = false;
+        var filesSeen = false;
+        foreach (var entry in Directory.EnumerateFileSystemEntries(resourceDirectory))
+        {
+            var attributes = GetNonReparseAttributes(entry);
+            var name = Path.GetFileName(entry);
+            if (string.Equals(name, ExternalProgramResourceContract.DescriptorFileName, StringComparison.Ordinal))
+            {
+                if ((attributes & FileAttributes.Directory) != 0 || descriptorSeen)
+                {
+                    throw new InvalidDataException(
+                        "External program resource descriptor must be one regular file.");
+                }
+
+                descriptorSeen = true;
+                continue;
+            }
+
+            if (string.Equals(name, ExternalProgramResourceContract.FilesDirectoryName, StringComparison.Ordinal))
+            {
+                if ((attributes & FileAttributes.Directory) == 0 || filesSeen)
+                {
+                    throw new InvalidDataException(
+                        "External program resource files entry must be one directory.");
+                }
+
+                filesSeen = true;
+                ValidateFrozenFilesTree(resourceDirectory, entry);
+                continue;
+            }
+
+            throw new InvalidDataException(
+                $"External program resource root entry '{name}' is not allowed.");
+        }
+
+        if (requireDescriptor && !descriptorSeen)
+        {
+            throw new InvalidDataException("External program resource descriptor is missing.");
+        }
+    }
+
+    private static void ValidateFrozenFilesTree(string resourceDirectory, string filesDirectory)
+    {
+        var pendingDirectories = new Stack<string>();
+        pendingDirectories.Push(filesDirectory);
+        var canonicalPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var directoryCount = 1;
+        var fileCount = 0;
+        long totalBytes = 0;
+        while (pendingDirectories.Count > 0)
+        {
+            var directory = pendingDirectories.Pop();
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var attributes = GetNonReparseAttributes(entry);
+                var relativePath = Path.GetRelativePath(resourceDirectory, entry).Replace('\\', '/');
+                var canonicalPath = ExternalProgramResourceContract.CanonicalRelativePath(
+                    relativePath,
+                    nameof(relativePath),
+                    ExternalProgramResourceContract.FilesDirectoryName);
+                if (!canonicalPaths.Add(canonicalPath))
+                {
+                    throw new InvalidDataException(
+                        $"External program resource path '{canonicalPath}' conflicts by portable case.");
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    directoryCount++;
+                    if (directoryCount > ExternalProgramResourceContract.MaximumFrozenDirectoryCount)
+                    {
+                        throw new InvalidDataException(
+                            "External program directory inventory exceeds the supported limits.");
+                    }
+
+                    pendingDirectories.Push(entry);
+                    continue;
+                }
+
+                var length = new FileInfo(entry).Length;
+                totalBytes = ExternalProgramResourceContract.AccumulateFrozenFileBytes(
+                    fileCount,
+                    totalBytes,
+                    length);
+                fileCount++;
+            }
         }
     }
 
     private static void RejectReparsePoint(string path)
     {
-        if ((Directory.Exists(path) || File.Exists(path))
-            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        if (Directory.Exists(path) || File.Exists(path))
+        {
+            _ = GetNonReparseAttributes(path);
+        }
+    }
+
+    private static FileAttributes GetNonReparseAttributes(string path)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
         {
             throw new InvalidDataException(
                 $"External program resource path '{path}' cannot be a symbolic link or reparse point.");
         }
+
+        return attributes;
     }
 
     private static void TryDeleteDirectory(string path)
@@ -504,12 +847,43 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         {
             if (Directory.Exists(path))
             {
-                Directory.Delete(path, recursive: true);
+                ValidateResourceDirectoryLayout(path, requireDescriptor: false);
+                DeleteDirectoryWithoutFollowingReparsePoints(path);
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _ = exception;
+        }
+    }
+
+    private static void DeleteDirectoryWithoutFollowingReparsePoints(string root)
+    {
+        var pending = new Stack<(string Path, bool ChildrenVisited)>();
+        pending.Push((root, false));
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            _ = GetNonReparseAttributes(current.Path);
+            if (current.ChildrenVisited)
+            {
+                Directory.Delete(current.Path, recursive: false);
+                continue;
+            }
+
+            pending.Push((current.Path, true));
+            foreach (var entry in Directory.EnumerateFileSystemEntries(current.Path))
+            {
+                var attributes = GetNonReparseAttributes(entry);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push((entry, false));
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+            }
         }
     }
 
@@ -523,34 +897,39 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
 
     private static void ValidateUploads(IReadOnlyCollection<ExternalProgramFileUpload> uploads)
     {
-        const int maximumFileCount = 256;
-        const long maximumFileBytes = 512L * 1024 * 1024;
-        const long maximumTotalBytes = 2L * 1024 * 1024 * 1024;
-        if (uploads.Count > maximumFileCount)
+        if (uploads.Count is 0 or > ExternalProgramResourceContract.MaximumFrozenFileCount)
         {
             throw new ArgumentException("External program upload file count exceeds the repository limit.");
         }
 
         long totalBytes = 0;
-        var paths = new HashSet<string>(StringComparer.Ordinal);
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var upload in uploads)
         {
             if (upload is null
                 || upload.Content is null
                 || !upload.Content.CanRead
                 || upload.SizeBytes < 0
-                || upload.SizeBytes > maximumFileBytes
+                || upload.SizeBytes > ExternalProgramResourceContract.MaximumFrozenFileBytes
                 || !ExternalProgramResourceContract.IsSha256(upload.ExpectedSha256))
             {
                 throw new ArgumentException("External program upload metadata is invalid.");
             }
 
-            if (totalBytes > maximumTotalBytes - upload.SizeBytes)
+            try
             {
-                throw new ArgumentException("External program upload total size exceeds the repository limit.");
+                totalBytes = ExternalProgramResourceContract.AccumulateFrozenFileBytes(
+                    paths.Count,
+                    totalBytes,
+                    upload.SizeBytes);
             }
-
-            totalBytes += upload.SizeBytes;
+            catch (InvalidDataException exception)
+            {
+                throw new ArgumentException(
+                    "External program upload total size exceeds the repository limit.",
+                    nameof(uploads),
+                    exception);
+            }
             var path = ExternalProgramResourceContract.CanonicalRelativePath(
                 upload.ResourceRelativePath,
                 nameof(upload.ResourceRelativePath),
@@ -601,6 +980,8 @@ public sealed class FileSystemExternalProgramResourceRepository : IExternalProgr
         document.Files,
         document.ContentSha256,
         document.UpdatedAtUtc);
+
+    private sealed record BoundedFileInventory(long SizeBytes, long TotalBytes, string Sha256);
 
     private sealed record ExternalProgramResourceDocument(
         string Schema,

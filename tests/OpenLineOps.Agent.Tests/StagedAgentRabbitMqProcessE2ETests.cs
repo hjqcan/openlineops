@@ -6,6 +6,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -31,6 +32,7 @@ using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Persistence;
+using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution;
@@ -64,7 +66,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private static readonly JsonSerializerOptions ReceiptJsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true
     };
 
     private const string AgentBundleRootVariable = "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT";
@@ -97,44 +100,87 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_GATE";
     private const string AgentServiceExternalAbortReadyPathVariable =
         "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH";
+    private const int ErrorAccessDenied = 5;
+    private const uint GenericExecute = 0x20000000;
+    private const uint DeleteAccess = 0x00010000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileFlagBackupSemantics = 0x02000000;
 
     [Fact]
-    public void NonAdministrativeTokenEvidenceRequiresIndependentAdministratorMembershipProof()
+    public void RestrictedServiceTokenEvidenceRequiresEveryIdentityBoundary()
     {
         var evidence = new AgentHostTokenEvidence(
-            "machine\\standard-user",
-            "S-1-5-21-1-2-3-1001",
+            "NT AUTHORITY\\LOCAL SERVICE",
+            "S-1-5-19",
             IsPrimaryToken: true,
             IsElevated: false,
-            HasRestrictions: false,
+            HasRestrictions: true,
             AdministratorGroupPresent: false,
             AdministratorGroupEnabled: false,
             AdministratorGroupDenyOnly: false,
-            PrincipalAdministratorMembership: false,
+            ServiceLogonSidPresent: true,
+            ServiceLogonSidEnabled: true,
+            ExactServiceSidPresent: true,
+            ExactServiceSidEnabled: true,
+            ExactServiceSidRestricted: true,
             IsAuthenticated: true,
             IsSystem: false);
 
         Assert.True(evidence.NonAdministrative);
         Assert.False((evidence with
         {
-            PrincipalAdministratorMembership = true
+            ExactServiceSidRestricted = false
         }).NonAdministrative);
     }
 
     [Fact]
     [SupportedOSPlatform("windows")]
-    public void ProfileDeletionRetryPolicyIsExplicitAndFailClosed()
+    public void CanonicalServiceSidMatchesWindowsKnownVector()
     {
-        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(5));
-        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(32));
-        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(33));
-        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(170));
-        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(1224));
+        Assert.Equal(
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "TrustedInstaller"));
+    }
 
-        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(0));
-        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(2));
-        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(3));
-        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(87));
+    [Fact]
+    public void CleanupDiscoveryIncludesStagingOnlyPackageTransactions()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-cleanup-discovery-{Guid.NewGuid():N}");
+        var contentSha256 = new string('a', 64);
+        try
+        {
+            Directory.CreateDirectory(root);
+            Directory.CreateDirectory(Path.Combine(
+                root,
+                $".{contentSha256}.{Guid.NewGuid():N}.installing"));
+            Directory.CreateDirectory(Path.Combine(
+                root,
+                $".{contentSha256}.{Guid.NewGuid():N}.committing"));
+
+            Assert.Equal(
+                contentSha256,
+                Assert.Single(ImmutableContentCacheCleanupDiscovery
+                    .DiscoverPackageContentHashes(root)));
+
+            Directory.CreateDirectory(Path.Combine(root, "unexpected"));
+            Assert.Throws<InvalidDataException>(
+                () => ImmutableContentCacheCleanupDiscovery
+                    .DiscoverPackageContentHashes(root));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -174,10 +220,30 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var stationId = $"station.rabbitmq-e2e.{suffix}";
         var coordinatorId = $"coordinator-rabbitmq-e2e-{suffix}";
         var agentIdentity = RestrictedAgentIdentity.CreateRequired(suffix);
+        if (!string.Equals(
+                agentIdentity.Sid,
+                cleanupEntry.ServiceSid,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                agentIdentity.AccountName,
+                cleanupEntry.ServiceAccountName,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                agentIdentity.ServiceAccountSid,
+                cleanupEntry.ServiceAccountSid,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The staged Agent runtime identity differs from its protected cleanup manifest.");
+        }
+
         var dataRoot = Path.Combine(root, "agent-data");
         var distributionRoot = Path.Combine(root, "package-distribution");
         var runtimeWorkRoot = Path.Combine(root, "runtime-work");
-        var packageCacheRoot = Path.Combine(root, "package-cache");
+        var packageCacheAnchor = Path.Combine(
+            Path.GetDirectoryName(root)!,
+            $"olo-staged-agent-rmq-content-{suffix}");
+        var packageCacheRoot = Path.Combine(packageCacheAnchor, "content");
         StagedCoordinatorApiProcess? artifactApi = null;
         HttpClient? operatorTraceClient = null;
         WindowsAgentService? agentService = null;
@@ -191,6 +257,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         AgentHostTokenEvidence? initialAgentTokenEvidence = null;
         var offlinePendingOutboxCount = 0;
         var coordinatorTransportResultInboxRestartedAfterBrokerRecovery = false;
+        var immutableContentCacheEvidence = ImmutableContentCacheEvidence.Empty;
+        var preSealRecoveryPrepared = false;
+        var cleanupCrashCheckpointPrepared = false;
         Exception? executionFailure = null;
         var cleanupFailures = new List<Exception>();
         try
@@ -216,6 +285,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 stationId,
                 package.PackageContentSha256,
                 suffix);
+            var localArrivalSignal = new StationMaterialArrivalSignal(
+                Guid.NewGuid(),
+                $"material-arrival/scm-e2e/{suffix}",
+                StationMaterialKinds.ProductionUnit,
+                $"board-scm-e2e-{suffix}",
+                StationMaterialArrivalSources.Plc,
+                "plc.scm-e2e",
+                DateTimeOffset.UtcNow);
+            var materialArrivalReceived = new TaskCompletionSource<MaterialArrived>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
                 request,
                 Assert.Single(request.ResourceFences));
@@ -256,9 +335,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 new SystemClock());
             resultInboxStop = new CancellationTokenSource();
             resultInbox = coordinator.RunResultInboxAsync(
-                static (_, cancellationToken) =>
+                (message, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (message.MessageId == localArrivalSignal.MessageId)
+                    {
+                        materialArrivalReceived.TrySetResult(message);
+                    }
+
                     return ValueTask.CompletedTask;
                 },
                 static (_, cancellationToken) =>
@@ -280,7 +364,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 agentId,
                 stationId,
                 suffix,
-                agentIdentity.Sid,
                 artifactApi.BaseUri,
                 artifactApiCredentials.AgentToken);
             agentService = WindowsAgentService.Install(
@@ -288,11 +371,76 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 ownedAgentBundleRoot,
                 environment,
                 agentIdentity,
-                suffix);
+                suffix,
+                packageCacheRoot);
+            var packagedProvisionCommandVerified =
+                ProvisionPackageCacheThroughPackagedAgent(
+                    cleanupEntry.ExecutablePath,
+                    packageCacheRoot,
+                    agentService.ServiceName,
+                    agentIdentity.Sid);
+            Assert.True(packagedProvisionCommandVerified);
+            immutableContentCacheEvidence = immutableContentCacheEvidence with
+            {
+                PackagedProvisionCommandVerified =
+                    packagedProvisionCommandVerified
+            };
             agent = agentService.Start();
+            var runningServiceAdministrationRejected =
+                VerifyPackagedProvisionRejectsRunningService(
+                    cleanupEntry.ExecutablePath,
+                    packageCacheRoot,
+                    agentService.ServiceName,
+                    agentIdentity.Sid);
+            Assert.True(runningServiceAdministrationRejected);
+            immutableContentCacheEvidence = immutableContentCacheEvidence with
+            {
+                RunningServiceAdministrationRejected =
+                    runningServiceAdministrationRejected
+            };
             initialAgentTokenEvidence = agent.TokenEvidence;
             await WaitForExternalAbortIfRequestedAsync(cleanupEntry, agent);
             await topology.WaitForAgentConsumerAsync(agent, TimeSpan.FromSeconds(30));
+            var ordinaryCiTokenExplicitAccessDenied =
+                await VerifyMaterialArrivalPipeRejectsNonStationTokenAsync(
+                    StationMaterialArrivalLocalIpcOptions.DerivePipeName(agentIdentity.Sid),
+                    agent,
+                    TimeSpan.FromSeconds(10));
+            var materialArrivalSubmission = await SubmitMaterialArrivalAsStationAsync(
+                StationMaterialArrivalLocalIpcOptions.DerivePipeName(agentIdentity.Sid),
+                agentIdentity.Sid,
+                agent,
+                localArrivalSignal,
+                TimeSpan.FromSeconds(10));
+            var arrivalResponse = materialArrivalSubmission.Response;
+            Assert.True(arrivalResponse.Accepted);
+            Assert.False(arrivalResponse.Replayed);
+            Assert.Null(arrivalResponse.FailureCode);
+            Assert.Equal(localArrivalSignal.MessageId, arrivalResponse.MessageId);
+            var arrived = await materialArrivalReceived.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal(localArrivalSignal.MessageId, arrived.MessageId);
+            Assert.Equal(localArrivalSignal.IdempotencyKey, arrived.IdempotencyKey);
+            Assert.Equal(agentId, arrived.ProducerId);
+            Assert.Equal(stationId, arrived.StationId);
+            Assert.Equal(localArrivalSignal.MaterialKind, arrived.MaterialKind);
+            Assert.Equal(localArrivalSignal.MaterialId, arrived.MaterialId);
+            Assert.Equal(localArrivalSignal.Source, arrived.Source);
+            Assert.Equal(localArrivalSignal.ActorId, arrived.ActorId);
+            await WaitUntilAsync(
+                () => IsMaterialArrivalDurablyPublishedAsync(
+                    Path.Combine(dataRoot, "station-agent.sqlite"),
+                    localArrivalSignal.MessageId),
+                agent,
+                TimeSpan.FromSeconds(30),
+                "Station Agent did not persist and publish the service-token material arrival.");
+            var materialArrivalDurablyPublished =
+                await IsMaterialArrivalDurablyPublishedAsync(
+                    Path.Combine(dataRoot, "station-agent.sqlite"),
+                    localArrivalSignal.MessageId);
+            Assert.True(materialArrivalSubmission.ServiceTokenConnected);
+            Assert.True(materialArrivalSubmission.PipeExactAclVerified);
+            Assert.True(materialArrivalDurablyPublished);
+            Assert.True(ordinaryCiTokenExplicitAccessDenied);
 
             var runtimeClock = new SystemClock();
             var runtimeMaterials = new InMemoryProductionMaterialRepository();
@@ -404,6 +552,20 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
             Assert.Null(await coordinationStore.GetCompletionAsync(request.IdempotencyKey));
             Assert.True(offlinePendingOutboxCount > 0);
+            var immutablePackageAccessEvidence =
+                VerifyImmutablePackageAccessAsExactServiceToken(
+                    agent,
+                    packageCacheRoot,
+                    package.PackageContentSha256);
+            immutableContentCacheEvidence = immutableContentCacheEvidence with
+            {
+                ServiceTokenReadExecuteVerified =
+                    immutablePackageAccessEvidence.ServiceTokenReadExecuteVerified,
+                SealedMutationAccessDenied =
+                    immutablePackageAccessEvidence.SealedMutationAccessDenied,
+                DeepAncestorMutationAccessDenied =
+                    immutablePackageAccessEvidence.DeepAncestorMutationAccessDenied
+            };
 
             await brokerOutage.StartAsync(TimeSpan.FromMinutes(2));
             resultInboxStop.Cancel();
@@ -538,6 +700,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 initialRevision,
                 initialEvents.Count,
                 initialExecutionCount);
+            var preSealRecoveryHash = new string('c', 64);
+            preSealRecoveryPrepared = CreatePreSealRecoveryTreeAsExactServiceToken(
+                agent,
+                packageCacheRoot,
+                preSealRecoveryHash);
+            Assert.True(preSealRecoveryPrepared);
 
             var restartedPresenceSessionId = Assert.Single(
                 presenceRepository.AcceptedSnapshots
@@ -559,8 +727,40 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             var windowsServiceName = agentService.ServiceName;
             var windowsServiceLifecycleVerified = agentService.LifecycleVerified;
             Assert.True(windowsServiceLifecycleVerified);
+            cleanupCrashCheckpointPrepared = PrepareCommittedCleanupCrashCheckpoint(
+                Path.Combine(
+                    packageCacheRoot,
+                    $".{package.PackageContentSha256}.installed",
+                    "content.sha256"),
+                agentIdentity.Sid);
+            Assert.True(cleanupCrashCheckpointPrepared);
+            RequireFormalContentCacheRemovalScenario(
+                packageCacheRoot,
+                package.PackageContentSha256,
+                preSealRecoveryHash);
             agentService.Dispose();
-            Assert.True(agentService.DeletionProven);
+            var committedAdminRemovalVerified = agentService.DeletionProven;
+            var packagedRemovalCommandVerified =
+                agentService.PackagedRemovalCommandVerified;
+            var cacheRootRemoved = !Directory.Exists(packageCacheRoot);
+            var cacheNamespaceRemoved = !Directory.Exists(packageCacheAnchor);
+            Assert.True(committedAdminRemovalVerified);
+            Assert.True(packagedRemovalCommandVerified);
+            Assert.True(cacheRootRemoved);
+            Assert.True(cacheNamespaceRemoved);
+            immutableContentCacheEvidence = immutableContentCacheEvidence with
+            {
+                PreSealRecoveryVerified = preSealRecoveryPrepared && cacheRootRemoved,
+                CleanupCrashResumeVerified =
+                    cleanupCrashCheckpointPrepared && cacheRootRemoved,
+                CommittedAdminRemovalVerified =
+                    committedAdminRemovalVerified && cacheRootRemoved,
+                PackagedRemovalCommandVerified =
+                    packagedRemovalCommandVerified
+                    && cacheRootRemoved
+                    && cacheNamespaceRemoved,
+                CacheNamespaceRemoved = cacheRootRemoved && cacheNamespaceRemoved
+            };
             agentService = null;
 
             WriteEvidence(
@@ -587,7 +787,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 windowsServiceName,
                 windowsServiceLifecycleVerified,
                 initialAgentTokenEvidence!,
-                restartedAgentTokenEvidence);
+                restartedAgentTokenEvidence,
+                new MaterialArrivalIpcEvidence(
+                    materialArrivalSubmission.ServiceTokenConnected,
+                    materialArrivalSubmission.PipeExactAclVerified,
+                    materialArrivalDurablyPublished,
+                    ordinaryCiTokenExplicitAccessDenied),
+                immutableContentCacheEvidence);
         }
         catch (Exception exception)
         {
@@ -682,8 +888,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             if (agentIdentity.HasUnprovenServiceInstallation)
             {
                 cleanupFailures.Add(new InvalidOperationException(
-                    "Staged Agent SCM deletion is unproven; the service account, "
-                    + "SeServiceLogonRight, profile, ACLs, and working root were deliberately preserved for safe diagnosis."));
+                    "Staged Agent SCM deletion is unproven; its exact service-SID ACLs "
+                    + "and working root were deliberately preserved for safe diagnosis."));
             }
             else
             {
@@ -707,7 +913,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 {
                     CaptureCleanupFailure(
                         cleanupFailures,
-                        () => DeleteRunScopedOwnedRoot("rabbitmq", root));
+                        () => DeleteRunScopedOwnedRoot(
+                            "rabbitmq",
+                            root,
+                            new Dictionary<string, RunScopedPackageCacheBinding>(StringComparer.Ordinal)
+                            {
+                                ["rabbitmq"] = new(
+                                    cleanupEntry.ServiceSid,
+                                    packageCacheRoot)
+                            }));
                 }
             }
         }
@@ -730,9 +944,148 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
     }
 
+    [SupportedOSPlatform("windows")]
+    private static async Task<MaterialArrivalSubmissionEvidence>
+        SubmitMaterialArrivalAsStationAsync(
+            string pipeName,
+            string expectedServiceSid,
+            WindowsAgentProcess agent,
+            StationMaterialArrivalSignal signal,
+            TimeSpan timeout)
+    {
+        using var deadline = new CancellationTokenSource(timeout);
+        await using var pipe = agent.ConnectNamedPipeAsService(pipeName, timeout);
+        var serviceTokenConnected = pipe.IsConnected;
+        if (!serviceTokenConnected)
+        {
+            throw new InvalidOperationException(
+                "The exact Station service token did not connect to its material-arrival pipe.");
+        }
+
+        WindowsIdentityBoundNamedPipe.Verify(pipe, expectedServiceSid);
+        var pipeExactAclVerified = true;
+        await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
+            pipe,
+            JsonSerializer.SerializeToUtf8Bytes(signal, ReceiptJsonOptions),
+            deadline.Token);
+        var responsePayload = await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
+            pipe,
+            4096,
+            deadline.Token);
+        var response = JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
+                           responsePayload,
+                           ReceiptJsonOptions)
+                       ?? throw new InvalidDataException(
+                           "Staged Agent material-arrival response is null.");
+        if (response.MessageId != signal.MessageId
+            || !response.Accepted
+            || response.Replayed
+            || response.FailureCode is not null)
+        {
+            throw new InvalidDataException(
+                "Staged Agent material-arrival response is not the exact positive acknowledgement.");
+        }
+
+        await StationMaterialArrivalLocalIpcServer.WriteResponseReceiptAsync(
+            pipe,
+            deadline.Token);
+        return new MaterialArrivalSubmissionEvidence(
+            response,
+            serviceTokenConnected,
+            pipeExactAclVerified);
+    }
+
+    private static async Task<bool> IsMaterialArrivalDurablyPublishedAsync(
+        string databasePath,
+        Guid messageId)
+    {
+        try
+        {
+            await using var connection = new SqliteConnection(
+                $"Data Source={databasePath};Pooling=False");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COUNT(*)
+                FROM station_material_arrival_outbox
+                WHERE message_id = $message_id
+                  AND published_at_utc IS NOT NULL
+                  AND quarantined_at_utc IS NULL;
+                """;
+            command.Parameters.AddWithValue("$message_id", messageId.ToString("D"));
+            return Convert.ToInt64(
+                       await command.ExecuteScalarAsync(),
+                       CultureInfo.InvariantCulture) == 1;
+        }
+        catch (SqliteException)
+        {
+            return false;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static async Task<bool> VerifyMaterialArrivalPipeRejectsNonStationTokenAsync(
+        string pipeName,
+        WindowsAgentProcess agent,
+        TimeSpan timeout)
+    {
+        var timeoutAtUtc = DateTimeOffset.UtcNow + timeout;
+        Exception? lastException = null;
+        while (DateTimeOffset.UtcNow < timeoutAtUtc)
+        {
+            if (agent.HasExited)
+            {
+                throw new InvalidOperationException(
+                    $"Station Agent exited with code {agent.ExitCode} before its material-arrival pipe boundary was verified.");
+            }
+            await using var pipe = new NamedPipeClientStream(
+                ".",
+                pipeName,
+                PipeDirection.InOut,
+                PipeOptions.Asynchronous);
+            using var attempt = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            try
+            {
+                await pipe.ConnectAsync(attempt.Token);
+                throw new UnauthorizedAccessException(
+                    "The non-Station CI token connected to the exact service-SID material-arrival pipe.");
+            }
+            catch (UnauthorizedAccessException exception) when (
+                !pipe.IsConnected
+                && (exception.HResult & 0xFFFF) == 5)
+            {
+                return true;
+            }
+            catch (IOException exception) when (
+                !pipe.IsConnected
+                && (exception.HResult & 0xFFFF) == 5)
+            {
+                return true;
+            }
+            catch (OperationCanceledException exception) when (attempt.IsCancellationRequested)
+            {
+                lastException = exception;
+            }
+            catch (IOException exception)
+            {
+                lastException = exception;
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                lastException = exception;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new InvalidOperationException(
+            "The staged Agent material-arrival pipe never produced the required access-denied proof for the non-Station token.",
+            lastException);
+    }
+
     [Fact]
     [SupportedOSPlatform("windows")]
-    public void CleanupRunScopedWindowsAgentServicesAndIdentities()
+    public void CleanupRunScopedWindowsAgentServicesAndAccess()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -751,68 +1104,29 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 $"{AgentServiceCleanupGateVariable} must be exactly 'true'.");
         }
 
-        CleanupRunScopedAgentServicesAndIdentities(
+        CleanupRunScopedAgentServicesAndAccess(
             ReadRequiredAgentServiceCleanupContract(
                 expectedKind: null,
                 expectedScope: null));
     }
 
     [SupportedOSPlatform("windows")]
-    private static void CleanupRunScopedAgentServicesAndIdentities(
+    private static void CleanupRunScopedAgentServicesAndAccess(
         AgentServiceCleanupContract contract)
     {
         var failures = new List<Exception>();
-        var identities = new Dictionary<string, RestrictedAgentIdentity.RunScopedIdentity?>(
-            StringComparer.Ordinal);
-        var invalidIdentities = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var entry in contract.Entries)
-        {
-            try
-            {
-                identities.Add(
-                    entry.Role,
-                    RestrictedAgentIdentity.ReadRunScopedIdentity(
-                        entry.AccountName,
-                        entry.AccountSid));
-            }
-            catch (Exception exception)
-            {
-                identities.Add(entry.Role, null);
-                invalidIdentities.Add(entry.Role);
-                failures.Add(new InvalidOperationException(
-                    $"Run-scoped identity validation failed for role '{entry.Role}'; preserving that identity and owned root.",
-                    exception));
-            }
-        }
-
         var deletedServices = new HashSet<string>(StringComparer.Ordinal);
-        var deletedIdentities = new HashSet<string>(StringComparer.Ordinal);
-
         foreach (var entry in contract.Entries)
         {
-            if (invalidIdentities.Contains(entry.Role))
-            {
-                continue;
-            }
-
             try
             {
-                var identity = identities[entry.Role];
-                if (identity is null)
-                {
-                    WindowsAgentService.ProveRunScopedArtifactsAbsent(entry);
-                }
-                else
-                {
-                    WindowsAgentService.CleanupRunScoped(entry, identity.Sid);
-                }
-
+                WindowsAgentService.CleanupRunScoped(entry);
                 deletedServices.Add(entry.Role);
             }
             catch (Exception exception)
             {
                 failures.Add(new InvalidOperationException(
-                    $"Run-scoped service cleanup failed for role '{entry.Role}'; preserving its identity and owned root.",
+                    $"Run-scoped service cleanup failed for role '{entry.Role}'; preserving its exact service-SID ACLs and owned root.",
                     exception));
             }
         }
@@ -823,8 +1137,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                      static entry => entry.OwnedRoot,
                      StringComparer.OrdinalIgnoreCase))
         {
-            if (rootGroup.Any(entry => invalidIdentities.Contains(entry.Role)
-                                       || !deletedServices.Contains(entry.Role)))
+            if (rootGroup.Any(entry => !deletedServices.Contains(entry.Role)))
             {
                 continue;
             }
@@ -832,9 +1145,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             try
             {
                 var allowedSids = rootGroup
-                    .Select(entry => identities[entry.Role]?.Sid)
-                    .Where(static sid => sid is not null)
-                    .Cast<string>()
+                    .Select(static entry => entry.ServiceSid)
                     .ToHashSet(StringComparer.Ordinal);
                 VerifyRunScopedOwnedRootForIdentityCleanup(
                     rootGroup.Key,
@@ -844,11 +1155,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             catch (Exception exception)
             {
                 failures.Add(new InvalidOperationException(
-                    $"Run-scoped owned-root provenance validation failed for '{rootGroup.Key}'; preserving every identity in that root.",
+                    $"Run-scoped owned-root provenance validation failed for '{rootGroup.Key}'; preserving every service-SID ACL in that root.",
                     exception));
             }
         }
 
+        var removedServiceSidAcls = new HashSet<string>(StringComparer.Ordinal);
         foreach (var rootGroup in contract.Entries.GroupBy(
                      static entry => entry.OwnedRoot,
                      StringComparer.OrdinalIgnoreCase))
@@ -858,21 +1170,40 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 continue;
             }
 
+            try
+            {
+                DeleteRunScopedProtectedInstallations(
+                    contract.Kind,
+                    rootGroup.ToDictionary(
+                        static entry => entry.Role,
+                        static entry => new RunScopedPackageCacheBinding(
+                            entry.ServiceSid,
+                            PackageCacheRootForCleanupEntry(entry)),
+                        StringComparer.Ordinal));
+            }
+            catch (Exception exception)
+            {
+                failures.Add(new InvalidOperationException(
+                    $"Run-scoped protected Station package cleanup failed for '{rootGroup.Key}'; preserving every service-SID ACL and the owned root.",
+                    exception));
+                authorizedRootSids.Remove(rootGroup.Key);
+                continue;
+            }
+
             foreach (var entry in rootGroup)
             {
                 try
                 {
-                    RestrictedAgentIdentity.CleanupRunScoped(
-                        identities[entry.Role],
-                        entry.AccountName,
+                    RestrictedAgentIdentity.CleanupRunScopedAccess(
                         entry.OwnedRoot,
+                        entry.ServiceSid,
                         allowedSids);
-                    deletedIdentities.Add(entry.Role);
+                    removedServiceSidAcls.Add(entry.Role);
                 }
                 catch (Exception exception)
                 {
                     failures.Add(new InvalidOperationException(
-                        $"Run-scoped identity cleanup failed for role '{entry.Role}'; preserving its owned root.",
+                        $"Run-scoped service-SID ACL cleanup failed for role '{entry.Role}'; preserving its owned root.",
                         exception));
                 }
             }
@@ -883,14 +1214,22 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                      StringComparer.OrdinalIgnoreCase))
         {
             if (rootGroup.Any(entry => !deletedServices.Contains(entry.Role)
-                                       || !deletedIdentities.Contains(entry.Role)))
+                                       || !removedServiceSidAcls.Contains(entry.Role)))
             {
                 continue;
             }
 
             try
             {
-                DeleteRunScopedOwnedRoot(contract.Kind, rootGroup.Key);
+                DeleteRunScopedOwnedRoot(
+                    contract.Kind,
+                    rootGroup.Key,
+                    rootGroup.ToDictionary(
+                        static entry => entry.Role,
+                        static entry => new RunScopedPackageCacheBinding(
+                            entry.ServiceSid,
+                            PackageCacheRootForCleanupEntry(entry)),
+                        StringComparer.Ordinal));
                 if (Directory.Exists(rootGroup.Key) || File.Exists(rootGroup.Key))
                 {
                     throw new InvalidOperationException(
@@ -968,7 +1307,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         var kind = RequiredJsonString(root, "kind");
-        if (kind is not ("rabbitmq" or "studio-two-agent")
+        if (kind is not ("rabbitmq" or "studio-two-agent" or "runner")
             || expectedKind is not null
             && !string.Equals(kind, expectedKind, StringComparison.Ordinal))
         {
@@ -996,7 +1335,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             .ToArray();
         var expectedRoles = kind == "rabbitmq"
             ? new[] { "rabbitmq" }
-            : new[] { "entry", "downstream" };
+            : kind == "runner"
+                ? new[] { "runner" }
+                : new[] { "entry", "downstream" };
         if (!entries.Select(static entry => entry.Role)
                 .SequenceEqual(expectedRoles, StringComparer.Ordinal))
         {
@@ -1004,7 +1345,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 "Agent service cleanup manifest roles are missing, duplicated, or out of canonical order.");
         }
 
-        return new AgentServiceCleanupContract(manifestPath, kind, scope, entries);
+        return new AgentServiceCleanupContract(kind, scope, entries);
     }
 
     [SupportedOSPlatform("windows")]
@@ -1018,10 +1359,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "Agent service cleanup entry",
             "role",
             "serviceSuffix",
-            "accountSuffix",
             "serviceName",
-            "accountName",
-            "accountSid",
+            "serviceAccountName",
+            "serviceAccountSid",
+            "serviceSid",
+            "serviceSidType",
             "executablePath",
             "executableSha256",
             "ownedRoot");
@@ -1029,56 +1371,55 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var serviceSuffix = RequireLowerHexScope(
             RequiredJsonString(element, "serviceSuffix"),
             "serviceSuffix");
-        var accountSuffix = RequireLowerHexScope(
-            RequiredJsonString(element, "accountSuffix"),
-            "accountSuffix");
-        var expectedServiceSuffix = kind == "rabbitmq"
+        var expectedServiceSuffix = kind is "rabbitmq" or "runner"
             ? scope
             : AgentServiceScopedSuffix($"{role}-service", scope);
-        var expectedAccountSuffix = kind == "rabbitmq"
-            ? scope
-            : AgentServiceScopedSuffix($"{role}-account", scope);
-        if (!string.Equals(serviceSuffix, expectedServiceSuffix, StringComparison.Ordinal)
-            || !string.Equals(accountSuffix, expectedAccountSuffix, StringComparison.Ordinal))
+        if (!string.Equals(serviceSuffix, expectedServiceSuffix, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Agent service cleanup entry '{role}' has a non-canonical derived suffix.");
+                $"Agent service cleanup entry '{role}' has a non-canonical service suffix.");
         }
 
         var serviceName = RequiredJsonString(element, "serviceName");
-        var accountName = RequiredJsonString(element, "accountName");
         if (!string.Equals(
                 serviceName,
                 $"OpenLineOpsAgentE2E-{serviceSuffix}",
-                StringComparison.Ordinal)
-            || !string.Equals(
-                accountName,
-                $"oloe2e{accountSuffix[..10]}",
                 StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Agent service cleanup entry '{role}' has a non-canonical service or account name.");
+                $"Agent service cleanup entry '{role}' has a non-canonical service name.");
         }
 
-        var accountSidElement = element.GetProperty("accountSid");
-        string? accountSid = null;
-        if (accountSidElement.ValueKind == JsonValueKind.String)
-        {
-            accountSid = accountSidElement.GetString();
-            if (string.IsNullOrWhiteSpace(accountSid)
-                || !string.Equals(
-                    new SecurityIdentifier(accountSid).Value,
-                    accountSid,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    $"Agent service cleanup entry '{role}' accountSid is not canonical.");
-            }
-        }
-        else if (accountSidElement.ValueKind != JsonValueKind.Null)
+        var serviceAccountName = RequiredJsonString(element, "serviceAccountName");
+        var serviceAccountSid = RequiredJsonString(element, "serviceAccountSid");
+        if (!string.Equals(
+                serviceAccountName,
+                RestrictedAgentIdentity.LocalServiceAccountName,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                serviceAccountSid,
+                RestrictedAgentIdentity.LocalServiceAccountSid,
+                StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"Agent service cleanup entry '{role}' accountSid must be null or a canonical SID string.");
+                $"Agent service cleanup entry '{role}' must use the canonical LocalService identity.");
+        }
+
+        var serviceSid = RequiredJsonString(element, "serviceSid");
+        if (!string.Equals(
+                serviceSid,
+                WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(serviceName),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' serviceSid is not canonical for its exact service name.");
+        }
+
+        var serviceSidType = RequiredJsonString(element, "serviceSidType");
+        if (!string.Equals(serviceSidType, "Restricted", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' serviceSidType must be exactly 'Restricted'.");
         }
 
         var windowsTemp = Path.Combine(
@@ -1086,9 +1427,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "Temp");
         var expectedOwnedRoot = Path.Combine(
             windowsTemp,
-            kind == "rabbitmq"
-                ? $"olo-staged-agent-rmq-{scope}"
-                : $"olo-studio-two-agent-{scope}");
+            kind switch
+            {
+                "rabbitmq" => $"olo-staged-agent-rmq-{scope}",
+                "runner" => $"olo-runner-staged-agent-{scope}",
+                _ => $"olo-studio-two-agent-{scope}"
+            });
         var ownedRootText = RequiredJsonString(element, "ownedRoot");
         var ownedRoot = RequireCanonicalAbsolutePath(ownedRootText, "ownedRoot");
         if (!string.Equals(ownedRoot, expectedOwnedRoot, StringComparison.OrdinalIgnoreCase))
@@ -1116,137 +1460,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         return new AgentServiceCleanupEntry(
             role,
             serviceSuffix,
-            accountSuffix,
             serviceName,
-            accountName,
-            accountSid,
+            serviceAccountName,
+            serviceAccountSid,
+            serviceSid,
+            serviceSidType,
             executablePath,
             RequireLowerHex(
                 RequiredJsonString(element, "executableSha256"),
                 64,
                 "executableSha256"),
             ownedRoot);
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static void UpdateCleanupManifestAccountSid(
-        string accountSuffix,
-        string accountName,
-        string accountSid)
-    {
-        var contract = ReadRequiredAgentServiceCleanupContract(
-            expectedKind: null,
-            expectedScope: null);
-        var matching = contract.Entries
-            .Where(entry => string.Equals(
-                entry.AccountSuffix,
-                accountSuffix,
-                StringComparison.Ordinal))
-            .ToArray();
-        var entry = matching.Length == 1
-            ? matching[0]
-            : throw new InvalidDataException(
-                "Protected cleanup manifest does not contain exactly one entry for the new service account.");
-        if (!string.Equals(entry.AccountName, accountName, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "Protected cleanup manifest account name differs from the newly created account.");
-        }
-
-        var canonicalSid = new SecurityIdentifier(accountSid).Value;
-        if (entry.AccountSid is not null)
-        {
-            if (!string.Equals(entry.AccountSid, canonicalSid, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    "Protected cleanup manifest already records a different account SID.");
-            }
-
-            return;
-        }
-
-        using var bytes = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(
-                   bytes,
-                   new JsonWriterOptions { Indented = true }))
-        {
-            writer.WriteStartObject();
-            writer.WriteString("schema", "openlineops-agent-service-cleanup");
-            writer.WriteNumber("schemaVersion", 1);
-            writer.WriteString("kind", contract.Kind);
-            writer.WriteString("scope", contract.Scope);
-            writer.WriteStartArray("entries");
-            foreach (var item in contract.Entries)
-            {
-                writer.WriteStartObject();
-                writer.WriteString("role", item.Role);
-                writer.WriteString("serviceSuffix", item.ServiceSuffix);
-                writer.WriteString("accountSuffix", item.AccountSuffix);
-                writer.WriteString("serviceName", item.ServiceName);
-                writer.WriteString("accountName", item.AccountName);
-                if (string.Equals(item.Role, entry.Role, StringComparison.Ordinal))
-                {
-                    writer.WriteString("accountSid", canonicalSid);
-                }
-                else if (item.AccountSid is null)
-                {
-                    writer.WriteNull("accountSid");
-                }
-                else
-                {
-                    writer.WriteString("accountSid", item.AccountSid);
-                }
-
-                writer.WriteString("executablePath", item.ExecutablePath);
-                writer.WriteString("executableSha256", item.ExecutableSha256);
-                writer.WriteString("ownedRoot", item.OwnedRoot);
-                writer.WriteEndObject();
-            }
-
-            writer.WriteEndArray();
-            writer.WriteEndObject();
-            writer.Flush();
-        }
-
-        var temporaryPath = contract.ManifestPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            using (File.Create(temporaryPath))
-            {
-            }
-
-            ProtectRunScopedFile(temporaryPath);
-            using (var stream = new FileStream(
-                       temporaryPath,
-                       FileMode.Open,
-                       FileAccess.Write,
-                       FileShare.None))
-            {
-                stream.Write(bytes.GetBuffer(), 0, checked((int)bytes.Length));
-                stream.SetLength(bytes.Length);
-                stream.Flush(flushToDisk: true);
-            }
-
-            File.Move(temporaryPath, contract.ManifestPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-
-        var updated = ReadRequiredAgentServiceCleanupContract(
-            expectedKind: contract.Kind,
-            expectedScope: contract.Scope);
-        var updatedEntry = Assert.Single(updated.Entries, item =>
-            string.Equals(item.Role, entry.Role, StringComparison.Ordinal));
-        if (!string.Equals(updatedEntry.AccountSid, canonicalSid, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "Protected cleanup manifest did not persist the exact new account SID.");
-        }
     }
 
     private static void VerifyCleanupExecutable(AgentServiceCleanupEntry entry)
@@ -1332,7 +1556,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 writer.WriteNumber("schemaVersion", 1);
                 writer.WriteString("scope", entry.ServiceSuffix);
                 writer.WriteString("serviceName", entry.ServiceName);
-                writer.WriteString("accountName", entry.AccountName);
+                writer.WriteString("serviceAccountName", entry.ServiceAccountName);
+                writer.WriteString("serviceAccountSid", entry.ServiceAccountSid);
+                writer.WriteString("serviceSid", entry.ServiceSid);
+                writer.WriteString("serviceSidType", entry.ServiceSidType);
                 writer.WriteNumber("testHostProcessId", Environment.ProcessId);
                 writer.WriteNumber("agentProcessId", agent.Id);
                 writer.WriteString("executablePath", agent.ExecutablePath);
@@ -1539,8 +1766,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [SupportedOSPlatform("windows")]
-    private static void DeleteRunScopedOwnedRoot(string kind, string root)
+    private static void DeleteRunScopedOwnedRoot(
+        string kind,
+        string root,
+        IReadOnlyDictionary<string, RunScopedPackageCacheBinding> packageCaches)
     {
+        ArgumentNullException.ThrowIfNull(packageCaches);
         if (!Directory.Exists(root))
         {
             if (File.Exists(root))
@@ -1553,14 +1784,50 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         VerifyRunScopedOwnedRootForCleanup(root);
+        DeleteRunScopedProtectedInstallations(kind, packageCaches);
         if (kind == "studio-two-agent")
         {
             DeleteStudioAgentHarnessRoot(root);
             return;
         }
 
-        DeleteWorkRoot(root, Path.Combine(root, "package-cache"));
+        DeleteWorkRoot(root);
     }
+
+    [SupportedOSPlatform("windows")]
+    private static void DeleteRunScopedProtectedInstallations(
+        string kind,
+        IReadOnlyDictionary<string, RunScopedPackageCacheBinding> packageCaches)
+    {
+        ArgumentNullException.ThrowIfNull(packageCaches);
+        var expectedRoles = kind switch
+        {
+            "rabbitmq" => new[] { "rabbitmq" },
+            "runner" => new[] { "runner" },
+            "studio-two-agent" => new[] { "entry", "downstream" },
+            _ => throw new InvalidDataException(
+                $"Unsupported run-scoped Agent cleanup kind '{kind}'.")
+        };
+        if (packageCaches.Count != expectedRoles.Length
+            || expectedRoles.Any(role => !packageCaches.ContainsKey(role)))
+        {
+            throw new InvalidDataException(
+                "Protected Station package cleanup service-SID roles do not match the exact run kind.");
+        }
+
+        foreach (var role in expectedRoles)
+        {
+            RunScopedPackageCacheBinding binding = packageCaches[role];
+            DeleteProtectedPackageInstallations(
+                binding.PackageCacheRoot,
+                binding.ServiceSid);
+            DeleteProvisionedCacheNamespace(binding.PackageCacheRoot);
+        }
+    }
+
+    private sealed record RunScopedPackageCacheBinding(
+        string ServiceSid,
+        string PackageCacheRoot);
 
     [SupportedOSPlatform("windows")]
     private static void VerifyRunScopedOwnedRootForCleanup(string root)
@@ -1581,10 +1848,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     [SupportedOSPlatform("windows")]
     private static void VerifyRunScopedOwnedRootForIdentityCleanup(
         string root,
-        IReadOnlySet<string> allowedAccountSids)
+        IReadOnlySet<string> allowedServiceSids)
     {
-        ArgumentNullException.ThrowIfNull(allowedAccountSids);
-        foreach (var sid in allowedAccountSids)
+        ArgumentNullException.ThrowIfNull(allowedServiceSids);
+        foreach (var sid in allowedServiceSids)
         {
             _ = new SecurityIdentifier(sid);
         }
@@ -1611,7 +1878,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 AccessControlSections.Owner | AccessControlSections.Access),
             currentSid,
             "run-scoped staged Agent identity root",
-            allowedAccountSids);
+            allowedServiceSids);
     }
 
     private static List<string> RejectTreeReparsePoints(
@@ -1993,7 +2260,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         try
         {
-            return await new FileSystemExternalProgramResourceRepository().SaveAsync(
+            return await new FileSystemExternalProgramResourceRepository().ImportDirectoryAsync(
                 scope,
                 new SaveExternalProgramResourceRequest(
                     ExternalProgramResourceId,
@@ -2190,12 +2457,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string agentId,
         string stationId,
         string suffix,
-        string restrictedExternalProgramHostSid,
         Uri coordinatorBaseUri,
         string artifactUploadBearerToken)
     {
         var environment = new Dictionary<string, string>(
             StringComparer.OrdinalIgnoreCase);
+        var privateTemp = Path.Combine(root, "private-temp");
+        Directory.CreateDirectory(privateTemp);
+        environment.Add("TEMP", privateTemp);
+        environment.Add("TMP", privateTemp);
 
         Set("AgentId", agentId);
         Set("StationId", stationId);
@@ -2209,7 +2479,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         Set("PackageDistributionDirectory", distributionRoot);
         Set("PackageCacheDirectory", packageCacheRoot);
         Set("MaterialArrivalPackageContentSha256", package.PackageContentSha256);
-        Set("MaterialArrivalPipeName", $"olo-rabbitmq-e2e-{suffix}");
         Set($"TrustedPackagePublicKeyFiles__{SigningKeyId}", package.PublicKeyPath);
         Set("RuntimeExecutablePath", "OpenLineOps.StationRuntime.exe");
         Set("PluginHostExecutablePath", "OpenLineOps.PluginHost.exe");
@@ -2230,9 +2499,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         Set("ArtifactUploadTimeout", "00:01:00");
         Set("RuntimeTimeout", "00:00:30");
         Set("MaximumRuntimeOutputBytes", (2 * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
-        Set(
-            "AllowedRestrictedExternalProgramHostSids__0",
-            restrictedExternalProgramHostSid);
         Set("ExternalProgramAppContainerProfileNamespace", $"OpenLineOps.StagedRmq.{suffix}");
         Set("SafetyExecutablePath", safetyExecutable);
         Set("SafetyWorkingDirectory", Path.Combine(root, "safety-work"));
@@ -2629,8 +2895,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string windowsServiceName,
         bool windowsServiceLifecycleVerified,
         AgentHostTokenEvidence initialAgentTokenEvidence,
-        AgentHostTokenEvidence restartedAgentTokenEvidence)
+        AgentHostTokenEvidence restartedAgentTokenEvidence,
+        MaterialArrivalIpcEvidence materialArrivalIpcEvidence,
+        ImmutableContentCacheEvidence immutableContentCacheEvidence)
     {
+        if (!immutableContentCacheEvidence.IsComplete)
+        {
+            throw new InvalidOperationException(
+                "Staged Agent evidence cannot be written before the immutable content-cache "
+                + "security, recovery, removal, and namespace proofs all complete.");
+        }
+
         var evidencePath = Environment.GetEnvironmentVariable(EvidencePathVariable);
         if (string.IsNullOrWhiteSpace(evidencePath))
         {
@@ -2704,6 +2979,40 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     restartedAgentHostIdentity = TokenProjection(
                         restartedAgentTokenEvidence,
                         agentIdentity),
+                    materialArrivalIpc = new
+                    {
+                        serviceTokenConnected =
+                            materialArrivalIpcEvidence.ServiceTokenConnected,
+                        pipeExactAclVerified =
+                            materialArrivalIpcEvidence.PipeExactAclVerified,
+                        durablePublicationVerified =
+                            materialArrivalIpcEvidence.DurablePublicationVerified,
+                        ordinaryCiTokenExplicitAccessDenied =
+                            materialArrivalIpcEvidence.OrdinaryCiTokenExplicitAccessDenied
+                    },
+                    immutableContentCache = new
+                    {
+                        packagedProvisionCommandVerified =
+                            immutableContentCacheEvidence.PackagedProvisionCommandVerified,
+                        runningServiceAdministrationRejected =
+                            immutableContentCacheEvidence.RunningServiceAdministrationRejected,
+                        serviceTokenReadExecuteVerified =
+                            immutableContentCacheEvidence.ServiceTokenReadExecuteVerified,
+                        sealedMutationAccessDenied =
+                            immutableContentCacheEvidence.SealedMutationAccessDenied,
+                        deepAncestorMutationAccessDenied =
+                            immutableContentCacheEvidence.DeepAncestorMutationAccessDenied,
+                        preSealRecoveryVerified =
+                            immutableContentCacheEvidence.PreSealRecoveryVerified,
+                        cleanupCrashResumeVerified =
+                            immutableContentCacheEvidence.CleanupCrashResumeVerified,
+                        committedAdminRemovalVerified =
+                            immutableContentCacheEvidence.CommittedAdminRemovalVerified,
+                        packagedRemovalCommandVerified =
+                            immutableContentCacheEvidence.PackagedRemovalCommandVerified,
+                        cacheNamespaceRemoved =
+                            immutableContentCacheEvidence.CacheNamespaceRemoved
+                    },
                     offlinePendingOutboxCount,
                     offlineCompletionWasNotDelivered = true,
                     completionDeliveredOnceAfterReconnect = true,
@@ -2757,8 +3066,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         AgentHostTokenEvidence evidence,
         RestrictedAgentIdentity requestedIdentity) => new
         {
-            requestedAccountName = requestedIdentity.AccountName,
-            requestedSid = requestedIdentity.Sid,
+            serviceAccountName = requestedIdentity.AccountName,
+            serviceAccountSid = requestedIdentity.ServiceAccountSid,
+            serviceSid = requestedIdentity.Sid,
             evidence.AccountName,
             evidence.UserSid,
             evidence.IsPrimaryToken,
@@ -2767,7 +3077,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             evidence.AdministratorGroupPresent,
             evidence.AdministratorGroupEnabled,
             evidence.AdministratorGroupDenyOnly,
-            evidence.PrincipalAdministratorMembership,
+            evidence.ServiceLogonSidPresent,
+            evidence.ServiceLogonSidEnabled,
+            evidence.ExactServiceSidPresent,
+            evidence.ExactServiceSidEnabled,
+            evidence.ExactServiceSidRestricted,
             evidence.IsAuthenticated,
             evidence.IsSystem,
             evidence.NonAdministrative,
@@ -2798,6 +3112,323 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
     }
 
+    [SupportedOSPlatform("windows")]
+    private static ImmutableContentCacheEvidence VerifyImmutablePackageAccessAsExactServiceToken(
+        WindowsAgentProcess agent,
+        string packageCacheRoot,
+        string contentSha256)
+    {
+        var contentDirectory = Path.Combine(packageCacheRoot, contentSha256);
+        var commitDirectory = Path.Combine(
+            packageCacheRoot,
+            $".{contentSha256}.installed");
+        var marker = Path.Combine(commitDirectory, "content.sha256");
+        var executable = Assert.Single(Directory.EnumerateFiles(
+            contentDirectory,
+            "OpenLineOps.VendorTestHelper.exe",
+            SearchOption.AllDirectories));
+        var contentRootPrefix = Path.TrimEndingDirectorySeparator(contentDirectory)
+                                + Path.DirectorySeparatorChar;
+        var protectedDirectories = new List<string>
+        {
+            contentDirectory,
+            commitDirectory
+        };
+        for (var directory = Path.GetDirectoryName(executable);
+             directory is not null
+             && directory.StartsWith(contentRootPrefix, StringComparison.OrdinalIgnoreCase);
+             directory = Path.GetDirectoryName(directory))
+        {
+            protectedDirectories.Add(directory);
+        }
+
+        protectedDirectories = [.. protectedDirectories
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        if (protectedDirectories.Count < 5)
+        {
+            throw new InvalidDataException(
+                "The frozen vendor package does not exercise at least three nested immutable directories.");
+        }
+
+        return agent.RunAsService(() =>
+        {
+            Assert.Equal(contentSha256 + "\n", File.ReadAllText(marker));
+            Assert.NotEmpty(File.ReadAllBytes(executable));
+            RequireNativeFileAccessAllowed(
+                executable,
+                GenericExecute,
+                FileFlagOpenReparsePoint,
+                "execute the frozen vendor helper");
+
+            foreach (var file in new[] { executable, marker })
+            {
+                RequireExactAccessDenied(
+                    () => File.WriteAllText(file, "mutation"),
+                    $"write immutable file '{file}'");
+                RequireExactAccessDenied(
+                    () => File.Delete(file),
+                    $"delete immutable file '{file}'");
+                RequireExactAccessDenied(
+                    () => File.Move(file, file + ".moved"),
+                    $"rename immutable file '{file}'");
+                RequireExactAccessDenied(
+                    () => File.SetAttributes(
+                        file,
+                        File.GetAttributes(file) & ~FileAttributes.ReadOnly),
+                    $"clear immutable read-only attribute '{file}'");
+                RequireFileSecurityMutationDenied(file);
+            }
+
+            foreach (var directory in protectedDirectories.Append(packageCacheRoot))
+            {
+                RequireExactAccessDenied(
+                    () => File.WriteAllText(
+                        Path.Combine(directory, $".mutation-{Guid.NewGuid():N}"),
+                        "mutation"),
+                    $"create a child in immutable directory '{directory}'");
+                RequireExactAccessDenied(
+                    () => Directory.Move(directory, directory + ".moved"),
+                    $"rename immutable directory '{directory}'");
+                RequireNativeFileAccessDenied(
+                    directory,
+                    DeleteAccess,
+                    FileFlagOpenReparsePoint | FileFlagBackupSemantics,
+                    $"open immutable directory '{directory}' for deletion");
+                RequireDirectorySecurityMutationDenied(directory);
+            }
+
+            return new ImmutableContentCacheEvidence(
+                PackagedProvisionCommandVerified: false,
+                RunningServiceAdministrationRejected: false,
+                ServiceTokenReadExecuteVerified: true,
+                SealedMutationAccessDenied: true,
+                DeepAncestorMutationAccessDenied: true,
+                PreSealRecoveryVerified: false,
+                CleanupCrashResumeVerified: false,
+                CommittedAdminRemovalVerified: false,
+                PackagedRemovalCommandVerified: false,
+                CacheNamespaceRemoved: false);
+        });
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool CreatePreSealRecoveryTreeAsExactServiceToken(
+        WindowsAgentProcess agent,
+        string packageCacheRoot,
+        string contentSha256)
+    {
+        var contentDirectory = Path.Combine(packageCacheRoot, contentSha256);
+        var payload = Path.Combine(contentDirectory, "deep", "nested", "payload.bin");
+        return agent.RunAsService(() =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(payload)!);
+            File.WriteAllText(payload, "interrupted-pre-seal");
+            foreach (var path in Directory
+                         .EnumerateDirectories(contentDirectory, "*", SearchOption.AllDirectories)
+                         .Prepend(contentDirectory)
+                         .Append(payload))
+            {
+                FileSystemSecurity security = Directory.Exists(path)
+                    ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
+                    : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+                Assert.Equal(
+                    new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null),
+                    security.GetOwner(typeof(SecurityIdentifier)));
+                Assert.False(security.AreAccessRulesProtected);
+            }
+
+            return File.Exists(payload)
+                   && string.Equals(
+                       File.ReadAllText(payload),
+                       "interrupted-pre-seal",
+                       StringComparison.Ordinal);
+        });
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool PrepareCommittedCleanupCrashCheckpoint(
+        string markerPath,
+        string stationServiceSid)
+    {
+        var marker = new FileInfo(markerPath);
+        FileSecurity original = FileSystemAclExtensions.GetAccessControl(marker);
+        Assert.Equal(
+            new SecurityIdentifier(stationServiceSid),
+            original.GetOwner(typeof(SecurityIdentifier)));
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        SecurityIdentifier currentUser = identity.User
+                                         ?? throw new InvalidOperationException(
+                                             "Cleanup checkpoint identity has no user SID.");
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var administrators = new SecurityIdentifier(
+            WellKnownSidType.BuiltinAdministratorsSid,
+            null);
+        SecurityIdentifier cleanupAuthority = currentUser.Equals(system)
+            ? system
+            : administrators;
+        var ownerRights = new SecurityIdentifier(
+            WellKnownSidType.WinCreatorOwnerRightsSid,
+            null);
+        var transition = new FileSecurity();
+        transition.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (SecurityIdentifier authority in new[]
+                 {
+                     system,
+                     administrators,
+                     cleanupAuthority
+                 }.DistinctBy(value => value.Value, StringComparer.Ordinal))
+        {
+            transition.AddAccessRule(new FileSystemAccessRule(
+                authority,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+        }
+
+        transition.AddAccessRule(new FileSystemAccessRule(
+            ownerRights,
+            FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership,
+            AccessControlType.Deny));
+        FileSystemAclExtensions.SetAccessControl(marker, transition);
+        FileSecurity prepared = FileSystemAclExtensions.GetAccessControl(marker);
+        return prepared.AreAccessRulesProtected
+               && Equals(
+                   prepared.GetOwner(typeof(SecurityIdentifier)),
+                   new SecurityIdentifier(stationServiceSid));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RequireFileSecurityMutationDenied(string path)
+    {
+        var accessSecurity = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        accessSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        RequireExactAccessDenied(
+            () => FileSystemAclExtensions.SetAccessControl(new FileInfo(path), accessSecurity),
+            $"write the immutable file DACL '{path}'");
+        var ownerSecurity = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+        ownerSecurity.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null));
+        RequireExactAccessDenied(
+            () => FileSystemAclExtensions.SetAccessControl(new FileInfo(path), ownerSecurity),
+            $"write the immutable file owner '{path}'");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RequireDirectorySecurityMutationDenied(string path)
+    {
+        var accessSecurity = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
+        accessSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        RequireExactAccessDenied(
+            () => FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), accessSecurity),
+            $"write the immutable directory DACL '{path}'");
+        var ownerSecurity = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
+        ownerSecurity.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null));
+        RequireExactAccessDenied(
+            () => FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), ownerSecurity),
+            $"write the immutable directory owner '{path}'");
+    }
+
+    private static void RequireExactAccessDenied(Action mutation, string operation)
+    {
+        try
+        {
+            mutation();
+        }
+        catch (UnauthorizedAccessException exception)
+            when ((exception.HResult & 0xffff) == ErrorAccessDenied)
+        {
+            return;
+        }
+        catch (Win32Exception exception)
+            when (exception.NativeErrorCode == ErrorAccessDenied)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"The exact Station service token did not receive ERROR_ACCESS_DENIED while attempting to {operation}.");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RequireNativeFileAccessAllowed(
+        string path,
+        uint desiredAccess,
+        uint flags,
+        string operation)
+    {
+        using SafeFileHandle handle = OpenImmutableProbeHandle(
+            ToExtendedNativeWindowsPath(path),
+            desiredAccess,
+            FileShareRead,
+            IntPtr.Zero,
+            OpenExisting,
+            flags,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"The exact Station service token could not {operation}.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RequireNativeFileAccessDenied(
+        string path,
+        uint desiredAccess,
+        uint flags,
+        string operation)
+    {
+        using SafeFileHandle handle = OpenImmutableProbeHandle(
+            ToExtendedNativeWindowsPath(path),
+            desiredAccess,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            flags,
+            IntPtr.Zero);
+        if (!handle.IsInvalid)
+        {
+            throw new InvalidOperationException(
+                $"The exact Station service token unexpectedly could {operation}.");
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        if (error != ErrorAccessDenied)
+        {
+            throw new Win32Exception(
+                error,
+                $"The exact Station service token did not receive ERROR_ACCESS_DENIED while attempting to {operation}.");
+        }
+    }
+
+    private static string ToExtendedNativeWindowsPath(string value)
+    {
+        const string prefix = @"\\?\";
+        const string uncPrefix = @"\\?\UNC\";
+        var path = Path.GetFullPath(value);
+        if (path.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return path;
+        }
+
+        return path.StartsWith(@"\\", StringComparison.Ordinal)
+            ? uncPrefix + path[2..]
+            : prefix + path;
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "CreateFileW",
+        SetLastError = true,
+        CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle OpenImmutableProbeHandle(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
     private static void CaptureCleanupFailure(
         List<Exception> failures,
         Action cleanup)
@@ -2826,31 +3457,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
     }
 
-    private static void DeleteWorkRoot(string root, string packageCacheRoot)
+    [SupportedOSPlatform("windows")]
+    private static void DeleteWorkRoot(
+        string root)
     {
         if (!Directory.Exists(root))
         {
             return;
-        }
-
-        if (Directory.Exists(packageCacheRoot))
-        {
-            var protector = new ImmutableContentProtector();
-            foreach (var contentDirectory in Directory.EnumerateDirectories(packageCacheRoot)
-                         .ToArray())
-            {
-                var leaf = Path.GetFileName(contentDirectory);
-                if (leaf.Length == 64
-                    && leaf.All(character =>
-                        character is >= '0' and <= '9' or >= 'a' and <= 'f'))
-                {
-                    protector.DeleteProtectedInstallation(
-                        packageCacheRoot,
-                        contentDirectory);
-                }
-            }
-
-            Directory.Delete(packageCacheRoot);
         }
 
         foreach (var path in Directory.EnumerateFileSystemEntries(
@@ -2863,6 +3476,136 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         File.SetAttributes(root, File.GetAttributes(root) & ~FileAttributes.ReadOnly);
         Directory.Delete(root, recursive: true);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void DeleteProtectedPackageInstallations(
+        string packageCacheRoot,
+        string stationServiceSid)
+    {
+        _ = WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+            stationServiceSid,
+            nameof(stationServiceSid));
+        if (!Directory.Exists(packageCacheRoot))
+        {
+            if (File.Exists(packageCacheRoot))
+            {
+                throw new InvalidDataException(
+                    $"Station package cache '{packageCacheRoot}' is a file; preserving it.");
+            }
+
+            return;
+        }
+
+        EnsureNoReparsePointInExistingPath(
+            packageCacheRoot,
+            "Station package cache cleanup root");
+        string[] protectedEntries = [.. Directory
+            .EnumerateDirectories(packageCacheRoot)
+            .Where(directory =>
+            {
+                var leaf = Path.GetFileName(directory);
+                return leaf.Length == 64
+                       && leaf.All(character =>
+                           character is >= '0' and <= '9' or >= 'a' and <= 'f')
+                       || leaf.Length == 75
+                       && leaf[0] == '.'
+                       && leaf.EndsWith(".installed", StringComparison.Ordinal);
+            })];
+        if (protectedEntries.Length != 0)
+        {
+            throw new InvalidOperationException(
+                "Protected Station packages must be removed while the exact service still exists in the stopped state.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RemoveProtectedPackageInstallations(
+        string packageCacheRoot,
+        string stationServiceName,
+        string stationServiceSid)
+    {
+        if (!Directory.Exists(packageCacheRoot))
+        {
+            return;
+        }
+
+        var policy = new ImmutableContentProtectionPolicy(
+            WindowsAppContainerIdentity.EnsureCapabilitySid(
+                WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+            WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                stationServiceSid,
+                nameof(stationServiceSid)));
+        var protector = new ImmutableContentProtector();
+        IReadOnlyList<string> contentHashes = ImmutableContentCacheCleanupDiscovery
+            .DiscoverPackageContentHashes(packageCacheRoot);
+        foreach (var contentHash in contentHashes)
+        {
+            protector.RemoveProtectedPackageInstallationAsync(
+                    packageCacheRoot,
+                    contentHash,
+                    stationServiceName,
+                    policy)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+        }
+    }
+
+    private static string PackageCacheRootForCleanupEntry(
+        AgentServiceCleanupEntry entry) => entry.Role switch
+        {
+            "rabbitmq" => Path.Combine(
+                Path.GetDirectoryName(entry.OwnedRoot)!,
+                $"olo-staged-agent-rmq-content-{entry.ServiceSuffix}",
+                "content"),
+            "runner" => Path.Combine(
+                Path.GetDirectoryName(entry.OwnedRoot)!,
+                $"olo-runner-staged-agent-content-{entry.ServiceSuffix}",
+                "content"),
+            "entry" => Path.Combine(
+                Path.GetDirectoryName(entry.OwnedRoot)!,
+                $"olo-studio-two-agent-entry-content-{entry.ServiceSuffix}",
+                "content"),
+            "downstream" => Path.Combine(
+                Path.GetDirectoryName(entry.OwnedRoot)!,
+                $"olo-studio-two-agent-downstream-content-{entry.ServiceSuffix}",
+                "content"),
+            _ => throw new InvalidDataException(
+                $"Unsupported Agent cleanup role '{entry.Role}'.")
+        };
+
+    private static void DeleteProvisionedCacheNamespace(string packageCacheRoot)
+    {
+        if (!Directory.Exists(packageCacheRoot))
+        {
+            return;
+        }
+
+        if (Directory.EnumerateFileSystemEntries(packageCacheRoot).Any())
+        {
+            throw new InvalidOperationException(
+                "Provisioned package cache is not empty after paired package removal.");
+        }
+
+        var anchor = Directory.GetParent(packageCacheRoot)?.FullName
+                     ?? throw new InvalidDataException(
+                         "Provisioned package cache has no dedicated anchor.");
+        if ((File.GetAttributes(packageCacheRoot) & FileAttributes.ReparsePoint) != 0
+            || (File.GetAttributes(anchor) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "Provisioned package cache cleanup refuses reparse points.");
+        }
+
+        Directory.Delete(packageCacheRoot);
+        if (Directory.EnumerateFileSystemEntries(anchor).Any())
+        {
+            throw new InvalidOperationException(
+                "Provisioned package cache anchor contains unexpected entries.");
+        }
+
+        Directory.Delete(anchor);
     }
 
     private static string RequiredDirectory(string? value, string variableName)
@@ -2973,7 +3716,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         Uri BrokerUri);
 
     private sealed record AgentServiceCleanupContract(
-        string ManifestPath,
         string Kind,
         string Scope,
         IReadOnlyList<AgentServiceCleanupEntry> Entries);
@@ -2981,10 +3723,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private sealed record AgentServiceCleanupEntry(
         string Role,
         string ServiceSuffix,
-        string AccountSuffix,
         string ServiceName,
-        string AccountName,
-        string? AccountSid,
+        string ServiceAccountName,
+        string ServiceAccountSid,
+        string ServiceSid,
+        string ServiceSidType,
         string ExecutablePath,
         string ExecutableSha256,
         string OwnedRoot);
@@ -3273,6 +4016,54 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string PackagePath,
         string PublicKeyPath);
 
+    private sealed record MaterialArrivalSubmissionEvidence(
+        StationMaterialArrivalLocalIpcResponse Response,
+        bool ServiceTokenConnected,
+        bool PipeExactAclVerified);
+
+    private sealed record MaterialArrivalIpcEvidence(
+        bool ServiceTokenConnected,
+        bool PipeExactAclVerified,
+        bool DurablePublicationVerified,
+        bool OrdinaryCiTokenExplicitAccessDenied);
+
+    private sealed record ImmutableContentCacheEvidence(
+        bool PackagedProvisionCommandVerified,
+        bool RunningServiceAdministrationRejected,
+        bool ServiceTokenReadExecuteVerified,
+        bool SealedMutationAccessDenied,
+        bool DeepAncestorMutationAccessDenied,
+        bool PreSealRecoveryVerified,
+        bool CleanupCrashResumeVerified,
+        bool CommittedAdminRemovalVerified,
+        bool PackagedRemovalCommandVerified,
+        bool CacheNamespaceRemoved)
+    {
+        public static ImmutableContentCacheEvidence Empty { get; } = new(
+            PackagedProvisionCommandVerified: false,
+            RunningServiceAdministrationRejected: false,
+            ServiceTokenReadExecuteVerified: false,
+            SealedMutationAccessDenied: false,
+            DeepAncestorMutationAccessDenied: false,
+            PreSealRecoveryVerified: false,
+            CleanupCrashResumeVerified: false,
+            CommittedAdminRemovalVerified: false,
+            PackagedRemovalCommandVerified: false,
+            CacheNamespaceRemoved: false);
+
+        public bool IsComplete =>
+            PackagedProvisionCommandVerified
+            && RunningServiceAdministrationRejected
+            && ServiceTokenReadExecuteVerified
+            && SealedMutationAccessDenied
+            && DeepAncestorMutationAccessDenied
+            && PreSealRecoveryVerified
+            && CleanupCrashResumeVerified
+            && CommittedAdminRemovalVerified
+            && PackagedRemovalCommandVerified
+            && CacheNamespaceRemoved;
+    }
+
     private sealed record AgentHostTokenEvidence(
         string AccountName,
         string UserSid,
@@ -3282,17 +4073,26 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         bool AdministratorGroupPresent,
         bool AdministratorGroupEnabled,
         bool AdministratorGroupDenyOnly,
-        bool PrincipalAdministratorMembership,
+        bool ServiceLogonSidPresent,
+        bool ServiceLogonSidEnabled,
+        bool ExactServiceSidPresent,
+        bool ExactServiceSidEnabled,
+        bool ExactServiceSidRestricted,
         bool IsAuthenticated,
         bool IsSystem)
     {
         public bool NonAdministrative =>
             IsPrimaryToken
             && !IsElevated
+            && HasRestrictions
             && !AdministratorGroupPresent
             && !AdministratorGroupEnabled
             && !AdministratorGroupDenyOnly
-            && !PrincipalAdministratorMembership
+            && ServiceLogonSidPresent
+            && ServiceLogonSidEnabled
+            && ExactServiceSidPresent
+            && ExactServiceSidEnabled
+            && ExactServiceSidRestricted
             && IsAuthenticated
             && !IsSystem;
     }
@@ -3345,75 +4145,124 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     [SupportedOSPlatform("windows")]
     private sealed class RestrictedAgentIdentity : IDisposable
     {
-        private const uint UserPrivilegeUser = 1;
-        private const uint UserFlagScript = 0x0001;
-        private const uint UserFlagNormalAccount = 0x0200;
-        private const uint UserFlagPasswordDoesNotExpire = 0x10000;
-        private const uint Success = 0;
-        private const uint AccessDenied = 5;
-        private const uint UserNotFound = 2221;
-        private const uint MemberAlreadyInAlias = 1378;
-        private const uint PolicyCreateAccount = 0x00000010;
-        private const uint PolicyLookupNames = 0x00000800;
-        private const uint StatusObjectNameNotFound = 0xC0000034;
-        private const int ErrorFileNotFound = 2;
-        private const int ErrorPathNotFound = 3;
-        private const int ErrorAccessDenied = 5;
-        private const int ErrorSharingViolation = 32;
-        private const int ErrorLockViolation = 33;
-        private const int ErrorBusy = 170;
-        private const int ErrorUserMappedFile = 1224;
-        private const uint InvalidFileAttributes = uint.MaxValue;
-        private const string ServiceLogonRight = "SeServiceLogonRight";
-        private const string TemporaryStandardServiceAccountStrategy =
-            "temporary-standard-service-account";
-        private const string TemporaryStandardServiceAccountComment =
-            "Temporary OpenLineOps staged Agent E2E identity";
-        private static readonly TimeSpan ProfileDeletionTimeout =
-            TimeSpan.FromSeconds(60);
+        internal const string LocalServiceAccountName = @"NT AUTHORITY\LocalService";
+        internal const string LocalServiceAccountSid = "S-1-5-19";
+        private const string RestrictedServiceSidStrategy =
+            "local-service-restricted-service-sid";
 
+        private readonly List<PendingDirectoryAccess> _pendingAccess = [];
         private readonly List<GrantedDirectoryAccess> _grantedAccess = [];
-        private readonly string _userName;
-        private readonly string _password;
+        private string? _boundServiceName;
         private string? _unprovenInstalledServiceName;
-        private bool _serviceLogonRightGranted;
         private bool _disposed;
 
-        private RestrictedAgentIdentity(
-            string accountName,
-            string sid,
-            string userName,
-            string password)
+        private RestrictedAgentIdentity(string provisionalServiceName)
         {
-            AccountName = accountName;
-            Sid = sid;
-            _userName = userName;
-            _password = password;
-            Strategy = TemporaryStandardServiceAccountStrategy;
-            _serviceLogonRightGranted = true;
+            AccountName = LocalServiceAccountName;
+            ServiceAccountSid = LocalServiceAccountSid;
+            Sid = WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                provisionalServiceName);
+            Strategy = RestrictedServiceSidStrategy;
         }
 
         public string AccountName { get; }
+
+        public string ServiceAccountSid { get; }
 
         public string Sid { get; }
 
         public string Strategy { get; }
 
-        internal string UserName => _userName;
-
-        internal string Password => _password;
-
-        internal string ServiceAccountName => $".\\{_userName}";
+        internal string ServiceAccountName => AccountName;
 
         internal bool HasUnprovenServiceInstallation =>
             _unprovenInstalledServiceName is not null;
 
+        public static RestrictedAgentIdentity CreateRequired(string serviceSuffix)
+        {
+            ValidateSuffix(serviceSuffix);
+            return new RestrictedAgentIdentity(
+                $"OpenLineOpsAgentE2E-{serviceSuffix}");
+        }
+
+        internal void BindServiceRequired(string serviceName)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            ValidateServiceName(serviceName);
+            if (_boundServiceName is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent identity is already bound to service '{_boundServiceName}'.");
+            }
+
+            var serviceSid = WindowsStationServiceIdentityReader
+                .ServiceSidFromNameRequired(serviceName);
+            if (!string.Equals(serviceSid, Sid, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent identity SID '{Sid}' differs from exact service '{serviceName}' SID '{serviceSid}'.");
+            }
+
+            var grantedCount = _grantedAccess.Count;
+            _boundServiceName = serviceName;
+            try
+            {
+                foreach (var pending in _pendingAccess)
+                {
+                    GrantDirectoryAccessRequired(
+                        pending.Path,
+                        pending.Rights,
+                        pending.InheritanceFlags);
+                }
+
+                _pendingAccess.Clear();
+            }
+            catch (Exception exception)
+            {
+                var failures = new List<Exception> { exception };
+                foreach (var granted in _grantedAccess
+                             .Skip(grantedCount)
+                             .Reverse()
+                             .ToArray())
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => RemoveGrantedAccessRule(granted));
+                }
+
+                if (_grantedAccess.Count > grantedCount)
+                {
+                    _grantedAccess.RemoveRange(
+                        grantedCount,
+                        _grantedAccess.Count - grantedCount);
+                }
+
+                _boundServiceName = null;
+                if (failures.Count > 1)
+                {
+                    throw new AggregateException(
+                        $"Could not bind exact service SID '{serviceSid}' to staged Agent filesystem access.",
+                        failures);
+                }
+
+                ExceptionDispatchInfo.Capture(exception).Throw();
+                throw;
+            }
+        }
+
         internal void MarkServiceInstalled(string serviceName)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!string.Equals(_boundServiceName, serviceName, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent identity is not bound to service '{serviceName}'.");
+            }
+
             if (_unprovenInstalledServiceName is not null)
             {
                 throw new InvalidOperationException(
-                    $"Staged Agent identity '{AccountName}' is already bound to unproven service '{_unprovenInstalledServiceName}'.");
+                    $"Staged Agent identity is already bound to unproven service '{_unprovenInstalledServiceName}'.");
             }
 
             _unprovenInstalledServiceName = serviceName;
@@ -3427,193 +4276,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    $"Staged Agent identity '{AccountName}' is not bound to service '{serviceName}'.");
+                    $"Staged Agent identity is not bound to unproven service '{serviceName}'.");
             }
 
             _unprovenInstalledServiceName = null;
-        }
-
-        public static RestrictedAgentIdentity CreateRequired(string suffix)
-        {
-            if (suffix.Length != 32
-                || suffix.Any(static character =>
-                    character is not (>= '0' and <= '9')
-                        and not (>= 'a' and <= 'f')))
-            {
-                throw new ArgumentException(
-                    "The staged Agent service-account suffix must contain exactly 32 lowercase hexadecimal characters.",
-                    nameof(suffix));
-            }
-
-            var userName = $"oloe2e{suffix[..10]}";
-            var password = $"Aa1!{Convert.ToHexString(RandomNumberGenerator.GetBytes(12))}";
-            var user = new UserInfo1
-            {
-                Name = userName,
-                Password = password,
-                Privilege = UserPrivilegeUser,
-                Flags = UserFlagScript | UserFlagNormalAccount | UserFlagPasswordDoesNotExpire,
-                Comment = TemporaryStandardServiceAccountComment
-            };
-            var status = NetUserAdd(null, 1, ref user, out var parameterError);
-            if (status != Success)
-            {
-                throw new InvalidOperationException(
-                    status == AccessDenied
-                        ? "The formal staged Agent service gate requires elevated permission to provision its temporary standard Windows service account; NetUserAdd was denied."
-                        : $"Could not provision the staged Agent standard service account (NetUserAdd {status}, parameter {parameterError}).");
-            }
-
-            SecurityIdentifier? sid = null;
-            try
-            {
-                sid = (SecurityIdentifier)new NTAccount(
-                        Environment.MachineName,
-                        userName)
-                    .Translate(typeof(SecurityIdentifier));
-                UpdateCleanupManifestAccountSid(suffix, userName, sid.Value);
-                AddToBuiltinUsers(sid);
-                GrantServiceLogonRight(sid);
-                return new RestrictedAgentIdentity(
-                    $"{Environment.MachineName}\\{userName}",
-                    sid.Value,
-                    userName,
-                    password);
-            }
-            catch (Exception exception)
-            {
-                var failures = new List<Exception> { exception };
-                if (sid is not null)
-                {
-                    CaptureCleanupFailure(
-                        failures,
-                        () => RemoveServiceLogonRightIfPresent(sid));
-                }
-
-                if (failures.Count == 1)
-                {
-                    if (sid is null)
-                    {
-                        failures.Add(new InvalidOperationException(
-                            $"Could not bind staged Agent account '{userName}' to its exact SID; preserving it for diagnosis."));
-                    }
-                    else
-                    {
-                        CaptureCleanupFailure(
-                            failures,
-                            () => DeleteExactAccountRequired(userName, sid.Value));
-                    }
-                }
-
-                if (failures.Count > 1)
-                {
-                    throw new AggregateException(
-                        "Staged Agent service-account creation failed and rollback was incomplete.",
-                        failures);
-                }
-
-                ExceptionDispatchInfo.Capture(exception).Throw();
-                throw;
-            }
-        }
-
-        public static RunScopedIdentity? ReadRunScopedIdentity(
-            string accountName,
-            string? recordedSid)
-        {
-            ValidateRunScopedAccountName(accountName);
-            var status = NetUserGetInfo(null, accountName, 1, out var buffer);
-            if (status == UserNotFound)
-            {
-                return recordedSid is null
-                    ? null
-                    : new RunScopedIdentity(accountName, recordedSid, AccountExists: false);
-            }
-
-            if (status != Success)
-            {
-                throw new InvalidOperationException(
-                    $"Could not inspect run-scoped staged Agent account '{accountName}' (NetUserGetInfo {status}).");
-            }
-
-            UserInfo1 user;
-            uint freeStatus;
-            try
-            {
-                user = Marshal.PtrToStructure<UserInfo1>(buffer);
-            }
-            finally
-            {
-                freeStatus = NetApiBufferFree(buffer);
-            }
-
-            if (freeStatus != Success)
-            {
-                throw new InvalidOperationException(
-                    $"Could not release NetUserGetInfo memory (NetApiBufferFree {freeStatus}).");
-            }
-
-            if (!string.Equals(user.Name, accountName, StringComparison.Ordinal)
-                || user.Privilege != UserPrivilegeUser
-                || (user.Flags & UserFlagNormalAccount) == 0
-                || !string.Equals(
-                    user.Comment,
-                    TemporaryStandardServiceAccountComment,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Run-scoped account '{accountName}' does not match the exact temporary service-account contract.");
-            }
-
-            if (recordedSid is null)
-            {
-                throw new InvalidOperationException(
-                    $"Run-scoped account '{accountName}' exists before its exact SID was committed to the protected cleanup manifest; preserving it for diagnosis.");
-            }
-
-            var sid = (SecurityIdentifier)new NTAccount(
-                    Environment.MachineName,
-                    accountName)
-                .Translate(typeof(SecurityIdentifier));
-            if (recordedSid is not null
-                && !string.Equals(recordedSid, sid.Value, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Run-scoped account '{accountName}' SID differs from its protected cleanup manifest.");
-            }
-
-            return new RunScopedIdentity(accountName, sid.Value, AccountExists: true);
-        }
-
-        public static void CleanupRunScoped(
-            RunScopedIdentity? identity,
-            string expectedAccountName,
-            string ownedRoot,
-            IReadOnlySet<string> allowedRootSids)
-        {
-            ArgumentNullException.ThrowIfNull(allowedRootSids);
-            ValidateRunScopedAccountName(expectedAccountName);
-            if (identity is null)
-            {
-                EnsureAccountAbsent(expectedAccountName);
-                return;
-            }
-
-            if (!string.Equals(
-                    identity.AccountName,
-                    expectedAccountName,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    "Run-scoped staged Agent identity differs from its cleanup manifest account.");
-            }
-
-            var sid = new SecurityIdentifier(identity.Sid);
-            VerifyRunScopedOwnedRootForIdentityCleanup(ownedRoot, allowedRootSids);
-            RemoveExactSidAccessRules(ownedRoot, sid);
-            RemoveServiceLogonRightIfPresent(sid);
-            DeleteProfileRequired(identity.Sid, expectedAccountName);
-            DeleteExactAccountRequired(expectedAccountName, identity.Sid);
         }
 
         public void GrantDirectoryAccess(
@@ -3622,7 +4288,113 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             InheritanceFlags inheritanceFlags =
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
         {
-            var directory = new DirectoryInfo(Path.GetFullPath(path));
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var fullPath = Path.GetFullPath(path);
+            if (!Directory.Exists(fullPath))
+            {
+                throw new DirectoryNotFoundException(
+                    $"Cannot grant staged Agent access to missing directory '{fullPath}'.");
+            }
+
+            if (_boundServiceName is null)
+            {
+                _pendingAccess.Add(new PendingDirectoryAccess(
+                    fullPath,
+                    rights,
+                    inheritanceFlags));
+                return;
+            }
+
+            GrantDirectoryAccessRequired(fullPath, rights, inheritanceFlags);
+        }
+
+        internal static void CleanupRunScopedAccess(
+            string ownedRoot,
+            string serviceSid,
+            IReadOnlySet<string> allowedRootSids)
+        {
+            ArgumentNullException.ThrowIfNull(allowedRootSids);
+            var canonicalServiceSid =
+                WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                    serviceSid,
+                    nameof(serviceSid));
+            var sid = new SecurityIdentifier(canonicalServiceSid);
+
+            VerifyRunScopedOwnedRootForIdentityCleanup(ownedRoot, allowedRootSids);
+            RemoveExactSidAccessRules(ownedRoot, sid);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_unprovenInstalledServiceName is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent service '{_unprovenInstalledServiceName}' deletion is unproven; preserving its exact service-SID ACLs for safe diagnosis.");
+            }
+
+            var failures = new List<Exception>();
+            foreach (var granted in _grantedAccess.AsEnumerable().Reverse())
+            {
+                CaptureCleanupFailure(
+                    failures,
+                    () => RemoveGrantedAccessRule(granted));
+            }
+
+            if (failures.Count == 1)
+            {
+                ExceptionDispatchInfo.Capture(failures[0]).Throw();
+            }
+
+            if (failures.Count > 1)
+            {
+                throw new AggregateException(
+                    "Staged Agent exact service-SID ACL cleanup failed.",
+                    failures);
+            }
+
+            _grantedAccess.Clear();
+            _pendingAccess.Clear();
+            _disposed = true;
+        }
+
+        private static void ValidateSuffix(string suffix)
+        {
+            if (suffix.Length != 32
+                || suffix.Any(static character =>
+                    character is not (>= '0' and <= '9')
+                        and not (>= 'a' and <= 'f')))
+            {
+                throw new ArgumentException(
+                    "The staged Agent service suffix must contain exactly 32 lowercase hexadecimal characters.",
+                    nameof(suffix));
+            }
+        }
+
+        private static void ValidateServiceName(string serviceName)
+        {
+            try
+            {
+                _ = WindowsStationServiceIdentityReader.RequireCanonicalServiceName(
+                    serviceName,
+                    nameof(serviceName));
+            }
+            catch (InvalidDataException exception)
+            {
+                throw new ArgumentException(exception.Message, nameof(serviceName), exception);
+            }
+        }
+
+        private void GrantDirectoryAccessRequired(
+            string path,
+            FileSystemRights rights,
+            InheritanceFlags inheritanceFlags)
+        {
+            var directory = new DirectoryInfo(path);
             if (!directory.Exists)
             {
                 throw new DirectoryNotFoundException(
@@ -3641,53 +4413,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             _grantedAccess.Add(new GrantedDirectoryAccess(directory.FullName, rule));
         }
 
-        public void Dispose()
+        private static void RemoveGrantedAccessRule(GrantedDirectoryAccess granted)
         {
-            if (_disposed)
+            if (!Directory.Exists(granted.Path))
             {
                 return;
             }
 
-            if (_unprovenInstalledServiceName is not null)
-            {
-                throw new InvalidOperationException(
-                    $"Staged Agent service '{_unprovenInstalledServiceName}' deletion is unproven; preserving its account, SeServiceLogonRight, profile, and ACLs for safe diagnosis.");
-            }
-
-            var failures = new List<Exception>();
-            foreach (var granted in _grantedAccess.AsEnumerable().Reverse())
-            {
-                CaptureCleanupFailure(
-                    failures,
-                    () =>
-                    {
-                        if (!Directory.Exists(granted.Path))
-                        {
-                            return;
-                        }
-
-                        var directory = new DirectoryInfo(granted.Path);
-                        var security = FileSystemAclExtensions.GetAccessControl(directory);
-                        security.RemoveAccessRuleSpecific(granted.Rule);
-                        FileSystemAclExtensions.SetAccessControl(directory, security);
-                    });
-            }
-
-            ThrowIdentityCleanupFailures(
-                failures,
-                "Staged Agent ACL cleanup failed; preserving its SeServiceLogonRight, profile, and account.");
-            _grantedAccess.Clear();
-
-            if (_serviceLogonRightGranted)
-            {
-                RemoveServiceLogonRight(new SecurityIdentifier(Sid));
-                _serviceLogonRightGranted = false;
-            }
-
-            DeleteProfileRequired(Sid, _userName);
-            DeleteExactAccountRequired(_userName, Sid);
-
-            _disposed = true;
+            var directory = new DirectoryInfo(granted.Path);
+            var security = FileSystemAclExtensions.GetAccessControl(directory);
+            security.RemoveAccessRuleSpecific(granted.Rule);
+            FileSystemAclExtensions.SetAccessControl(directory, security);
         }
 
         private static void RemoveExactSidAccessRules(
@@ -3738,915 +4474,19 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         && string.Equals(identity.Value, sid.Value, StringComparison.Ordinal)))
                 {
                     throw new InvalidOperationException(
-                        $"Run-scoped staged Agent SID '{sid.Value}' still has an ACL entry on '{path}'.");
+                        $"Run-scoped staged Agent service SID '{sid.Value}' still has an ACL entry on '{path}'.");
                 }
             }
         }
 
-        private static void ValidateRunScopedAccountName(string accountName)
-        {
-            if (accountName.Length != 16
-                || !accountName.StartsWith("oloe2e", StringComparison.Ordinal)
-                || accountName[6..].Any(static character =>
-                    character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
-            {
-                throw new InvalidDataException(
-                    "Run-scoped staged Agent account name is not canonical.");
-            }
-        }
-
-        private static void EnsureAccountAbsent(string accountName)
-        {
-            var status = NetUserGetInfo(null, accountName, 1, out var buffer);
-            if (status == Success)
-            {
-                _ = NetApiBufferFree(buffer);
-                throw new InvalidOperationException(
-                    $"Run-scoped staged Agent account '{accountName}' still exists after cleanup.");
-            }
-
-            if (status != UserNotFound)
-            {
-                throw new InvalidOperationException(
-                    $"Could not prove deletion of run-scoped staged Agent account '{accountName}' (NetUserGetInfo {status}).");
-            }
-        }
-
-        private static void DeleteExactAccountRequired(
-            string accountName,
-            string expectedSid)
-        {
-            _ = new SecurityIdentifier(expectedSid);
-            var currentIdentity = ReadRunScopedIdentity(accountName, expectedSid)
-                                  ?? throw new InvalidOperationException(
-                                      $"Could not bind run-scoped staged Agent account '{accountName}' to its exact SID immediately before deletion.");
-            if (!currentIdentity.AccountExists)
-            {
-                EnsureAccountAbsent(accountName);
-                return;
-            }
-
-            var status = NetUserDel(null, accountName);
-            if (status is not Success and not UserNotFound)
-            {
-                throw new InvalidOperationException(
-                    $"Could not delete the exact run-scoped staged Agent account '{accountName}' (NetUserDel {status}).");
-            }
-
-            EnsureAccountAbsent(accountName);
-        }
-
-        private static void DeleteProfileRequired(string sid, string accountName)
-        {
-            const string profileListRegistryPath =
-                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
-            var canonicalSid = new SecurityIdentifier(sid).Value;
-            if (!string.Equals(canonicalSid, sid, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    $"Run-scoped staged Agent profile SID '{sid}' is not canonical.");
-            }
-
-            var profileRegistryPath = profileListRegistryPath + "\\" + sid;
-            var userProfilesRoot = ReadRequiredProfilesDirectory(
-                profileListRegistryPath);
-            var profilesRootAttributes = ReadPathAttributesRequired(
-                userProfilesRoot,
-                "configured Windows user-profile root")
-                ?? throw new DirectoryNotFoundException(
-                    $"The configured Windows user-profile root '{userProfilesRoot}' does not exist.");
-            if (!profilesRootAttributes.HasFlag(FileAttributes.Directory))
-            {
-                throw new InvalidDataException(
-                    $"The configured Windows user-profile root '{userProfilesRoot}' is not a directory.");
-            }
-
-            EnsureNoReparsePointInExistingPath(
-                userProfilesRoot,
-                "configured Windows user-profile root");
-            var expectedDefaultProfilePath = Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(Path.Combine(userProfilesRoot, accountName)));
-            if (!string.Equals(
-                    Path.GetDirectoryName(expectedDefaultProfilePath),
-                    userProfilesRoot,
-                    StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(
-                    Path.GetFileName(expectedDefaultProfilePath),
-                    accountName,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    $"The expected profile path for account '{accountName}' is not a direct child of the configured profile root.");
-            }
-
-            VerifyProfileDeletionProvenance(
-                profileListRegistryPath,
-                profileRegistryPath,
-                userProfilesRoot,
-                expectedDefaultProfilePath,
-                sid,
-                accountName);
-            var initialRegisteredProfilePath = ReadValidatedRegisteredProfilePath(
-                profileRegistryPath,
-                sid);
-            var initialState = ReadProfileArtifactState(
-                profileRegistryPath,
-                expectedDefaultProfilePath,
-                sid);
-            if (initialRegisteredProfilePath is null)
-            {
-                if (initialState.Absent)
-                {
-                    return;
-                }
-
-                throw CreateProfileDeletionException(
-                    sid,
-                    nativeErrorCode: 0,
-                    initialState,
-                    "Exact profile artifacts exist without a ProfileList SID-to-path binding");
-            }
-
-            if (!string.Equals(
-                    initialRegisteredProfilePath,
-                    expectedDefaultProfilePath,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    $"Run-scoped staged Agent initial ProfileImagePath '{initialRegisteredProfilePath}' is not the exact direct profile for account '{accountName}'.");
-            }
-
-            // Never use a mutable registry string as the destructive path argument.
-            // The captured binding authorizes only this already-derived direct child.
-            var capturedRegisteredProfilePath = expectedDefaultProfilePath;
-
-            var elapsed = Stopwatch.StartNew();
-            var lastNativeError = 0;
-            while (true)
-            {
-                VerifyProfileDeletionProvenance(
-                    profileListRegistryPath,
-                    profileRegistryPath,
-                    userProfilesRoot,
-                    expectedDefaultProfilePath,
-                    sid,
-                    accountName);
-                var state = ReadProfileArtifactState(
-                    profileRegistryPath,
-                    expectedDefaultProfilePath,
-                    sid);
-                if (elapsed.Elapsed >= ProfileDeletionTimeout)
-                {
-                    throw CreateProfileDeletionException(
-                        sid,
-                        lastNativeError,
-                        state,
-                        "The bounded profile-unload and deletion deadline expired");
-                }
-
-                if (!state.SidHiveLoaded && !state.ClassesHiveLoaded)
-                {
-                    if (DeleteProfile(sid, capturedRegisteredProfilePath, null))
-                    {
-                        VerifyProfileAbsent(
-                            profileListRegistryPath,
-                            profileRegistryPath,
-                            userProfilesRoot,
-                            expectedDefaultProfilePath,
-                            sid,
-                            accountName,
-                            elapsed);
-                        return;
-                    }
-
-                    lastNativeError = Marshal.GetLastWin32Error();
-                    state = ReadProfileArtifactState(
-                        profileRegistryPath,
-                        expectedDefaultProfilePath,
-                        sid);
-                    if (lastNativeError is ErrorFileNotFound or ErrorPathNotFound)
-                    {
-                        if (state.Absent)
-                        {
-                            return;
-                        }
-
-                        throw CreateProfileDeletionException(
-                            sid,
-                            lastNativeError,
-                            state,
-                            "DeleteProfileW reported an absent path while exact profile residue remained");
-                    }
-
-                    if (!IsTransientProfileDeletionError(lastNativeError))
-                    {
-                        throw CreateProfileDeletionException(
-                            sid,
-                            lastNativeError,
-                            state,
-                            "DeleteProfileW returned a non-transient error");
-                    }
-                }
-
-                Thread.Sleep(GetProfileDeletionRetryDelay(elapsed.Elapsed));
-            }
-        }
-
-        private static void VerifyProfileAbsent(
-            string profileListRegistryPath,
-            string profileRegistryPath,
-            string userProfilesRoot,
-            string expectedDefaultProfilePath,
-            string sid,
-            string accountName,
-            Stopwatch elapsed)
-        {
-            while (true)
-            {
-                VerifyProfileDeletionProvenance(
-                    profileListRegistryPath,
-                    profileRegistryPath,
-                    userProfilesRoot,
-                    expectedDefaultProfilePath,
-                    sid,
-                    accountName);
-                var state = ReadProfileArtifactState(
-                    profileRegistryPath,
-                    expectedDefaultProfilePath,
-                    sid);
-                if (state.Absent)
-                {
-                    return;
-                }
-
-                if (elapsed.Elapsed >= ProfileDeletionTimeout)
-                {
-                    throw CreateProfileDeletionException(
-                        sid,
-                        nativeErrorCode: 0,
-                        state,
-                        "DeleteProfileW succeeded but exact profile residue remained until the bounded deadline");
-                }
-
-                Thread.Sleep(GetProfileDeletionRetryDelay(elapsed.Elapsed));
-            }
-        }
-
-        internal static bool IsTransientProfileDeletionError(int nativeErrorCode) =>
-            nativeErrorCode is ErrorAccessDenied
-                or ErrorSharingViolation
-                or ErrorLockViolation
-                or ErrorBusy
-                or ErrorUserMappedFile;
-
-        private static TimeSpan GetProfileDeletionRetryDelay(TimeSpan elapsed)
-        {
-            var remaining = ProfileDeletionTimeout - elapsed;
-            if (remaining <= TimeSpan.Zero)
-            {
-                return TimeSpan.Zero;
-            }
-
-            var desired = elapsed < TimeSpan.FromSeconds(2)
-                ? TimeSpan.FromMilliseconds(100)
-                : elapsed < TimeSpan.FromSeconds(10)
-                    ? TimeSpan.FromMilliseconds(250)
-                    : TimeSpan.FromMilliseconds(500);
-            return desired <= remaining ? desired : remaining;
-        }
-
-        private static string ReadRequiredProfilesDirectory(
-            string profileListRegistryPath)
-        {
-            string profilesDirectory;
-            using (var profileListKey = Registry.LocalMachine.OpenSubKey(
-                       profileListRegistryPath,
-                       writable: false)
-                   ?? throw new InvalidOperationException(
-                       "The Windows ProfileList registry key is missing."))
-            {
-                profilesDirectory = profileListKey.GetValue(
-                        "ProfilesDirectory",
-                        defaultValue: null,
-                        RegistryValueOptions.DoNotExpandEnvironmentNames) as string
-                    ?? throw new InvalidOperationException(
-                        "The Windows ProfileList ProfilesDirectory value is missing or is not a string.");
-            }
-
-            profilesDirectory = Environment.ExpandEnvironmentVariables(profilesDirectory);
-            if (string.IsNullOrWhiteSpace(profilesDirectory)
-                || !Path.IsPathFullyQualified(profilesDirectory))
-            {
-                throw new InvalidDataException(
-                    "The Windows ProfileList ProfilesDirectory value is not an absolute path.");
-            }
-
-            return Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(profilesDirectory));
-        }
-
-        private static void VerifyProfileDeletionProvenance(
-            string profileListRegistryPath,
-            string profileRegistryPath,
-            string userProfilesRoot,
-            string expectedDefaultProfilePath,
-            string sid,
-            string accountName)
-        {
-            var currentProfilesRoot = ReadRequiredProfilesDirectory(
-                profileListRegistryPath);
-            if (!string.Equals(
-                    currentProfilesRoot,
-                    userProfilesRoot,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    "The configured Windows user-profile root changed during staged Agent cleanup.");
-            }
-
-            var profilesRootAttributes = ReadPathAttributesRequired(
-                userProfilesRoot,
-                "configured Windows user-profile root")
-                ?? throw new DirectoryNotFoundException(
-                    $"The configured Windows user-profile root '{userProfilesRoot}' disappeared during staged Agent cleanup.");
-            if (!profilesRootAttributes.HasFlag(FileAttributes.Directory))
-            {
-                throw new InvalidDataException(
-                    $"The configured Windows user-profile root '{userProfilesRoot}' is not a directory.");
-            }
-
-            EnsureNoReparsePointInExistingPath(
-                userProfilesRoot,
-                "configured Windows user-profile root");
-            var registeredProfilePath = ReadValidatedRegisteredProfilePath(
-                profileRegistryPath,
-                sid);
-            if (registeredProfilePath is not null
-                && !string.Equals(
-                    registeredProfilePath,
-                    expectedDefaultProfilePath,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not the exact direct profile for account '{accountName}'.");
-            }
-
-            var profileAttributes = ReadPathAttributesRequired(
-                expectedDefaultProfilePath,
-                "run-scoped staged Agent profile path");
-            if (profileAttributes is not null)
-            {
-                if (!profileAttributes.Value.HasFlag(FileAttributes.Directory))
-                {
-                    throw new InvalidDataException(
-                        $"Run-scoped staged Agent profile path '{expectedDefaultProfilePath}' is not a directory.");
-                }
-
-                EnsureNoReparsePointInExistingPath(
-                    expectedDefaultProfilePath,
-                    "run-scoped staged Agent profile path");
-            }
-        }
-
-        private static string? ReadValidatedRegisteredProfilePath(
-            string profileRegistryPath,
-            string sid)
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                profileRegistryPath,
-                writable: false);
-            if (key is null)
-            {
-                return null;
-            }
-
-            var registeredProfileValue = key.GetValue(
-                "ProfileImagePath",
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames);
-            if (registeredProfileValue is not string registeredProfilePath
-                || string.IsNullOrWhiteSpace(registeredProfilePath))
-            {
-                throw new InvalidDataException(
-                    $"Run-scoped staged Agent profile for SID '{sid}' has a missing, empty, or non-string ProfileImagePath.");
-            }
-
-            registeredProfilePath = Environment.ExpandEnvironmentVariables(
-                registeredProfilePath);
-            if (!Path.IsPathFullyQualified(registeredProfilePath))
-            {
-                throw new InvalidDataException(
-                    $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not absolute.");
-            }
-
-            return Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(registeredProfilePath));
-        }
-
-        private static ProfileArtifactState ReadProfileArtifactState(
-            string profileRegistryPath,
-            string expectedDefaultProfilePath,
-            string sid)
-        {
-            bool profileRegistryPresent;
-            using (var key = Registry.LocalMachine.OpenSubKey(
-                       profileRegistryPath,
-                       writable: false))
-            {
-                profileRegistryPresent = key is not null;
-            }
-
-            var profileAttributes = ReadPathAttributesRequired(
-                expectedDefaultProfilePath,
-                "run-scoped staged Agent profile path");
-            var profilePathPresent = profileAttributes is not null;
-            if (profileAttributes is not null)
-            {
-                if (!profileAttributes.Value.HasFlag(FileAttributes.Directory))
-                {
-                    throw new InvalidDataException(
-                        $"Run-scoped staged Agent profile path '{expectedDefaultProfilePath}' is not a directory.");
-                }
-
-                EnsureNoReparsePointInExistingPath(
-                    expectedDefaultProfilePath,
-                    "run-scoped staged Agent profile path");
-            }
-
-            bool sidHiveLoaded;
-            using (var key = Registry.Users.OpenSubKey(sid, writable: false))
-            {
-                sidHiveLoaded = key is not null;
-            }
-
-            bool classesHiveLoaded;
-            using (var key = Registry.Users.OpenSubKey(
-                       sid + "_Classes",
-                       writable: false))
-            {
-                classesHiveLoaded = key is not null;
-            }
-
-            return new ProfileArtifactState(
-                profileRegistryPresent,
-                profilePathPresent,
-                sidHiveLoaded,
-                classesHiveLoaded);
-        }
-
-        private static FileAttributes? ReadPathAttributesRequired(
-            string path,
-            string purpose)
-        {
-            var attributes = GetFileAttributes(path);
-            if (attributes != InvalidFileAttributes)
-            {
-                return (FileAttributes)attributes;
-            }
-
-            var error = Marshal.GetLastWin32Error();
-            if (error is ErrorFileNotFound or ErrorPathNotFound)
-            {
-                return null;
-            }
-
-            throw new Win32Exception(
-                error,
-                $"Could not inspect {purpose} '{path}' while proving staged Agent profile cleanup.");
-        }
-
-        private static Win32Exception CreateProfileDeletionException(
-            string sid,
-            int nativeErrorCode,
-            ProfileArtifactState state,
-            string reason) => new(
-            nativeErrorCode,
-            $"Could not delete the temporary staged Agent service profile for SID {sid}; "
-            + $"{reason}. NativeErrorCode={nativeErrorCode}; "
-            + $"ProfileListPresent={state.ProfileRegistryPresent}; "
-            + $"ProfilePathPresent={state.ProfilePathPresent}; "
-            + $"HkuSidLoaded={state.SidHiveLoaded}; "
-            + $"HkuClassesLoaded={state.ClassesHiveLoaded}. "
-            + "The exact account is preserved for bounded cleanup retry.");
-
-        private sealed record ProfileArtifactState(
-            bool ProfileRegistryPresent,
-            bool ProfilePathPresent,
-            bool SidHiveLoaded,
-            bool ClassesHiveLoaded)
-        {
-            public bool Absent =>
-                !ProfileRegistryPresent
-                && !ProfilePathPresent
-                && !SidHiveLoaded
-                && !ClassesHiveLoaded;
-        }
-
-        private static void ThrowIdentityCleanupFailures(
-            List<Exception> failures,
-            string message)
-        {
-            if (failures.Count == 1)
-            {
-                ExceptionDispatchInfo.Capture(failures[0]).Throw();
-            }
-
-            if (failures.Count > 1)
-            {
-                throw new AggregateException(message, failures);
-            }
-        }
-
-        private static void AddToBuiltinUsers(SecurityIdentifier userSid)
-        {
-            var builtinUsers = (NTAccount)new SecurityIdentifier(
-                    WellKnownSidType.BuiltinUsersSid,
-                    null)
-                .Translate(typeof(NTAccount));
-            var groupName = builtinUsers.Value.Split('\\')[^1];
-            var sidBytes = new byte[userSid.BinaryLength];
-            userSid.GetBinaryForm(sidBytes, 0);
-            var sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
-            try
-            {
-                Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
-                var member = new LocalGroupMembersInfo0 { Sid = sidPointer };
-                var status = NetLocalGroupAddMembers(
-                    null,
-                    groupName,
-                    0,
-                    ref member,
-                    1);
-                if (status is not Success and not MemberAlreadyInAlias)
-                {
-                    throw new InvalidOperationException(
-                        $"Could not add the staged Agent account to the built-in Users group (NetLocalGroupAddMembers {status}).");
-                }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(sidPointer);
-            }
-        }
-
-        private static void GrantServiceLogonRight(SecurityIdentifier userSid) =>
-            ChangeAccountRight(userSid, add: true);
-
-        private static void RemoveServiceLogonRight(SecurityIdentifier userSid) =>
-            ChangeAccountRight(userSid, add: false);
-
-        private static void RemoveServiceLogonRightIfPresent(SecurityIdentifier userSid)
-        {
-            var attributes = new LsaObjectAttributes
-            {
-                Length = checked((uint)Marshal.SizeOf<LsaObjectAttributes>())
-            };
-            var status = LsaOpenPolicy(
-                IntPtr.Zero,
-                ref attributes,
-                PolicyLookupNames,
-                out var policy);
-            if (status != 0)
-            {
-                policy.Dispose();
-                ThrowIfLsaFailed(
-                    status,
-                    "Could not open Local Security Policy for run-scoped staged Agent cleanup.");
-            }
-
-            using (policy)
-            {
-                var sidBytes = new byte[userSid.BinaryLength];
-                userSid.GetBinaryForm(sidBytes, 0);
-                var sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
-                var rightBuffer = Marshal.StringToHGlobalUni(ServiceLogonRight);
-                try
-                {
-                    Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
-                    if (!HasAccountRight(policy, sidPointer, ServiceLogonRight))
-                    {
-                        return;
-                    }
-
-                    var right = new LsaUnicodeString
-                    {
-                        Length = checked((ushort)(ServiceLogonRight.Length * sizeof(char))),
-                        MaximumLength = checked((ushort)((ServiceLogonRight.Length + 1) * sizeof(char))),
-                        Buffer = rightBuffer
-                    };
-                    status = LsaRemoveAccountRights(
-                        policy,
-                        sidPointer,
-                        removeAllRights: false,
-                        [right],
-                        1);
-                    ThrowIfLsaFailed(
-                        status,
-                        $"Could not remove {ServiceLogonRight} from run-scoped staged Agent account '{userSid.Value}'.");
-                    if (HasAccountRight(policy, sidPointer, ServiceLogonRight))
-                    {
-                        throw new InvalidOperationException(
-                            $"Run-scoped staged Agent account '{userSid.Value}' still owns {ServiceLogonRight} after cleanup.");
-                    }
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(rightBuffer);
-                    Marshal.FreeHGlobal(sidPointer);
-                }
-            }
-        }
-
-        private static void ChangeAccountRight(
-            SecurityIdentifier userSid,
-            bool add)
-        {
-            var attributes = new LsaObjectAttributes
-            {
-                Length = checked((uint)Marshal.SizeOf<LsaObjectAttributes>())
-            };
-            var status = LsaOpenPolicy(
-                IntPtr.Zero,
-                ref attributes,
-                PolicyLookupNames | (add ? PolicyCreateAccount : 0),
-                out var policy);
-            if (status != 0)
-            {
-                policy.Dispose();
-                ThrowIfLsaFailed(
-                    status,
-                    "Could not open Local Security Policy for the staged Agent service account.");
-            }
-            using (policy)
-            {
-                var sidBytes = new byte[userSid.BinaryLength];
-                userSid.GetBinaryForm(sidBytes, 0);
-                var sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
-                var rightBuffer = Marshal.StringToHGlobalUni(ServiceLogonRight);
-                try
-                {
-                    Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
-                    var right = new LsaUnicodeString
-                    {
-                        Length = checked((ushort)(ServiceLogonRight.Length * sizeof(char))),
-                        MaximumLength = checked((ushort)((ServiceLogonRight.Length + 1) * sizeof(char))),
-                        Buffer = rightBuffer
-                    };
-                    var rightPresentBefore = HasAccountRight(
-                        policy,
-                        sidPointer,
-                        ServiceLogonRight);
-                    if (rightPresentBefore != !add)
-                    {
-                        throw new InvalidOperationException(
-                            add
-                                ? $"Fresh staged Agent account '{userSid.Value}' unexpectedly already owns {ServiceLogonRight}."
-                                : $"Staged Agent account '{userSid.Value}' no longer owns the {ServiceLogonRight} grant that this test must remove.");
-                    }
-
-                    status = add
-                        ? LsaAddAccountRights(policy, sidPointer, [right], 1)
-                        : LsaRemoveAccountRights(
-                            policy,
-                            sidPointer,
-                            removeAllRights: false,
-                            [right],
-                            1);
-                    ThrowIfLsaFailed(
-                        status,
-                        add
-                            ? $"Could not grant {ServiceLogonRight} to staged Agent account '{userSid.Value}'."
-                            : $"Could not remove {ServiceLogonRight} from staged Agent account '{userSid.Value}'.");
-                    var rightPresentAfter = HasAccountRight(
-                        policy,
-                        sidPointer,
-                        ServiceLogonRight);
-                    if (rightPresentAfter != add)
-                    {
-                        throw new InvalidOperationException(
-                            $"Local Security Policy did not persist the required {(add ? "grant" : "removal")} of {ServiceLogonRight} for '{userSid.Value}'.");
-                    }
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(rightBuffer);
-                    Marshal.FreeHGlobal(sidPointer);
-                }
-            }
-        }
-
-        private static bool HasAccountRight(
-            SafeLsaPolicyHandle policy,
-            IntPtr accountSid,
-            string expectedRight)
-        {
-            var status = LsaEnumerateAccountRights(
-                policy,
-                accountSid,
-                out var rights,
-                out var count);
-            if (status == StatusObjectNameNotFound)
-            {
-                return false;
-            }
-
-            ThrowIfLsaFailed(
-                status,
-                "Could not enumerate staged Agent service-account rights.");
-            var present = false;
-            uint freeStatus = 0;
-            try
-            {
-                var stride = Marshal.SizeOf<LsaUnicodeString>();
-                for (var index = 0u; index < count; index++)
-                {
-                    var right = Marshal.PtrToStructure<LsaUnicodeString>(
-                        IntPtr.Add(rights, checked((int)index * stride)));
-                    var name = right.Buffer == IntPtr.Zero
-                        ? null
-                        : Marshal.PtrToStringUni(
-                            right.Buffer,
-                            right.Length / sizeof(char));
-                    if (string.Equals(name, expectedRight, StringComparison.Ordinal))
-                    {
-                        present = true;
-                        break;
-                    }
-                }
-            }
-            finally
-            {
-                if (rights != IntPtr.Zero)
-                {
-                    freeStatus = LsaFreeMemory(rights);
-                }
-            }
-
-            if (freeStatus != 0)
-            {
-                throw new Win32Exception(
-                    checked((int)LsaNtStatusToWinError(freeStatus)),
-                    "Could not release staged Agent LSA account-rights memory.");
-            }
-
-            return present;
-        }
-
-        private static void ThrowIfLsaFailed(uint status, string message)
-        {
-            if (status == 0)
-            {
-                return;
-            }
-
-            var win32Error = LsaNtStatusToWinError(status);
-            throw new Win32Exception(
-                checked((int)win32Error),
-                $"{message} (NTSTATUS 0x{status:x8}, Win32 error {win32Error}).");
-        }
-
-        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-        private static extern uint NetUserAdd(
-            string? serverName,
-            uint level,
-            ref UserInfo1 buffer,
-            out uint parameterError);
-
-        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-        private static extern uint NetUserDel(string? serverName, string userName);
-
-        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-        private static extern uint NetUserGetInfo(
-            string? serverName,
-            string userName,
-            uint level,
-            out IntPtr buffer);
-
-        [DllImport("netapi32.dll")]
-        private static extern uint NetApiBufferFree(IntPtr buffer);
-
-        [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-        private static extern uint NetLocalGroupAddMembers(
-            string? serverName,
-            string groupName,
-            uint level,
-            ref LocalGroupMembersInfo0 buffer,
-            uint totalEntries);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaOpenPolicy(
-            IntPtr systemName,
-            ref LsaObjectAttributes objectAttributes,
-            uint desiredAccess,
-            out SafeLsaPolicyHandle policyHandle);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaAddAccountRights(
-            SafeLsaPolicyHandle policyHandle,
-            IntPtr accountSid,
-            [In] LsaUnicodeString[] userRights,
-            uint countOfRights);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaRemoveAccountRights(
-            SafeLsaPolicyHandle policyHandle,
-            IntPtr accountSid,
-            [MarshalAs(UnmanagedType.U1)] bool removeAllRights,
-            [In] LsaUnicodeString[] userRights,
-            uint countOfRights);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaEnumerateAccountRights(
-            SafeLsaPolicyHandle policyHandle,
-            IntPtr accountSid,
-            out IntPtr userRights,
-            out uint countOfRights);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaFreeMemory(IntPtr buffer);
-
-        [DllImport("advapi32.dll")]
-        private static extern uint LsaNtStatusToWinError(uint status);
-
-        [DllImport(
-            "userenv.dll",
-            EntryPoint = "DeleteProfileW",
-            CharSet = CharSet.Unicode,
-            ExactSpelling = true,
-            SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DeleteProfile(
-            string sidString,
-            string? profilePath,
-            string? computerName);
-
-        [DllImport(
-            "kernel32.dll",
-            EntryPoint = "GetFileAttributesW",
-            CharSet = CharSet.Unicode,
-            ExactSpelling = true,
-            SetLastError = true)]
-        private static extern uint GetFileAttributes(string fileName);
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct UserInfo1
-        {
-            public string? Name;
-            public string? Password;
-            public uint PasswordAge;
-            public uint Privilege;
-            public string? HomeDirectory;
-            public string? Comment;
-            public uint Flags;
-            public string? ScriptPath;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct LocalGroupMembersInfo0
-        {
-            public IntPtr Sid;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct LsaObjectAttributes
-        {
-            public uint Length;
-            public IntPtr RootDirectory;
-            public IntPtr ObjectName;
-            public uint Attributes;
-            public IntPtr SecurityDescriptor;
-            public IntPtr SecurityQualityOfService;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct LsaUnicodeString
-        {
-            public ushort Length;
-            public ushort MaximumLength;
-            public IntPtr Buffer;
-        }
-
-        private sealed class SafeLsaPolicyHandle : SafeHandleZeroOrMinusOneIsInvalid
-        {
-            public SafeLsaPolicyHandle()
-                : base(ownsHandle: true)
-            {
-            }
-
-            protected override bool ReleaseHandle() => LsaClose(handle) == 0;
-
-            [DllImport("advapi32.dll")]
-            private static extern uint LsaClose(IntPtr policyHandle);
-        }
+        private sealed record PendingDirectoryAccess(
+            string Path,
+            FileSystemRights Rights,
+            InheritanceFlags InheritanceFlags);
 
         private sealed record GrantedDirectoryAccess(
             string Path,
             FileSystemAccessRule Rule);
-
-        public sealed record RunScopedIdentity(
-            string AccountName,
-            string Sid,
-            bool AccountExists);
     }
 
     [SupportedOSPlatform("windows")]
@@ -5355,6 +5195,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint ScManagerCreateService = 0x0002;
         private const uint DeleteAccess = 0x00010000;
         private const uint ServiceQueryConfig = 0x0001;
+        private const uint ServiceChangeConfig = 0x0002;
         private const uint ServiceQueryStatus = 0x0004;
         private const uint ServiceStart = 0x0010;
         private const uint ServiceStop = 0x0020;
@@ -5364,6 +5205,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint ServiceControlStop = 0x00000001;
         private const uint ScStatusProcessInfo = 0;
         private const uint ServiceConfigFailureActions = 2;
+        private const uint ServiceConfigServiceSidInfo = 5;
+        private const uint ServiceSidTypeRestricted = 3;
         private const uint ServiceStopped = 0x00000001;
         private const uint ServiceStartPending = 0x00000002;
         private const uint ServiceStopPending = 0x00000003;
@@ -5388,6 +5231,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly string _expectedExecutableSha256;
         private readonly string _expectedBinaryPath;
         private readonly string _expectedServiceAccountName;
+        private readonly string _packageCacheRoot;
         private readonly RestrictedAgentIdentity _identity;
         private readonly List<uint> _startedProcessIds = [];
         private readonly List<uint> _cleanlyStoppedProcessIds = [];
@@ -5404,7 +5248,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string expectedExecutableSha256,
             string expectedBinaryPath,
             string expectedServiceAccountName,
-            RestrictedAgentIdentity identity)
+            RestrictedAgentIdentity identity,
+            string packageCacheRoot)
         {
             _serviceControlManager = serviceControlManager;
             _service = service;
@@ -5415,11 +5260,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             _expectedBinaryPath = expectedBinaryPath;
             _expectedServiceAccountName = expectedServiceAccountName;
             _identity = identity;
+            _packageCacheRoot = Path.GetFullPath(packageCacheRoot);
         }
 
         public string ServiceName { get; }
 
         public bool DeletionProven { get; private set; }
+
+        public bool PackagedRemovalCommandVerified { get; private set; }
 
         public bool LifecycleVerified
         {
@@ -5443,7 +5291,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string workingDirectory,
             IReadOnlyDictionary<string, string> environment,
             RestrictedAgentIdentity identity,
-            string suffix)
+            string suffix,
+            string packageCacheRoot)
         {
             ArgumentNullException.ThrowIfNull(environment);
             ArgumentNullException.ThrowIfNull(identity);
@@ -5490,13 +5339,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "The staged Agent dynamic service name exceeds the ServiceBase limit.");
             }
 
-            var serviceEnvironment = new Dictionary<string, string>(
-                environment,
-                StringComparer.OrdinalIgnoreCase)
-            {
-                ["OpenLineOps__WindowsServiceName"] = serviceName,
-                ["DOTNET_CONTENTROOT"] = fullWorkingDirectory
-            };
+            var serviceEnvironment = environment.ToDictionary(
+                static pair => pair.Key,
+                static pair => pair.Value,
+                StringComparer.OrdinalIgnoreCase);
+            serviceEnvironment.Add(
+                "OpenLineOps__WindowsServiceName",
+                serviceName);
+            serviceEnvironment.Add(
+                "DOTNET_CONTENTROOT",
+                fullWorkingDirectory);
             var environmentEntries = CreateEnvironmentEntries(serviceEnvironment);
             var executableSha256 = Convert.ToHexStringLower(
                 SHA256.HashData(File.ReadAllBytes(fullExecutablePath)));
@@ -5516,6 +5368,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             SafeServiceHandle? service = null;
             var eventLogSourceRegistered = false;
+            var identityInstallationMarked = false;
             try
             {
                 service = CreateService(
@@ -5524,6 +5377,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     serviceName,
                     DeleteAccess
                     | ServiceQueryConfig
+                    | ServiceChangeConfig
                     | ServiceQueryStatus
                     | ServiceStart
                     | ServiceStop,
@@ -5535,7 +5389,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     IntPtr.Zero,
                     dependencies: null,
                     identity.ServiceAccountName,
-                    identity.Password);
+                    password: null);
                 if (service.IsInvalid)
                 {
                     var error = Marshal.GetLastWin32Error();
@@ -5546,7 +5400,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         $"Could not install staged Agent Windows service '{serviceName}'.");
                 }
 
+                identity.BindServiceRequired(serviceName);
                 identity.MarkServiceInstalled(serviceName);
+                identityInstallationMarked = true;
+                ConfigureRestrictedServiceSid(service, serviceName);
+                VerifyCanonicalServiceSidIdentity(serviceName, identity.Sid);
                 RegisterEventLogSource(
                     serviceName,
                     new SecurityIdentifier(identity.Sid),
@@ -5567,7 +5425,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     executableSha256,
                     binaryPath,
                     identity.ServiceAccountName,
-                    identity);
+                    identity,
+                    packageCacheRoot);
                 service = null;
                 return owner;
             }
@@ -5614,7 +5473,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                 serviceName,
                                 TimeSpan.FromSeconds(15));
                             VerifyEventLogSourceAbsent(serviceName);
-                            identity.MarkServiceDeletionProven(serviceName);
+                            if (identityInstallationMarked)
+                            {
+                                identity.MarkServiceDeletionProven(serviceName);
+                            }
                         });
                 }
 
@@ -5631,11 +5493,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
         }
 
-        public static void CleanupRunScoped(
-            AgentServiceCleanupEntry entry,
-            string expectedAccountSid)
+        public static void CleanupRunScoped(AgentServiceCleanupEntry entry)
         {
-            _ = new SecurityIdentifier(expectedAccountSid);
+            var expectedServiceSid = new SecurityIdentifier(entry.ServiceSid);
             var manager = OpenSCManager(
                 machineName: null,
                 databaseName: null,
@@ -5667,7 +5527,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                             ServiceTransitionTimeout);
                         DeleteEventLogSource(
                             entry.ServiceName,
-                            new SecurityIdentifier(expectedAccountSid));
+                            expectedServiceSid);
                         VerifyEventLogSourceAbsent(entry.ServiceName);
                         return;
                     }
@@ -5685,7 +5545,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         service,
                         entry.ServiceName,
                         QuoteServiceBinaryPath(entry.ExecutablePath),
-                        $".\\{entry.AccountName}");
+                        entry.ServiceAccountName);
                     CaptureCleanupFailure(
                         failures,
                         () => DeleteEnvironmentValue(entry.ServiceName));
@@ -5693,7 +5553,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         failures,
                         () => DeleteEventLogSource(
                             entry.ServiceName,
-                            new SecurityIdentifier(expectedAccountSid)));
+                            expectedServiceSid));
                     var executableValidated = true;
                     try
                     {
@@ -5707,18 +5567,38 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
                     if (executableValidated)
                     {
+                        var transitionFailureCount = failures.Count;
                         CaptureCleanupFailure(
                             failures,
                             () => StopRunScopedService(
                                 service,
                                 entry,
-                                expectedAccountSid,
+                                entry.ServiceSid,
                                 ServiceTransitionTimeout));
-                        var failureCount = failures.Count;
-                        CaptureCleanupFailure(
-                            failures,
-                            () => DeleteServiceRequired(service, entry.ServiceName));
-                        serviceDeletionRequested = failures.Count == failureCount;
+                        if (failures.Count == transitionFailureCount)
+                        {
+                            var packageCacheRoot = PackageCacheRootForCleanupEntry(entry);
+                            CaptureCleanupFailure(
+                                failures,
+                                () => RemoveProtectedPackageInstallations(
+                                    packageCacheRoot,
+                                    entry.ServiceName,
+                                    entry.ServiceSid));
+                            if (failures.Count == transitionFailureCount)
+                            {
+                                CaptureCleanupFailure(
+                                    failures,
+                                    () => DeleteProvisionedCacheNamespace(packageCacheRoot));
+                            }
+                        }
+
+                        if (failures.Count == transitionFailureCount)
+                        {
+                            CaptureCleanupFailure(
+                                failures,
+                                () => DeleteServiceRequired(service, entry.ServiceName));
+                            serviceDeletionRequested = failures.Count == transitionFailureCount;
+                        }
                     }
                 }
                 finally
@@ -5753,75 +5633,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
         }
 
-        public static void ProveRunScopedArtifactsAbsent(
-            AgentServiceCleanupEntry entry)
-        {
-            var manager = OpenSCManager(
-                machineName: null,
-                databaseName: null,
-                ScManagerConnect);
-            if (manager.IsInvalid)
-            {
-                var error = Marshal.GetLastWin32Error();
-                manager.Dispose();
-                throw new Win32Exception(
-                    error,
-                    "Could not open SCM to prove pre-account run-scope absence.");
-            }
-
-            using (manager)
-            {
-                var service = OpenService(
-                    manager,
-                    entry.ServiceName,
-                    ServiceQueryStatus);
-                if (!service.IsInvalid)
-                {
-                    service.Dispose();
-                    throw new InvalidOperationException(
-                        $"Service '{entry.ServiceName}' exists without a manifest-bound account SID; preserving it.");
-                }
-
-                var error = Marshal.GetLastWin32Error();
-                service.Dispose();
-                if (error != ErrorServiceDoesNotExist)
-                {
-                    throw new Win32Exception(
-                        error,
-                        $"Could not prove absence of pre-account service '{entry.ServiceName}'.");
-                }
-
-                using var serviceKey = Registry.LocalMachine.OpenSubKey(
-                    ServiceRegistryPrefix + entry.ServiceName,
-                    writable: false);
-                if (serviceKey is not null)
-                {
-                    throw new InvalidOperationException(
-                        $"Service registry key '{entry.ServiceName}' exists without a manifest-bound account SID; preserving it.");
-                }
-            }
-
-            VerifyEventLogSourceAbsent(entry.ServiceName);
-            if (File.Exists(entry.OwnedRoot))
-            {
-                throw new InvalidDataException(
-                    $"Pre-account run-scoped root '{entry.OwnedRoot}' is a file; preserving it.");
-            }
-
-            if (Directory.Exists(entry.OwnedRoot))
-            {
-                VerifyRunScopedOwnedRootForCleanup(entry.OwnedRoot);
-                if (File.Exists(entry.ExecutablePath))
-                {
-                    VerifyCleanupExecutable(entry);
-                }
-            }
-        }
-
         private static void StopRunScopedService(
             SafeServiceHandle service,
             AgentServiceCleanupEntry entry,
-            string expectedAccountSid,
+            string expectedServiceSid,
             TimeSpan timeout)
         {
             var status = QueryStatus(service, entry.ServiceName);
@@ -5896,7 +5711,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     status.ProcessId,
                     entry.ExecutablePath,
                     entry.ExecutableSha256,
-                    expectedAccountSid);
+                    RestrictedAgentIdentity.LocalServiceAccountSid,
+                    expectedServiceSid);
                 confirmed = QueryStatus(service, entry.ServiceName);
                 if (confirmed.CurrentState == ServiceStopped)
                 {
@@ -5958,7 +5774,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         validatedProcessId,
                         entry.ExecutablePath,
                         entry.ExecutableSha256,
-                        expectedAccountSid!);
+                        RestrictedAgentIdentity.LocalServiceAccountSid,
+                        expectedServiceSid);
                     current = QueryStatus(service, entry.ServiceName);
                     if (current.CurrentState == ServiceStopped
                         || current.CurrentState == ServiceRunning
@@ -6228,42 +6045,69 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 }
 
                 var failures = new List<Exception>();
+                var transitionFailureCount = failures.Count;
                 CaptureCleanupFailure(
                     failures,
                     () => StopOrTerminateCurrentProcess(ServiceTransitionTimeout));
-                CaptureCleanupFailure(
-                    failures,
-                    ReleaseAnyActiveProcessHandle);
-                CaptureCleanupFailure(
-                    failures,
-                    () => DeleteEnvironmentValue(ServiceName));
-                CaptureCleanupFailure(
-                    failures,
-                    () => DeleteEventLogSource(
-                        ServiceName,
-                        new SecurityIdentifier(_identity.Sid)));
-                var service = _service;
-                if (service is not null)
+                if (failures.Count == transitionFailureCount)
                 {
                     CaptureCleanupFailure(
                         failures,
-                        () => DeleteServiceRequired(service, ServiceName));
-                    CaptureCleanupFailure(failures, service.Dispose);
-                    _service = null;
+                        ReleaseAnyActiveProcessHandle);
                 }
 
                 var deletionProven = false;
-                CaptureCleanupFailure(
-                    failures,
-                    () =>
-                    {
-                        WaitForServiceDeletion(
-                            _serviceControlManager,
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => PackagedRemovalCommandVerified =
+                            RemovePackageInstallationsThroughPackagedAgent(
+                                _expectedExecutablePath,
+                                _packageCacheRoot,
+                                ServiceName,
+                                _identity.Sid));
+                }
+
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteProvisionedCacheNamespace(_packageCacheRoot));
+                }
+
+                if (failures.Count == transitionFailureCount)
+                {
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEnvironmentValue(ServiceName));
+                    CaptureCleanupFailure(
+                        failures,
+                        () => DeleteEventLogSource(
                             ServiceName,
-                            TimeSpan.FromSeconds(15));
-                        VerifyEventLogSourceAbsent(ServiceName);
-                        deletionProven = true;
-                    });
+                            new SecurityIdentifier(_identity.Sid)));
+                    var service = _service;
+                    if (service is not null)
+                    {
+                        CaptureCleanupFailure(
+                            failures,
+                            () => DeleteServiceRequired(service, ServiceName));
+                        CaptureCleanupFailure(failures, service.Dispose);
+                        _service = null;
+                    }
+
+                    CaptureCleanupFailure(
+                        failures,
+                        () =>
+                        {
+                            WaitForServiceDeletion(
+                                _serviceControlManager,
+                                ServiceName,
+                                TimeSpan.FromSeconds(15));
+                            VerifyEventLogSourceAbsent(ServiceName);
+                            deletionProven = true;
+                        });
+                }
                 DeletionProven = deletionProven;
                 if (deletionProven)
                 {
@@ -6634,14 +6478,91 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException(
-                        $"Staged Agent service '{serviceName}' SCM configuration differs from the exact own-process, demand-start, error-normal, frozen-image, dedicated-account, display-name, empty-group, empty-dependencies contract.");
+                        $"Staged Agent service '{serviceName}' SCM configuration differs from the exact own-process, demand-start, error-normal, frozen-image, LocalService, display-name, empty-group, empty-dependencies contract.");
                 }
 
+                VerifyRestrictedServiceSid(service, serviceName);
                 VerifyFailureActions(service, serviceName);
             }
             finally
             {
                 Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void ConfigureRestrictedServiceSid(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            var sidInfo = new ServiceSidInfo
+            {
+                ServiceSidType = ServiceSidTypeRestricted
+            };
+            if (!ChangeServiceConfig2(
+                    service,
+                    ServiceConfigServiceSidInfo,
+                    ref sidInfo))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not configure exact restricted service SID for staged Agent service '{serviceName}'.");
+            }
+
+            VerifyRestrictedServiceSid(service, serviceName);
+        }
+
+        private static void VerifyRestrictedServiceSid(
+            SafeServiceHandle service,
+            string serviceName)
+        {
+            var size = checked((uint)Marshal.SizeOf<ServiceSidInfo>());
+            var buffer = Marshal.AllocHGlobal(checked((int)size));
+            try
+            {
+                if (!QueryServiceConfig2(
+                        service,
+                        ServiceConfigServiceSidInfo,
+                        buffer,
+                        size,
+                        out var bytesNeeded))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not read service-SID configuration for staged Agent service '{serviceName}'.");
+                }
+
+                if (bytesNeeded > size)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' returned an oversized service-SID configuration.");
+                }
+
+                var sidInfo = Marshal.PtrToStructure<ServiceSidInfo>(buffer);
+                if (sidInfo.ServiceSidType != ServiceSidTypeRestricted)
+                {
+                    throw new InvalidOperationException(
+                        $"Staged Agent service '{serviceName}' must use SERVICE_SID_TYPE_RESTRICTED.");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void VerifyCanonicalServiceSidIdentity(
+            string serviceName,
+            string expectedServiceSid)
+        {
+            var resolved = (SecurityIdentifier)new NTAccount("NT SERVICE", serviceName)
+                .Translate(typeof(SecurityIdentifier));
+            if (!string.Equals(
+                    resolved.Value,
+                    expectedServiceSid,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Windows resolved service '{serviceName}' to SID '{resolved.Value}', not canonical SID '{expectedServiceSid}'.");
             }
         }
 
@@ -6847,7 +6768,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static void RegisterEventLogSource(
             string serviceName,
-            SecurityIdentifier serviceAccountSid,
+            SecurityIdentifier serviceSid,
             out bool sourceCreated)
         {
             sourceCreated = false;
@@ -6894,7 +6815,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 }
 
                 security.AddAccessRule(new RegistryAccessRule(
-                    serviceAccountSid,
+                    serviceSid,
                     RegistryRights.ReadKey,
                     InheritanceFlags.None,
                     PropagationFlags.None,
@@ -6903,7 +6824,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 key.Flush();
                 VerifyEventLogSource(
                     serviceName,
-                    serviceAccountSid,
+                    serviceSid,
                     currentSid);
             }
             catch (Exception exception)
@@ -6935,7 +6856,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static void VerifyEventLogSource(
             string serviceName,
-            SecurityIdentifier serviceAccountSid,
+            SecurityIdentifier serviceSid,
             SecurityIdentifier currentSid)
         {
             if (!EventLog.SourceExists(serviceName))
@@ -6987,7 +6908,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                   || !fullControlSids.Contains(sid.Value)
                                   && !string.Equals(
                                       sid.Value,
-                                      serviceAccountSid.Value,
+                                      serviceSid.Value,
                                       StringComparison.Ordinal)))
             {
                 throw new InvalidOperationException(
@@ -6998,13 +6919,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     rule.IdentityReference is SecurityIdentifier sid
                     && string.Equals(
                         sid.Value,
-                        serviceAccountSid.Value,
+                        serviceSid.Value,
                         StringComparison.Ordinal)
                     && (rule.RegistryRights & RegistryRights.ReadKey)
                     == RegistryRights.ReadKey))
             {
                 throw new InvalidOperationException(
-                    $"EventLog source '{serviceName}' is not readable by its exact service account.");
+                    $"EventLog source '{serviceName}' is not readable by its exact service SID.");
             }
 
             foreach (var sid in fullControlSids)
@@ -7024,20 +6945,20 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     rule.IdentityReference is SecurityIdentifier sid
                     && string.Equals(
                         sid.Value,
-                        serviceAccountSid.Value,
+                        serviceSid.Value,
                         StringComparison.Ordinal))
                 .ToArray();
             if (serviceRules.Length != 1
                 || serviceRules[0].RegistryRights != RegistryRights.ReadKey)
             {
                 throw new InvalidOperationException(
-                    $"EventLog source '{serviceName}' service-account ACL must be exactly one ReadKey rule.");
+                    $"EventLog source '{serviceName}' service-SID ACL must be exactly one ReadKey rule.");
             }
         }
 
         private static void DeleteEventLogSource(
             string serviceName,
-            SecurityIdentifier serviceAccountSid)
+            SecurityIdentifier serviceSid)
         {
             if (EventLog.SourceExists(serviceName))
             {
@@ -7046,7 +6967,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                      "The staged E2E cleanup identity has no SID for EventLog source validation.");
                 VerifyEventLogSource(
                     serviceName,
-                    serviceAccountSid,
+                    serviceSid,
                     currentSid);
                 EventLog.DeleteEventSource(serviceName);
             }
@@ -7183,7 +7104,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             IntPtr tagId,
             string? dependencies,
             string serviceStartName,
-            string password);
+            string? password);
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern SafeServiceHandle OpenService(
@@ -7230,6 +7151,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             IntPtr buffer,
             uint bufferSize,
             out uint bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ChangeServiceConfig2(
+            SafeServiceHandle service,
+            uint infoLevel,
+            ref ServiceSidInfo info);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -7291,6 +7219,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             public IntPtr Actions;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceSidInfo
+        {
+            public uint ServiceSidType;
+        }
+
         private sealed class SafeServiceHandle : SafeHandleZeroOrMinusOneIsInvalid
         {
             public SafeServiceHandle()
@@ -7313,7 +7247,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint ProcessQueryLimitedInformation = 0x1000;
         private const uint Synchronize = 0x00100000;
         private const uint TokenDuplicate = 0x0002;
+        private const uint TokenImpersonate = 0x0004;
         private const uint TokenQuery = 0x0008;
+        private const int SecurityImpersonation = 2;
+        private const int TokenImpersonation = 2;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
         private const int ErrorInsufficientBuffer = 122;
@@ -7358,6 +7295,106 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         public string ExecutablePath { get; }
 
         public string ExecutableSha256 { get; }
+
+        public T RunAsService<T>(Func<T> action)
+        {
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(action);
+            if (!OpenProcessTokenSafe(
+                    _processHandle,
+                    TokenQuery | TokenDuplicate,
+                    out var primaryToken))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not open the staged Agent service token for filesystem boundary proof.");
+            }
+
+            using (primaryToken)
+            {
+                if (!DuplicateTokenEx(
+                        primaryToken,
+                        TokenQuery | TokenImpersonate,
+                        IntPtr.Zero,
+                        SecurityImpersonation,
+                        TokenImpersonation,
+                        out var impersonationToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not duplicate the staged Agent service token for filesystem boundary proof.");
+                }
+
+                using (impersonationToken)
+                {
+                    return WindowsIdentity.RunImpersonated(impersonationToken, action);
+                }
+            }
+        }
+
+        public NamedPipeClientStream ConnectNamedPipeAsService(
+            string pipeName,
+            TimeSpan timeout)
+        {
+            ThrowIfDisposed();
+            ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
+            if (timeout <= TimeSpan.Zero || timeout.TotalMilliseconds > int.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timeout),
+                    "Named-pipe connection timeout must be positive and representable by Win32.");
+            }
+
+            if (!OpenProcessTokenSafe(
+                    _processHandle,
+                    TokenQuery | TokenDuplicate,
+                    out var primaryToken))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not open the staged Agent service token for IPC boundary proof.");
+            }
+
+            using (primaryToken)
+            {
+                if (!DuplicateTokenEx(
+                        primaryToken,
+                        TokenQuery | TokenImpersonate,
+                        IntPtr.Zero,
+                        SecurityImpersonation,
+                        TokenImpersonation,
+                        out var impersonationToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not duplicate the staged Agent service token for IPC boundary proof.");
+                }
+
+                using (impersonationToken)
+                {
+                    return WindowsIdentity.RunImpersonated(
+                        impersonationToken,
+                        () =>
+                        {
+                            var pipe = new NamedPipeClientStream(
+                                ".",
+                                pipeName,
+                                PipeDirection.InOut,
+                                PipeOptions.Asynchronous);
+                            try
+                            {
+                                pipe.Connect(checked((int)Math.Ceiling(timeout.TotalMilliseconds)));
+                                return pipe;
+                            }
+                            catch
+                            {
+                                pipe.Dispose();
+                                throw;
+                            }
+                        });
+                }
+            }
+        }
 
         internal static SafeProcessHandle OpenRequiredProcess(uint processId)
         {
@@ -7407,6 +7444,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 processId,
                 expectedExecutablePath,
                 expectedExecutableSha256,
+                requestedIdentity.ServiceAccountSid,
                 requestedIdentity.Sid);
             return new WindowsAgentProcess(
                 service,
@@ -7422,7 +7460,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint processId,
             string expectedExecutablePath,
             string expectedExecutableSha256,
-            string expectedSid)
+            string expectedUserSid,
+            string expectedServiceSid)
         {
             ArgumentNullException.ThrowIfNull(processHandle);
             if (processHandle.IsInvalid || processHandle.IsClosed)
@@ -7432,7 +7471,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     nameof(processHandle));
             }
 
-            var tokenEvidence = ReadRequiredTokenEvidence(processHandle, expectedSid);
+            var tokenEvidence = ReadRequiredTokenEvidence(
+                processHandle,
+                expectedUserSid,
+                expectedServiceSid);
             var actualExecutablePath = ReadRequiredExecutablePath(processHandle);
             var fullExpectedPath = Path.GetFullPath(expectedExecutablePath);
             if (!string.Equals(
@@ -7588,18 +7630,38 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         private static AgentHostTokenEvidence ReadRequiredTokenEvidence(
             SafeProcessHandle processHandle,
-            string expectedSid)
+            string expectedUserSid,
+            string expectedServiceSid)
         {
-            var evidence = ReadTokenEvidence(processHandle);
+            var canonicalUserSid = new SecurityIdentifier(expectedUserSid).Value;
+            var canonicalServiceSid =
+                WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                    expectedServiceSid,
+                    nameof(expectedServiceSid));
+            if (!string.Equals(
+                    canonicalUserSid,
+                    expectedUserSid,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    canonicalUserSid,
+                    RestrictedAgentIdentity.LocalServiceAccountSid,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The staged Agent token contract requires LocalService and one canonical per-service SID.");
+            }
+
+            var evidence = ReadTokenEvidence(processHandle, canonicalServiceSid);
             if (!string.Equals(
                     evidence.UserSid,
-                    expectedSid,
+                    canonicalUserSid,
                     StringComparison.Ordinal)
                 || !evidence.NonAdministrative)
             {
                 throw new InvalidOperationException(
-                    "The staged Agent service token did not prove the exact authenticated, "
-                    + "primary, non-elevated, non-administrative service identity. "
+                    "The staged Agent service token did not prove LocalService, a service logon SID, "
+                    + "the exact enabled restricted per-service SID, and a primary, non-elevated, "
+                    + "non-administrative identity. "
                     + JsonSerializer.Serialize(evidence));
             }
 
@@ -7607,11 +7669,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         private static AgentHostTokenEvidence ReadTokenEvidence(
-            SafeProcessHandle processHandle)
+            SafeProcessHandle processHandle,
+            string expectedServiceSid)
         {
             if (!OpenProcessTokenSafe(
                     processHandle,
-                    TokenQuery | TokenDuplicate,
+                    TokenQuery,
                     out var token))
             {
                 var tokenError = Marshal.GetLastWin32Error();
@@ -7630,21 +7693,33 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 var administratorSid = new SecurityIdentifier(
                     WellKnownSidType.BuiltinAdministratorsSid,
                     null);
-                var groups = ReadTokenGroups(token.DangerousGetHandle());
+                var serviceLogonSid = new SecurityIdentifier("S-1-5-6");
+                var groups = ReadTokenGroups(
+                    token.DangerousGetHandle(),
+                    TokenInformationClass.TokenGroups);
+                var restrictedSids = ReadTokenGroups(
+                    token.DangerousGetHandle(),
+                    TokenInformationClass.TokenRestrictedSids);
                 var administrator = groups.FirstOrDefault(group =>
                     string.Equals(
                         group.Sid,
                         administratorSid.Value,
                         StringComparison.Ordinal));
+                var serviceLogon = groups.FirstOrDefault(group =>
+                    string.Equals(
+                        group.Sid,
+                        serviceLogonSid.Value,
+                        StringComparison.Ordinal));
+                var exactService = groups.FirstOrDefault(group =>
+                    string.Equals(
+                        group.Sid,
+                        expectedServiceSid,
+                        StringComparison.Ordinal));
                 var administratorPresent = administrator is not null;
-                var administratorEnabled = administrator is not null
-                                           && (administrator.Attributes & GroupEnabled) != 0
-                                           && (administrator.Attributes & GroupUseForDenyOnly) == 0;
+                var administratorEnabled = IsEnabledGroup(administrator);
                 var administratorDenyOnly = administrator is not null
-                                            && (administrator.Attributes & GroupUseForDenyOnly) != 0;
-                var principalAdministrator = ReadRequiredEnabledTokenMembership(
-                    token,
-                    administratorSid);
+                                            && (administrator.Attributes
+                                                & GroupUseForDenyOnly) != 0;
                 return new AgentHostTokenEvidence(
                     identity.Name,
                     userSid.Value,
@@ -7660,54 +7735,24 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     administratorPresent,
                     administratorEnabled,
                     administratorDenyOnly,
-                    principalAdministrator,
+                    serviceLogon is not null,
+                    IsEnabledGroup(serviceLogon),
+                    exactService is not null,
+                    IsEnabledGroup(exactService),
+                    restrictedSids.Any(group => string.Equals(
+                        group.Sid,
+                        expectedServiceSid,
+                        StringComparison.Ordinal)),
                     !string.IsNullOrWhiteSpace(identity.AuthenticationType)
                     && !userSid.IsWellKnown(WellKnownSidType.AnonymousSid),
                     userSid.IsWellKnown(WellKnownSidType.LocalSystemSid));
             }
         }
 
-        private static bool ReadRequiredEnabledTokenMembership(
-            SafeAccessTokenHandle primaryToken,
-            SecurityIdentifier sid)
-        {
-            if (!DuplicateToken(
-                    primaryToken,
-                    SecurityImpersonationLevel.SecurityIdentification,
-                    out var impersonationToken))
-            {
-                var error = Marshal.GetLastWin32Error();
-                impersonationToken.Dispose();
-                throw new Win32Exception(
-                    error,
-                    "Could not duplicate the staged Agent primary token for an independent administrator-membership proof.");
-            }
-
-            using (impersonationToken)
-            {
-                var sidBytes = new byte[sid.BinaryLength];
-                sid.GetBinaryForm(sidBytes, 0);
-                var pinnedSid = GCHandle.Alloc(sidBytes, GCHandleType.Pinned);
-                try
-                {
-                    if (!CheckTokenMembership(
-                            impersonationToken,
-                            pinnedSid.AddrOfPinnedObject(),
-                            out var isMember))
-                    {
-                        throw new Win32Exception(
-                            Marshal.GetLastWin32Error(),
-                            "Could not independently inspect staged Agent administrator membership on its duplicated impersonation token.");
-                    }
-
-                    return isMember;
-                }
-                finally
-                {
-                    pinnedSid.Free();
-                }
-            }
-        }
+        private static bool IsEnabledGroup(TokenGroupEvidence? group) =>
+            group is not null
+            && (group.Attributes & GroupEnabled) != 0
+            && (group.Attributes & GroupUseForDenyOnly) == 0;
 
         private static int ReadTokenInt32(
             IntPtr token,
@@ -7730,11 +7775,21 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return value;
         }
 
-        private static List<TokenGroupEvidence> ReadTokenGroups(IntPtr token)
+        private static List<TokenGroupEvidence> ReadTokenGroups(
+            IntPtr token,
+            TokenInformationClass informationClass)
         {
+            if (informationClass is not (TokenInformationClass.TokenGroups
+                or TokenInformationClass.TokenRestrictedSids))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(informationClass),
+                    "Only enabled groups and restricted SIDs use the TOKEN_GROUPS shape.");
+            }
+
             _ = GetTokenInformation(
                 token,
-                TokenInformationClass.TokenGroups,
+                informationClass,
                 IntPtr.Zero,
                 0,
                 out var requiredLength);
@@ -7743,7 +7798,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             {
                 throw new Win32Exception(
                     sizingError,
-                    "Could not size the staged Agent token groups buffer.");
+                    $"Could not size the staged Agent {informationClass} buffer.");
             }
 
             var buffer = Marshal.AllocHGlobal(requiredLength);
@@ -7751,14 +7806,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             {
                 if (!GetTokenInformation(
                         token,
-                        TokenInformationClass.TokenGroups,
+                        informationClass,
                         buffer,
                         requiredLength,
                         out _))
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "Could not inspect the staged Agent token groups.");
+                        $"Could not inspect the staged Agent {informationClass}.");
                 }
 
                 var count = checked((uint)Marshal.ReadInt32(buffer));
@@ -7814,17 +7869,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DuplicateToken(
-            SafeAccessTokenHandle existingTokenHandle,
-            SecurityImpersonationLevel impersonationLevel,
-            out SafeAccessTokenHandle duplicateTokenHandle);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CheckTokenMembership(
-            SafeAccessTokenHandle tokenHandle,
-            IntPtr sidToCheck,
-            [MarshalAs(UnmanagedType.Bool)] out bool isMember);
+        private static extern bool DuplicateTokenEx(
+            SafeAccessTokenHandle existingToken,
+            uint desiredAccess,
+            IntPtr tokenAttributes,
+            int impersonationLevel,
+            int tokenType,
+            out SafeAccessTokenHandle duplicateToken);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(
@@ -7886,16 +7937,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenUser = 1,
             TokenGroups = 2,
             TokenType = 8,
+            TokenRestrictedSids = 11,
             TokenElevation = 20,
             TokenHasRestrictions = 21
-        }
-
-        private enum SecurityImpersonationLevel
-        {
-            SecurityAnonymous,
-            SecurityIdentification,
-            SecurityImpersonation,
-            SecurityDelegation
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);

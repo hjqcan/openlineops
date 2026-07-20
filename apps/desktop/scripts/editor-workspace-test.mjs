@@ -180,6 +180,7 @@ function registration(overrides) {
     problems: [],
     conflict: null,
     saving: false,
+    busy: false,
     saveError: null,
     ...overrides
   };

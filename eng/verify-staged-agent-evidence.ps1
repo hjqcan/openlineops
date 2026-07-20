@@ -51,6 +51,24 @@ function Assert-Condition {
     }
 }
 
+function Get-ServiceSidFromName {
+    param([Parameter(Mandatory = $true)][string] $ServiceName)
+
+    $algorithm = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $hash = $algorithm.ComputeHash(
+            [System.Text.Encoding]::Unicode.GetBytes($ServiceName.ToUpperInvariant()))
+        $subAuthorities = @(for ($offset = 0; $offset -lt 20; $offset += 4) {
+                [System.BitConverter]::ToUInt32($hash, $offset).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+            })
+        return "S-1-5-80-$($subAuthorities -join '-')"
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
 function Assert-ExactProperties {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -63,6 +81,33 @@ function Assert-ExactProperties {
             -and @($actual | Where-Object { $Expected -cnotcontains $_ }).Count -eq 0 `
             -and @($Expected | Where-Object { $actual -cnotcontains $_ }).Count -eq 0) `
         "$Description does not have the exact strict-schema properties."
+}
+
+function Assert-JsonBooleanProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    foreach ($field in $Expected.Keys) {
+        Assert-Condition ($Value.$field -is [bool] `
+                -and $Value.$field -eq $Expected[$field]) `
+            "$Description field '$field' must be the JSON boolean $($Expected[$field].ToString().ToLowerInvariant())."
+    }
+}
+
+function Test-JsonInteger {
+    param([AllowNull()] $Value)
+
+    return $Value -is [byte] `
+        -or $Value -is [sbyte] `
+        -or $Value -is [int16] `
+        -or $Value -is [uint16] `
+        -or $Value -is [int32] `
+        -or $Value -is [uint32] `
+        -or $Value -is [int64] `
+        -or $Value -is [uint64]
 }
 
 function Read-SafeXml {
@@ -278,7 +323,10 @@ function Assert-SanitizedEvidenceRoot {
             "Staged Agent public evidence escaped its root."
         $relativePath = $entry.FullName.Substring($rootPrefix.Length).Replace('\', '/')
         if ($entry -is [System.IO.DirectoryInfo]) {
-            Assert-Condition ($relativePath -cin @("test-results", "rabbitmq-process")) `
+            Assert-Condition ($relativePath -cin @(
+                    "test-results",
+                    "rabbitmq-process",
+                    "entry-point-probes")) `
                 "Staged Agent public evidence contains an unknown directory: $relativePath"
             continue
         }
@@ -316,22 +364,127 @@ Assert-Condition ($evidence.schemaVersion -eq 1 `
     "Staged Agent top-level evidence identity is invalid."
 
 $expectedEntryPoints = [ordered]@{
-    "station-agent-service" = "OpenLineOps.Agent.exe"
-    "station-runtime" = "OpenLineOps.StationRuntime.exe"
-    "plugin-host" = "OpenLineOps.PluginHost.exe"
-    "python-script-worker" = "OpenLineOps.ScriptWorker.exe"
+    "station-agent-service" = [pscustomobject][ordered]@{
+        executable = "OpenLineOps.Agent.exe"
+        requiredExitCode = $null
+        outputContract = '^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
+    }
+    "station-runtime" = [pscustomobject][ordered]@{
+        executable = "OpenLineOps.StationRuntime.exe"
+        requiredExitCode = 64
+        outputContract = "execute-operation --request-file"
+    }
+    "plugin-host" = [pscustomobject][ordered]@{
+        executable = "OpenLineOps.PluginHost.exe"
+        requiredExitCode = 2
+        outputContract = "--manifest is required"
+    }
+    "python-script-worker" = [pscustomobject][ordered]@{
+        executable = "OpenLineOps.ScriptWorker.exe"
+        requiredExitCode = 2
+        outputContract = "Python script worker request body is required"
+    }
 }
 $entryPoints = @($evidence.entryPoints)
 $probes = @($evidence.entryPointProbes)
 Assert-Condition ($entryPoints.Count -eq 4 -and $probes.Count -eq 4) `
     "Staged Agent evidence must contain exactly four entry points and probes."
 foreach ($role in $expectedEntryPoints.Keys) {
-    Assert-Condition (@($entryPoints | Where-Object {
-                $_.role -ceq $role -and $_.relativePath -ceq $expectedEntryPoints[$role]
-            }).Count -eq 1 `
-            -and @($probes | Where-Object { $_.name -ceq $role -and $_.status -ceq "passed" }).Count -eq 1) `
-        "Staged Agent entry point or probe '$role' is missing."
+    $expected = $expectedEntryPoints[$role]
+    $entryPoint = @($entryPoints | Where-Object { $_.role -ceq $role })
+    $probe = @($probes | Where-Object { $_.name -ceq $role })
+    Assert-Condition ($entryPoint.Count -eq 1 -and $probe.Count -eq 1) `
+        "Staged Agent entry point or probe '$role' is missing or duplicated."
+    $entryPoint = $entryPoint[0]
+    $probe = $probe[0]
+    Assert-ExactProperties $entryPoint @(
+        "role",
+        "relativePath",
+        "sha256") "Staged Agent entry point '$role'"
+    Assert-ExactProperties $probe @(
+        "name",
+        "executable",
+        "executableSha256",
+        "exitCode",
+        "outputContract",
+        "status") "Staged Agent entry-point probe '$role'"
+    Assert-Condition ($entryPoint.relativePath -ceq $expected.executable `
+            -and $entryPoint.sha256 -cmatch '^[0-9a-f]{64}$' `
+            -and $probe.executable -ceq $entryPoint.relativePath `
+            -and $probe.executableSha256 -ceq $entryPoint.sha256 `
+            -and (Test-JsonInteger $probe.exitCode) `
+            -and $probe.outputContract -ceq $expected.outputContract `
+            -and $probe.status -ceq "passed") `
+        "Staged Agent entry-point probe '$role' is not value- and hash-bound to its bundle executable."
+    if ($role -ceq "station-agent-service") {
+        Assert-Condition ($probe.exitCode -ne 0) `
+            "Staged Agent service probe must fail closed with a non-zero integer exit code."
+    }
+    else {
+        Assert-Condition ($probe.exitCode -eq $expected.requiredExitCode) `
+            "Staged Agent entry-point probe '$role' has the wrong exit code."
+    }
 }
+
+$entryPointProbeReference = $evidence.entryPointProbeEvidence
+Assert-ExactProperties $entryPointProbeReference @(
+    "evidence",
+    "evidenceSha256") "Staged Agent entry-point raw evidence reference"
+Assert-Condition ($entryPointProbeReference.evidence -ceq "entry-point-probes/evidence.json" `
+        -and $entryPointProbeReference.evidenceSha256 -cmatch '^[0-9a-f]{64}$') `
+    "Staged Agent entry-point raw evidence reference is invalid."
+$entryPointProbeRawPath = [System.IO.Path]::GetFullPath(
+    (Join-Path $resolvedRoot ([string]$entryPointProbeReference.evidence).Replace(
+        '/',
+        [System.IO.Path]::DirectorySeparatorChar)))
+$entryPointProbeRootPrefix = $resolvedRoot.TrimEnd(
+    [System.IO.Path]::DirectorySeparatorChar,
+    [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+Assert-Condition ($entryPointProbeRawPath.StartsWith(
+            $entryPointProbeRootPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase) `
+        -and (Test-Path -LiteralPath $entryPointProbeRawPath -PathType Leaf) `
+        -and (Get-FileHash -LiteralPath $entryPointProbeRawPath -Algorithm SHA256).Hash.ToLowerInvariant() `
+            -ceq [string]$entryPointProbeReference.evidenceSha256) `
+    "Staged Agent entry-point raw evidence is missing, escaped, or changed."
+$entryPointProbeRaw = Get-Content -LiteralPath $entryPointProbeRawPath -Raw |
+    ConvertFrom-Json
+Assert-ExactProperties $entryPointProbeRaw @(
+    "schema",
+    "schemaVersion",
+    "agentArtifactSha256",
+    "entryPoints",
+    "probes") "Staged Agent entry-point raw evidence"
+$rawEntryPoints = @($entryPointProbeRaw.entryPoints)
+$rawProbes = @($entryPointProbeRaw.probes)
+Assert-Condition ($rawEntryPoints.Count -eq 4 -and $rawProbes.Count -eq 4) `
+    "Staged Agent entry-point raw evidence must contain exactly four entry points and probes."
+foreach ($role in $expectedEntryPoints.Keys) {
+    $rawEntryPoint = @($rawEntryPoints | Where-Object { $_.role -ceq $role })
+    $rawProbe = @($rawProbes | Where-Object { $_.name -ceq $role })
+    Assert-Condition ($rawEntryPoint.Count -eq 1 -and $rawProbe.Count -eq 1) `
+        "Staged Agent raw entry point or probe '$role' is missing or duplicated."
+    Assert-ExactProperties $rawEntryPoint[0] @(
+        "role",
+        "relativePath",
+        "sha256") "Staged Agent raw entry point '$role'"
+    Assert-ExactProperties $rawProbe[0] @(
+        "name",
+        "executable",
+        "executableSha256",
+        "exitCode",
+        "outputContract",
+        "status") "Staged Agent raw entry-point probe '$role'"
+}
+Assert-Condition ($entryPointProbeRaw.schema -ceq `
+        "openlineops.staged-agent-entry-point-probe-evidence" `
+        -and $entryPointProbeRaw.schemaVersion -eq 1 `
+        -and $entryPointProbeRaw.agentArtifactSha256 -ceq $evidence.agentArtifact.sha256 `
+        -and (ConvertTo-Json @($entryPointProbeRaw.entryPoints) -Depth 6 -Compress) `
+            -ceq (ConvertTo-Json $entryPoints -Depth 6 -Compress) `
+        -and (ConvertTo-Json @($entryPointProbeRaw.probes) -Depth 6 -Compress) `
+            -ceq (ConvertTo-Json $probes -Depth 6 -Compress)) `
+    "Staged Agent entry-point public evidence is not value- and hash-bound to its raw probe evidence."
 
 $exactTests = @($evidence.exactTestEvidence)
 Assert-Condition ($exactTests.Count -eq 5 `
@@ -428,6 +581,51 @@ Assert-TestEvidenceBinding `
     "Staged Python runtime-provisioning exact-test binding"
 
 $rabbit = $evidence.rabbitMqTransportCoverage
+$materialArrivalIpcFields = @(
+    "serviceTokenConnected",
+    "pipeExactAclVerified",
+    "durablePublicationVerified",
+    "ordinaryCiTokenExplicitAccessDenied")
+Assert-ExactProperties `
+    -Value $rabbit.materialArrivalIpc `
+    -Expected $materialArrivalIpcFields `
+    -Description "Staged Agent material-arrival IPC evidence"
+foreach ($field in $materialArrivalIpcFields) {
+    Assert-Condition ($rabbit.materialArrivalIpc.$field -is [bool] `
+            -and $rabbit.materialArrivalIpc.$field -eq $true) `
+        "Staged Agent material-arrival IPC evidence field '$field' must be the JSON boolean true."
+}
+$immutableContentCacheFields = @(
+    "packagedProvisionCommandVerified",
+    "runningServiceAdministrationRejected",
+    "serviceTokenReadExecuteVerified",
+    "sealedMutationAccessDenied",
+    "deepAncestorMutationAccessDenied",
+    "preSealRecoveryVerified",
+    "cleanupCrashResumeVerified",
+    "committedAdminRemovalVerified",
+    "packagedRemovalCommandVerified",
+    "cacheNamespaceRemoved")
+Assert-ExactProperties `
+    -Value $rabbit.immutableContentCache `
+    -Expected $immutableContentCacheFields `
+    -Description "Staged Agent immutable content-cache evidence"
+foreach ($field in $immutableContentCacheFields) {
+    Assert-Condition ($rabbit.immutableContentCache.$field -is [bool] `
+            -and $rabbit.immutableContentCache.$field -eq $true) `
+        "Staged Agent immutable content-cache evidence field '$field' must be the JSON boolean true."
+}
+Assert-JsonBooleanProperties $rabbit ([ordered]@{
+        operatorTraceGetVerified = $true
+        brokerOutageVerified = $true
+        coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $true
+        offlineCompletionWasNotDelivered = $true
+        completionDeliveredOnceAfterReconnect = $true
+        duplicateRedeliveryRejected = $true
+        duplicateAfterRestartRejected = $true
+        windowsServiceLifecycleVerified = $true
+        cleanShutdownVerified = $true
+    }) "Staged Agent public RabbitMQ evidence"
 Assert-Condition ($rabbit.status -ceq "passed" `
         -and $rabbit.executionStatus -ceq "Completed" `
         -and $rabbit.judgement -ceq "Passed" `
@@ -449,28 +647,83 @@ Assert-Condition ($rabbit.status -ceq "passed" `
         -and -not [string]::IsNullOrWhiteSpace([string]$rabbit.agentId) `
         -and -not [string]::IsNullOrWhiteSpace([string]$rabbit.stationId) `
         -and [string]$rabbit.windowsServiceName -cmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+        -and $rabbit.windowsServiceLifecycleVerified -is [bool] `
         -and $rabbit.windowsServiceLifecycleVerified -eq $true `
+        -and $rabbit.cleanShutdownVerified -is [bool] `
         -and $rabbit.cleanShutdownVerified -eq $true) `
     "Staged Agent RabbitMQ transport closure is incomplete or was skipped."
 
 foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIdentity)) {
+    Assert-ExactProperties $identity @(
+        "nonAdministrative",
+        "isPrimaryToken",
+        "isElevated",
+        "hasRestrictions",
+        "administratorGroupPresent",
+        "administratorGroupEnabled",
+        "administratorGroupDenyOnly",
+        "serviceLogonSidPresent",
+        "serviceLogonSidEnabled",
+        "exactServiceSidPresent",
+        "exactServiceSidEnabled",
+        "exactServiceSidRestricted",
+        "isAuthenticated",
+        "isSystem",
+        "identityStrategy",
+        "serviceAccountName",
+        "serviceAccountSid",
+        "serviceSid") "Staged Agent host identity"
+    Assert-JsonBooleanProperties $identity ([ordered]@{
+            nonAdministrative = $true
+            isPrimaryToken = $true
+            isElevated = $false
+            hasRestrictions = $true
+            administratorGroupPresent = $false
+            administratorGroupEnabled = $false
+            administratorGroupDenyOnly = $false
+            serviceLogonSidPresent = $true
+            serviceLogonSidEnabled = $true
+            exactServiceSidPresent = $true
+            exactServiceSidEnabled = $true
+            exactServiceSidRestricted = $true
+            isAuthenticated = $true
+            isSystem = $false
+        }) "Staged Agent host identity"
     Assert-Condition ($identity.nonAdministrative -eq $true `
             -and $identity.isPrimaryToken -eq $true `
             -and $identity.isElevated -eq $false `
+            -and $identity.hasRestrictions -eq $true `
             -and $identity.administratorGroupPresent -eq $false `
             -and $identity.administratorGroupEnabled -eq $false `
             -and $identity.administratorGroupDenyOnly -eq $false `
-            -and $identity.principalAdministratorMembership -eq $false `
+            -and $identity.serviceLogonSidPresent -eq $true `
+            -and $identity.serviceLogonSidEnabled -eq $true `
+            -and $identity.exactServiceSidPresent -eq $true `
+            -and $identity.exactServiceSidEnabled -eq $true `
+            -and $identity.exactServiceSidRestricted -eq $true `
             -and $identity.isAuthenticated -eq $true `
             -and $identity.isSystem -eq $false `
-            -and $identity.identityStrategy -ceq "temporary-standard-service-account") `
-        "Staged Agent host identity is not the required temporary standard Windows service account."
+            -and $identity.identityStrategy -ceq "local-service-restricted-service-sid" `
+            -and $identity.serviceAccountName -ceq "NT AUTHORITY\LocalService" `
+            -and $identity.serviceAccountSid -ceq "S-1-5-19" `
+            -and $identity.serviceSid -cmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') `
+        "Staged Agent host identity is not the required LocalService restricted service-SID token."
 }
 Assert-Condition ($rabbit.agentHostIdentity.identityStrategy -ceq $rabbit.restartedAgentHostIdentity.identityStrategy `
-        -and $rabbit.agentHostIdentity.userSid -ceq $rabbit.restartedAgentHostIdentity.userSid) `
+        -and $rabbit.agentHostIdentity.serviceAccountName -ceq $rabbit.restartedAgentHostIdentity.serviceAccountName `
+        -and $rabbit.agentHostIdentity.serviceAccountSid -ceq $rabbit.restartedAgentHostIdentity.serviceAccountSid `
+        -and $rabbit.agentHostIdentity.serviceSid -ceq $rabbit.restartedAgentHostIdentity.serviceSid) `
     "Restarted staged Agent identity differs from its initial identity."
+$expectedServiceSid = Get-ServiceSidFromName $rabbit.windowsServiceName
+Assert-Condition ($rabbit.agentHostIdentity.serviceSid -ceq $expectedServiceSid) `
+    "Staged Agent service SID does not match its exact Windows service name."
 
 $presence = $rabbit.presence
+Assert-JsonBooleanProperties $presence ([ordered]@{
+        startedAndHeartbeatPersisted = $true
+        expiredOfflineDuringBrokerOutage = $true
+        freshOnlineAfterReconnect = $true
+    }) "Staged Agent public presence evidence"
 Assert-Condition (@($presence.persistedStates) -ccontains "Started" `
         -and @($presence.persistedStates) -ccontains "Heartbeat" `
         -and $presence.startedAndHeartbeatPersisted -eq $true `
@@ -521,6 +774,64 @@ Assert-Condition ($rawPath.StartsWith($rootPrefix, [System.StringComparison]::Or
             -ceq [string]$rabbit.evidenceSha256) `
     "Staged RabbitMQ raw evidence is missing, escaped, or changed."
 $raw = Get-Content -LiteralPath $rawPath -Raw | ConvertFrom-Json
+Assert-Condition ($raw.broker.tls -is [bool]) `
+    "Staged Agent raw broker TLS marker must be a JSON boolean."
+Assert-JsonBooleanProperties $raw ([ordered]@{
+        operatorTraceGetVerified = $true
+        brokerOutageVerified = $true
+        coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $true
+        offlineCompletionWasNotDelivered = $true
+        completionDeliveredOnceAfterReconnect = $true
+        duplicateRedeliveryRejected = $true
+        duplicateAfterRestartRejected = $true
+        windowsServiceLifecycleVerified = $true
+        cleanShutdownVerified = $true
+    }) "Staged Agent raw RabbitMQ evidence"
+foreach ($rawIdentity in @($raw.agentHostIdentity, $raw.restartedAgentHostIdentity)) {
+    Assert-JsonBooleanProperties $rawIdentity ([ordered]@{
+            IsPrimaryToken = $true
+            IsElevated = $false
+            HasRestrictions = $true
+            AdministratorGroupPresent = $false
+            AdministratorGroupEnabled = $false
+            AdministratorGroupDenyOnly = $false
+            ServiceLogonSidPresent = $true
+            ServiceLogonSidEnabled = $true
+            ExactServiceSidPresent = $true
+            ExactServiceSidEnabled = $true
+            ExactServiceSidRestricted = $true
+            IsAuthenticated = $true
+            IsSystem = $false
+            NonAdministrative = $true
+        }) "Staged Agent raw host identity"
+}
+Assert-JsonBooleanProperties $raw.presence ([ordered]@{
+        startedAndHeartbeatPersisted = $true
+        expiredOfflineDuringBrokerOutage = $true
+        freshOnlineAfterReconnect = $true
+    }) "Staged Agent raw presence evidence"
+Assert-ExactProperties `
+    -Value $raw.materialArrivalIpc `
+    -Expected $materialArrivalIpcFields `
+    -Description "Staged Agent raw material-arrival IPC evidence"
+foreach ($field in $materialArrivalIpcFields) {
+    Assert-Condition ($raw.materialArrivalIpc.$field -is [bool] `
+            -and $raw.materialArrivalIpc.$field -eq $true) `
+        "Staged Agent raw material-arrival IPC evidence field '$field' must be the JSON boolean true."
+    Assert-Condition ($rabbit.materialArrivalIpc.$field -ceq $raw.materialArrivalIpc.$field) `
+        "Staged Agent material-arrival IPC field '$field' differs from raw RabbitMQ evidence."
+}
+Assert-ExactProperties `
+    -Value $raw.immutableContentCache `
+    -Expected $immutableContentCacheFields `
+    -Description "Staged Agent raw immutable content-cache evidence"
+foreach ($field in $immutableContentCacheFields) {
+    Assert-Condition ($raw.immutableContentCache.$field -is [bool] `
+            -and $raw.immutableContentCache.$field -eq $true) `
+        "Staged Agent raw immutable content-cache evidence field '$field' must be the JSON boolean true."
+    Assert-Condition ($rabbit.immutableContentCache.$field -ceq $raw.immutableContentCache.$field) `
+        "Staged Agent immutable content-cache field '$field' differs from raw RabbitMQ evidence."
+}
 foreach ($field in @(
         "executionStatus",
         "judgement",
@@ -547,14 +858,21 @@ foreach ($identityField in @(
         "nonAdministrative",
         "isPrimaryToken",
         "isElevated",
+        "hasRestrictions",
         "administratorGroupPresent",
         "administratorGroupEnabled",
         "administratorGroupDenyOnly",
-        "principalAdministratorMembership",
+        "serviceLogonSidPresent",
+        "serviceLogonSidEnabled",
+        "exactServiceSidPresent",
+        "exactServiceSidEnabled",
+        "exactServiceSidRestricted",
         "isAuthenticated",
         "isSystem",
         "identityStrategy",
-        "userSid")) {
+        "serviceAccountName",
+        "serviceAccountSid",
+        "serviceSid")) {
     Assert-Condition ($rabbit.agentHostIdentity.$identityField -ceq $raw.agentHostIdentity.$identityField) `
         "Staged Agent initial identity field '$identityField' differs from raw RabbitMQ evidence."
     Assert-Condition ($rabbit.restartedAgentHostIdentity.$identityField -ceq $raw.restartedAgentHostIdentity.$identityField) `
@@ -569,6 +887,7 @@ if ($RequireSanitizedRoot) {
         -Root $resolvedRoot `
         -ExpectedFiles (@(
                 "evidence.json",
+                [string]$entryPointProbeReference.evidence,
                 [string]$rabbit.evidence) + @(
                 $exactTests | ForEach-Object { [string]$_.trxRelativePath }))
 }

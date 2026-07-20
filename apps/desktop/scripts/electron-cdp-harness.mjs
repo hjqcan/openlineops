@@ -68,6 +68,7 @@ export class ElectronCdpHarness {
     this.cdpPort = await getFreePort();
     const launchArguments = [
       `--remote-debugging-port=${this.cdpPort}`,
+      '--remote-debugging-address=127.0.0.1',
       '--disable-gpu'
     ];
     if (this.userDataDirectory !== null && this.userDataDirectory !== undefined) {
@@ -86,7 +87,13 @@ export class ElectronCdpHarness {
       'OpenLineOps',
       this.logs);
 
-    const target = await waitForTarget(this.cdpPort, 45_000);
+    const target = await waitForTarget(
+      this.cdpPort,
+      90_000,
+      () => ({
+        exitCode: this.process?.exitCode ?? null,
+        recentProcessLogs: this.logs.slice(-40)
+      }));
     this.cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
     await this.cdp.send('Runtime.enable');
     await this.cdp.send('Page.enable');
@@ -205,12 +212,6 @@ export class ElectronCdpHarness {
       `window.openlineopsDesktop.apiRequest(${JSON.stringify(pathname)}, ${JSON.stringify(options)})`);
   }
 
-  async uploadExternalProgram(pathname, definition, files, headers = {}) {
-    return this.evaluate(
-      `window.openlineopsDesktop.uploadExternalProgram(`
-      + `${JSON.stringify(pathname)}, ${JSON.stringify(definition)}, ${JSON.stringify(files)}, ${JSON.stringify(headers)})`);
-  }
-
   async screenshot(filePath) {
     if (!this.cdp) throw new Error('Electron CDP is not connected.');
     const result = await this.cdp.send('Page.captureScreenshot', {
@@ -228,7 +229,7 @@ function escapeForJavaScript(value) {
   return value.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
 }
 
-async function waitForTarget(port, timeoutMilliseconds) {
+async function waitForTarget(port, timeoutMilliseconds, diagnostics = () => null) {
   const deadline = Date.now() + timeoutMilliseconds;
   while (Date.now() < deadline) {
     try {
@@ -241,9 +242,15 @@ async function waitForTarget(port, timeoutMilliseconds) {
     } catch {
       // Electron is still starting.
     }
+    const state = diagnostics();
+    if (state?.exitCode !== null && state?.exitCode !== undefined) {
+      throw new Error(
+        `Packaged Electron exited before exposing CDP on port ${port}. Diagnostics: ${JSON.stringify(state)}`);
+    }
     await delay(250);
   }
-  throw new Error(`Timed out waiting for packaged Electron CDP on port ${port}.`);
+  throw new Error(
+    `Timed out waiting for packaged Electron CDP on port ${port}. Diagnostics: ${JSON.stringify(diagnostics())}`);
 }
 
 class CdpClient {

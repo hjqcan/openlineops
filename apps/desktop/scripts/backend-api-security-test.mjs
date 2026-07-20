@@ -240,16 +240,17 @@ test('main process applies navigation, window-open, redirect, and every IPC send
   assert.doesNotMatch(mainSource, /sandbox: false/u);
   const expectedChannels = [
     'api:import-application-extension',
+    'api:import-external-program-directory',
     'api:request',
-    'api:upload-external-program',
     'backend:get-status',
     'backend:start',
     'backend:stop',
     'desktop:close-response',
     'desktop:get-config',
+    'desktop:release-external-program-directory-selection',
     'desktop:select-application-project-file',
     'desktop:select-directory',
-    'desktop:select-external-program-files',
+    'desktop:select-external-program-directory',
     'desktop:select-project-file',
     'trace:save-artifact'
   ];

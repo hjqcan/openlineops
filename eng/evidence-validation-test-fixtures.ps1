@@ -112,35 +112,82 @@ function New-FixtureStationPackageEntries {
         })
 }
 
+function Write-FixtureStationPackageInt32 {
+    param([System.IO.Stream] $Stream, [int] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-FixtureStationPackageInt64 {
+    param([System.IO.Stream] $Stream, [long] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-FixtureStationPackageText {
+    param([System.IO.Stream] $Stream, [string] $Value)
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    [byte[]]$bytes = $strictUtf8.GetBytes($Value)
+    Write-FixtureStationPackageInt32 $Stream $bytes.Length
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
 function Get-FixtureStationPackageContentSha256 {
     param([string] $StationSystemId, [object[]] $Entries)
-    $builder = [System.Text.StringBuilder]::new()
-    foreach ($value in @(
-            "project.fixture",
-            "application.fixture",
-            "snapshot.fixture",
-            "line.fixture",
-            $StationSystemId)) {
-        [void]$builder.Append($value).Append("`n")
+    [object[]]$orderedEntries = @($Entries)
+    $entryComparer = [System.Collections.Generic.Comparer[object]]::Create(
+        [System.Comparison[object]]{
+            param($left, $right)
+            return [System.StringComparer]::Ordinal.Compare(
+                [string]$left.path,
+                [string]$right.path)
+        })
+    [System.Array]::Sort($orderedEntries, $entryComparer)
+    $stream = [System.IO.MemoryStream]::new()
+    try {
+        Write-FixtureStationPackageText $stream "openlineops.station-package-content"
+        foreach ($value in @(
+                "project.fixture",
+                "application.fixture",
+                "snapshot.fixture",
+                "line.fixture",
+                $StationSystemId)) {
+            Write-FixtureStationPackageText $stream $value
+        }
+        Write-FixtureStationPackageInt32 $stream $orderedEntries.Count
+        foreach ($entry in $orderedEntries) {
+            Write-FixtureStationPackageText $stream $entry.path
+            Write-FixtureStationPackageInt64 $stream ([long]$entry.length)
+            Write-FixtureStationPackageText $stream $entry.sha256
+            Write-FixtureStationPackageText $stream $entry.mediaType
+        }
+        return Get-FixtureBytesSha256 $stream.ToArray()
     }
-    foreach ($entry in $Entries) {
-        [void]$builder.Append($entry.path).Append("`n")
-        [void]$builder.Append(([long]$entry.length).ToString(
-                [System.Globalization.CultureInfo]::InvariantCulture)).Append("`n")
-        [void]$builder.Append($entry.sha256).Append("`n")
-        [void]$builder.Append($entry.mediaType).Append("`n")
-    }
-    return Get-FixtureBytesSha256 ([System.Text.Encoding]::UTF8.GetBytes($builder.ToString()))
+    finally { $stream.Dispose() }
 }
 
 function Get-FixtureDeploymentCatalogName {
     param([string] $StationSystemId)
-    $identity = @(
-        "project.fixture",
-        "application.fixture",
-        "snapshot.fixture",
-        $StationSystemId) -join [char]0x1f
-    return (Get-FixtureBytesSha256 ([System.Text.Encoding]::UTF8.GetBytes($identity))) + ".json"
+    $stream = [System.IO.MemoryStream]::new()
+    try {
+        Write-FixtureStationPackageText $stream `
+            "openlineops.station-package-deployment-catalog"
+        foreach ($value in @(
+                "project.fixture",
+                "application.fixture",
+                "snapshot.fixture",
+                $StationSystemId)) {
+            Write-FixtureStationPackageText $stream $value
+        }
+        return (Get-FixtureBytesSha256 $stream.ToArray()) + ".json"
+    }
+    finally { $stream.Dispose() }
 }
 
 function New-TestStationPackage {
@@ -615,6 +662,16 @@ function Write-ProductionClosureEvidenceFixture {
             executionStatus = "Completed"
             judgement = "Passed"
             artifactCount = 1
+            directoryImport = [ordered]@{
+                entryPoint = "files/bin/OpenLineOps.VendorTestHelper.exe"
+                files = @(
+                    "files/bin/OpenLineOps.VendorTestHelper.exe",
+                    "files/config/shared.settings.json",
+                    "files/lib/shared.settings.json")
+                preservedSameBasenames = @(
+                    "files/config/shared.settings.json",
+                    "files/lib/shared.settings.json")
+            }
         }
         studioAuthoring = [ordered]@{
             status = "passed"
@@ -913,14 +970,21 @@ function Write-StagedAgentEvidenceFixture {
         nonAdministrative = $true
         isPrimaryToken = $true
         isElevated = $false
+        hasRestrictions = $true
         administratorGroupPresent = $false
         administratorGroupEnabled = $false
         administratorGroupDenyOnly = $false
-        principalAdministratorMembership = $false
+        serviceLogonSidPresent = $true
+        serviceLogonSidEnabled = $true
+        exactServiceSidPresent = $true
+        exactServiceSidEnabled = $true
+        exactServiceSidRestricted = $true
         isAuthenticated = $true
         isSystem = $false
-        identityStrategy = "temporary-standard-service-account"
-        userSid = "S-1-5-21-1000"
+        identityStrategy = "local-service-restricted-service-sid"
+        serviceAccountName = "NT AUTHORITY\LocalService"
+        serviceAccountSid = "S-1-5-19"
+        serviceSid = "S-1-5-80-1318403588-2035430339-3331843247-126381569-1994642067"
     }
     $artifactDefinitions = [ordered]@{
         "measurements.csv" = "Csv"
@@ -952,9 +1016,28 @@ function Write-StagedAgentEvidenceFixture {
         freshOnlineAfterReconnect = $true
         onlineAfterReconnect = [ordered]@{ status = "Idle"; health = "Online" }
     }
+    $materialArrivalIpc = [ordered]@{
+        serviceTokenConnected = $true
+        pipeExactAclVerified = $true
+        durablePublicationVerified = $true
+        ordinaryCiTokenExplicitAccessDenied = $true
+    }
+    $immutableContentCache = [ordered]@{
+        packagedProvisionCommandVerified = $true
+        runningServiceAdministrationRejected = $true
+        serviceTokenReadExecuteVerified = $true
+        sealedMutationAccessDenied = $true
+        deepAncestorMutationAccessDenied = $true
+        preSealRecoveryVerified = $true
+        cleanupCrashResumeVerified = $true
+        committedAdminRemovalVerified = $true
+        packagedRemovalCommandVerified = $true
+        cacheNamespaceRemoved = $true
+    }
     $raw = [ordered]@{
         schema = "openlineops.staged-agent-rabbitmq-e2e-evidence"
         schemaVersion = 1
+        broker = [ordered]@{ Host = "localhost"; Port = 5671; tls = $true }
         executionStatus = "Completed"
         judgement = "Passed"
         vendorProgram = "OpenLineOps.VendorTestHelper.exe"
@@ -978,6 +1061,8 @@ function Write-StagedAgentEvidenceFixture {
         vendorArtifacts = $artifacts
         agentHostIdentity = $identity
         restartedAgentHostIdentity = $identity
+        materialArrivalIpc = $materialArrivalIpc
+        immutableContentCache = $immutableContentCache
         presence = $presence
         cleanShutdownVerified = $true
     }
@@ -995,6 +1080,8 @@ function Write-StagedAgentEvidenceFixture {
         coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $raw.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
         agentHostIdentity = $identity
         restartedAgentHostIdentity = $identity
+        materialArrivalIpc = $materialArrivalIpc
+        immutableContentCache = $immutableContentCache
         agentId = $raw.AgentId
         stationId = $raw.StationId
         windowsServiceName = $raw.windowsServiceName
@@ -1025,15 +1112,43 @@ function Write-StagedAgentEvidenceFixture {
         agentArtifact = [ordered]@{ relativePath = "agent.zip"; sha256 = "d" * 64 }
         samplePluginArtifact = [ordered]@{ relativePath = "plugin.zip"; sha256 = "e" * 64 }
         entryPoints = @(
-            [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
-            [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
-            [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" })
+            [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe"; sha256 = "1" * 64 },
+            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe"; sha256 = "2" * 64 },
+            [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe"; sha256 = "3" * 64 },
+            [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe"; sha256 = "4" * 64 })
         entryPointProbes = @(
-            [ordered]@{ name = "station-agent-service"; status = "passed" },
-            [ordered]@{ name = "station-runtime"; status = "passed" },
-            [ordered]@{ name = "plugin-host"; status = "passed" },
-            [ordered]@{ name = "python-script-worker"; status = "passed" })
+            [ordered]@{
+                name = "station-agent-service"
+                executable = "OpenLineOps.Agent.exe"
+                executableSha256 = "1" * 64
+                exitCode = 1
+                outputContract = '^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
+                status = "passed"
+            },
+            [ordered]@{
+                name = "station-runtime"
+                executable = "OpenLineOps.StationRuntime.exe"
+                executableSha256 = "2" * 64
+                exitCode = 64
+                outputContract = "execute-operation --request-file"
+                status = "passed"
+            },
+            [ordered]@{
+                name = "plugin-host"
+                executable = "OpenLineOps.PluginHost.exe"
+                executableSha256 = "3" * 64
+                exitCode = 2
+                outputContract = "--manifest is required"
+                status = "passed"
+            },
+            [ordered]@{
+                name = "python-script-worker"
+                executable = "OpenLineOps.ScriptWorker.exe"
+                executableSha256 = "4" * 64
+                exitCode = 2
+                outputContract = "Python script worker request body is required"
+                status = "passed"
+            })
         exactTestEvidence = $tests
         signedPackageProcessChains = @(
             [ordered]@{
@@ -1071,6 +1186,19 @@ function Write-StagedAgentEvidenceFixture {
         }
         rabbitMqTransportCoverage = $rabbit
         status = "passed"
+    }
+    $entryPointProbeRawRelativePath = "entry-point-probes/evidence.json"
+    $entryPointProbeRawPath = Join-Path $Root $entryPointProbeRawRelativePath
+    Write-Json -Path $entryPointProbeRawPath -Value ([ordered]@{
+            schema = "openlineops.staged-agent-entry-point-probe-evidence"
+            schemaVersion = 1
+            agentArtifactSha256 = $evidence.agentArtifact.sha256
+            entryPoints = $evidence.entryPoints
+            probes = $evidence.entryPointProbes
+        })
+    $evidence.entryPointProbeEvidence = [ordered]@{
+        evidence = $entryPointProbeRawRelativePath
+        evidenceSha256 = Get-FileSha256 $entryPointProbeRawPath
     }
     Write-Json -Path (Join-Path $Root "evidence.json") -Value $evidence
 }

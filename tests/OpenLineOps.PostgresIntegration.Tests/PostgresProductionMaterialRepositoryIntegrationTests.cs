@@ -168,6 +168,104 @@ public sealed class PostgresProductionMaterialRepositoryIntegrationTests(
     }
 
     [PostgresIntegrationFact]
+    public async Task ColdReadPreservesTwoUnitsAtDistinctCarrierPositions()
+    {
+        await using var schema = await PostgresIsolatedSchema.CreateAsync(
+            fixture.ConnectionString,
+            "carrierpositions");
+        var unique = Guid.NewGuid().ToString("N");
+        var firstUnitId = ProductionUnitId.New();
+        var secondUnitId = ProductionUnitId.New();
+        var carrierId = new CarrierId($"carrier-two-position-{unique}");
+        var station = MaterialLocation.AtStation($"line-{unique}", "station-load");
+        var firstPosition = MaterialLocation.OnCarrier(carrierId, "position-01");
+        var secondPosition = MaterialLocation.OnCarrier(carrierId, "position-02");
+
+        await using (var materials =
+            new PostgreSqlProductionMaterialRepository(schema.ConnectionString))
+        {
+            using var runs = new PostgreSqlProductionCoordinationStore(schema.ConnectionString);
+            var service = new ProductionMaterialService(materials, runs);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                firstUnitId,
+                "controller-board",
+                "serial-number",
+                $"CARRIER-POSITION-01-{unique}",
+                null,
+                "integration-test",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                secondUnitId,
+                "controller-board",
+                "serial-number",
+                $"CARRIER-POSITION-02-{unique}",
+                null,
+                "integration-test",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterCarrierAsync(new RegisterCarrierCommand(
+                carrierId,
+                "panel-tray-2",
+                2,
+                "integration-test",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForCarrier(carrierId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(1)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(2)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(3)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                firstPosition,
+                "integration-test",
+                BaseTimeUtc.AddSeconds(4)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                secondPosition,
+                "integration-test",
+                BaseTimeUtc.AddSeconds(5)))).Succeeded);
+        }
+
+        await using var restarted =
+            new PostgreSqlProductionMaterialRepository(schema.ConnectionString);
+        var restoredUnits = (await restarted.ListProductionUnitsAsync())
+            .Where(entry => entry.Aggregate.Location?.CarrierId == carrierId)
+            .ToDictionary(entry => entry.Aggregate.Id);
+        var restoredCarrier = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+            await restarted.GetCarrierAsync(carrierId));
+
+        Assert.Equal(2, restoredUnits.Count);
+        Assert.Equal(firstPosition, restoredUnits[firstUnitId].Aggregate.Location);
+        Assert.Equal(secondPosition, restoredUnits[secondUnitId].Aggregate.Location);
+        Assert.Equal(2, restoredCarrier.Aggregate.Capacity);
+        Assert.Equal(station, restoredCarrier.Aggregate.Location);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: firstUnitId)),
+            entry => entry.DestinationLocation == firstPosition);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: secondUnitId)),
+            entry => entry.DestinationLocation == secondPosition);
+    }
+
+    [PostgresIntegrationFact]
     public async Task TimelineQueryModesPreserveMaterialRunAndTimeScopeSemantics()
     {
         await using var schema = await PostgresIsolatedSchema.CreateAsync(

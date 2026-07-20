@@ -433,7 +433,7 @@ internal static class StationOperationExecutor
                     root,
                     "evidence"),
                 ["OpenLineOps:Devices:ExternalProgramHost:RequireRestrictedHostIdentity"] = "false",
-                ["OpenLineOps:Devices:ExternalProgramHost:RequireImmutableContentProtection"] = "true"
+                ["OpenLineOps:Devices:ExternalProgramHost:RequireImmutableContentProtection"] = "false"
             })
             .AddEnvironmentVariables()
             .AddInMemoryCollection(new Dictionary<string, string?>

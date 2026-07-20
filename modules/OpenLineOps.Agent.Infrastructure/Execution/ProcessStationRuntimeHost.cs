@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -7,6 +8,7 @@ using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
@@ -26,8 +28,7 @@ public sealed record ProcessStationRuntimeHostOptions(
     long MaximumJobMemoryBytes = 4L * 1024 * 1024 * 1024,
     TimeSpan? MaximumCpuTime = null,
     bool RequireRestrictedExternalProgramHostIdentity = false,
-    IReadOnlyCollection<string>? AllowedRestrictedExternalProgramHostAccounts = null,
-    IReadOnlyCollection<string>? AllowedRestrictedExternalProgramHostSids = null,
+    string? RestrictedServiceSid = null,
     bool RequireExternalProgramAppContainerIsolation = false,
     string? ExternalProgramAppContainerProfileNamespace = null,
     bool RequireImmutableExternalProgramContent = false,
@@ -48,8 +49,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly IClock _clock;
     private readonly WindowsProcessLimits _processLimits;
     private readonly bool _requireRestrictedExternalProgramHostIdentity;
-    private readonly string[] _allowedRestrictedExternalProgramHostAccounts;
-    private readonly string[] _allowedRestrictedExternalProgramHostSids;
+    private readonly string? _restrictedServiceSid;
     private readonly bool _requireExternalProgramAppContainerIsolation;
     private readonly string? _externalProgramAppContainerProfileNamespace;
     private readonly bool _requireImmutableExternalProgramContent;
@@ -104,10 +104,11 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _processLimits.Validate();
         _requireRestrictedExternalProgramHostIdentity =
             options.RequireRestrictedExternalProgramHostIdentity;
-        _allowedRestrictedExternalProgramHostAccounts =
-            options.AllowedRestrictedExternalProgramHostAccounts?.ToArray() ?? [];
-        _allowedRestrictedExternalProgramHostSids =
-            options.AllowedRestrictedExternalProgramHostSids?.ToArray() ?? [];
+        _restrictedServiceSid = options.RestrictedServiceSid is null
+            ? null
+            : WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                options.RestrictedServiceSid,
+                nameof(options.RestrictedServiceSid));
         _requireExternalProgramAppContainerIsolation =
             options.RequireExternalProgramAppContainerIsolation;
         _externalProgramAppContainerProfileNamespace =
@@ -133,11 +134,27 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _pythonScriptSandbox = pythonScript.Sandbox;
         ValidatePythonScriptSandbox(_pythonScriptSandbox, options);
         if (_requireRestrictedExternalProgramHostIdentity
-            && _allowedRestrictedExternalProgramHostAccounts.Length == 0
-            && _allowedRestrictedExternalProgramHostSids.Length == 0)
+            && _restrictedServiceSid is null)
         {
             throw new ArgumentException(
-                "Restricted external program hosting requires an allowed service account or SID.",
+                "Restricted external program hosting requires one exact Station service SID.",
+                nameof(options));
+        }
+
+        if (_requireImmutableExternalProgramContent
+            && (!_requireRestrictedExternalProgramHostIdentity
+                || _restrictedServiceSid is null))
+        {
+            throw new ArgumentException(
+                "Immutable external program content requires the exact restricted Station service SID.",
+                nameof(options));
+        }
+
+        if (_requireImmutableExternalProgramContent
+            && !_requireExternalProgramAppContainerIsolation)
+        {
+            throw new ArgumentException(
+                "Immutable external program content requires AppContainer isolation.",
                 nameof(options));
         }
 
@@ -218,7 +235,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         var resultPath = Path.Combine(workDirectory, "result.json");
         var fenceAuthority = new StationResourceFenceAuthorityServer(
             request.Job,
-            _resourceFenceValidator);
+            _resourceFenceValidator,
+            ResolveFenceAuthorityPrincipalSid());
         using var fenceAuthorityCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken);
         var fenceAuthorityTask = fenceAuthority.RunAsync(fenceAuthorityCancellation.Token);
@@ -436,7 +454,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         }
     }
 
-    public ValueTask CleanupAsync(
+    public async ValueTask CleanupAsync(
         StationJobSnapshot job,
         CancellationToken cancellationToken = default)
     {
@@ -447,7 +465,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         {
             foreach (var workDirectory in ResolveJobWorkingDirectories(job.JobId))
             {
-                DeleteWorkingDirectory(workDirectory);
+                await DeleteWorkingDirectoryAsync(workDirectory, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
         catch (Exception exception) when (exception is IOException
@@ -480,7 +499,6 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                 failures.Count == 1 ? failures[0] : new AggregateException(failures));
         }
 
-        return ValueTask.CompletedTask;
     }
 
     private string[] ResolveJobWorkingDirectories(StationJobId jobId)
@@ -558,6 +576,23 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         string resultPath,
         string? appContainerProfileName)
     {
+        var environment = CreateRuntimeEnvironment(workDirectory, appContainerProfileName);
+        var arguments = new List<string>();
+        AddArgument(arguments, "execute-operation");
+        AddOption(arguments, "request-file", requestPath);
+        AddOption(arguments, "result-file", resultPath);
+        return new IsolatedProcessStartRequest(
+            _executablePath,
+            arguments,
+            workDirectory,
+            environment,
+            _processLimits);
+    }
+
+    internal Dictionary<string, string> CreateRuntimeEnvironment(
+        string workDirectory,
+        string? appContainerProfileName)
+    {
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         CopyEnvironment(environment, "SystemRoot");
         CopyEnvironment(environment, "WINDIR");
@@ -581,30 +616,13 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                 "true";
         }
 
-        var accountIndex = 0;
-        foreach (var account in _allowedRestrictedExternalProgramHostAccounts)
+        if (_restrictedServiceSid is not null)
         {
-            environment[$"OpenLineOps__Devices__ExternalProgramHost__AllowedRestrictedHostAccounts__{accountIndex}"] =
-                account;
-            accountIndex++;
+            environment["OpenLineOps__Devices__ExternalProgramHost__RestrictedServiceSid"] =
+                _restrictedServiceSid;
         }
 
-        var sidIndex = 0;
-        foreach (var sid in _allowedRestrictedExternalProgramHostSids)
-        {
-            environment[$"OpenLineOps__Devices__ExternalProgramHost__AllowedRestrictedHostSids__{sidIndex}"] = sid;
-            sidIndex++;
-        }
-        var arguments = new List<string>();
-        AddArgument(arguments, "execute-operation");
-        AddOption(arguments, "request-file", requestPath);
-        AddOption(arguments, "result-file", resultPath);
-        return new IsolatedProcessStartRequest(
-            _executablePath,
-            arguments,
-            workDirectory,
-            environment,
-            _processLimits);
+        return environment;
     }
 
     private void AddPythonScriptEnvironment(Dictionary<string, string> environment)
@@ -1002,17 +1020,61 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             ? throw new InvalidDataException($"{parameterName} must be canonical non-empty text.")
             : value;
 
-    private static void DeleteWorkingDirectory(string path)
+    private string ResolveFenceAuthorityPrincipalSid()
     {
-        if (!Directory.Exists(path))
+        if (_restrictedServiceSid is not null)
         {
-            return;
+            return _restrictedServiceSid;
         }
 
-        RejectReparsePoint(path, "Station runtime Job working directory");
-        DeleteDirectoryContents(path);
-        Directory.Delete(path, recursive: false);
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Station resource fencing requires a Windows identity-bound named pipe.");
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        return identity.User?.Value
+               ?? throw new InvalidOperationException(
+                   "Current Station Runtime host token has no user SID.");
     }
+
+    private static async ValueTask DeleteWorkingDirectoryAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 24;
+        var retryDelay = TimeSpan.FromMilliseconds(25);
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                RejectReparsePoint(path, "Station runtime Job working directory");
+                DeleteDirectoryContents(path);
+                Directory.Delete(path, recursive: false);
+                return;
+            }
+            catch (IOException exception) when (
+                OperatingSystem.IsWindows()
+                && attempt < maximumAttempts
+                && IsTransientWindowsDeletionFailure(exception))
+            {
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromMilliseconds(Math.Min(
+                    retryDelay.TotalMilliseconds * 2,
+                    200));
+            }
+        }
+    }
+
+    private static bool IsTransientWindowsDeletionFailure(IOException exception) =>
+        (exception.HResult & 0xffff) is 32 or 33 or 145;
 
     private static void DeleteDirectoryContents(string directory)
     {

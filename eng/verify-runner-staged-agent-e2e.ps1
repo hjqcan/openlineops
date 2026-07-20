@@ -16,7 +16,10 @@ param(
     [switch] $NoRestore,
 
     [ValidateRange(60, 900)]
-    [int] $TestTimeoutSeconds = 240
+    [int] $TestTimeoutSeconds = 240,
+
+    [ValidateRange(30, 180)]
+    [int] $CleanupTimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -475,6 +478,26 @@ if ($resolvedEvidenceRoot -cne $fixedEvidenceRoot) {
     throw "Runner staged-Agent public evidence root is fixed at output/runner-staged-agent-e2e."
 }
 $scopeId = [System.Guid]::NewGuid().ToString('N')
+$requestedServiceScope = $env:OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE
+$serviceScope = if ([string]::IsNullOrWhiteSpace($requestedServiceScope)) {
+    $scopeId
+}
+else {
+    $requestedServiceScope
+}
+if ($serviceScope -cnotmatch '^[0-9a-f]{32}$') {
+    throw "OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE must contain exactly 32 lowercase hexadecimal characters."
+}
+$requestedCleanupManifestPath = $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH
+$cleanupManifestPath = if ([string]::IsNullOrWhiteSpace($requestedCleanupManifestPath)) {
+    [System.IO.Path]::GetFullPath((Join-Path `
+            ([System.IO.Path]::GetTempPath()) `
+            "openlineops-agent-service-cleanup/runner-$serviceScope.json"))
+}
+else {
+    [System.IO.Path]::GetFullPath($requestedCleanupManifestPath)
+}
+$serviceCleanupScript = Join-Path $PSScriptRoot 'invoke-run-scoped-agent-service-cleanup.ps1'
 $tempBase = [System.IO.Path]::GetFullPath(
     (Join-Path ([System.IO.Path]::GetTempPath()) 'openlineops-runner-staged-agent-gates'))
 Assert-NoReparseAncestors $tempBase
@@ -495,6 +518,7 @@ $succeeded = $false
 $runtimeMayHaveMutated = $false
 $primaryFailure = $null
 $cleanupFailures = [System.Collections.Generic.List[System.Exception]]::new()
+$cleanupManifestPrepared = $false
 $previous = @{}
 $gateVariables = @(
     'OPENLINEOPS_RUNNER_AGENT_GATE_RUNNER_BUNDLE_ROOT',
@@ -504,6 +528,9 @@ $gateVariables = @(
     'OPENLINEOPS_RUNNER_AGENT_GATE_EVIDENCE_PATH',
     'OPENLINEOPS_RUNNER_AGENT_GATE_ENABLED',
     'OPENLINEOPS_RUNNER_AGENT_GATE_SCOPE_ID',
+    'OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE',
+    'OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE',
+    'OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH',
     'DOTNET_CLI_UI_LANGUAGE',
     'VSLANG')
 foreach ($name in $gateVariables) {
@@ -525,6 +552,19 @@ try {
     Assert-ExtractedBundle $runnerBundleRoot 'runner' 'headless-runner' 'OpenLineOps.Runner.exe'
     Assert-ExtractedBundle $agentBundleRoot 'agent' 'station-agent-service' 'OpenLineOps.Agent.exe'
 
+    & $serviceCleanupScript `
+        -Kind runner `
+        -Scope $serviceScope `
+        -AgentBundleRoot $agentBundleRoot `
+        -ManifestPath $cleanupManifestPath `
+        -Configuration $Configuration `
+        -DotNetPath $DotNetPath `
+        -PrepareManifest `
+        -NoBuild:$NoBuild `
+        -NoRestore:$NoRestore `
+        -CleanupTimeoutSeconds $CleanupTimeoutSeconds
+    $cleanupManifestPrepared = $true
+
     $resultsRoot = Join-Path $resolvedEvidenceRoot 'test-results'
     New-Item -ItemType Directory -Path $resultsRoot | Out-Null
     $evidencePath = Join-Path $resolvedEvidenceRoot 'evidence.json'
@@ -540,6 +580,9 @@ try {
     $env:OPENLINEOPS_RUNNER_AGENT_GATE_EVIDENCE_PATH = $evidencePath
     $env:OPENLINEOPS_RUNNER_AGENT_GATE_ENABLED = '1'
     $env:OPENLINEOPS_RUNNER_AGENT_GATE_SCOPE_ID = $scopeId
+    $env:OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE = $serviceScope
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_GATE = $null
+    $env:OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH = $cleanupManifestPath
     $env:DOTNET_CLI_UI_LANGUAGE = 'en-US'
     $env:VSLANG = '1033'
 
@@ -688,6 +731,23 @@ finally {
             $cleanupFailures.Add($_.Exception)
         }
     }
+    if ($cleanupManifestPrepared) {
+        try {
+            & $serviceCleanupScript `
+                -Kind runner `
+                -Scope $serviceScope `
+                -AgentBundleRoot $agentBundleRoot `
+                -ManifestPath $cleanupManifestPath `
+                -Configuration $Configuration `
+                -DotNetPath $DotNetPath `
+                -NoBuild:$NoBuild `
+                -NoRestore:$NoRestore `
+                -CleanupTimeoutSeconds $CleanupTimeoutSeconds
+        }
+        catch {
+            $cleanupFailures.Add($_.Exception)
+        }
+    }
     if (-not $succeeded -and $runtimeMayHaveMutated) {
         try {
             Invoke-RunnerAgentCompensation `
@@ -715,7 +775,8 @@ finally {
             $cleanupFailures.Add($_.Exception)
         }
     }
-    if (-not $succeeded -and (Test-Path -LiteralPath $resolvedEvidenceRoot)) {
+    if ((-not $succeeded -or $cleanupFailures.Count -gt 0) `
+        -and (Test-Path -LiteralPath $resolvedEvidenceRoot)) {
         try {
             Assert-NoReparseAncestors $resolvedEvidenceRoot
             Assert-NoReparseTree $resolvedEvidenceRoot

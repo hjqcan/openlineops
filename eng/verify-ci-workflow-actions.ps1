@@ -224,8 +224,8 @@ Test-ContentContains `
     -Message "Workflow must execute the staged Agent gate after release staging and real PostgreSQL/RabbitMQ readiness."
 Test-ContentContains `
     -Content $workflowContent `
-    -Pattern '(?ms)name:\s*Prepare run-scoped Agent service cleanup contracts.*?\[System\.Guid\]::NewGuid\(\)\.ToString\("N"\).*?OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=.*?OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=.*?OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=.*?OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=' `
-    -Message "Workflow must allocate private 32-hex RabbitMQ, external-abort, and Studio cleanup scopes before the formal gates."
+    -Pattern '(?ms)name:\s*Prepare run-scoped Agent service cleanup contracts.*?\[System\.Guid\]::NewGuid\(\)\.ToString\("N"\).*?OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=.*?OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=.*?OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=.*?OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=.*?OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE=.*?OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH=' `
+    -Message "Workflow must allocate private 32-hex RabbitMQ, external-abort, Studio, and Runner cleanup scopes before the formal gates."
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern '(?ms)^\s{6}- name:\s*Cleanup staged Agent Windows service scope\s*\r?\n\s*if:\s*\$\{\{\s*always\(\)\s*&&\s*env\.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE\s*!=\s*\x27\x27\s*\}\}\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?invoke-run-scoped-agent-service-cleanup\.ps1.*?-Kind rabbitmq.*?OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE.*?OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH' `
@@ -326,6 +326,10 @@ Test-ContentContains `
     -Message "Workflow must verify that Application extension imports accept only a trusted main-process ZIP selection."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Test external program directory import boundary\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*run:\s*npm run test:external-program-directory-import\s*$' `
+    -Message "Workflow must verify bounded, portable, atomic external program directory imports through the trusted main process."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "npm run test:trace-artifact-save" `
     -Message "Workflow must verify Trace artifact hashing, session binding, and destination confinement."
 Test-ContentContains `
@@ -358,7 +362,7 @@ Test-ContentContains `
     -Message "Workflow must verify that operator commands are enabled only in domain-valid Production Run states."
 Test-ContentContains `
     -Content $workflowContent `
-    -Pattern '(?ms)name:\s*Run packaged Studio two-Agent production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*35\s*\r?\n\s*env:.*?OPENLINEOPS_STUDIO_TWO_AGENT_ACCOUNT_SUFFIX:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-studio-two-agent-production-closure\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore' `
+    -Pattern '(?ms)name:\s*Run packaged Studio two-Agent production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*35\s*\r?\n\s*env:.*?OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-studio-two-agent-production-closure\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore' `
     -Message "Workflow must run the bounded packaged-to-two-staged-Agent production closure against real PostgreSQL and RabbitMQ."
 Test-ContentContains `
     -Content $workflowContent `
@@ -388,11 +392,18 @@ Test-StepCannotContinueOnError `
     -StepName "Verify sanitized Studio two-Agent evidence"
 Test-ContentContains `
     -Content $workflowContent `
-    -Pattern '(?ms)name:\s*Run staged Runner production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*15\s*\r?\n\s*run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-runner-staged-agent-e2e\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore.*?name:\s*Verify sanitized Runner staged-Agent evidence\s*\r?\n\s*id:\s*runner_staged_agent_evidence\s*\r?\n\s*if:.*?verify-runner-staged-agent-evidence\.ps1 -RequirePassed' `
+    -Pattern '(?ms)name:\s*Run staged Runner production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*15\s*\r?\n\s*env:.*?OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE:\s*\$\{\{\s*env\.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-runner-staged-agent-e2e\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore.*?name:\s*Cleanup Runner staged-Agent Windows service scope.*?name:\s*Verify sanitized Runner staged-Agent evidence\s*\r?\n\s*id:\s*runner_staged_agent_evidence\s*\r?\n\s*if:.*?verify-runner-staged-agent-evidence\.ps1 -RequirePassed' `
     -Message "Workflow must run and independently scan the staged Runner production closure against the same real infrastructure."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Cleanup Runner staged-Agent Windows service scope\s*\r?\n\s*if:\s*\$\{\{\s*always\(\)\s*&&\s*env\.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE\s*!=\s*\x27\x27\s*\}\}\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:.*?\$agentRoot\s*=\s*Join-Path\s+\$env:GITHUB_WORKSPACE\s+''artifacts\\release-work\\agent''.*?invoke-run-scoped-agent-service-cleanup\.ps1.*?-Kind runner.*?OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE.*?OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH' `
+    -Message "Workflow must always run the bounded external Runner Agent service scavenger with the exact prepared scope and manifest."
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Run staged Runner production closure"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Cleanup Runner staged-Agent Windows service scope"
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Verify sanitized Runner staged-Agent evidence"
@@ -446,6 +457,10 @@ Test-ContentContains `
     -Message "Workflow must regression-test tracked-only release staging, clean provenance, credential redaction, and finite process-tree cleanup."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "(?ms)name:\s*Verify Station Agent content-cache provisioning contract\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*run:\s*\./eng/verify-station-agent-content-cache-contract\.ps1" `
+    -Message "Workflow must enforce the explicit administrator-only Station content-cache provisioning contract."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "(?ms)name:\s*Run staged Agent bundle E2E\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*25" `
     -Message "Workflow must impose a finite timeout on the staged Agent process boundary."
 Test-ContentContains `
@@ -460,6 +475,10 @@ Test-ContentContains `
     -Content $workflowContent `
     -Pattern 'OPENLINEOPS_RUN_RABBITMQ_INTEGRATION:\s*"1"' `
     -Message "Workflow must run the real RabbitMQ production integration gate."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{2}production-integration:\s*.*?runs-on:\s*ubuntu-latest\s*.*?dotnet test tests/OpenLineOps\.Projects\.Tests/OpenLineOps\.Projects\.Tests\.csproj[^\r\n]*--configuration Release[^\r\n]*TreatWarningsAsErrors=true[^\r\n]*--filter FullyQualifiedName~OpenLineOps\.Projects\.Tests\.StationPackageBuilderSecurityTests' `
+    -Message "Workflow must run the strict Station package source-boundary security gates on Linux."
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern 'dotnet test tests/OpenLineOps\.PostgresIntegration\.Tests/OpenLineOps\.PostgresIntegration\.Tests\.csproj[^\r\n]*--configuration Release[^\r\n]*TreatWarningsAsErrors=true' `

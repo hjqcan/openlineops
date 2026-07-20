@@ -46,6 +46,20 @@ function Assert-ExactProperties {
     }
 }
 
+function Assert-JsonBooleanProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    foreach ($field in $Expected.Keys) {
+        Assert-Condition ($Value.$field -is [bool] `
+                -and $Value.$field -eq $Expected[$field]) `
+            "$Description field '$field' must be the JSON boolean $($Expected[$field].ToString().ToLowerInvariant())."
+    }
+}
+
 function Assert-Sha256 {
     param(
         [Parameter(Mandatory = $true)] $Value,
@@ -61,6 +75,69 @@ function Get-TextSha256 {
     try {
         $hash = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text))
         ([System.BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Write-StationPackageCanonicalInt32 {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][int] $Value)
+    [byte[]]$bytes = [System.BitConverter]::GetBytes($Value)
+    if ([System.BitConverter]::IsLittleEndian) {
+        [System.Array]::Reverse($bytes)
+    }
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Write-StationPackageCanonicalText {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $Stream,
+        [Parameter(Mandatory = $true)][string] $Value)
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    [byte[]]$bytes = $strictUtf8.GetBytes($Value)
+    Write-StationPackageCanonicalInt32 $Stream $bytes.Length
+    $Stream.Write($bytes, 0, $bytes.Length)
+}
+
+function Get-StationDeploymentCatalogFileName {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProjectId,
+        [Parameter(Mandatory = $true)][string] $ApplicationId,
+        [Parameter(Mandatory = $true)][string] $ProjectSnapshotId,
+        [Parameter(Mandatory = $true)][string] $StationSystemId)
+    $stream = [System.IO.MemoryStream]::new()
+    try {
+        Write-StationPackageCanonicalText $stream `
+            'openlineops.station-package-deployment-catalog'
+        foreach ($value in @($ProjectId, $ApplicationId, $ProjectSnapshotId, $StationSystemId)) {
+            Write-StationPackageCanonicalText $stream $value
+        }
+        $algorithm = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $algorithm.ComputeHash($stream.ToArray())
+            return ([System.BitConverter]::ToString($hash)).Replace(
+                '-', '').ToLowerInvariant() + '.json'
+        }
+        finally { $algorithm.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-ServiceSidFromName {
+    param([Parameter(Mandatory = $true)][string] $ServiceName)
+
+    $algorithm = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $hash = $algorithm.ComputeHash(
+            [System.Text.Encoding]::Unicode.GetBytes($ServiceName.ToUpperInvariant()))
+        $subAuthorities = @(for ($offset = 0; $offset -lt 20; $offset += 4) {
+                [System.BitConverter]::ToUInt32($hash, $offset).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+            })
+        return "S-1-5-80-$($subAuthorities -join '-')"
     }
     finally {
         $algorithm.Dispose()
@@ -219,24 +296,61 @@ $agent = $execution.agent
 Assert-ExactProperties $agent @(
     'processId', 'executableFileName', 'executableSha256', 'runningImageSha256',
     'bundleManifestSha256', 'bundleChecksumsSha256', 'manifestBound',
-    'mainModuleBound', 'jobObjectBound', 'processTreeTerminated') 'Agent evidence'
+    'mainModuleBound', 'serviceName', 'serviceLifecycleVerified',
+    'serviceAccountName', 'serviceAccountSid', 'serviceSidSha256',
+    'hasRestrictions', 'serviceLogonSidPresent', 'serviceLogonSidEnabled',
+    'exactServiceSidPresent', 'exactServiceSidEnabled', 'exactServiceSidRestricted',
+    'nonAdministrative') 'Agent evidence'
+Assert-JsonBooleanProperties $runner ([ordered]@{
+        manifestBound = $true
+        mainModuleBound = $true
+        jobObjectBound = $true
+        processTreeTerminated = $true
+    }) 'Runner process evidence'
+Assert-JsonBooleanProperties $agent ([ordered]@{
+        manifestBound = $true
+        mainModuleBound = $true
+        serviceLifecycleVerified = $true
+        hasRestrictions = $true
+        serviceLogonSidPresent = $true
+        serviceLogonSidEnabled = $true
+        exactServiceSidPresent = $true
+        exactServiceSidEnabled = $true
+        exactServiceSidRestricted = $true
+        nonAdministrative = $true
+    }) 'Agent process evidence'
 Assert-Condition ($runner.processId -gt 0 -and $agent.processId -gt 0 `
         -and $runner.processId -ne $agent.processId `
         -and $runner.executableFileName -ceq 'OpenLineOps.Runner.exe' `
         -and $agent.executableFileName -ceq 'OpenLineOps.Agent.exe' `
         -and $runner.manifestBound -eq $true -and $agent.manifestBound -eq $true `
         -and $runner.mainModuleBound -eq $true -and $agent.mainModuleBound -eq $true `
-        -and $runner.jobObjectBound -eq $true -and $agent.jobObjectBound -eq $true `
+        -and $runner.jobObjectBound -eq $true `
         -and $runner.processTreeTerminated -eq $true `
-        -and $agent.processTreeTerminated -eq $true `
         -and $runner.runningImageSha256 -ceq $runner.executableSha256 `
         -and $agent.runningImageSha256 -ceq $agent.executableSha256 `
         -and $runner.exitCode -eq 0) `
     "Staged process identity or manifest binding is invalid."
+Assert-Condition ($agent.serviceName -cmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+        -and $agent.serviceLifecycleVerified -eq $true `
+        -and $agent.serviceAccountName -ceq 'NT AUTHORITY\LocalService' `
+        -and $agent.serviceAccountSid -ceq 'S-1-5-19' `
+        -and $agent.hasRestrictions -eq $true `
+        -and $agent.serviceLogonSidPresent -eq $true `
+        -and $agent.serviceLogonSidEnabled -eq $true `
+        -and $agent.exactServiceSidPresent -eq $true `
+        -and $agent.exactServiceSidEnabled -eq $true `
+        -and $agent.exactServiceSidRestricted -eq $true `
+        -and $agent.nonAdministrative -eq $true) `
+    "Staged Agent did not use the exact LocalService restricted service-SID boundary."
+$expectedServiceSidSha256 = Get-TextSha256 (Get-ServiceSidFromName $agent.serviceName)
+Assert-Condition ($agent.serviceSidSha256 -ceq $expectedServiceSidSha256) `
+    "Staged Agent service SID hash does not match its exact service name."
 foreach ($value in @(
         $runner.executableSha256, $runner.runningImageSha256, $runner.bundleManifestSha256,
         $runner.bundleChecksumsSha256, $agent.executableSha256, $agent.runningImageSha256,
-        $agent.bundleManifestSha256, $agent.bundleChecksumsSha256)) {
+        $agent.bundleManifestSha256, $agent.bundleChecksumsSha256,
+        $agent.serviceSidSha256)) {
     Assert-Sha256 $value 'Staged executable evidence hash'
 }
 $terminal = $execution.terminal
@@ -254,14 +368,24 @@ Assert-Condition ($terminal.executionStatus -ceq 'Completed' `
 
 $package = $evidence.stationPackage
 Assert-ExactProperties $package @(
-    'packageFileName', 'packageContentSha256', 'packageFileSha256', 'catalogFileName',
+    'stationSystemId', 'packageFileName', 'packageContentSha256', 'packageFileSha256', 'catalogFileName',
     'catalogFileSha256', 'signingKeyId', 'signatureAlgorithm', 'manifestBound',
     'deploymentBound') 'Station package evidence'
+Assert-JsonBooleanProperties $package ([ordered]@{
+        manifestBound = $true
+        deploymentBound = $true
+    }) 'Station package evidence'
 Assert-Sha256 $package.packageContentSha256 'Station package content SHA-256'
 Assert-Sha256 $package.packageFileSha256 'Station package file SHA-256'
 Assert-Sha256 $package.catalogFileSha256 'Station package catalog SHA-256'
+Assert-CanonicalId $package.stationSystemId 'Station package stationSystemId'
+$expectedCatalogFileName = Get-StationDeploymentCatalogFileName `
+    -ProjectId $project.projectId `
+    -ApplicationId $project.applicationId `
+    -ProjectSnapshotId $project.snapshotId `
+    -StationSystemId $package.stationSystemId
 Assert-Condition ($package.packageFileName -ceq "$($package.packageContentSha256).olopkg" `
-        -and $package.catalogFileName -cmatch '^[A-Za-z0-9._-]+\.json$' `
+        -and $package.catalogFileName -ceq $expectedCatalogFileName `
         -and $package.signingKeyId -ceq 'runner-process-e2e-signing' `
         -and $package.signatureAlgorithm -ceq 'RSA-PSS-SHA256' `
         -and $package.manifestBound -eq $true `
@@ -274,6 +398,9 @@ Assert-ExactProperties $postgres @(
     'stationResultCount', 'unpublishedJobCount', 'terminalOutboxCount',
     'createdOutboxCount', 'executionStatus', 'resultArtifactCount', 'rawSnapshot',
     'rawSnapshotSha256') 'PostgreSQL evidence'
+Assert-JsonBooleanProperties $postgres ([ordered]@{
+        isolatedSchema = $true
+    }) 'PostgreSQL evidence'
 Assert-Condition ($postgres.isolatedSchema -eq $true `
         -and $postgres.productionRunCount -eq 1 `
         -and $postgres.terminalEvidenceCount -eq 1 `
@@ -321,6 +448,9 @@ Assert-ExactProperties $sqlite @(
     'jobCount', 'inboxCount', 'completionOutboxCount', 'acknowledgedCompletionCount',
     'pendingOutboxCount', 'safetyInboxCount', 'status', 'terminalCheckpointRevision', 'commandCount',
     'databaseSha256', 'onceOnly') 'Agent SQLite evidence'
+Assert-JsonBooleanProperties $sqlite ([ordered]@{
+        onceOnly = $true
+    }) 'Agent SQLite evidence'
 Assert-Sha256 $sqlite.databaseSha256 'Agent SQLite SHA-256'
 Assert-Condition ($sqlite.jobCount -eq 1 -and $sqlite.inboxCount -eq 1 `
         -and $sqlite.completionOutboxCount -eq 1 `
@@ -339,6 +469,9 @@ Assert-ExactProperties $rabbit @(
     'jobQueueConsumerCount', 'resultQueueConsumerCount', 'queueIdentitySha256',
     'rawSnapshotSha256', 'drained') `
     'RabbitMQ evidence'
+Assert-JsonBooleanProperties $rabbit ([ordered]@{
+        drained = $true
+    }) 'RabbitMQ evidence'
 Assert-Condition ($rabbit.jobQueueMessageCount -eq 0 `
         -and $rabbit.resultQueueMessageCount -eq 0 `
         -and $rabbit.safetyQueueMessageCount -eq 0 `
@@ -375,6 +508,9 @@ $artifact = $evidence.artifactTransport
 Assert-ExactProperties $artifact @(
     'endpointClass', 'endpointReachable', 'artifactCount', 'artifactUploadAttemptCount') `
     'Artifact transport evidence'
+Assert-JsonBooleanProperties $artifact ([ordered]@{
+        endpointReachable = $false
+    }) 'Artifact transport evidence'
 Assert-Condition ($artifact.endpointClass -ceq 'closed-loopback-http' `
         -and $artifact.endpointReachable -eq $false `
         -and $artifact.artifactCount -eq 0 `
@@ -386,6 +522,11 @@ Assert-ExactProperties $safety @(
     'configured', 'commandCount', 'queueMessageCount', 'actuatorInvoked',
     'executableFileName', 'executableSha256', 'independentFromStationRuntime') `
     'Safety channel evidence'
+Assert-JsonBooleanProperties $safety ([ordered]@{
+        configured = $true
+        actuatorInvoked = $false
+        independentFromStationRuntime = $true
+    }) 'Safety channel evidence'
 Assert-Sha256 $safety.executableSha256 'Safety placeholder executable SHA-256'
 Assert-Condition ($safety.configured -eq $true `
         -and $safety.commandCount -eq 0 `
@@ -398,11 +539,19 @@ Assert-Condition ($safety.configured -eq $true `
 $cleanup = $evidence.cleanup
 Assert-ExactProperties $cleanup @(
     'postgresSchemaDropped', 'rabbitQueuesDeleted', 'runnerTreeTerminated',
-    'agentTreeTerminated', 'temporaryRootDeleted', 'reparsePointsTraversed') 'Cleanup evidence'
+    'agentServiceDeleted', 'temporaryRootDeleted', 'reparsePointsTraversed') 'Cleanup evidence'
+Assert-JsonBooleanProperties $cleanup ([ordered]@{
+        postgresSchemaDropped = $true
+        rabbitQueuesDeleted = $true
+        runnerTreeTerminated = $true
+        agentServiceDeleted = $true
+        temporaryRootDeleted = $true
+        reparsePointsTraversed = $false
+    }) 'Cleanup evidence'
 Assert-Condition ($cleanup.postgresSchemaDropped -eq $true `
         -and $cleanup.rabbitQueuesDeleted -eq $true `
         -and $cleanup.runnerTreeTerminated -eq $true `
-        -and $cleanup.agentTreeTerminated -eq $true `
+        -and $cleanup.agentServiceDeleted -eq $true `
         -and $cleanup.temporaryRootDeleted -eq $true `
         -and $cleanup.reparsePointsTraversed -eq $false) `
     "Bounded process or infrastructure cleanup evidence is incomplete."

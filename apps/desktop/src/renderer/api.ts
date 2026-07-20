@@ -947,28 +947,18 @@ export async function saveExternalProgramResource(
     });
 }
 
-export async function importExternalProgramResource(
+export async function importExternalProgramDirectory(
   request: SaveExternalProgramResourceRequest,
-  files: Array<{ sourcePath: string; resourceRelativePath: string }>,
-  scope: ProjectApplicationApiScope
-): Promise<ApiResponse<ExternalProgramResourceResponse>> {
-  return desktop.uploadExternalProgram<ExternalProgramResourceResponse>(
-    `${externalProgramCollectionPath(scope)}/import`,
-    request,
-    files);
-}
-
-export async function importExternalProgramResourceFile(
-  resourceId: string,
-  file: { sourcePath: string; resourceRelativePath: string },
+  selectionId: string,
   scope: ProjectApplicationApiScope,
-  write: EditorDocumentWriteOptions
+  write?: EditorDocumentWriteOptions
 ): Promise<ApiResponse<ExternalProgramResourceResponse>> {
-  return desktop.uploadExternalProgram<ExternalProgramResourceResponse>(
-    `${externalProgramCollectionPath(scope)}/${encodeURIComponent(resourceId)}/files`,
-    null,
-    [file],
-    editorDocumentHeaders(write));
+  return desktop.importExternalProgramDirectory<ExternalProgramResourceResponse>(
+    scope.projectId,
+    scope.applicationId,
+    request,
+    selectionId,
+    write);
 }
 
 export async function trialExternalProgramResource(

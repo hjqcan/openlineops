@@ -615,7 +615,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
 
         var executableBytes = Encoding.UTF8.GetBytes("frozen-external-program");
         await using var executableContent = new MemoryStream(executableBytes, writable: false);
-        var externalResource = await new FileSystemExternalProgramResourceRepository().SaveAsync(
+        var externalResource = await new FileSystemExternalProgramResourceRepository().ImportDirectoryAsync(
             scope,
             new SaveExternalProgramResourceRequest(
                 resourceId,

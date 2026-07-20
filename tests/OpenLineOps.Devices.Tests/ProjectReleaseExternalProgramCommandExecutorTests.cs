@@ -27,6 +27,8 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         Path.GetTempPath(),
         "openlineops-external-program-host-tests",
         Guid.NewGuid().ToString("N"));
+    private readonly string _appContainerProfileName =
+        $"OpenLineOps.Tests.External.{Guid.NewGuid():N}";
 
     [Fact]
     public async Task ProviderResourceCarriesRunOperationAndProductionUnitInputThenMapsExactResult()
@@ -121,7 +123,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             AllowFences,
             CreateHost());
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.True(
+            result.Outcome == RuntimeCommandExecutionOutcome.Completed,
+            result.Reason);
         using var payload = JsonDocument.Parse(result.Payload!);
         Assert.Equal(
             "12.5",
@@ -328,7 +332,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             AllowFences,
             CreateHost());
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.True(
+            result.Outcome == RuntimeCommandExecutionOutcome.Completed,
+            result.Reason);
         var evidence = Assert.IsType<RuntimeCommandEvidence>(
             RuntimeCommandEvidencePayload.Read(result.Payload));
         var stdout = Assert.Single(evidence.Artifacts, artifact => artifact.Name == "stdout.log");
@@ -671,9 +677,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             RequireRestrictedHostIdentity = true,
             RequireImmutableContentProtection = false,
             RequireAppContainerIsolation = true,
-            AppContainerProfileName = "OpenLineOps.Tests.ExternalPrograms"
+            AppContainerProfileName = _appContainerProfileName,
+            RestrictedServiceSid = "S-1-5-80-123-456-789-1011-1213"
         };
-        options.AllowedRestrictedHostSids.Add("S-1-5-21-1000");
         return new ExternalProgramHost(
             options,
             processLauncher: null,
@@ -831,12 +837,13 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
 
     private sealed class TestHostIdentityReader : IExternalProgramHostIdentityReader
     {
-        public ExternalProgramHostIdentity Read() => new(
-            "FACTORY\\OpenLineOpsTestAgent",
-            "S-1-5-21-1000",
-            IsAuthenticated: true,
-            IsSystem: false,
-            IsAdministrator: false);
+        public ExternalProgramHostIdentity Read(string requiredServiceSid) => new(
+            "S-1-5-19",
+            requiredServiceSid,
+            ServiceLogonSidEnabled: true,
+            TokenHasRestrictions: true,
+            ServiceSidEnabled: true,
+            ServiceSidRestricted: true);
     }
 
     private sealed class RecordingExternalProgramHost : IExternalProgramHost

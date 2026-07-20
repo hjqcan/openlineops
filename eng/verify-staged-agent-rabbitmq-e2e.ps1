@@ -86,6 +86,125 @@ function Assert-DirectFile {
     }
 }
 
+function Assert-ExactProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    $actual = @($Value.PSObject.Properties.Name)
+    if ($actual.Count -ne $Expected.Count) {
+        throw "$Description must contain exactly: $($Expected -join ', ')."
+    }
+    foreach ($name in $Expected) {
+        if ($actual -cnotcontains $name) {
+            throw "$Description is missing '$name'."
+        }
+    }
+}
+
+function Assert-JsonBooleanProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Expected,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    foreach ($field in $Expected.Keys) {
+        if ($Value.$field -isnot [bool] -or $Value.$field -ne $Expected[$field]) {
+            throw "$Description field '$field' must be the JSON boolean $($Expected[$field].ToString().ToLowerInvariant())."
+        }
+    }
+}
+
+function Get-ServiceSidFromName {
+    param([Parameter(Mandatory = $true)][string] $ServiceName)
+
+    $algorithm = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $hash = $algorithm.ComputeHash(
+            [System.Text.Encoding]::Unicode.GetBytes($ServiceName.ToUpperInvariant()))
+        $subAuthorities = @(for ($offset = 0; $offset -lt 20; $offset += 4) {
+                [System.BitConverter]::ToUInt32($hash, $offset).ToString(
+                    [System.Globalization.CultureInfo]::InvariantCulture)
+            })
+        return "S-1-5-80-$($subAuthorities -join '-')"
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Assert-RestrictedServiceIdentity {
+    param(
+        [Parameter(Mandatory = $true)] $Identity,
+        [Parameter(Mandatory = $true)][string] $ServiceName,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    Assert-ExactProperties $Identity @(
+        "serviceAccountName",
+        "serviceAccountSid",
+        "serviceSid",
+        "AccountName",
+        "UserSid",
+        "IsPrimaryToken",
+        "IsElevated",
+        "HasRestrictions",
+        "AdministratorGroupPresent",
+        "AdministratorGroupEnabled",
+        "AdministratorGroupDenyOnly",
+        "ServiceLogonSidPresent",
+        "ServiceLogonSidEnabled",
+        "ExactServiceSidPresent",
+        "ExactServiceSidEnabled",
+        "ExactServiceSidRestricted",
+        "IsAuthenticated",
+        "IsSystem",
+        "NonAdministrative",
+        "identityStrategy") $Description
+    Assert-JsonBooleanProperties $Identity ([ordered]@{
+            IsPrimaryToken = $true
+            IsElevated = $false
+            HasRestrictions = $true
+            AdministratorGroupPresent = $false
+            AdministratorGroupEnabled = $false
+            AdministratorGroupDenyOnly = $false
+            ServiceLogonSidPresent = $true
+            ServiceLogonSidEnabled = $true
+            ExactServiceSidPresent = $true
+            ExactServiceSidEnabled = $true
+            ExactServiceSidRestricted = $true
+            IsAuthenticated = $true
+            IsSystem = $false
+            NonAdministrative = $true
+        }) $Description
+    if ($Identity.serviceAccountName -cne "NT AUTHORITY\LocalService" `
+        -or $Identity.serviceAccountSid -cne "S-1-5-19" `
+        -or $Identity.serviceSid -cnotmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$' `
+        -or $Identity.serviceSid -cne (Get-ServiceSidFromName $ServiceName) `
+        -or [string]::IsNullOrWhiteSpace([string]$Identity.AccountName) `
+        -or $Identity.UserSid -cne "S-1-5-19" `
+        -or $Identity.IsPrimaryToken -ne $true `
+        -or $Identity.IsElevated -ne $false `
+        -or $Identity.HasRestrictions -ne $true `
+        -or $Identity.AdministratorGroupPresent -ne $false `
+        -or $Identity.AdministratorGroupEnabled -ne $false `
+        -or $Identity.AdministratorGroupDenyOnly -ne $false `
+        -or $Identity.ServiceLogonSidPresent -ne $true `
+        -or $Identity.ServiceLogonSidEnabled -ne $true `
+        -or $Identity.ExactServiceSidPresent -ne $true `
+        -or $Identity.ExactServiceSidEnabled -ne $true `
+        -or $Identity.ExactServiceSidRestricted -ne $true `
+        -or $Identity.IsAuthenticated -ne $true `
+        -or $Identity.IsSystem -ne $false `
+        -or $Identity.NonAdministrative -ne $true `
+        -or $Identity.identityStrategy -cne "local-service-restricted-service-sid") {
+        throw "$Description does not prove the exact LocalService restricted service-SID token."
+    }
+}
+
 function Stop-ProcessTree {
     param([Parameter(Mandatory = $true)][int] $ProcessId)
 
@@ -354,6 +473,69 @@ $artifactEvidenceInvalid = $vendorArtifacts.Count -lt $requiredVendorArtifacts.C
                         -and $_.kind -ceq $requiredVendorArtifacts[$name]
                 }).Count -ne 1
         }).Count -ne 0
+Assert-RestrictedServiceIdentity `
+    -Identity $evidence.agentHostIdentity `
+    -ServiceName $evidence.windowsServiceName `
+    -Description "Initial staged Agent host identity"
+Assert-RestrictedServiceIdentity `
+    -Identity $evidence.restartedAgentHostIdentity `
+    -ServiceName $evidence.windowsServiceName `
+    -Description "Restarted staged Agent host identity"
+if ($evidence.agentHostIdentity.serviceSid -cne $evidence.restartedAgentHostIdentity.serviceSid) {
+    throw "Restarted staged Agent service SID differs from its initial SCM service identity."
+}
+$materialArrivalIpcFields = @(
+    "serviceTokenConnected",
+    "pipeExactAclVerified",
+    "durablePublicationVerified",
+    "ordinaryCiTokenExplicitAccessDenied")
+Assert-ExactProperties `
+    -Value $evidence.materialArrivalIpc `
+    -Expected $materialArrivalIpcFields `
+    -Description "Staged Agent material-arrival IPC evidence"
+foreach ($field in $materialArrivalIpcFields) {
+    if ($evidence.materialArrivalIpc.$field -isnot [bool] `
+        -or $evidence.materialArrivalIpc.$field -ne $true) {
+        throw "Staged Agent material-arrival IPC evidence field '$field' must be the JSON boolean true."
+    }
+}
+$immutableContentCacheFields = @(
+    "packagedProvisionCommandVerified",
+    "runningServiceAdministrationRejected",
+    "serviceTokenReadExecuteVerified",
+    "sealedMutationAccessDenied",
+    "deepAncestorMutationAccessDenied",
+    "preSealRecoveryVerified",
+    "cleanupCrashResumeVerified",
+    "committedAdminRemovalVerified",
+    "packagedRemovalCommandVerified",
+    "cacheNamespaceRemoved")
+Assert-ExactProperties `
+    -Value $evidence.immutableContentCache `
+    -Expected $immutableContentCacheFields `
+    -Description "Staged Agent immutable content-cache evidence"
+foreach ($field in $immutableContentCacheFields) {
+    if ($evidence.immutableContentCache.$field -isnot [bool] `
+        -or $evidence.immutableContentCache.$field -ne $true) {
+        throw "Staged Agent immutable content-cache evidence field '$field' must be the JSON boolean true."
+    }
+}
+Assert-JsonBooleanProperties $evidence ([ordered]@{
+        operatorTraceGetVerified = $true
+        brokerOutageVerified = $true
+        coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $true
+        offlineCompletionWasNotDelivered = $true
+        completionDeliveredOnceAfterReconnect = $true
+        duplicateRedeliveryRejected = $true
+        duplicateAfterRestartRejected = $true
+        windowsServiceLifecycleVerified = $true
+        cleanShutdownVerified = $true
+    }) "Staged Agent RabbitMQ evidence"
+Assert-JsonBooleanProperties $evidence.presence ([ordered]@{
+        startedAndHeartbeatPersisted = $true
+        expiredOfflineDuringBrokerOutage = $true
+        freshOnlineAfterReconnect = $true
+    }) "Staged Agent presence evidence"
 if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or $evidence.schemaVersion -ne 1 `
     -or $evidence.executionStatus -cne "Completed" `
@@ -364,26 +546,6 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or $artifactEvidenceInvalid `
     -or $evidence.brokerOutageVerified -ne $true `
     -or $evidence.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
-    -or $evidence.agentHostIdentity.nonAdministrative -ne $true `
-    -or $evidence.agentHostIdentity.isPrimaryToken -ne $true `
-    -or $evidence.agentHostIdentity.isElevated -ne $false `
-    -or $evidence.agentHostIdentity.administratorGroupPresent -ne $false `
-    -or $evidence.agentHostIdentity.administratorGroupEnabled -ne $false `
-    -or $evidence.agentHostIdentity.administratorGroupDenyOnly -ne $false `
-    -or $evidence.agentHostIdentity.principalAdministratorMembership -ne $false `
-    -or $evidence.agentHostIdentity.isAuthenticated -ne $true `
-    -or $evidence.agentHostIdentity.isSystem -ne $false `
-    -or $evidence.agentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
-    -or $evidence.restartedAgentHostIdentity.nonAdministrative -ne $true `
-    -or $evidence.restartedAgentHostIdentity.isPrimaryToken -ne $true `
-    -or $evidence.restartedAgentHostIdentity.isElevated -ne $false `
-    -or $evidence.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
-    -or $evidence.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
-    -or $evidence.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `
-    -or $evidence.restartedAgentHostIdentity.principalAdministratorMembership -ne $false `
-    -or $evidence.restartedAgentHostIdentity.isAuthenticated -ne $true `
-    -or $evidence.restartedAgentHostIdentity.isSystem -ne $false `
-    -or $evidence.restartedAgentHostIdentity.identityStrategy -cne "temporary-standard-service-account" `
     -or $evidence.offlinePendingOutboxCount -lt 1 `
     -or $evidence.offlineCompletionWasNotDelivered -ne $true `
     -or $evidence.completionDeliveredOnceAfterReconnect -ne $true `
@@ -399,6 +561,7 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or $evidence.presence.onlineAfterReconnect.status -cne "Idle" `
     -or $evidence.presence.onlineAfterReconnect.health -cne "Online" `
     -or [string]$evidence.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
+    -or $evidence.windowsServiceLifecycleVerified -isnot [bool] `
     -or $evidence.windowsServiceLifecycleVerified -ne $true `
     -or $evidence.cleanShutdownVerified -ne $true) {
     throw "Staged Agent RabbitMQ process E2E evidence is incomplete or invalid."
@@ -406,9 +569,9 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
 
 Write-Host "Staged Agent RabbitMQ process E2E passed."
 Write-Host " - Broker: $($parsedBrokerUri.Host):$($parsedBrokerUri.Port) (TLS: $($parsedBrokerUri.Scheme -ceq 'amqps'))"
-Write-Host " - A temporary Windows service completed a signed frozen vendor helper while RabbitMQ was offline."
+Write-Host " - A run-scoped Windows service completed a signed frozen vendor helper while RabbitMQ was offline."
 Write-Host " - SQLite buffered the result; reconnect delivered it once; redelivery and restart did not replay hardware."
-Write-Host " - SCM start, stop, restart, and deletion were verified under a temporary standard service account."
-Write-Host " - Coordinator transport/result inbox restarted after broker recovery; token inspection proved the Agent non-administrative."
+Write-Host " - SCM start, stop, restart, and deletion were verified under LocalService with an exact restricted service SID."
+Write-Host " - Coordinator transport/result inbox restarted after broker recovery; actual token groups and restricting SIDs proved least privilege."
 Write-Host " - Persisted Started/Heartbeat presence expired to Offline during outage and recovered to fresh Online."
 Write-Host " - Evidence: $evidencePath"

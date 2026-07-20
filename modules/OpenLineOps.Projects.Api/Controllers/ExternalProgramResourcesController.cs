@@ -16,11 +16,6 @@ namespace OpenLineOps.Projects.Api.Controllers;
 [Route(OpenLineOpsApiRoutes.ProjectApplicationExternalPrograms)]
 public sealed class ExternalProgramResourcesController : ControllerBase
 {
-    private const long MaximumImportBytes = 256L * 1024 * 1024;
-    private const long MaximumImportFileBytes = 64L * 1024 * 1024;
-    private const int MaximumImportFileCount = 64;
-    private const int MaximumFormValueBytes = 256 * 1024;
-
     private static readonly JsonSerializerOptions ImportSerializerOptions = new(JsonSerializerDefaults.Web)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
@@ -97,11 +92,10 @@ public sealed class ExternalProgramResourcesController : ControllerBase
             return ToProblem(mapped.Error);
         }
 
-        var result = await _service.SaveAsync(
+        var result = await _service.SaveDefinitionAsync(
                 projectId,
                 applicationId,
                 mapped.Value,
-                [],
                 cancellationToken)
             .ConfigureAwait(false);
         if (result.IsFailure)
@@ -114,16 +108,16 @@ public sealed class ExternalProgramResourcesController : ControllerBase
         return Ok(response);
     }
 
-    [HttpPost("import")]
+    [HttpPost("directory-import")]
     [Consumes("multipart/form-data")]
     [ProducesResponseType<ExternalProgramResourceApiResponse>(StatusCodes.Status201Created)]
     [RequestFormLimits(
-        MultipartBodyLengthLimit = MaximumImportBytes,
-        ValueLengthLimit = MaximumFormValueBytes,
+        MultipartBodyLengthLimit = ExternalProgramDirectoryImportLimits.MaximumRequestBytes,
+        ValueLengthLimit = ExternalProgramDirectoryImportLimits.MaximumFormValueBytes,
         KeyLengthLimit = 256,
         MultipartHeadersLengthLimit = 16 * 1024)]
-    [RequestSizeLimit(MaximumImportBytes)]
-    public async Task<ActionResult<ExternalProgramResourceApiResponse>> ImportAsync(
+    [RequestSizeLimit(ExternalProgramDirectoryImportLimits.MaximumRequestBytes)]
+    public async Task<ActionResult<ExternalProgramResourceApiResponse>> ImportDirectoryAsync(
         string projectId,
         string applicationId,
         CancellationToken cancellationToken)
@@ -134,12 +128,14 @@ public sealed class ExternalProgramResourcesController : ControllerBase
         }
 
         var form = await Request.ReadFormAsync(cancellationToken).ConfigureAwait(false);
-        var definitionJson = form["definition"].SingleOrDefault();
-        var uploadManifestJson = form["uploadManifest"].SingleOrDefault();
-        if (string.IsNullOrWhiteSpace(definitionJson)
-            || string.IsNullOrWhiteSpace(uploadManifestJson)
+        var definitionValues = form["definition"];
+        var uploadManifestValues = form["uploadManifest"];
+        if (definitionValues.Count != 1
+            || uploadManifestValues.Count != 1
+            || string.IsNullOrWhiteSpace(definitionValues[0])
+            || string.IsNullOrWhiteSpace(uploadManifestValues[0])
             || form.Files.Count == 0
-            || form.Files.Count > MaximumImportFileCount
+            || form.Files.Count > ExternalProgramDirectoryImportLimits.MaximumFileCount
             || form.Keys.Any(key => key is not "definition" and not "uploadManifest"))
         {
             return BadRequestProblem(
@@ -147,6 +143,8 @@ public sealed class ExternalProgramResourcesController : ControllerBase
                 "One definition, one uploadManifest, and bounded uploaded files are required.");
         }
 
+        var definitionJson = definitionValues[0]!;
+        var uploadManifestJson = uploadManifestValues[0]!;
 
         IReadOnlyCollection<ExternalProgramUploadManifestItemApiRequest>? uploadManifest;
         try
@@ -199,7 +197,33 @@ public sealed class ExternalProgramResourcesController : ControllerBase
                     item.Manifest.Sha256!));
             }
 
-            var result = await _service.SaveAsync(
+            var documentKey = $"external-program:{projectId}:{applicationId}:{mapped.Value.ResourceId}";
+            await using var lease = await EditorDocumentConcurrency
+                .AcquireAsync(documentKey, cancellationToken)
+                .ConfigureAwait(false);
+            var current = await _service.GetAsync(
+                    projectId,
+                    applicationId,
+                    mapped.Value.ResourceId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var replacingExisting = current.IsSuccess;
+            if (current.IsFailure
+                && !current.Error.Code.StartsWith("NotFound.", StringComparison.Ordinal))
+            {
+                return ToProblem(current.Error);
+            }
+
+            if (replacingExisting)
+            {
+                var precondition = EvaluateRevision(ToResponse(current.Value).Revision);
+                if (precondition is not null)
+                {
+                    return precondition;
+                }
+            }
+
+            var result = await _service.ImportDirectoryAsync(
                     projectId,
                     applicationId,
                     mapped.Value,
@@ -213,9 +237,11 @@ public sealed class ExternalProgramResourcesController : ControllerBase
 
             var response = ToResponse(result.Value);
             Response.SetEditorDocumentRevision(response.Revision);
-            return Created(
-                $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/external-programs/{Uri.EscapeDataString(response.ResourceId)}",
-                response);
+            return replacingExisting
+                ? Ok(response)
+                : Created(
+                    $"/api/automation-projects/{Uri.EscapeDataString(projectId)}/applications/{Uri.EscapeDataString(applicationId)}/external-programs/{Uri.EscapeDataString(response.ResourceId)}",
+                    response);
         }
         finally
         {
@@ -224,95 +250,6 @@ public sealed class ExternalProgramResourcesController : ControllerBase
                 await stream.DisposeAsync().ConfigureAwait(false);
             }
         }
-    }
-
-    [HttpPost("{resourceId}/files")]
-    [Consumes("multipart/form-data")]
-    [ProducesResponseType<ExternalProgramResourceApiResponse>(StatusCodes.Status200OK)]
-    [RequestFormLimits(
-        MultipartBodyLengthLimit = MaximumImportFileBytes,
-        ValueLengthLimit = MaximumFormValueBytes,
-        KeyLengthLimit = 256,
-        MultipartHeadersLengthLimit = 16 * 1024)]
-    [RequestSizeLimit(MaximumImportFileBytes)]
-    public async Task<ActionResult<ExternalProgramResourceApiResponse>> ImportFileAsync(
-        string projectId,
-        string applicationId,
-        string resourceId,
-        CancellationToken cancellationToken)
-    {
-        var documentKey = $"external-program:{projectId}:{applicationId}:{resourceId}";
-        await using var lease = await EditorDocumentConcurrency
-            .AcquireAsync(documentKey, cancellationToken)
-            .ConfigureAwait(false);
-        var precondition = await RequireCurrentRevisionAsync(
-                projectId,
-                applicationId,
-                resourceId,
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (precondition is not null)
-        {
-            return precondition;
-        }
-
-        if (!Request.HasFormContentType)
-        {
-            return BadRequestProblem("Projects.ExternalProgramImportFormRequired", "Multipart form data is required.");
-        }
-
-        var form = await Request.ReadFormAsync(cancellationToken).ConfigureAwait(false);
-        var uploadManifestJson = form["uploadManifest"].SingleOrDefault();
-        if (string.IsNullOrWhiteSpace(uploadManifestJson)
-            || form.Files.Count != 1
-            || form.Keys.Any(key => key != "uploadManifest"))
-        {
-            return BadRequestProblem(
-                "Projects.ExternalProgramFileImportIncomplete",
-                "Exactly one uploadManifest item and one uploaded file are required.");
-        }
-
-
-        IReadOnlyCollection<ExternalProgramUploadManifestItemApiRequest>? uploadManifest;
-        try
-        {
-            uploadManifest = JsonSerializer.Deserialize<IReadOnlyCollection<ExternalProgramUploadManifestItemApiRequest>>(
-                uploadManifestJson,
-                ImportSerializerOptions);
-        }
-        catch (JsonException exception)
-        {
-            return BadRequestProblem("Projects.ExternalProgramUploadManifestInvalid", exception.Message);
-        }
-
-        var manifestValidation = ValidateUploadManifest(uploadManifest, form.Files);
-        if (manifestValidation.IsFailure)
-        {
-            return ToProblem(manifestValidation.Error);
-        }
-
-        var item = manifestValidation.Value.Single();
-
-        await using var stream = item.File.OpenReadStream();
-        var result = await _service.ImportFileAsync(
-                projectId,
-                applicationId,
-                resourceId,
-                new ExternalProgramFileUpload(
-                    item.Manifest.ResourceRelativePath!,
-                    stream,
-                    item.Manifest.SizeBytes!.Value,
-                    item.Manifest.Sha256!),
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (result.IsFailure)
-        {
-            return ToProblem(result.Error);
-        }
-
-        var response = ToResponse(result.Value);
-        Response.SetEditorDocumentRevision(response.Revision);
-        return Ok(response);
     }
 
     [HttpPost("{resourceId}/trial")]
@@ -527,13 +464,13 @@ public sealed class ExternalProgramResourcesController : ControllerBase
         if (manifest is null
             || manifest.Count == 0
             || manifest.Count != files.Count
-            || manifest.Count > MaximumImportFileCount
+            || manifest.Count > ExternalProgramDirectoryImportLimits.MaximumFileCount
             || manifest.Any(item => item is null
                 || string.IsNullOrWhiteSpace(item.FieldName)
                 || string.IsNullOrWhiteSpace(item.ResourceRelativePath)
                 || item.SizeBytes is null
                 || item.SizeBytes < 0
-                || item.SizeBytes > MaximumImportFileBytes
+                || item.SizeBytes > ExternalProgramDirectoryImportLimits.MaximumFileBytes
                 || string.IsNullOrWhiteSpace(item.Sha256)
                 || !ExternalProgramResourceContract.IsSha256(item.Sha256)))
         {
@@ -543,14 +480,16 @@ public sealed class ExternalProgramResourcesController : ControllerBase
         }
 
         var fieldNames = new HashSet<string>(StringComparer.Ordinal);
-        var resourcePaths = new HashSet<string>(StringComparer.Ordinal);
+        var resourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var validated = new List<ValidatedUpload>(manifest.Count);
         long totalBytes = 0;
         try
         {
             foreach (var item in manifest)
             {
-                if (totalBytes > MaximumImportBytes - item.SizeBytes!.Value)
+                if (!ExternalProgramDirectoryImportLimits.CanAccumulateContentBytes(
+                        totalBytes,
+                        item.SizeBytes!.Value))
                 {
                     throw new InvalidDataException("Upload manifest total size exceeds the HTTP import limit.");
                 }

@@ -602,6 +602,35 @@ function Sync-ProductionIntegrationEvidenceBindings {
     Write-Json -Path $publicationPath -Value $publication
 }
 
+function Sync-PublicationE2eEvidenceBinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $RecordName,
+        [Parameter(Mandatory = $true)][string] $SourceRelativePath,
+        [Parameter(Mandatory = $true)][string] $EmbeddedRelativePath
+    )
+
+    $sourcePath = Join-Path `
+        $Root `
+        $SourceRelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    $publicationRoot = Join-Path $Root "output/publication-evidence"
+    $publicationPath = Join-Path $publicationRoot "publication-evidence.json"
+    $embeddedPath = Join-Path `
+        $publicationRoot `
+        $EmbeddedRelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    Copy-Item -LiteralPath $sourcePath -Destination $embeddedPath -Force
+
+    $publication = Get-Content -LiteralPath $publicationPath -Raw | ConvertFrom-Json
+    $record = $publication.e2eEvidence.PSObject.Properties[$RecordName].Value
+    if ($null -eq $record) {
+        throw "Publication fixture does not contain E2E evidence record '$RecordName'."
+    }
+
+    $record.sizeBytes = (Get-Item -LiteralPath $sourcePath).Length
+    $record.sha256 = Get-FileSha256 $sourcePath
+    Write-Json -Path $publicationPath -Value $publication
+}
+
 function Assert-FixtureIndexMutationFails {
     param(
         [Parameter(Mandatory = $true)][string] $CandidateWorkRoot,
@@ -716,6 +745,97 @@ Assert-FailsWith `
     -Name "e2e-hash-tamper" `
     -Pattern "Publication stagedAgentBundle E2E evidence source, embedded copy, size, or SHA-256 does not match"
 
+$stagedSemanticDowngradeRoot = New-Bundle `
+    -Name "fully-rebound-staged-material-arrival-downgrade" `
+    -CandidateRoot $candidateRoot
+$stagedRawPath = Join-Path `
+    $stagedSemanticDowngradeRoot `
+    "output/staged-agent-bundle-e2e/rabbitmq-process/evidence.json"
+$stagedRaw = Get-Content -LiteralPath $stagedRawPath -Raw | ConvertFrom-Json
+$stagedRaw.materialArrivalIpc.durablePublicationVerified = $false
+Write-Json -Path $stagedRawPath -Value $stagedRaw
+$stagedSummaryPath = Join-Path `
+    $stagedSemanticDowngradeRoot `
+    "output/staged-agent-bundle-e2e/evidence.json"
+$stagedSummary = Get-Content -LiteralPath $stagedSummaryPath -Raw | ConvertFrom-Json
+$stagedSummary.rabbitMqTransportCoverage.materialArrivalIpc.durablePublicationVerified = $false
+$stagedSummary.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $stagedRawPath
+Write-Json -Path $stagedSummaryPath -Value $stagedSummary
+Sync-PublicationE2eEvidenceBinding `
+    -Root $stagedSemanticDowngradeRoot `
+    -RecordName "stagedAgentBundle" `
+    -SourceRelativePath "output/staged-agent-bundle-e2e/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/staged-agent-bundle.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $stagedSemanticDowngradeRoot `
+        -Name "fully-rebound-staged-material-arrival-downgrade") `
+    -Name "fully-rebound-staged-material-arrival-downgrade" `
+    -Pattern "durablePublicationVerified.*JSON boolean true"
+
+$stagedImmutableDowngradeRoot = New-Bundle `
+    -Name "fully-rebound-staged-immutable-cache-downgrade" `
+    -CandidateRoot $candidateRoot
+$stagedImmutableRawPath = Join-Path `
+    $stagedImmutableDowngradeRoot `
+    "output/staged-agent-bundle-e2e/rabbitmq-process/evidence.json"
+$stagedImmutableRaw = Get-Content -LiteralPath $stagedImmutableRawPath -Raw |
+    ConvertFrom-Json
+$stagedImmutableRaw.immutableContentCache.packagedRemovalCommandVerified = $false
+Write-Json -Path $stagedImmutableRawPath -Value $stagedImmutableRaw
+$stagedImmutableSummaryPath = Join-Path `
+    $stagedImmutableDowngradeRoot `
+    "output/staged-agent-bundle-e2e/evidence.json"
+$stagedImmutableSummary = Get-Content -LiteralPath $stagedImmutableSummaryPath -Raw |
+    ConvertFrom-Json
+$stagedImmutableSummary.rabbitMqTransportCoverage.immutableContentCache.packagedRemovalCommandVerified =
+    $false
+$stagedImmutableSummary.rabbitMqTransportCoverage.evidenceSha256 =
+    Get-FileSha256 $stagedImmutableRawPath
+Write-Json -Path $stagedImmutableSummaryPath -Value $stagedImmutableSummary
+Sync-PublicationE2eEvidenceBinding `
+    -Root $stagedImmutableDowngradeRoot `
+    -RecordName "stagedAgentBundle" `
+    -SourceRelativePath "output/staged-agent-bundle-e2e/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/staged-agent-bundle.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $stagedImmutableDowngradeRoot `
+        -Name "fully-rebound-staged-immutable-cache-downgrade") `
+    -Name "fully-rebound-staged-immutable-cache-downgrade" `
+    -Pattern "packagedRemovalCommandVerified.*JSON boolean true"
+
+$stagedTruthyBooleanRoot = New-Bundle `
+    -Name "fully-rebound-staged-truthy-identity" `
+    -CandidateRoot $candidateRoot
+$stagedTruthyRawPath = Join-Path `
+    $stagedTruthyBooleanRoot `
+    "output/staged-agent-bundle-e2e/rabbitmq-process/evidence.json"
+$stagedTruthyRaw = Get-Content -LiteralPath $stagedTruthyRawPath -Raw |
+    ConvertFrom-Json
+$stagedTruthyRaw.agentHostIdentity.NonAdministrative = 1
+Write-Json -Path $stagedTruthyRawPath -Value $stagedTruthyRaw
+$stagedTruthySummaryPath = Join-Path `
+    $stagedTruthyBooleanRoot `
+    "output/staged-agent-bundle-e2e/evidence.json"
+$stagedTruthySummary = Get-Content -LiteralPath $stagedTruthySummaryPath -Raw |
+    ConvertFrom-Json
+$stagedTruthySummary.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative = 1
+$stagedTruthySummary.rabbitMqTransportCoverage.evidenceSha256 =
+    Get-FileSha256 $stagedTruthyRawPath
+Write-Json -Path $stagedTruthySummaryPath -Value $stagedTruthySummary
+Sync-PublicationE2eEvidenceBinding `
+    -Root $stagedTruthyBooleanRoot `
+    -RecordName "stagedAgentBundle" `
+    -SourceRelativePath "output/staged-agent-bundle-e2e/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/staged-agent-bundle.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $stagedTruthyBooleanRoot `
+        -Name "fully-rebound-staged-truthy-identity") `
+    -Name "fully-rebound-staged-truthy-identity" `
+    -Pattern "nonAdministrative.*JSON boolean true"
+
 $studioSourceTamperRoot = New-Bundle -Name "studio-two-agent-source-tamper" -CandidateRoot $candidateRoot
 $studioSourceTamperPath = Join-Path $studioSourceTamperRoot "output/studio-two-agent-production-closure/evidence.json"
 Write-Utf8NoBom `
@@ -735,6 +855,75 @@ Assert-FailsWith `
     -Result (Invoke-Inspection -Root $studioEmbeddedTamperRoot -Name "studio-two-agent-embedded-tamper") `
     -Name "studio-two-agent-embedded-tamper" `
     -Pattern "Publication studioTwoAgent E2E evidence source, embedded copy, size, or SHA-256 does not match"
+
+$studioSemanticDowngradeRoot = New-Bundle `
+    -Name "fully-rebound-studio-windows-identity-downgrade" `
+    -CandidateRoot $candidateRoot
+$studioEvidencePath = Join-Path `
+    $studioSemanticDowngradeRoot `
+    "output/studio-two-agent-production-closure/evidence.json"
+$studioEvidence = Get-Content -LiteralPath $studioEvidencePath -Raw | ConvertFrom-Json
+$studioEvidence.windowsIdentity.entryPipeExactAclVerified = $false
+Write-Json -Path $studioEvidencePath -Value $studioEvidence
+$studioManifestPath = Join-Path `
+    $studioSemanticDowngradeRoot `
+    "output/studio-two-agent-production-closure/evidence-manifest.json"
+$studioManifest = Get-Content -LiteralPath $studioManifestPath -Raw | ConvertFrom-Json
+$studioManifest.files[0].sizeBytes = (Get-Item -LiteralPath $studioEvidencePath).Length
+$studioManifest.files[0].sha256 = Get-FileSha256 $studioEvidencePath
+Write-Json -Path $studioManifestPath -Value $studioManifest
+Sync-PublicationE2eEvidenceBinding `
+    -Root $studioSemanticDowngradeRoot `
+    -RecordName "studioTwoAgent" `
+    -SourceRelativePath "output/studio-two-agent-production-closure/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/studio-two-agent.json"
+Sync-PublicationE2eEvidenceBinding `
+    -Root $studioSemanticDowngradeRoot `
+    -RecordName "studioTwoAgentManifest" `
+    -SourceRelativePath "output/studio-two-agent-production-closure/evidence-manifest.json" `
+    -EmbeddedRelativePath "e2e-evidence/studio-two-agent-manifest.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $studioSemanticDowngradeRoot `
+        -Name "fully-rebound-studio-windows-identity-downgrade") `
+    -Name "fully-rebound-studio-windows-identity-downgrade" `
+    -Pattern "entryPipeExactAclVerified.*JSON boolean true"
+
+$studioTruthyBooleanRoot = New-Bundle `
+    -Name "fully-rebound-studio-truthy-parallel-proof" `
+    -CandidateRoot $candidateRoot
+$studioTruthyEvidencePath = Join-Path `
+    $studioTruthyBooleanRoot `
+    "output/studio-two-agent-production-closure/evidence.json"
+$studioTruthyEvidence = Get-Content -LiteralPath $studioTruthyEvidencePath -Raw |
+    ConvertFrom-Json
+$studioTruthyEvidence.parallelExecution.observed = "true"
+Write-Json -Path $studioTruthyEvidencePath -Value $studioTruthyEvidence
+$studioTruthyManifestPath = Join-Path `
+    $studioTruthyBooleanRoot `
+    "output/studio-two-agent-production-closure/evidence-manifest.json"
+$studioTruthyManifest = Get-Content -LiteralPath $studioTruthyManifestPath -Raw |
+    ConvertFrom-Json
+$studioTruthyManifest.files[0].sizeBytes =
+    (Get-Item -LiteralPath $studioTruthyEvidencePath).Length
+$studioTruthyManifest.files[0].sha256 = Get-FileSha256 $studioTruthyEvidencePath
+Write-Json -Path $studioTruthyManifestPath -Value $studioTruthyManifest
+Sync-PublicationE2eEvidenceBinding `
+    -Root $studioTruthyBooleanRoot `
+    -RecordName "studioTwoAgent" `
+    -SourceRelativePath "output/studio-two-agent-production-closure/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/studio-two-agent.json"
+Sync-PublicationE2eEvidenceBinding `
+    -Root $studioTruthyBooleanRoot `
+    -RecordName "studioTwoAgentManifest" `
+    -SourceRelativePath "output/studio-two-agent-production-closure/evidence-manifest.json" `
+    -EmbeddedRelativePath "e2e-evidence/studio-two-agent-manifest.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $studioTruthyBooleanRoot `
+        -Name "fully-rebound-studio-truthy-parallel-proof") `
+    -Name "fully-rebound-studio-truthy-parallel-proof" `
+    -Pattern "observed.*JSON boolean true"
 
 $runnerSourceTamperRoot = New-Bundle -Name "runner-staged-agent-source-tamper" -CandidateRoot $candidateRoot
 $runnerSourceTamperPath = Join-Path $runnerSourceTamperRoot "output/runner-staged-agent-e2e/evidence.json"
@@ -756,6 +945,28 @@ Assert-FailsWith `
     -Result (Invoke-Inspection -Root $runnerTrxTamperRoot -Name "runner-staged-agent-trx-tamper") `
     -Name "runner-staged-agent-trx-tamper" `
     -Pattern "Runner staged-Agent evidence failed strict validation|Publication runnerStagedAgentTrx E2E evidence source, embedded copy, size, or SHA-256 does not match"
+
+$runnerTruthyBooleanRoot = New-Bundle `
+    -Name "fully-rebound-runner-truthy-manifest-binding" `
+    -CandidateRoot $candidateRoot
+$runnerTruthyEvidencePath = Join-Path `
+    $runnerTruthyBooleanRoot `
+    "output/runner-staged-agent-e2e/evidence.json"
+$runnerTruthyEvidence = Get-Content -LiteralPath $runnerTruthyEvidencePath -Raw |
+    ConvertFrom-Json
+$runnerTruthyEvidence.execution.runner.manifestBound = 1
+Write-Json -Path $runnerTruthyEvidencePath -Value $runnerTruthyEvidence
+Sync-PublicationE2eEvidenceBinding `
+    -Root $runnerTruthyBooleanRoot `
+    -RecordName "runnerStagedAgent" `
+    -SourceRelativePath "output/runner-staged-agent-e2e/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/runner-staged-agent.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $runnerTruthyBooleanRoot `
+        -Name "fully-rebound-runner-truthy-manifest-binding") `
+    -Name "fully-rebound-runner-truthy-manifest-binding" `
+    -Pattern "manifestBound.*JSON boolean true"
 
 $duplicateClosureRoot = New-Bundle -Name "duplicate-production-closure" -CandidateRoot $candidateRoot
 $duplicateClosurePath = Join-Path $duplicateClosureRoot "artifacts/production-closure-e2e/duplicate/summary.json"
@@ -819,6 +1030,38 @@ Assert-FailsWith `
     -Result (Invoke-Inspection -Root $evidenceStatusRoot -Name "evidence-status-case") `
     -Name "evidence-status-case" `
     -Pattern "status 'Pass' is not canonical"
+
+$publishableTruthyRoot = New-Bundle -Name "publication-publishable-truthy" -CandidateRoot $candidateRoot
+$publishableTruthyPath = Join-Path `
+    $publishableTruthyRoot `
+    "output/publication-evidence/publication-evidence.json"
+$publishableTruthyEvidence = Get-Content -LiteralPath $publishableTruthyPath -Raw |
+    ConvertFrom-Json
+$publishableTruthyEvidence.publishable = 1
+Write-Json -Path $publishableTruthyPath -Value $publishableTruthyEvidence
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $publishableTruthyRoot `
+        -Name "publication-publishable-truthy") `
+    -Name "publication-publishable-truthy" `
+    -Pattern "publishable must be a JSON boolean"
+
+$pendingAllowedTruthyRoot = New-Bundle `
+    -Name "publication-pending-allowed-truthy" `
+    -CandidateRoot $candidateRoot
+$pendingAllowedTruthyPath = Join-Path `
+    $pendingAllowedTruthyRoot `
+    "output/publication-evidence/publication-evidence.json"
+$pendingAllowedTruthyEvidence = Get-Content -LiteralPath $pendingAllowedTruthyPath -Raw |
+    ConvertFrom-Json
+$pendingAllowedTruthyEvidence.gates[0].pendingAllowed = "false"
+Write-Json -Path $pendingAllowedTruthyPath -Value $pendingAllowedTruthyEvidence
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $pendingAllowedTruthyRoot `
+        -Name "publication-pending-allowed-truthy") `
+    -Name "publication-pending-allowed-truthy" `
+    -Pattern "pendingAllowed must be a JSON boolean"
 
 $preflightNameRoot = New-Bundle -Name "preflight-name-case" -CandidateRoot $candidateRoot
 Replace-InFile `

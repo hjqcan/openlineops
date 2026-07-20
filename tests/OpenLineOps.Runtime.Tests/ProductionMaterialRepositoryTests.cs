@@ -325,6 +325,99 @@ public sealed class ProductionMaterialRepositoryTests
     }
 
     [Fact]
+    public async Task SqliteColdRestartPreservesTwoUnitsAtDistinctCarrierPositions()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        var firstUnitId = ProductionUnitId.New();
+        var secondUnitId = ProductionUnitId.New();
+        var carrierId = new CarrierId("carrier-two-position");
+        var station = MaterialLocation.AtStation("line-a", "station-load");
+        var firstPosition = MaterialLocation.OnCarrier(carrierId, "position-01");
+        var secondPosition = MaterialLocation.OnCarrier(carrierId, "position-02");
+
+        using (var materials = new SqliteProductionMaterialRepository(database.ConnectionString))
+        using (var runs = new SqliteProductionRunRepository(database.ConnectionString))
+        {
+            var service = new ProductionMaterialService(materials, runs);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                firstUnitId,
+                "board-a",
+                "serial-number",
+                "SN-CARRIER-POSITION-01",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                secondUnitId,
+                "board-a",
+                "serial-number",
+                "SN-CARRIER-POSITION-02",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterCarrierAsync(new RegisterCarrierCommand(
+                carrierId,
+                "tray-2",
+                2,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForCarrier(carrierId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(1)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(2)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(3)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                firstPosition,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(4)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                secondPosition,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(5)))).Succeeded);
+        }
+
+        using var restarted = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var restoredUnits = (await restarted.ListProductionUnitsAsync())
+            .Where(entry => entry.Aggregate.Location?.CarrierId == carrierId)
+            .ToDictionary(entry => entry.Aggregate.Id);
+        var restoredCarrier = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+            await restarted.GetCarrierAsync(carrierId));
+
+        Assert.Equal(2, restoredUnits.Count);
+        Assert.Equal(firstPosition, restoredUnits[firstUnitId].Aggregate.Location);
+        Assert.Equal(secondPosition, restoredUnits[secondUnitId].Aggregate.Location);
+        Assert.Equal(2, restoredCarrier.Aggregate.Capacity);
+        Assert.Equal(station, restoredCarrier.Aggregate.Location);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: firstUnitId)),
+            entry => entry.DestinationLocation == firstPosition);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: secondUnitId)),
+            entry => entry.DestinationLocation == secondPosition);
+    }
+
+    [Fact]
     public async Task SqliteTimelineRebuildsCarrierSlotLocationAndGenealogyEvidenceAfterRestart()
     {
         using var database = TemporarySqliteDatabase.Create();

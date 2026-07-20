@@ -196,7 +196,8 @@ public static class DevicesModuleServiceCollectionExtensions
             AppContainerProfileExternallyOwned = ReadOptionalBoolean(
                 section?["AppContainerProfileExternallyOwned"],
                 defaultValue: false,
-                $"{ExternalProgramHostOptions.SectionName}:AppContainerProfileExternallyOwned")
+                $"{ExternalProgramHostOptions.SectionName}:AppContainerProfileExternallyOwned"),
+            RestrictedServiceSid = section?["RestrictedServiceSid"]
         };
         options.AllowedInheritedEnvironmentVariables.Clear();
         foreach (var variable in section?
@@ -205,22 +206,6 @@ public static class DevicesModuleServiceCollectionExtensions
                  ?? ["SystemRoot", "WINDIR"])
         {
             options.AllowedInheritedEnvironmentVariables.Add(variable);
-        }
-
-        foreach (var account in section?
-                     .GetSection("AllowedRestrictedHostAccounts")
-                     .Get<string[]>()
-                 ?? [])
-        {
-            options.AllowedRestrictedHostAccounts.Add(account);
-        }
-
-        foreach (var sid in section?
-                     .GetSection("AllowedRestrictedHostSids")
-                     .Get<string[]>()
-                 ?? [])
-        {
-            options.AllowedRestrictedHostSids.Add(sid);
         }
 
         options.Validate();

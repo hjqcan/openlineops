@@ -110,6 +110,21 @@ test('engineering dirty state covers mutable source but not immutable publicatio
     false);
 });
 
+test('new engineering source keeps device owner selection explicit', () => {
+  const populatedOptions = engineeringModel.createEngineeringDeviceOwnerOptions([
+    { systemId: 'station-a', displayName: 'Station A' },
+    { systemId: 'diagnostics-a', displayName: 'Diagnostics A' }
+  ]);
+  assert.deepEqual(populatedOptions, [
+    { value: '', label: 'Select a device owner System' },
+    { value: 'station-a', label: 'Station A (station-a)' },
+    { value: 'diagnostics-a', label: 'Diagnostics A (diagnostics-a)' }
+  ]);
+  assert.deepEqual(
+    engineeringModel.createEngineeringDeviceOwnerOptions([]),
+    [{ value: '', label: 'No System in selected Station' }]);
+});
+
 test('engineering workbench participates in the unified document lifecycle', () => {
   assert.match(workbenchSource, /useEditorDocument\(\{/u);
   assert.match(workbenchSource, /dirty: draftDirty/u);

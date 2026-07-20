@@ -48,6 +48,12 @@ const helperFileNames = [
   'OpenLineOps.VendorTestHelper.deps.json',
   'OpenLineOps.VendorTestHelper.runtimeconfig.json'
 ];
+const vendorProgramEntryPoint = 'files/bin/OpenLineOps.VendorTestHelper.exe';
+const vendorProgramInventoryPaths = [
+  ...helperFileNames.map(fileName => `files/bin/${fileName}`),
+  'files/config/shared.settings.json',
+  'files/lib/shared.settings.json'
+].sort((left, right) => left.localeCompare(right, 'en-US'));
 const productionClosureEvidenceRoot = path.resolve(
   repoRoot,
   'artifacts',
@@ -61,6 +67,7 @@ const privateHandoffBaseRoot = path.resolve(
   os.tmpdir(),
   'openlineops-production-closure-handoffs');
 const privateExecutionRoot = path.join(privateExecutionBaseRoot, runSuffix);
+const vendorProgramDirectory = path.join(privateExecutionRoot, 'vendor-program-directory');
 const screenshotRoot = path.join(artifactRoot, 'screenshots');
 const traceArtifactSaveRoot = path.join(artifactRoot, 'verified-trace-artifact-saves');
 const summaryPath = path.join(artifactRoot, 'summary.json');
@@ -284,7 +291,9 @@ function createHarness() {
     environment: {
       OPENLINEOPS_REPO_ROOT: repoRoot,
       OPENLINEOPS_DESKTOP_LOG_PATH: path.join(privateExecutionRoot, 'desktop-logs'),
-      OPENLINEOPS_E2E_TRACE_ARTIFACT_SAVE_ROOT: traceArtifactSaveRoot
+      OPENLINEOPS_E2E_TRACE_ARTIFACT_SAVE_ROOT: traceArtifactSaveRoot,
+      OPENLINEOPS_E2E_ALLOW_EXTERNAL_PROGRAM_DIRECTORY_DIALOG_BYPASS: '1',
+      OPENLINEOPS_E2E_EXTERNAL_PROGRAM_DIRECTORY_PATH: vendorProgramDirectory
     },
     logs
   });
@@ -305,6 +314,20 @@ async function buildVendorHelper() {
   for (const fileName of helperFileNames) {
     await assertFile(path.join(helperOutputDirectory, fileName), `Vendor helper ${fileName}`);
   }
+  await fs.mkdir(path.join(vendorProgramDirectory, 'bin'), { recursive: true });
+  await fs.mkdir(path.join(vendorProgramDirectory, 'config'), { recursive: true });
+  await fs.mkdir(path.join(vendorProgramDirectory, 'lib'), { recursive: true });
+  await Promise.all(helperFileNames.map(fileName => fs.copyFile(
+    path.join(helperOutputDirectory, fileName),
+    path.join(vendorProgramDirectory, 'bin', fileName))));
+  await fs.writeFile(
+    path.join(vendorProgramDirectory, 'config', 'shared.settings.json'),
+    '{"source":"config"}\n',
+    { flag: 'wx' });
+  await fs.writeFile(
+    path.join(vendorProgramDirectory, 'lib', 'shared.settings.json'),
+    '{"source":"lib"}\n',
+    { flag: 'wx' });
 }
 
 async function ensureBackendHealthy() {
@@ -505,7 +528,15 @@ async function authorProductionFixture(targetPath) {
     status: 'passed',
     executionStatus: protocolTrial.executionStatus,
     judgement: protocolTrial.judgement,
-    artifactCount: protocolTrial.artifacts.length
+    artifactCount: protocolTrial.artifacts.length,
+    directoryImport: {
+      entryPoint: vendorProgramEntryPoint,
+      files: vendorProgramInventoryPaths,
+      preservedSameBasenames: [
+        'files/config/shared.settings.json',
+        'files/lib/shared.settings.json'
+      ]
+    }
   };
   await persistSummary();
   const prepFlow = await createAndPublishFlow(ids, createPrepFlow(ids));
@@ -927,7 +958,7 @@ function layoutElement(elementId, kind, targetKind, targetId, parentElementId, x
 }
 
 async function importVendorPrograms(ids) {
-  const vendor = await importVendorProgram(ids, {
+  const vendorDefinition = externalProgramDefinition({
     resourceId: ids.externalProgramResourceId,
     displayName: 'Signed Vendor Test Helper',
     capabilityId: ids.vendorCapabilityId,
@@ -935,7 +966,7 @@ async function importVendorPrograms(ids) {
     argumentTemplates: ['--mode', '{{input.vendorMode}}', '--delay-milliseconds', '30000'],
     timeoutMilliseconds: 60000
   });
-  const preparation = await importVendorProgram(ids, {
+  const preparationDefinition = externalProgramDefinition({
     resourceId: ids.prepExternalProgramResourceId,
     displayName: 'Signed Preparation Delay Helper',
     capabilityId: ids.prepCapabilityId,
@@ -943,17 +974,21 @@ async function importVendorPrograms(ids) {
     argumentTemplates: ['--mode', 'Delay', '--delay-milliseconds', '4000'],
     timeoutMilliseconds: 10000
   });
+  await seedExternalProgramProviderDefinition(ids, vendorDefinition);
+  await seedExternalProgramProviderDefinition(ids, preparationDefinition);
+  const vendor = await importVendorProgramDirectoryInStudio(ids, vendorDefinition);
+  const preparation = await importVendorProgramDirectoryInStudio(ids, preparationDefinition);
   return [vendor, preparation];
 }
 
-async function importVendorProgram(ids, definitionOptions) {
-  const definition = {
+function externalProgramDefinition(definitionOptions) {
+  return {
     resourceId: definitionOptions.resourceId,
     displayName: definitionOptions.displayName,
     capabilityId: definitionOptions.capabilityId,
     commandName: definitionOptions.commandName,
     launchKind: 'ApplicationExecutable',
-    entryPoint: 'files/OpenLineOps.VendorTestHelper.exe',
+    entryPoint: vendorProgramEntryPoint,
     providerKind: null,
     providerKey: null,
     argumentTemplates: definitionOptions.argumentTemplates,
@@ -988,20 +1023,93 @@ async function importVendorProgram(ids, definitionOptions) {
       maximumTotalArtifactBytes: 268435456
     }
   };
-  const files = helperFileNames.map(fileName => ({
-    sourcePath: path.join(helperOutputDirectory, fileName),
-    resourceRelativePath: `files/${fileName}`
-  }));
-  const response = await harness.uploadExternalProgram(
+}
+
+async function seedExternalProgramProviderDefinition(ids, definition) {
+  const seed = {
+    ...definition,
+    launchKind: 'Provider',
+    entryPoint: null,
+    providerKind: 'ProcessCommandProvider',
+    providerKey: `seed.${definition.resourceId}`
+  };
+  await expectApi(
     `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
-      + `/applications/${encodeURIComponent(ids.applicationId)}/external-programs/import`,
-    definition,
-    files);
-  assertStatus(response, 201, `import ${definitionOptions.resourceId} with companion files`);
-  assert(response.body.files.length === helperFileNames.length, 'External program inventory is incomplete.');
+      + `/applications/${encodeURIComponent(ids.applicationId)}`
+      + `/external-programs/${encodeURIComponent(definition.resourceId)}`,
+    { method: 'PUT', body: seed },
+    200,
+    `seed ${definition.resourceId} metadata before Studio directory import`);
+}
+
+async function importVendorProgramDirectoryInStudio(ids, definition) {
+  await harness.click('nav-programs');
+  await harness.waitFor(
+    `Boolean(document.querySelector(${JSON.stringify(`[data-testid="external-program-resource-${definition.resourceId}"]`)}))`,
+    30_000,
+    `${definition.resourceId} in the Program Resources browser`);
+  await harness.click(`external-program-resource-${definition.resourceId}`);
+  await harness.waitFor(
+    `document.querySelector('[data-testid="external-program-resource-id"]')?.value === ${JSON.stringify(definition.resourceId)}`,
+    15_000,
+    `${definition.resourceId} editor`);
+  await harness.click('select-external-program-directory');
+  await harness.waitFor(
+    'Boolean(document.querySelector("[data-testid=\\"external-program-directory-stage\\"]"))'
+      + ` && document.querySelector('[data-testid="external-program-entry-point"]')`
+      + `?.querySelector('option[value=${JSON.stringify(vendorProgramEntryPoint)}]') !== null`,
+    30_000,
+    `validated nested directory inventory for ${definition.resourceId}`);
+  await harness.setSelect('external-program-entry-point', vendorProgramEntryPoint);
+  await harness.waitFor(
+    `document.querySelector('[data-testid="external-program-entry-point"]')?.value === ${JSON.stringify(vendorProgramEntryPoint)}`,
+    10_000,
+    `selected executable entry point for ${definition.resourceId}`);
+  await harness.click('save-external-program-resource');
+  const saveOutcome = await harness.waitFor(
+    `(() => {
+      const text = document.body.innerText;
+      if (text.includes(${JSON.stringify(`resource ${definition.resourceId} saved atomically`)})) {
+        return { status: 'saved' };
+      }
+      const failure = text.split('\\n').find(line => line.startsWith('External program save failed:'));
+      return failure ? { status: 'failed', detail: failure } : null;
+    })()`,
+    30_000,
+    `atomic Program Resource save for ${definition.resourceId}`);
+  if (saveOutcome.status !== 'saved') {
+    const editorSnapshot = await harness.evaluate(`(() => ({
+      launchKind: document.querySelector('[data-testid="external-program-launch-kind"]')?.value ?? null,
+      entryPoint: document.querySelector('[data-testid="external-program-entry-point"]')?.value ?? null,
+      inputSources: Array.from(document.querySelectorAll('[data-testid^="external-program-input-source-"]'))
+        .map(element => element instanceof HTMLInputElement ? element.value : null)
+    }))()`);
+    throw new Error(
+      `Studio directory import failed for ${definition.resourceId}: ${saveOutcome.detail}. Editor: ${JSON.stringify(editorSnapshot)}`);
+  }
+
+  const response = await expectApi(
+    `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
+      + `/applications/${encodeURIComponent(ids.applicationId)}`
+      + `/external-programs/${encodeURIComponent(definition.resourceId)}`,
+    {},
+    200,
+    `read ${definition.resourceId} after Studio directory import`);
+  assert(response.body.launchKind === 'ApplicationExecutable', 'Studio did not persist executable launch kind.');
+  assert(response.body.entryPoint === vendorProgramEntryPoint, 'Studio did not persist the nested executable entry point.');
+  assert(
+    JSON.stringify(response.body.files
+      .map(file => file.relativePath)
+      .sort((left, right) => left.localeCompare(right, 'en-US')))
+      === JSON.stringify(vendorProgramInventoryPaths),
+    'Studio flattened or omitted the external program directory inventory.');
   for (const file of response.body.files) {
     assertSha256(file.sha256, `Imported file ${file.relativePath}`);
   }
+  assert(
+    response.body.files.some(file => file.relativePath === 'files/config/shared.settings.json')
+      && response.body.files.some(file => file.relativePath === 'files/lib/shared.settings.json'),
+    'Same-basename files in distinct nested directories were not preserved.');
   return response.body;
 }
 
@@ -2934,9 +3042,15 @@ main()
       code: 'ProductionClosureFailed',
       detailSha256: createHash('sha256').update(failureText, 'utf8').digest('hex')
     };
-    summary.diagnostics = null;
+    summary.diagnostics = await collectDiagnostics().catch(diagnosticError => ({
+      error: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+      processLogs: logs.slice(-100)
+    }));
     await persistSummary().catch(() => undefined);
     console.error(error);
+    if (logs.length > 0) {
+      console.error(`Recent packaged process logs:\n${logs.slice(-100).join('\n')}`);
+    }
     console.error(`Failure evidence: ${summaryPath}`);
     process.exitCode = 1;
   })
@@ -2980,7 +3094,9 @@ main()
   });
 
 async function collectDiagnostics() {
-  if (!harness?.cdp) return null;
+  if (!harness?.cdp) {
+    return { processLogs: logs.slice(-100) };
+  }
   const [backendStatus, page, activeRuns, lineState] = await Promise.all([
     harness.evaluate('window.openlineopsDesktop.getBackendStatus()').catch(error => ({ error: String(error) })),
     harness.evaluate(`(() => ({
@@ -2995,5 +3111,12 @@ async function collectDiagnostics() {
       : Promise.resolve(null)
   ]);
   const diagnosticScreenshot = await recordScreenshot('failure-diagnostic').catch(() => null);
-  return { backendStatus, page, activeRuns, lineState, diagnosticScreenshot };
+  return {
+    backendStatus,
+    page,
+    activeRuns,
+    lineState,
+    diagnosticScreenshot,
+    processLogs: logs.slice(-100)
+  };
 }

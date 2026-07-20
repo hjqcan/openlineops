@@ -476,7 +476,15 @@ function Test-WindowsBundle {
             if ($null -ne $configurationText) {
                 try {
                     $configuration = $configurationText | ConvertFrom-Json
-                    $agentConfiguration = $configuration.OpenLineOps.Agent
+                    $openLineOpsConfiguration = $configuration.OpenLineOps
+                    $openLineOpsConfigurationProperties = @(
+                        $openLineOpsConfiguration.PSObject.Properties.Name)
+                    if (-not ($openLineOpsConfigurationProperties -ccontains "WindowsServiceName") `
+                        -or $openLineOpsConfiguration.WindowsServiceName -isnot [string] `
+                        -or $openLineOpsConfiguration.WindowsServiceName -cne "") {
+                        Add-Failure "$ArchiveName WindowsServiceName release template must be present and empty for deployment-time binding."
+                    }
+                    $agentConfiguration = $openLineOpsConfiguration.Agent
                     $agentConfigurationProperties = @(
                         $agentConfiguration.PSObject.Properties.Name)
                     if (-not ($agentConfigurationProperties -ccontains "StationSystemId") `
@@ -487,6 +495,11 @@ function Test-WindowsBundle {
                     if (-not ($agentConfigurationProperties -ccontains "HeartbeatInterval") `
                         -or $agentConfiguration.HeartbeatInterval -cne "00:00:05") {
                         Add-Failure "$ArchiveName HeartbeatInterval release template must be exactly '00:00:05'."
+                    }
+                    if (-not ($agentConfigurationProperties -ccontains "PackageCacheDirectory") `
+                        -or $agentConfiguration.PackageCacheDirectory -isnot [string] `
+                        -or $agentConfiguration.PackageCacheDirectory -cne "") {
+                        Add-Failure "$ArchiveName PackageCacheDirectory release template must be present and empty for explicit administrator provisioning."
                     }
                     $brokerUri = $null
                     if ($agentConfiguration.RequireBrokerTls -ne $true `
@@ -570,6 +583,27 @@ function Test-WindowsBundle {
                 }
                 catch {
                     Add-Failure "$ArchiveName appsettings.json is not valid JSON: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $deploymentEntry = @($payloadEntries | Where-Object {
+            [string]::Equals($_.FullName, "DEPLOYMENT.md", [System.StringComparison]::Ordinal)
+        })
+        if ($deploymentEntry.Count -eq 1) {
+            $deploymentText = Read-ZipEntryText `
+                -Entry $deploymentEntry[0] `
+                -Description "$ArchiveName DEPLOYMENT.md"
+            if ($null -ne $deploymentText) {
+                foreach ($requiredProvisioningContract in @(
+                        "--provision-content-cache",
+                        "--remove-content-cache-package",
+                        "OpenLineOps:WindowsServiceName",
+                        "OpenLineOps:Agent:PackageCacheDirectory",
+                        "dedicated content-cache namespace")) {
+                    if ($deploymentText -cnotmatch [regex]::Escape($requiredProvisioningContract)) {
+                        Add-Failure "$ArchiveName DEPLOYMENT.md is missing content-cache provisioning contract '$requiredProvisioningContract'."
+                    }
                 }
             }
         }
@@ -1287,6 +1321,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/verify-evidence-validation.tests.ps1",
             "eng/evidence-validation-test-fixtures.ps1",
             "eng/verify-solution-project-coverage.ps1",
+            "eng/verify-station-agent-content-cache-contract.ps1",
             "eng/inspect-ci-release-artifact.ps1",
             "eng/inspect-release-candidate.ps1",
             "eng/prepare-final-publication.ps1",

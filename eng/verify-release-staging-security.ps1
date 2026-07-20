@@ -6,8 +6,10 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $StageScript = Join-Path $PSScriptRoot "stage-release-artifacts.ps1"
 $PrepareScript = Join-Path $PSScriptRoot "prepare-final-publication.ps1"
+$StagedAgentBundleScript = Join-Path $PSScriptRoot "verify-staged-agent-bundle-e2e.ps1"
 $RabbitMqScript = Join-Path $PSScriptRoot "verify-staged-agent-rabbitmq-e2e.ps1"
 $StudioScript = Join-Path $PSScriptRoot "verify-studio-two-agent-production-closure.ps1"
+$RunnerScript = Join-Path $PSScriptRoot "verify-runner-staged-agent-e2e.ps1"
 $AgentServiceCleanupScript = Join-Path $PSScriptRoot "invoke-run-scoped-agent-service-cleanup.ps1"
 $ExternalAbortScript = Join-Path $PSScriptRoot "verify-agent-service-external-abort-cleanup.ps1"
 . (Join-Path $PSScriptRoot "github-fixture-process.ps1")
@@ -93,8 +95,10 @@ function Invoke-Git {
 
 $stageAst = Get-ScriptAst $StageScript
 $prepareAst = Get-ScriptAst $PrepareScript
+$stagedAgentBundleAst = Get-ScriptAst $StagedAgentBundleScript
 $rabbitMqAst = Get-ScriptAst $RabbitMqScript
 $studioAst = Get-ScriptAst $StudioScript
+$runnerAst = Get-ScriptAst $RunnerScript
 $agentServiceCleanupAst = Get-ScriptAst $AgentServiceCleanupScript
 $externalAbortAst = Get-ScriptAst $ExternalAbortScript
 
@@ -117,8 +121,10 @@ Assert-ParameterAbsent `
 
 $stageText = Get-Content -LiteralPath $StageScript -Raw
 $prepareText = Get-Content -LiteralPath $PrepareScript -Raw
+$stagedAgentBundleText = Get-Content -LiteralPath $StagedAgentBundleScript -Raw
 $rabbitMqText = Get-Content -LiteralPath $RabbitMqScript -Raw
 $studioText = Get-Content -LiteralPath $StudioScript -Raw
+$runnerText = Get-Content -LiteralPath $RunnerScript -Raw
 $agentServiceCleanupText = Get-Content -LiteralPath $AgentServiceCleanupScript -Raw
 $externalAbortText = Get-Content -LiteralPath $ExternalAbortScript -Raw
 foreach ($expectedStageBoundary in @(
@@ -127,6 +133,9 @@ foreach ($expectedStageBoundary in @(
         "ExpectedGitCommit",
         "CoordinatorBaseUri",
         "ArtifactUploadBearerToken",
+        "WindowsServiceName must be present and empty",
+        "PackageCacheDirectory must be present and empty",
+        "--provision-content-cache",
         "Signed release staging requires exactly one certificate-store selector",
         "Sparse or incomplete checkouts cannot be published",
         "traverses a reparse point and cannot be archived",
@@ -147,6 +156,18 @@ if ($stageText -cmatch 'CodeSigningCertificate(?:Path|Password)' `
     -or $prepareText -cmatch 'CodeSigningCertificate(?:Path|Password)') {
     throw "Release staging or final publication still contains a removed file/password signing chain."
 }
+$stationAgentUndeployedContract =
+    '-ExpectedOutputPattern "^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"'
+if ($stagedAgentBundleText -cnotmatch [regex]::Escape(
+        'Agent release template must expose an explicit empty WindowsServiceName') `
+    -or $stagedAgentBundleText -cnotmatch [regex]::Escape(
+        'Agent release template must expose an explicit empty PackageCacheDirectory') `
+    -or $stagedAgentBundleText -cnotmatch [regex]::Escape('OpenLineOps__*') `
+    -or $stagedAgentBundleText -cnotmatch [regex]::Escape($stationAgentUndeployedContract) `
+    -or $stagedAgentBundleText -cmatch [regex]::Escape(
+        'BrokerUri must include a dedicated non-guest username')) {
+    throw "Staged Agent bundle verification must scrub deployment overrides and bind normal startup to the empty WindowsServiceName fail-closed contract."
+}
 if ($rabbitMqText -match 'WaitForExit\s*\(\s*\)') {
     throw "Staged Agent RabbitMQ verification still contains an unbounded WaitForExit call."
 }
@@ -160,14 +181,23 @@ foreach ($expectedTimeoutBoundary in @(
     }
 }
 foreach ($expectedCleanupBoundary in @(
-        "CleanupRunScopedWindowsAgentServicesAndIdentities",
+        "CleanupRunScopedWindowsAgentServicesAndAccess",
         "openlineops-agent-service-cleanup",
+        "Get-ManifestPathKind",
+        "ordinary non-reparse file",
+        "FileAttributes]::ReparsePoint",
+        "FileAttributes]::Device",
+        '-not $PrepareManifest -and $manifestPathKind -ceq "Absent"',
+        "changed while proving its exact service scope absent",
         "Assert-RunScopeAbsent",
         "SourceExists",
         "Assert-NoReparseAncestors",
         "SetOwner",
         "AreAccessRulesProtected",
-        "accountSid",
+        "serviceSid",
+        "serviceSidType",
+        "olo-runner-staged-agent",
+        "NT AUTHORITY\LocalService",
         "PreserveManifest")) {
     if ($agentServiceCleanupText -cnotmatch [regex]::Escape($expectedCleanupBoundary)) {
         throw "Run-scoped Agent service cleanup is missing boundary '$expectedCleanupBoundary'."
@@ -185,8 +215,9 @@ foreach ($expectedAbortBoundary in @(
     }
 }
 if ($rabbitMqText -cnotmatch '(?s)finally\s*\{.*?&\s*\$cleanupScript' `
-    -or $studioText -cnotmatch '(?s)finally\s*\{.*?serviceCleanupScript.*?Invoke-StudioCompensation') {
-    throw "RabbitMQ and Studio wrappers must run the shared service scavenger from finally before Studio compensation."
+    -or $studioText -cnotmatch '(?s)finally\s*\{.*?serviceCleanupScript.*?Invoke-StudioCompensation' `
+    -or $runnerText -cnotmatch '(?s)finally\s*\{.*?serviceCleanupScript.*?Invoke-RunnerAgentCompensation') {
+    throw "RabbitMQ, Studio, and Runner wrappers must run the shared service scavenger from finally before compensation."
 }
 if ($studioText -cmatch 'Invoke-TemporaryAccountPreflight|New-LocalUser|Remove-LocalUser') {
     throw "Studio wrapper still contains destructive account preflight outside the strict scavenger contract."
@@ -217,6 +248,134 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
     Remove-Item -LiteralPath $resolvedWorkRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
+
+$cleanupFixtureBundleRoot = [System.IO.Path]::GetFullPath(
+    (Join-Path $resolvedWorkRoot "cleanup-manifest-agent-bundle"))
+New-Item -ItemType Directory -Path $cleanupFixtureBundleRoot -Force | Out-Null
+Copy-Item `
+    -LiteralPath (Join-Path $env:SystemRoot "System32/where.exe") `
+    -Destination (Join-Path $cleanupFixtureBundleRoot "OpenLineOps.Agent.exe")
+$cleanupManifestBase = [System.IO.Path]::GetFullPath(
+    (Join-Path ([System.IO.Path]::GetTempPath()) "openlineops-agent-service-cleanup"))
+New-Item -ItemType Directory -Path $cleanupManifestBase -Force | Out-Null
+$cleanupFixtureGitHubEnvironment = @{
+    GITHUB_REPOSITORY = "openlineops/openlineops"
+    GITHUB_SHA = "0000000000000000000000000000000000000000"
+    GITHUB_RUN_ID = "1"
+    GITHUB_SERVER_URL = "https://github.com"
+}
+
+function Invoke-CleanupManifestFixture {
+    param(
+        [Parameter(Mandatory = $true)][string] $Scope,
+        [Parameter(Mandatory = $true)][string] $ManifestPath
+    )
+
+    return Invoke-GitHubFixturePowerShellProcess `
+        -ScriptPath $AgentServiceCleanupScript `
+        -Arguments @(
+            "-Kind", "rabbitmq",
+            "-Scope", $Scope,
+            "-AgentBundleRoot", $cleanupFixtureBundleRoot,
+            "-ManifestPath", $ManifestPath,
+            "-Configuration", "Release",
+            "-NoBuild",
+            "-NoRestore") `
+        -GitHubEnvironment $cleanupFixtureGitHubEnvironment
+}
+
+$cleanupManifestFixturePaths = [System.Collections.Generic.List[string]]::new()
+$cleanupManifestReparseTarget = [System.IO.Path]::GetFullPath(
+    (Join-Path $resolvedWorkRoot "cleanup-manifest-reparse-target"))
+try {
+    $absentScope = [System.Guid]::NewGuid().ToString("N")
+    $absentManifestPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $cleanupManifestBase "rabbitmq-$absentScope.json"))
+    $manifestPathKindFunction = Get-FunctionDefinition `
+        -Ast $agentServiceCleanupAst `
+        -Name "Get-ManifestPathKind"
+    $manifestPathKindTest = [scriptblock]::Create(
+        "param(`$ManifestPath)" + [Environment]::NewLine +
+        $manifestPathKindFunction.Extent.Text + [Environment]::NewLine +
+        "Get-ManifestPathKind -Path `$ManifestPath")
+    $absentPathKind = & $manifestPathKindTest $absentManifestPath
+    if ($absentPathKind -cne "Absent") {
+        throw "Run-scoped Agent cleanup did not classify a truly absent manifest path as absent."
+    }
+
+    $directoryScope = [System.Guid]::NewGuid().ToString("N")
+    $directoryManifestPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $cleanupManifestBase "rabbitmq-$directoryScope.json"))
+    New-Item -ItemType Directory -Path $directoryManifestPath | Out-Null
+    $cleanupManifestFixturePaths.Add($directoryManifestPath) | Out-Null
+    $directorySentinelPath = Join-Path $directoryManifestPath "sentinel.txt"
+    [System.IO.File]::WriteAllText(
+        $directorySentinelPath,
+        "directory-must-remain",
+        [System.Text.UTF8Encoding]::new($false))
+    $directoryResult = Invoke-CleanupManifestFixture `
+        -Scope $directoryScope `
+        -ManifestPath $directoryManifestPath
+    if ($directoryResult.ExitCode -eq 0 `
+        -or $directoryResult.Text -notmatch "ordinary non-reparse file" `
+        -or -not (Test-Path -LiteralPath $directoryManifestPath -PathType Container) `
+        -or (Get-Content -LiteralPath $directorySentinelPath -Raw) -cne "directory-must-remain") {
+        Write-Host $directoryResult.Text
+        throw "Run-scoped Agent cleanup did not fail closed without mutating a directory at the manifest path."
+    }
+
+    New-Item -ItemType Directory -Path $cleanupManifestReparseTarget | Out-Null
+    $reparseSentinelPath = Join-Path $cleanupManifestReparseTarget "sentinel.txt"
+    [System.IO.File]::WriteAllText(
+        $reparseSentinelPath,
+        "reparse-target-must-remain",
+        [System.Text.UTF8Encoding]::new($false))
+    $reparseScope = [System.Guid]::NewGuid().ToString("N")
+    $reparseManifestPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $cleanupManifestBase "rabbitmq-$reparseScope.json"))
+    New-Item `
+        -ItemType Junction `
+        -Path $reparseManifestPath `
+        -Target $cleanupManifestReparseTarget | Out-Null
+    $cleanupManifestFixturePaths.Add($reparseManifestPath) | Out-Null
+    $reparseResult = Invoke-CleanupManifestFixture `
+        -Scope $reparseScope `
+        -ManifestPath $reparseManifestPath
+    $reparseItem = Get-Item -LiteralPath $reparseManifestPath -Force
+    if ($reparseResult.ExitCode -eq 0 `
+        -or $reparseResult.Text -notmatch "ordinary non-reparse file" `
+        -or (($reparseItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) `
+        -or (Get-Content -LiteralPath $reparseSentinelPath -Raw) -cne "reparse-target-must-remain") {
+        Write-Host $reparseResult.Text
+        throw "Run-scoped Agent cleanup did not fail closed without traversing or mutating a reparse-point manifest path."
+    }
+}
+finally {
+    foreach ($fixturePath in $cleanupManifestFixturePaths) {
+        if ([System.IO.Path]::GetDirectoryName($fixturePath) -cne $cleanupManifestBase) {
+            throw "Cleanup manifest mutation fixture escaped its deterministic private base."
+        }
+        if (Test-Path -LiteralPath $fixturePath) {
+            $fixtureItem = Get-Item -LiteralPath $fixturePath -Force
+            if (($fixtureItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                [System.IO.Directory]::Delete($fixturePath, $false)
+            }
+            elseif ($fixtureItem -is [System.IO.DirectoryInfo]) {
+                Remove-Item -LiteralPath $fixturePath -Recurse -Force
+            }
+            else {
+                Remove-Item -LiteralPath $fixturePath -Force
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $cleanupManifestReparseTarget) {
+        $expectedReparseParent = [System.IO.Path]::GetFullPath($resolvedWorkRoot).TrimEnd('\', '/')
+        if ([System.IO.Path]::GetDirectoryName($cleanupManifestReparseTarget) -cne $expectedReparseParent) {
+            throw "Cleanup manifest reparse target escaped the verification work root."
+        }
+        Remove-Item -LiteralPath $cleanupManifestReparseTarget -Recurse -Force
+    }
+}
 
 $trackedCopyRepo = Join-Path $resolvedWorkRoot "tracked-copy-repo"
 $trackedCopyDestination = Join-Path $resolvedWorkRoot "tracked-copy-output"
@@ -425,4 +584,6 @@ Write-Host " - Source staging copied only Git-index tracked paths and excluded a
 Write-Host " - Final publication rejected dirty Git state and bound staging to a full commit."
 Write-Host " - Formal file/password signing parameters are absent and command logs redact secret-shaped arguments."
 Write-Host " - Staged Agent RabbitMQ verification has a finite timeout and behavior-verified taskkill process-tree cleanup."
+Write-Host " - RabbitMQ, Studio, and Runner gates invoke the strict restricted-service-SID scavenger from finally."
+Write-Host " - Cleanup manifest absence, directory obstruction, and reparse-point mutations are behavior-verified."
 exit 0

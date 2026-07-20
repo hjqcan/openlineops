@@ -46,6 +46,7 @@ import {
   synchronizeCleanEditorDraft
 } from './editor-draft-baseline-model';
 import {
+  createEngineeringDeviceOwnerOptions,
   engineeringSourceDraftsEqual,
   type EngineeringDraft
 } from './engineering-draft-model';
@@ -151,6 +152,9 @@ export function EngineeringWorkbench({
     () => resources.topology?.systems.filter(system =>
       isSystemWithinStation(system, draft.stationSystemId, resources.topology!)) ?? [],
     [draft.stationSystemId, resources.topology]);
+  const deviceOwnerOptions = useMemo(
+    () => createEngineeringDeviceOwnerOptions(deviceOwnerSystems),
+    [deviceOwnerSystems]);
   const selectedDeviceOwner = deviceOwnerSystems.find(
     system => system.systemId === draft.deviceOwnerSystemId) ?? null;
   const ownerCapabilityIds = useMemo(
@@ -827,11 +831,9 @@ export function EngineeringWorkbench({
                   }}
                   data-testid="engineering-device-owner-system"
                 >
-                  {deviceOwnerSystems.length === 0 ? (
-                    <option value="">No System in selected Station</option>
-                  ) : deviceOwnerSystems.map(system => (
-                    <option key={system.systemId} value={system.systemId}>
-                      {system.displayName} ({system.systemId})
+                  {deviceOwnerOptions.map(option => (
+                    <option key={`owner-option:${option.value}`} value={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>

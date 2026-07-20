@@ -8,6 +8,42 @@ public sealed class StationAgentExecutableContractTests
     [Fact]
     public async Task UndeployedReleaseTemplateFailsClosedWithoutAnUnhandledCrashProcess()
     {
+        var result = await RunAgentAsync();
+
+        Assert.Equal(70, result.ExitCode);
+        Assert.Empty(result.StandardOutput);
+        Assert.Contains(
+            "OpenLineOps:WindowsServiceName must contain 1-80 ASCII",
+            result.StandardError,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AdministrativeContentCacheModesAreExposedByAgentExecutable()
+    {
+        var duplicateProvision = await RunAgentAsync(
+            StationAgentCommandLine.ProvisionContentCacheSwitch,
+            StationAgentCommandLine.ProvisionContentCacheSwitch);
+        Assert.Equal(70, duplicateProvision.ExitCode);
+        Assert.Empty(duplicateProvision.StandardOutput);
+        Assert.Contains(
+            "--provision-content-cache may be specified only once",
+            duplicateProvision.StandardError,
+            StringComparison.Ordinal);
+
+        var invalidRemoval = await RunAgentAsync(
+            StationAgentCommandLine.RemoveContentCachePackageSwitch,
+            new string('A', 64));
+        Assert.Equal(70, invalidRemoval.ExitCode);
+        Assert.Empty(invalidRemoval.StandardOutput);
+        Assert.Contains(
+            "--remove-content-cache-package requires one lowercase SHA-256 value",
+            invalidRemoval.StandardError,
+            StringComparison.Ordinal);
+    }
+
+    private static async Task<AgentProcessResult> RunAgentAsync(params string[] arguments)
+    {
         var executableDirectory = AgentExecutableDirectory();
         var executablePath = Path.Combine(
             executableDirectory,
@@ -26,8 +62,16 @@ public sealed class StationAgentExecutableContractTests
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
         foreach (var name in startInfo.Environment.Keys.Where(name =>
                      name.StartsWith("OpenLineOps__Agent__", StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(
+                         name,
+                         "OpenLineOps__WindowsServiceName",
+                         StringComparison.OrdinalIgnoreCase)
                      || string.Equals(name, "DOTNET_ENVIRONMENT", StringComparison.OrdinalIgnoreCase)
                      || string.Equals(name, "ASPNETCORE_ENVIRONMENT", StringComparison.OrdinalIgnoreCase)).ToArray())
         {
@@ -49,15 +93,13 @@ public sealed class StationAgentExecutableContractTests
         {
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
-            throw new TimeoutException("Undeployed Station Agent did not fail closed within ten seconds.");
+            throw new TimeoutException("Station Agent contract probe did not fail closed within ten seconds.");
         }
 
-        Assert.Equal(70, process.ExitCode);
-        Assert.Empty(await standardOutput);
-        Assert.Contains(
-            "AgentId must satisfy the shared Station identity contract",
-            await standardError,
-            StringComparison.Ordinal);
+        return new AgentProcessResult(
+            process.ExitCode,
+            await standardOutput,
+            await standardError);
     }
 
     private static string AgentExecutableDirectory()
@@ -85,4 +127,9 @@ public sealed class StationAgentExecutableContractTests
             configuration,
             "net10.0");
     }
+
+    private sealed record AgentProcessResult(
+        int ExitCode,
+        string StandardOutput,
+        string StandardError);
 }

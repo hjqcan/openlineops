@@ -15,18 +15,17 @@ public interface IExternalProgramResourceService
         string resourceId,
         CancellationToken cancellationToken = default);
 
-    Task<Result<ExternalProgramResource>> SaveAsync(
+    Task<Result<ExternalProgramResource>> SaveDefinitionAsync(
         string projectId,
         string applicationId,
         SaveExternalProgramResourceRequest request,
-        IReadOnlyCollection<ExternalProgramFileUpload> uploads,
         CancellationToken cancellationToken = default);
 
-    Task<Result<ExternalProgramResource>> ImportFileAsync(
+    Task<Result<ExternalProgramResource>> ImportDirectoryAsync(
         string projectId,
         string applicationId,
-        string resourceId,
-        ExternalProgramFileUpload upload,
+        SaveExternalProgramResourceRequest request,
+        IReadOnlyCollection<ExternalProgramFileUpload> files,
         CancellationToken cancellationToken = default);
 
     Task<Result<bool>> DeleteAsync(

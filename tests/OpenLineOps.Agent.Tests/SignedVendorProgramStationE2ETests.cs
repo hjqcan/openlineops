@@ -4,7 +4,6 @@ using System.Globalization;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -316,11 +315,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         Assert.True(File.Exists(package.PackagePath));
         _packageContentSha256 = package.PackageContentSha256;
 
-        using var currentIdentity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var currentSid = currentIdentity.User?.Value
-            ?? throw new InvalidOperationException("The Windows test identity has no SID.");
         var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var hasRestrictedStationIdentity =
+            AgentTestStationServiceIdentity.TryReadCurrent(out _);
         var installer = new SignedStationPackageInstaller(new StationPackageTrustOptions(
             _cacheRoot,
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -328,7 +326,9 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 ["station-release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
             },
             ImmutableReaderSid: contentCapabilitySid,
-            ImmutableHostReaderSid: currentSid));
+            ImmutableStationServiceSid:
+                AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+            new InventoryOnlyTestContentProtector());
         _resourceFenceValidator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
         _runtimeHost = new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
@@ -342,10 +342,13 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 MaximumProcessMemoryBytes: 1024L * 1024 * 1024,
                 MaximumJobMemoryBytes: 4L * 1024 * 1024 * 1024,
                 MaximumCpuTime: TimeSpan.FromMinutes(3),
-                RequireRestrictedExternalProgramHostIdentity: false,
+                RequireRestrictedExternalProgramHostIdentity: hasRestrictedStationIdentity,
+                RestrictedServiceSid: hasRestrictedStationIdentity
+                    ? AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()
+                    : null,
                 RequireExternalProgramAppContainerIsolation: true,
                 ExternalProgramAppContainerProfileNamespace: AppContainerProfileNamespace,
-                RequireImmutableExternalProgramContent: true,
+                RequireImmutableExternalProgramContent: hasRestrictedStationIdentity,
                 PythonScript: PythonScriptOptions()),
             _resourceFenceValidator,
             clock: new FixedClock(Now));
@@ -382,11 +385,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             new ProjectReleaseStationPackageRequest(release, metadata, Now))).Packages);
         _packageContentSha256 = package.PackageContentSha256;
 
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var currentSid = identity.User?.Value
-            ?? throw new InvalidOperationException("The Windows test identity has no SID.");
         var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var hasRestrictedStationIdentity =
+            AgentTestStationServiceIdentity.TryReadCurrent(out _);
         var installer = new SignedStationPackageInstaller(new StationPackageTrustOptions(
             _cacheRoot,
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -394,7 +396,9 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 ["python-station-release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
             },
             ImmutableReaderSid: contentCapabilitySid,
-            ImmutableHostReaderSid: currentSid));
+            ImmutableStationServiceSid:
+                AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+            new InventoryOnlyTestContentProtector());
         _resourceFenceValidator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
         _runtimeHost = new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
@@ -408,7 +412,11 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 MaximumProcessMemoryBytes: 1024L * 1024 * 1024,
                 MaximumJobMemoryBytes: 2L * 1024 * 1024 * 1024,
                 MaximumCpuTime: TimeSpan.FromMinutes(1),
-                RequireImmutableExternalProgramContent: true,
+                RequireRestrictedExternalProgramHostIdentity: hasRestrictedStationIdentity,
+                RestrictedServiceSid: hasRestrictedStationIdentity
+                    ? AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()
+                    : null,
+                RequireImmutableExternalProgramContent: hasRestrictedStationIdentity,
                 PythonScript: PythonScriptOptions()),
             _resourceFenceValidator,
             clock: new FixedClock(Now));
@@ -446,11 +454,10 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             new ProjectReleaseStationPackageRequest(release, metadata, Now))).Packages);
         _packageContentSha256 = package.PackageContentSha256;
 
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var currentSid = identity.User?.Value
-            ?? throw new InvalidOperationException("The Windows test identity has no SID.");
         var contentCapabilitySid = WindowsAppContainerIdentity.EnsureCapabilitySid(
             WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
+        var hasRestrictedStationIdentity =
+            AgentTestStationServiceIdentity.TryReadCurrent(out _);
         var installer = new SignedStationPackageInstaller(new StationPackageTrustOptions(
             _cacheRoot,
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -458,7 +465,9 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 ["plugin-station-release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
             },
             ImmutableReaderSid: contentCapabilitySid,
-            ImmutableHostReaderSid: currentSid));
+            ImmutableStationServiceSid:
+                AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+            new InventoryOnlyTestContentProtector());
         _resourceFenceValidator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
         _runtimeHost = new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
@@ -472,7 +481,11 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 MaximumProcessMemoryBytes: 1024L * 1024 * 1024,
                 MaximumJobMemoryBytes: 2L * 1024 * 1024 * 1024,
                 MaximumCpuTime: TimeSpan.FromMinutes(1),
-                RequireImmutableExternalProgramContent: true,
+                RequireRestrictedExternalProgramHostIdentity: hasRestrictedStationIdentity,
+                RestrictedServiceSid: hasRestrictedStationIdentity
+                    ? AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()
+                    : null,
+                RequireImmutableExternalProgramContent: hasRestrictedStationIdentity,
                 PythonScript: PythonScriptOptions()),
             _resourceFenceValidator,
             clock: new FixedClock(Now));
@@ -889,7 +902,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
 
         try
         {
-            return await new FileSystemExternalProgramResourceRepository().SaveAsync(
+            return await new FileSystemExternalProgramResourceRepository().ImportDirectoryAsync(
                 scope,
                 new SaveExternalProgramResourceRequest(
                     ResourceId,
@@ -1993,16 +2006,14 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
 
         if (Directory.Exists(_cacheRoot))
         {
-            var protector = new ImmutableContentProtector();
-            foreach (var contentDirectory in Directory.EnumerateDirectories(_cacheRoot).ToArray())
-            {
-                var leaf = Path.GetFileName(contentDirectory);
-                if (leaf.Length == 64
-                    && leaf.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
-                {
-                    protector.DeleteProtectedInstallation(_cacheRoot, contentDirectory);
-                }
-            }
+            var policy = new ImmutableContentProtectionPolicy(
+                WindowsAppContainerIdentity.EnsureCapabilitySid(
+                    WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+                AgentTestStationServiceIdentity.ConfiguredOrFixtureSid());
+            AgentTestStationPackageCache.RemovePackageInstallations(
+                _cacheRoot,
+                new InventoryOnlyTestContentProtector(),
+                policy);
 
             Directory.Delete(_cacheRoot);
         }

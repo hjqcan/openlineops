@@ -6,33 +6,31 @@ using OpenLineOps.Agent.Infrastructure.Packages;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 
 const int hostFailureExitCode = 70;
-const string defaultWindowsServiceName = "OpenLineOps Station Agent";
 
 try
 {
-    var builder = Host.CreateApplicationBuilder(args);
-    var configuredWindowsServiceName = builder.Configuration[
-        "OpenLineOps:WindowsServiceName"];
-    var windowsServiceName = configuredWindowsServiceName
-        ?? defaultWindowsServiceName;
-    if (string.IsNullOrWhiteSpace(windowsServiceName)
-        || !string.Equals(
-            windowsServiceName,
-            windowsServiceName.Trim(),
-            StringComparison.Ordinal)
-        || windowsServiceName.Length > 80
-        || windowsServiceName.Contains('/')
-        || windowsServiceName.Contains('\\')
-        || windowsServiceName.Any(char.IsControl))
+    var commandLine = StationAgentCommandLine.Parse(args);
+    var builder = Host.CreateApplicationBuilder(commandLine.ConfigurationArguments);
+    if (commandLine.ProvisionContentCache)
     {
-        throw new InvalidDataException(
-            "OpenLineOps:WindowsServiceName must be canonical non-empty text with no "
-            + "leading or trailing whitespace, at most 80 characters, and contain "
-            + "neither path separators nor control characters.");
+        StationAgentContentCacheProvisioningCommand.Execute(builder.Configuration);
+        return 0;
     }
+    if (commandLine.RemoveContentCachePackageSha256 is not null)
+    {
+        await StationAgentContentCacheProvisioningCommand.RemovePackageAsync(
+            builder.Configuration,
+            commandLine.RemoveContentCachePackageSha256);
+        return 0;
+    }
+
+    var windowsServiceName = WindowsStationServiceIdentityReader.RequireCanonicalServiceName(
+        builder.Configuration["OpenLineOps:WindowsServiceName"],
+        "OpenLineOps:WindowsServiceName");
 
     builder.Services.AddWindowsService(options =>
     {
@@ -40,6 +38,15 @@ try
     });
 
     var options = StationAgentHostOptions.Load(builder.Configuration);
+    if (!OperatingSystem.IsWindows())
+    {
+        throw new PlatformNotSupportedException(
+            "OpenLineOps Station Agent requires a Windows LocalService token with a restricted service SID.");
+    }
+
+    var stationServiceSid = WindowsStationServiceIdentityReader.ReadRequired(
+        WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(windowsServiceName))
+        .ServiceSid;
     Directory.CreateDirectory(options.DataDirectory);
     var sqliteBuilder = new SqliteConnectionStringBuilder
     {
@@ -76,7 +83,8 @@ try
             options.PackageCacheDirectory,
             options.TrustedPackagePublicKeys,
             ImmutableReaderSid: WindowsAppContainerIdentity.EnsureCapabilitySid(
-                WindowsAppContainerIdentity.ExternalProgramContentCapabilityName))));
+                WindowsAppContainerIdentity.ExternalProgramContentCapabilityName),
+            ImmutableStationServiceSid: stationServiceSid)));
     builder.Services.AddSingleton<IStationMaterialArrivalDeploymentProvider>(serviceProvider =>
         new SignedStationMaterialArrivalDeploymentProvider(
             new SignedStationMaterialArrivalDeploymentOptions(
@@ -97,10 +105,7 @@ try
             options.RuntimeTimeout,
             options.MaximumRuntimeOutputBytes,
             RequireRestrictedExternalProgramHostIdentity: true,
-            AllowedRestrictedExternalProgramHostAccounts:
-                options.AllowedRestrictedExternalProgramHostAccounts,
-            AllowedRestrictedExternalProgramHostSids:
-                options.AllowedRestrictedExternalProgramHostSids,
+            RestrictedServiceSid: stationServiceSid,
             RequireExternalProgramAppContainerIsolation: true,
             ExternalProgramAppContainerProfileNamespace:
                 options.ExternalProgramAppContainerProfileNamespace,
@@ -137,8 +142,8 @@ try
     builder.Services.AddSingleton<IStationAgentMessagePublisher>(provider =>
         provider.GetRequiredService<RabbitMqStationTransport>());
     builder.Services.AddSingleton<StationMaterialArrivalOutboxDispatcher>();
-    builder.Services.AddSingleton(_ => new StationMaterialArrivalLocalIpcOptions(
-        options.MaterialArrivalPipeName));
+    builder.Services.AddSingleton(_ =>
+        StationMaterialArrivalLocalIpcOptions.ForStationServiceSid(stationServiceSid));
     builder.Services.AddSingleton<StationMaterialArrivalLocalIpcServer>();
     const string artifactUploadHttpClient = "OpenLineOps.StationArtifactUpload";
     builder.Services
