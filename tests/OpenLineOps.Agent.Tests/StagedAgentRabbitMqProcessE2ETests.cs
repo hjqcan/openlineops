@@ -99,6 +99,45 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH";
 
     [Fact]
+    public void NonAdministrativeTokenEvidenceRequiresIndependentAdministratorMembershipProof()
+    {
+        var evidence = new AgentHostTokenEvidence(
+            "machine\\standard-user",
+            "S-1-5-21-1-2-3-1001",
+            IsPrimaryToken: true,
+            IsElevated: false,
+            HasRestrictions: false,
+            AdministratorGroupPresent: false,
+            AdministratorGroupEnabled: false,
+            AdministratorGroupDenyOnly: false,
+            PrincipalAdministratorMembership: false,
+            IsAuthenticated: true,
+            IsSystem: false);
+
+        Assert.True(evidence.NonAdministrative);
+        Assert.False((evidence with
+        {
+            PrincipalAdministratorMembership = true
+        }).NonAdministrative);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ProfileDeletionRetryPolicyIsExplicitAndFailClosed()
+    {
+        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(5));
+        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(32));
+        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(33));
+        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(170));
+        Assert.True(RestrictedAgentIdentity.IsTransientProfileDeletionError(1224));
+
+        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(0));
+        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(2));
+        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(3));
+        Assert.False(RestrictedAgentIdentity.IsTransientProfileDeletionError(87));
+    }
+
+    [Fact]
     [SupportedOSPlatform("windows")]
     public async Task StagedAgentBuffersSignedVendorResultDuringBrokerOutageAndDeduplicatesAcrossRestart()
     {
@@ -3317,11 +3356,21 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint PolicyCreateAccount = 0x00000010;
         private const uint PolicyLookupNames = 0x00000800;
         private const uint StatusObjectNameNotFound = 0xC0000034;
+        private const int ErrorFileNotFound = 2;
+        private const int ErrorPathNotFound = 3;
+        private const int ErrorAccessDenied = 5;
+        private const int ErrorSharingViolation = 32;
+        private const int ErrorLockViolation = 33;
+        private const int ErrorBusy = 170;
+        private const int ErrorUserMappedFile = 1224;
+        private const uint InvalidFileAttributes = uint.MaxValue;
         private const string ServiceLogonRight = "SeServiceLogonRight";
         private const string TemporaryStandardServiceAccountStrategy =
             "temporary-standard-service-account";
         private const string TemporaryStandardServiceAccountComment =
             "Temporary OpenLineOps staged Agent E2E identity";
+        private static readonly TimeSpan ProfileDeletionTimeout =
+            TimeSpan.FromSeconds(60);
 
         private readonly List<GrantedDirectoryAccess> _grantedAccess = [];
         private readonly string _userName;
@@ -3751,46 +3800,224 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         {
             const string profileListRegistryPath =
                 @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+            var canonicalSid = new SecurityIdentifier(sid).Value;
+            if (!string.Equals(canonicalSid, sid, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent profile SID '{sid}' is not canonical.");
+            }
+
             var profileRegistryPath = profileListRegistryPath + "\\" + sid;
-            string? registeredProfilePath;
-            using (var key = Registry.LocalMachine.OpenSubKey(
-                       profileRegistryPath,
-                       writable: false))
+            var userProfilesRoot = ReadRequiredProfilesDirectory(
+                profileListRegistryPath);
+            var profilesRootAttributes = ReadPathAttributesRequired(
+                userProfilesRoot,
+                "configured Windows user-profile root")
+                ?? throw new DirectoryNotFoundException(
+                    $"The configured Windows user-profile root '{userProfilesRoot}' does not exist.");
+            if (!profilesRootAttributes.HasFlag(FileAttributes.Directory))
             {
-                var registeredProfileValue = key?.GetValue(
-                    "ProfileImagePath",
-                    defaultValue: null,
-                    RegistryValueOptions.DoNotExpandEnvironmentNames);
-                if (registeredProfileValue is not null
-                    && registeredProfileValue is not string)
-                {
-                    throw new InvalidDataException(
-                        $"Run-scoped staged Agent profile for SID '{sid}' has a non-string ProfileImagePath.");
-                }
-
-                registeredProfilePath = registeredProfileValue as string;
+                throw new InvalidDataException(
+                    $"The configured Windows user-profile root '{userProfilesRoot}' is not a directory.");
             }
 
-            if (registeredProfilePath is not null)
+            EnsureNoReparsePointInExistingPath(
+                userProfilesRoot,
+                "configured Windows user-profile root");
+            var expectedDefaultProfilePath = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(Path.Combine(userProfilesRoot, accountName)));
+            if (!string.Equals(
+                    Path.GetDirectoryName(expectedDefaultProfilePath),
+                    userProfilesRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    Path.GetFileName(expectedDefaultProfilePath),
+                    accountName,
+                    StringComparison.Ordinal))
             {
-                if (string.IsNullOrWhiteSpace(registeredProfilePath))
-                {
-                    throw new InvalidDataException(
-                        $"Run-scoped staged Agent profile for SID '{sid}' has an empty ProfileImagePath.");
-                }
-
-                registeredProfilePath = Environment.ExpandEnvironmentVariables(
-                    registeredProfilePath);
-                if (!Path.IsPathFullyQualified(registeredProfilePath))
-                {
-                    throw new InvalidDataException(
-                        $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not absolute.");
-                }
-
-                registeredProfilePath = Path.TrimEndingDirectorySeparator(
-                    Path.GetFullPath(registeredProfilePath));
+                throw new InvalidDataException(
+                    $"The expected profile path for account '{accountName}' is not a direct child of the configured profile root.");
             }
 
+            VerifyProfileDeletionProvenance(
+                profileListRegistryPath,
+                profileRegistryPath,
+                userProfilesRoot,
+                expectedDefaultProfilePath,
+                sid,
+                accountName);
+            var initialRegisteredProfilePath = ReadValidatedRegisteredProfilePath(
+                profileRegistryPath,
+                sid);
+            var initialState = ReadProfileArtifactState(
+                profileRegistryPath,
+                expectedDefaultProfilePath,
+                sid);
+            if (initialRegisteredProfilePath is null)
+            {
+                if (initialState.Absent)
+                {
+                    return;
+                }
+
+                throw CreateProfileDeletionException(
+                    sid,
+                    nativeErrorCode: 0,
+                    initialState,
+                    "Exact profile artifacts exist without a ProfileList SID-to-path binding");
+            }
+
+            if (!string.Equals(
+                    initialRegisteredProfilePath,
+                    expectedDefaultProfilePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Run-scoped staged Agent initial ProfileImagePath '{initialRegisteredProfilePath}' is not the exact direct profile for account '{accountName}'.");
+            }
+
+            // Never use a mutable registry string as the destructive path argument.
+            // The captured binding authorizes only this already-derived direct child.
+            var capturedRegisteredProfilePath = expectedDefaultProfilePath;
+
+            var elapsed = Stopwatch.StartNew();
+            var lastNativeError = 0;
+            while (true)
+            {
+                VerifyProfileDeletionProvenance(
+                    profileListRegistryPath,
+                    profileRegistryPath,
+                    userProfilesRoot,
+                    expectedDefaultProfilePath,
+                    sid,
+                    accountName);
+                var state = ReadProfileArtifactState(
+                    profileRegistryPath,
+                    expectedDefaultProfilePath,
+                    sid);
+                if (elapsed.Elapsed >= ProfileDeletionTimeout)
+                {
+                    throw CreateProfileDeletionException(
+                        sid,
+                        lastNativeError,
+                        state,
+                        "The bounded profile-unload and deletion deadline expired");
+                }
+
+                if (!state.SidHiveLoaded && !state.ClassesHiveLoaded)
+                {
+                    if (DeleteProfile(sid, capturedRegisteredProfilePath, null))
+                    {
+                        VerifyProfileAbsent(
+                            profileListRegistryPath,
+                            profileRegistryPath,
+                            userProfilesRoot,
+                            expectedDefaultProfilePath,
+                            sid,
+                            accountName,
+                            elapsed);
+                        return;
+                    }
+
+                    lastNativeError = Marshal.GetLastWin32Error();
+                    state = ReadProfileArtifactState(
+                        profileRegistryPath,
+                        expectedDefaultProfilePath,
+                        sid);
+                    if (lastNativeError is ErrorFileNotFound or ErrorPathNotFound)
+                    {
+                        if (state.Absent)
+                        {
+                            return;
+                        }
+
+                        throw CreateProfileDeletionException(
+                            sid,
+                            lastNativeError,
+                            state,
+                            "DeleteProfileW reported an absent path while exact profile residue remained");
+                    }
+
+                    if (!IsTransientProfileDeletionError(lastNativeError))
+                    {
+                        throw CreateProfileDeletionException(
+                            sid,
+                            lastNativeError,
+                            state,
+                            "DeleteProfileW returned a non-transient error");
+                    }
+                }
+
+                Thread.Sleep(GetProfileDeletionRetryDelay(elapsed.Elapsed));
+            }
+        }
+
+        private static void VerifyProfileAbsent(
+            string profileListRegistryPath,
+            string profileRegistryPath,
+            string userProfilesRoot,
+            string expectedDefaultProfilePath,
+            string sid,
+            string accountName,
+            Stopwatch elapsed)
+        {
+            while (true)
+            {
+                VerifyProfileDeletionProvenance(
+                    profileListRegistryPath,
+                    profileRegistryPath,
+                    userProfilesRoot,
+                    expectedDefaultProfilePath,
+                    sid,
+                    accountName);
+                var state = ReadProfileArtifactState(
+                    profileRegistryPath,
+                    expectedDefaultProfilePath,
+                    sid);
+                if (state.Absent)
+                {
+                    return;
+                }
+
+                if (elapsed.Elapsed >= ProfileDeletionTimeout)
+                {
+                    throw CreateProfileDeletionException(
+                        sid,
+                        nativeErrorCode: 0,
+                        state,
+                        "DeleteProfileW succeeded but exact profile residue remained until the bounded deadline");
+                }
+
+                Thread.Sleep(GetProfileDeletionRetryDelay(elapsed.Elapsed));
+            }
+        }
+
+        internal static bool IsTransientProfileDeletionError(int nativeErrorCode) =>
+            nativeErrorCode is ErrorAccessDenied
+                or ErrorSharingViolation
+                or ErrorLockViolation
+                or ErrorBusy
+                or ErrorUserMappedFile;
+
+        private static TimeSpan GetProfileDeletionRetryDelay(TimeSpan elapsed)
+        {
+            var remaining = ProfileDeletionTimeout - elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return TimeSpan.Zero;
+            }
+
+            var desired = elapsed < TimeSpan.FromSeconds(2)
+                ? TimeSpan.FromMilliseconds(100)
+                : elapsed < TimeSpan.FromSeconds(10)
+                    ? TimeSpan.FromMilliseconds(250)
+                    : TimeSpan.FromMilliseconds(500);
+            return desired <= remaining ? desired : remaining;
+        }
+
+        private static string ReadRequiredProfilesDirectory(
+            string profileListRegistryPath)
+        {
             string profilesDirectory;
             using (var profileListKey = Registry.LocalMachine.OpenSubKey(
                        profileListRegistryPath,
@@ -3814,32 +4041,46 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "The Windows ProfileList ProfilesDirectory value is not an absolute path.");
             }
 
-            var userProfilesRoot = Path.TrimEndingDirectorySeparator(
+            return Path.TrimEndingDirectorySeparator(
                 Path.GetFullPath(profilesDirectory));
-            if (!Directory.Exists(userProfilesRoot))
+        }
+
+        private static void VerifyProfileDeletionProvenance(
+            string profileListRegistryPath,
+            string profileRegistryPath,
+            string userProfilesRoot,
+            string expectedDefaultProfilePath,
+            string sid,
+            string accountName)
+        {
+            var currentProfilesRoot = ReadRequiredProfilesDirectory(
+                profileListRegistryPath);
+            if (!string.Equals(
+                    currentProfilesRoot,
+                    userProfilesRoot,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                throw new DirectoryNotFoundException(
-                    $"The configured Windows user-profile root '{userProfilesRoot}' does not exist.");
+                throw new InvalidOperationException(
+                    "The configured Windows user-profile root changed during staged Agent cleanup.");
+            }
+
+            var profilesRootAttributes = ReadPathAttributesRequired(
+                userProfilesRoot,
+                "configured Windows user-profile root")
+                ?? throw new DirectoryNotFoundException(
+                    $"The configured Windows user-profile root '{userProfilesRoot}' disappeared during staged Agent cleanup.");
+            if (!profilesRootAttributes.HasFlag(FileAttributes.Directory))
+            {
+                throw new InvalidDataException(
+                    $"The configured Windows user-profile root '{userProfilesRoot}' is not a directory.");
             }
 
             EnsureNoReparsePointInExistingPath(
                 userProfilesRoot,
                 "configured Windows user-profile root");
-            var expectedDefaultProfilePath = Path.TrimEndingDirectorySeparator(
-                Path.GetFullPath(Path.Combine(userProfilesRoot, accountName)));
-            if (!string.Equals(
-                    Path.GetDirectoryName(expectedDefaultProfilePath),
-                    userProfilesRoot,
-                    StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(
-                    Path.GetFileName(expectedDefaultProfilePath),
-                    accountName,
-                    StringComparison.Ordinal))
-            {
-                throw new InvalidDataException(
-                    $"The expected profile path for account '{accountName}' is not a direct child of the configured profile root.");
-            }
-
+            var registeredProfilePath = ReadValidatedRegisteredProfilePath(
+                profileRegistryPath,
+                sid);
             if (registeredProfilePath is not null
                 && !string.Equals(
                     registeredProfilePath,
@@ -3850,87 +4091,155 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not the exact direct profile for account '{accountName}'.");
             }
 
-            if (registeredProfilePath is not null
-                && (Directory.Exists(registeredProfilePath) || File.Exists(registeredProfilePath)))
+            var profileAttributes = ReadPathAttributesRequired(
+                expectedDefaultProfilePath,
+                "run-scoped staged Agent profile path");
+            if (profileAttributes is not null)
             {
+                if (!profileAttributes.Value.HasFlag(FileAttributes.Directory))
+                {
+                    throw new InvalidDataException(
+                        $"Run-scoped staged Agent profile path '{expectedDefaultProfilePath}' is not a directory.");
+                }
+
                 EnsureNoReparsePointInExistingPath(
-                    registeredProfilePath,
+                    expectedDefaultProfilePath,
+                    "run-scoped staged Agent profile path");
+            }
+        }
+
+        private static string? ReadValidatedRegisteredProfilePath(
+            string profileRegistryPath,
+            string sid)
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                profileRegistryPath,
+                writable: false);
+            if (key is null)
+            {
+                return null;
+            }
+
+            var registeredProfileValue = key.GetValue(
+                "ProfileImagePath",
+                defaultValue: null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames);
+            if (registeredProfileValue is not string registeredProfilePath
+                || string.IsNullOrWhiteSpace(registeredProfilePath))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent profile for SID '{sid}' has a missing, empty, or non-string ProfileImagePath.");
+            }
+
+            registeredProfilePath = Environment.ExpandEnvironmentVariables(
+                registeredProfilePath);
+            if (!Path.IsPathFullyQualified(registeredProfilePath))
+            {
+                throw new InvalidDataException(
+                    $"Run-scoped staged Agent ProfileImagePath '{registeredProfilePath}' is not absolute.");
+            }
+
+            return Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(registeredProfilePath));
+        }
+
+        private static ProfileArtifactState ReadProfileArtifactState(
+            string profileRegistryPath,
+            string expectedDefaultProfilePath,
+            string sid)
+        {
+            bool profileRegistryPresent;
+            using (var key = Registry.LocalMachine.OpenSubKey(
+                       profileRegistryPath,
+                       writable: false))
+            {
+                profileRegistryPresent = key is not null;
+            }
+
+            var profileAttributes = ReadPathAttributesRequired(
+                expectedDefaultProfilePath,
+                "run-scoped staged Agent profile path");
+            var profilePathPresent = profileAttributes is not null;
+            if (profileAttributes is not null)
+            {
+                if (!profileAttributes.Value.HasFlag(FileAttributes.Directory))
+                {
+                    throw new InvalidDataException(
+                        $"Run-scoped staged Agent profile path '{expectedDefaultProfilePath}' is not a directory.");
+                }
+
+                EnsureNoReparsePointInExistingPath(
+                    expectedDefaultProfilePath,
                     "run-scoped staged Agent profile path");
             }
 
-            const int maximumAttempts = 30;
-            var error = 0;
-            for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+            bool sidHiveLoaded;
+            using (var key = Registry.Users.OpenSubKey(sid, writable: false))
             {
-                if (DeleteProfile(sid, null, null))
-                {
-                    VerifyProfileAbsent(
-                        profileRegistryPath,
-                        registeredProfilePath,
-                        expectedDefaultProfilePath,
-                        sid);
-                    return;
-                }
+                sidHiveLoaded = key is not null;
+            }
 
-                error = Marshal.GetLastWin32Error();
-                if (error is 2 or 3)
-                {
-                    VerifyProfileAbsent(
-                        profileRegistryPath,
-                        registeredProfilePath,
-                        expectedDefaultProfilePath,
-                        sid);
-                    return;
-                }
+            bool classesHiveLoaded;
+            using (var key = Registry.Users.OpenSubKey(
+                       sid + "_Classes",
+                       writable: false))
+            {
+                classesHiveLoaded = key is not null;
+            }
 
-                if (attempt < maximumAttempts)
-                {
-                    Thread.Sleep(TimeSpan.FromMilliseconds(100));
-                }
+            return new ProfileArtifactState(
+                profileRegistryPresent,
+                profilePathPresent,
+                sidHiveLoaded,
+                classesHiveLoaded);
+        }
+
+        private static FileAttributes? ReadPathAttributesRequired(
+            string path,
+            string purpose)
+        {
+            var attributes = GetFileAttributes(path);
+            if (attributes != InvalidFileAttributes)
+            {
+                return (FileAttributes)attributes;
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error is ErrorFileNotFound or ErrorPathNotFound)
+            {
+                return null;
             }
 
             throw new Win32Exception(
                 error,
-                $"Could not delete the temporary staged Agent service profile for SID {sid} after bounded retries; preserving the account for retry.");
+                $"Could not inspect {purpose} '{path}' while proving staged Agent profile cleanup.");
         }
 
-        private static void VerifyProfileAbsent(
-            string profileRegistryPath,
-            string? registeredProfilePath,
-            string expectedDefaultProfilePath,
-            string sid)
+        private static Win32Exception CreateProfileDeletionException(
+            string sid,
+            int nativeErrorCode,
+            ProfileArtifactState state,
+            string reason) => new(
+            nativeErrorCode,
+            $"Could not delete the temporary staged Agent service profile for SID {sid}; "
+            + $"{reason}. NativeErrorCode={nativeErrorCode}; "
+            + $"ProfileListPresent={state.ProfileRegistryPresent}; "
+            + $"ProfilePathPresent={state.ProfilePathPresent}; "
+            + $"HkuSidLoaded={state.SidHiveLoaded}; "
+            + $"HkuClassesLoaded={state.ClassesHiveLoaded}. "
+            + "The exact account is preserved for bounded cleanup retry.");
+
+        private sealed record ProfileArtifactState(
+            bool ProfileRegistryPresent,
+            bool ProfilePathPresent,
+            bool SidHiveLoaded,
+            bool ClassesHiveLoaded)
         {
-            const int maximumAttempts = 30;
-            for (var attempt = 1; attempt <= maximumAttempts; attempt++)
-            {
-                var registryAbsent = false;
-                using (var key = Registry.LocalMachine.OpenSubKey(
-                           profileRegistryPath,
-                           writable: false))
-                {
-                    registryAbsent = key is null;
-                }
-
-                var pathAbsent = new[]
-                    {
-                        registeredProfilePath,
-                        expectedDefaultProfilePath
-                    }.Where(static path => !string.IsNullOrWhiteSpace(path))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .All(path => !Directory.Exists(path) && !File.Exists(path));
-                if (registryAbsent && pathAbsent)
-                {
-                    return;
-                }
-
-                if (attempt < maximumAttempts)
-                {
-                    Thread.Sleep(TimeSpan.FromMilliseconds(100));
-                }
-            }
-
-            throw new InvalidOperationException(
-                $"Run-scoped staged Agent profile residue for SID '{sid}' remained in ProfileList or its exact profile directory after bounded verification.");
+            public bool Absent =>
+                !ProfileRegistryPresent
+                && !ProfilePathPresent
+                && !SidHiveLoaded
+                && !ClassesHiveLoaded;
         }
 
         private static void ThrowIdentityCleanupFailures(
@@ -4259,12 +4568,25 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         [DllImport("advapi32.dll")]
         private static extern uint LsaNtStatusToWinError(uint status);
 
-        [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [DllImport(
+            "userenv.dll",
+            EntryPoint = "DeleteProfileW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DeleteProfile(
             string sidString,
             string? profilePath,
             string? computerName);
+
+        [DllImport(
+            "kernel32.dll",
+            EntryPoint = "GetFileAttributesW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        private static extern uint GetFileAttributes(string fileName);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct UserInfo1
@@ -6990,6 +7312,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint ProcessTerminate = 0x0001;
         private const uint ProcessQueryLimitedInformation = 0x1000;
         private const uint Synchronize = 0x00100000;
+        private const uint TokenDuplicate = 0x0002;
         private const uint TokenQuery = 0x0008;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
@@ -7288,7 +7611,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         {
             if (!OpenProcessTokenSafe(
                     processHandle,
-                    TokenQuery,
+                    TokenQuery | TokenDuplicate,
                     out var token))
             {
                 var tokenError = Marshal.GetLastWin32Error();
@@ -7319,8 +7642,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                            && (administrator.Attributes & GroupUseForDenyOnly) == 0;
                 var administratorDenyOnly = administrator is not null
                                             && (administrator.Attributes & GroupUseForDenyOnly) != 0;
-                var principalAdministrator = new WindowsPrincipal(identity)
-                    .IsInRole(WindowsBuiltInRole.Administrator);
+                var principalAdministrator = ReadRequiredEnabledTokenMembership(
+                    token,
+                    administratorSid);
                 return new AgentHostTokenEvidence(
                     identity.Name,
                     userSid.Value,
@@ -7340,6 +7664,48 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     !string.IsNullOrWhiteSpace(identity.AuthenticationType)
                     && !userSid.IsWellKnown(WellKnownSidType.AnonymousSid),
                     userSid.IsWellKnown(WellKnownSidType.LocalSystemSid));
+            }
+        }
+
+        private static bool ReadRequiredEnabledTokenMembership(
+            SafeAccessTokenHandle primaryToken,
+            SecurityIdentifier sid)
+        {
+            if (!DuplicateToken(
+                    primaryToken,
+                    SecurityImpersonationLevel.SecurityIdentification,
+                    out var impersonationToken))
+            {
+                var error = Marshal.GetLastWin32Error();
+                impersonationToken.Dispose();
+                throw new Win32Exception(
+                    error,
+                    "Could not duplicate the staged Agent primary token for an independent administrator-membership proof.");
+            }
+
+            using (impersonationToken)
+            {
+                var sidBytes = new byte[sid.BinaryLength];
+                sid.GetBinaryForm(sidBytes, 0);
+                var pinnedSid = GCHandle.Alloc(sidBytes, GCHandleType.Pinned);
+                try
+                {
+                    if (!CheckTokenMembership(
+                            impersonationToken,
+                            pinnedSid.AddrOfPinnedObject(),
+                            out var isMember))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "Could not independently inspect staged Agent administrator membership on its duplicated impersonation token.");
+                    }
+
+                    return isMember;
+                }
+                finally
+                {
+                    pinnedSid.Free();
+                }
             }
         }
 
@@ -7446,6 +7812,20 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint desiredAccess,
             out SafeAccessTokenHandle tokenHandle);
 
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateToken(
+            SafeAccessTokenHandle existingTokenHandle,
+            SecurityImpersonationLevel impersonationLevel,
+            out SafeAccessTokenHandle duplicateTokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CheckTokenMembership(
+            SafeAccessTokenHandle tokenHandle,
+            IntPtr sidToCheck,
+            [MarshalAs(UnmanagedType.Bool)] out bool isMember);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(
             SafeProcessHandle handle,
@@ -7508,6 +7888,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenType = 8,
             TokenElevation = 20,
             TokenHasRestrictions = 21
+        }
+
+        private enum SecurityImpersonationLevel
+        {
+            SecurityAnonymous,
+            SecurityIdentification,
+            SecurityImpersonation,
+            SecurityDelegation
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);
