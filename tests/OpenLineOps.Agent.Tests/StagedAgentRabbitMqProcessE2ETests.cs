@@ -7876,38 +7876,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             IntPtr token,
             TokenInformationClass informationClass)
         {
-            _ = GetTokenInformation(
-                token,
-                informationClass,
-                IntPtr.Zero,
-                0,
-                out var requiredLength);
-            var sizingError = Marshal.GetLastWin32Error();
-            if (requiredLength <= 0 || sizingError != ErrorInsufficientBuffer)
-            {
-                throw new Win32Exception(
-                    sizingError,
-                    "Could not size staged Agent token information "
-                    + informationClass + ".");
-            }
-
-            if (requiredLength != sizeof(int))
-            {
-                throw new InvalidDataException(
-                    $"Staged Agent token information {informationClass} requires an exact {sizeof(int)}-byte integer, not {requiredLength} bytes.");
-            }
-
-            var buffer = Marshal.AllocHGlobal(requiredLength);
+            const int bufferLength = sizeof(int);
+            var buffer = Marshal.AllocHGlobal(bufferLength);
             try
             {
                 Marshal.WriteInt32(buffer, 0);
 
                 if (!GetTokenInformation(
-                    token,
-                    informationClass,
-                    buffer,
-                    requiredLength,
-                    out var returnedLength))
+                        token,
+                        informationClass,
+                        buffer,
+                        bufferLength,
+                        out var returnedLength))
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
@@ -7915,10 +7895,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         + informationClass + ".");
                 }
 
-                if (returnedLength != requiredLength)
+                if (returnedLength != bufferLength)
                 {
                     throw new InvalidDataException(
-                        $"Staged Agent token information {informationClass} returned {returnedLength} bytes after requiring {requiredLength} bytes.");
+                        $"Staged Agent token information {informationClass} returned {returnedLength} bytes instead of the required {bufferLength}-byte scalar.");
                 }
 
                 return Marshal.ReadInt32(buffer);
