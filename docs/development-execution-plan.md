@@ -247,6 +247,15 @@ the SCM PID, restricted source token, and exact service SID, then validates the
 frozen Agent path/hash and connects to a single-instance reverse pipe while
 impersonating that source token. The runner executes the existing boundary
 assertion through `RunAsClient`; no token handle crosses the process boundary.
+The test harness temporarily grants only that random helper service SID
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on the exact retained Station
+process, proves that it changed no existing ACE, proves the exact helper PID has
+exited before a gate can pass, and restores and revalidates the original process
+DACL. A cleanup path that cannot prove exact helper termination hard-fails and
+still attempts exact DACL restoration so no new helper handle can be opened; a
+DACL restoration or revalidation failure also hard-fails. It never grants the shared
+LocalService, service-logon, Administrators, or runner SID and never enables a
+debug privilege.
 This helper is self-contained, accepts only its fixed nonce-bound request, is
 absent from every deployable artifact, and does not relax any production Agent
 pipe, cache, or token ACL.

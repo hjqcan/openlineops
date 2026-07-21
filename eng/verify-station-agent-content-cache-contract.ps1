@@ -38,6 +38,8 @@ $runnerStagedE2E = Read-RequiredText "tests/OpenLineOps.Runner.Tests/RunnerStage
 $transactionLock = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentCacheTransactionLock.cs"
 $studioHarness = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentExternalProcessHarness.cs"
 $serviceTokenBridge = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs"
+$serviceTokenProcessLease = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsProcessAccessLease.cs"
+$serviceTokenContractTests = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestHelperContractTests.cs"
 $serviceTokenHelperProject = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj"
 $serviceTokenHelperProtocol = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs"
 $serviceTokenHelperNative = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs"
@@ -152,6 +154,9 @@ foreach ($bridgeLiteral in @(
         "AssertBridgeTreeSecurity(",
         "SearchOption.TopDirectoryOnly",
         "CaptureCleanupFailure(",
+        "CaptureHelperProcess(",
+        "EnsureHelperProcessTerminated(",
+        "WaitForProcessExit(",
         "WaitForDeletion(manager, bridgeServiceName, TransitionTimeout)",
         "DeleteBridgeDirectoryWithoutFollowingReparsePoints(",
         '@"NT AUTHORITY\LocalService"',
@@ -161,6 +166,47 @@ foreach ($bridgeLiteral in @(
 }
 if ($serviceTokenBridge -cmatch 'SearchOption\.AllDirectories') {
     throw "The service-token bridge must not recursively traverse helper or cleanup reparse points."
+}
+foreach ($leaseLiteral in @(
+        "ReadControl | WriteDac | ProcessQueryLimitedInformation | Synchronize",
+        "new CommonAce(",
+        "AceQualifier.AccessAllowed",
+        "SetKernelObjectSecurity(",
+        "VerifyTemporaryDacl(",
+        "RestoreRequired();",
+        "AssertEquivalentDacl(")) {
+    Assert-ContainsLiteral $serviceTokenProcessLease $leaseLiteral `
+        "The source-process query lease is missing strict boundary '$leaseLiteral'."
+}
+if ($serviceTokenProcessLease -cmatch 'LocalServiceSid|ServiceLogonSid|AdministratorsSid|SeDebugPrivilege|AdjustTokenPrivileges') {
+    throw "The service-token helper process lease must grant only the random helper service SID query-and-wait access."
+}
+Assert-ContainsLiteral $serviceTokenBridge "WindowsProcessAccessLease.Acquire(" `
+    "The reverse-pipe bridge does not acquire the exact scoped source-process query lease."
+Assert-ContainsLiteral $serviceTokenBridge "if (before.CurrentState == ServiceStartPending)" `
+    "The reverse-pipe bridge does not wait out SCM's non-authoritative start-pending process identifier."
+Assert-ContainsLiteral $serviceTokenBridge "if (before.CurrentState != ServiceRunning" `
+    "The reverse-pipe bridge does not require a running own-process service before capturing its exact process handle."
+if ($serviceTokenBridge -cmatch 'CurrentState is not \(ServiceStartPending or ServiceRunning\)') {
+    throw "The reverse-pipe bridge must not trust an SCM process identifier while the helper service is start-pending."
+}
+Assert-ContainsLiteral $serviceTokenBridge "var postTerminationWait = WaitForSingleObject(" `
+    "The exact helper-process cleanup does not close the normal-exit race after TerminateProcess failure."
+Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseGrantsOnlyBridgeQueryAndWaitAndRestoresDacl" `
+    "The scoped source-process query lease lacks an apply-and-exact-restore regression test."
+Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseRejectsExitedProcessWithStillActiveExitCode" `
+    "The source-process lease does not regression-test exit code 259 against an exact wait handle."
+Assert-ContainsLiteral $serviceTokenContractTests "HelperProcessCleanupTerminatesOnlyTheExactCapturedProcess" `
+    "The one-shot helper cleanup does not behavior-test forced termination of its exact captured process."
+$helperTerminationIndex = $serviceTokenBridge.IndexOf(
+    "EnsureHelperProcessTerminated(",
+    [System.StringComparison]::Ordinal)
+$sourceDaclRestoreIndex = $serviceTokenBridge.IndexOf(
+    "CaptureCleanupFailure(cleanupFailures, sourceProcessAccessLease.Dispose)",
+    [System.StringComparison]::Ordinal)
+if ($helperTerminationIndex -lt 0 `
+    -or $sourceDaclRestoreIndex -le $helperTerminationIndex) {
+    throw "The source process DACL can be restored before exact helper-process termination is attempted."
 }
 foreach ($helperLiteral in @(
         "TokenQuery | TokenDuplicate",
@@ -189,7 +235,21 @@ Assert-ContainsLiteral $serviceTokenHelperOperation "ValidateCanonicalSourceExec
 Assert-ContainsLiteral $serviceTokenHelperOperation "ReceiptTimeout = TimeSpan.FromSeconds(60)" `
     "The helper does not leave a distinct receipt grace period beyond the bounded Agent actions."
 Assert-ContainsLiteral $serviceTokenHelperOperation 'failurePhase = "helper-identity"' `
-    "The helper does not publish bounded phase-only failure diagnostics."
+    "The helper does not publish bounded failure-phase diagnostics."
+Assert-ContainsLiteral $serviceTokenHelperOperation 'failureReason = "open-process"' `
+    "The helper does not distinguish its bounded source-process failure reason."
+Assert-ContainsLiteral $serviceTokenHelperOperation "FindWin32Error(operationFailure)" `
+    "The helper does not publish a numeric Win32 failure code."
+Assert-ContainsLiteral $serviceTokenHelperProtocol "string FailureReason" `
+    "The strict helper result schema is missing its bounded failure reason."
+Assert-ContainsLiteral $serviceTokenHelperProtocol "int Win32Error" `
+    "The strict helper result schema is missing its numeric Win32 error."
+Assert-ContainsLiteral $serviceTokenBridge "AllowDuplicateProperties = false" `
+    "The strict helper result parser does not reject duplicate JSON properties."
+Assert-ContainsLiteral $serviceTokenBridge "HasValidResultContract(result)" `
+    "The strict helper result parser does not validate phase, reason, flags, and Win32 error as one contract."
+Assert-ContainsLiteral $serviceTokenContractTests "BridgeResultProtocolRejectsDuplicateUnknownAndInconsistentFields" `
+    "The strict helper result parser lacks malformed-protocol regression coverage."
 Assert-ContainsLiteral $serviceTokenHelperProtocol "var sourceExecutablePath = RequireCanonicalAbsolutePath(" `
     "The helper protocol still touches the frozen Agent executable before source-token impersonation."
 $sourceExecutablePathStart = $serviceTokenHelperProtocol.IndexOf(

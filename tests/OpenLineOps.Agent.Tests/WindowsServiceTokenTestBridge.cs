@@ -23,6 +23,9 @@ internal static class WindowsServiceTokenTestBridge
     private const uint ScManagerCreateService = 0x0002;
     private const uint DeleteAccess = 0x00010000;
     private const uint WriteDac = 0x00040000;
+    private const uint ProcessTerminate = 0x00000001;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const uint Synchronize = 0x00100000;
     private const uint ServiceAllAccess = 0x000F01FF;
     private const uint ServiceChangeConfig = 0x0002;
     private const uint ServiceQueryConfig = 0x0001;
@@ -46,6 +49,10 @@ internal static class WindowsServiceTokenTestBridge
     private const int ErrorServiceAlreadyRunning = 1056;
     private const int ErrorServiceMarkedForDelete = 1072;
     private const int ErrorAlreadyExists = 183;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
+    private const uint WaitFailed = uint.MaxValue;
+    private const uint ForcedHelperTerminationExitCode = 70;
     private const byte CompletionReceipt = 0xA5;
     private const int NonceBytes = 32;
     private const int MaximumResultBytes = 4096;
@@ -57,6 +64,7 @@ internal static class WindowsServiceTokenTestBridge
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
+        AllowDuplicateProperties = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         RespectRequiredConstructorParameters = true,
         WriteIndented = true
@@ -165,14 +173,18 @@ internal static class WindowsServiceTokenTestBridge
         SafeServiceHandle? manager = null;
         SafeServiceHandle? service = null;
         NamedPipeServerStream? controlPipe = null;
+        SafeProcessHandle? helperProcessHandle = null;
         ExceptionDispatchInfo? actionFailure = null;
         ExceptionDispatchInfo? operationFailure = null;
         Exception? bridgeDiagnostic = null;
+        WindowsProcessAccessLease? sourceProcessAccessLease = null;
         T? actionResult = default;
         var actionCompleted = false;
         var bridgeResultConsumed = false;
         var bridgeRootOwned = false;
         var serviceOwned = false;
+        var helperServiceStarted = false;
+        var helperProcessTerminationProven = false;
         try
         {
             PrepareBridgeRoot(bridgeRoot, bridgeServiceSid);
@@ -186,12 +198,14 @@ internal static class WindowsServiceTokenTestBridge
                     helperExecutablePath);
             }
 
+            var sourceProcessCreatedAtUtcTicks = ReadProcessCreationUtcTicks(
+                sourceProcessHandle);
             var request = new BridgeRequest(
                 bridgeServiceName,
                 nonce,
                 canonicalSourceServiceName,
                 sourceProcessId,
-                ReadProcessCreationUtcTicks(sourceProcessHandle),
+                sourceProcessCreatedAtUtcTicks,
                 fullSourceExecutablePath,
                 canonicalSourceExecutableSha256,
                 canonicalSourceServiceSid,
@@ -202,6 +216,11 @@ internal static class WindowsServiceTokenTestBridge
             AssertBridgeTreeSecurity(
                 bridgeRoot,
                 bridgeServiceSid);
+            sourceProcessAccessLease = WindowsProcessAccessLease.Acquire(
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks,
+                new SecurityIdentifier(bridgeServiceSid));
             controlPipe = CreateControlPipe(pipeName, canonicalSourceServiceSid);
 
             manager = OpenSCManager(
@@ -264,7 +283,12 @@ internal static class WindowsServiceTokenTestBridge
                         ? $"Service-token bridge '{bridgeServiceName}' was already running."
                         : $"Could not start service-token bridge '{bridgeServiceName}'.");
             }
+            helperServiceStarted = true;
 
+            helperProcessHandle = CaptureHelperProcess(
+                service,
+                bridgeServiceName,
+                resultPath);
             WaitForBridgeConnection(controlPipe, service, bridgeServiceName, resultPath);
             var receivedNonce = new byte[NonceBytes];
             ReadExactlyWithTimeout(controlPipe, receivedNonce, TransitionTimeout);
@@ -304,9 +328,14 @@ internal static class WindowsServiceTokenTestBridge
 
             WriteReceipt(controlPipe);
             WaitForStopped(service, bridgeServiceName, resultPath, TransitionTimeout);
+            WaitForProcessExit(
+                helperProcessHandle,
+                bridgeServiceName,
+                TransitionTimeout);
+            helperProcessTerminationProven = true;
             var bridgeResult = ReadRequiredResult(resultPath, nonce, sourceProcessId);
             bridgeResultConsumed = true;
-            if (!bridgeResult.Success)
+            if (!bridgeResult.IsSuccess())
             {
                 throw new InvalidOperationException(
                     "The service-token bridge did not prove every required validation and control-pipe fact. "
@@ -340,6 +369,21 @@ internal static class WindowsServiceTokenTestBridge
                         StopServiceRequired(service, bridgeServiceName);
                         serviceStopped = true;
                     });
+                if (helperProcessHandle is not null
+                    && !helperProcessTerminationProven)
+                {
+                    try
+                    {
+                        EnsureHelperProcessTerminated(
+                            helperProcessHandle,
+                            bridgeServiceName);
+                        helperProcessTerminationProven = true;
+                    }
+                    catch (Exception exception)
+                    {
+                        cleanupFailures.Add(exception);
+                    }
+                }
                 if (operationFailure is not null
                     && !bridgeResultConsumed
                     && serviceStopped
@@ -372,6 +416,12 @@ internal static class WindowsServiceTokenTestBridge
             service = null;
         }
 
+        if (helperProcessHandle is not null)
+        {
+            CaptureCleanupFailure(cleanupFailures, helperProcessHandle.Dispose);
+            helperProcessHandle = null;
+        }
+
         if (manager is not null)
         {
             if (serviceOwned && !manager.IsInvalid)
@@ -382,6 +432,17 @@ internal static class WindowsServiceTokenTestBridge
             }
 
             CaptureCleanupFailure(cleanupFailures, manager.Dispose);
+        }
+
+        if (sourceProcessAccessLease is not null)
+        {
+            if (!helperProcessTerminationProven && helperServiceStarted)
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    "The source process DACL was restored, but exact termination of the helper process was not proven; any already-open helper handles could not be revoked."));
+            }
+            CaptureCleanupFailure(cleanupFailures, sourceProcessAccessLease.Dispose);
+            sourceProcessAccessLease = null;
         }
 
         if (bridgeRootOwned)
@@ -780,9 +841,25 @@ internal static class WindowsServiceTokenTestBridge
                 resultPath);
         }
 
-        var result = JsonSerializer.Deserialize<BridgeResult>(
-                         ReadBoundedResultDocument(resultPath),
-                         JsonOptions)
+        return ParseValidatedResult(
+            ReadBoundedResultDocument(resultPath),
+            expectedNonce,
+            expectedProcessId);
+    }
+
+    internal static void ValidateResultDocument(
+        byte[] document,
+        string expectedNonce,
+        uint expectedProcessId) =>
+        _ = ParseValidatedResult(document, expectedNonce, expectedProcessId);
+
+    private static BridgeResult ParseValidatedResult(
+        byte[] document,
+        string expectedNonce,
+        uint expectedProcessId)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        var result = JsonSerializer.Deserialize<BridgeResult>(document, JsonOptions)
                      ?? throw new InvalidDataException(
                          "The service-token bridge result is null.");
         if (!string.Equals(result.Nonce, expectedNonce, StringComparison.Ordinal)
@@ -791,9 +868,105 @@ internal static class WindowsServiceTokenTestBridge
             throw new InvalidDataException(
                 "The service-token bridge result does not match its request.");
         }
+        if (!HasValidResultContract(result))
+        {
+            throw new InvalidDataException(
+                "The service-token bridge result contains invalid bounded failure diagnostics.");
+        }
 
         return result;
     }
+
+    private static bool HasValidResultContract(BridgeResult result)
+    {
+        if (result.Win32Error < 0)
+        {
+            return false;
+        }
+
+        return result.FailurePhase switch
+        {
+            "helper-identity" =>
+                result.FailureReason == "helper-identity"
+                && !result.HelperIdentityValidated
+                && !result.SourceServiceValidated
+                && !result.SourceProcessValidated
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "source-service" =>
+                result.FailureReason == "source-service"
+                && result.HelperIdentityValidated
+                && !result.SourceServiceValidated
+                && !result.SourceProcessValidated
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "source-process" =>
+                result.FailureReason is "open-process"
+                    or "process-liveness"
+                    or "process-creation"
+                    or "process-image"
+                && result.HelperIdentityValidated
+                && result.SourceServiceValidated
+                && !result.SourceProcessValidated
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "source-token" =>
+                result.FailureReason is "open-source-token"
+                    or "duplicate-source-token"
+                && result.HelperIdentityValidated
+                && result.SourceServiceValidated
+                && result.SourceProcessValidated
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "source-executable" =>
+                result.FailureReason == "source-executable"
+                && HasValidatedSourceTokenOnly(result),
+            "post-validation-source" =>
+                result.FailureReason is "source-service-post-validation"
+                    or "process-liveness-post-validation"
+                && HasValidatedSourceTokenOnly(result),
+            "control-pipe" =>
+                result.FailureReason == "control-pipe"
+                && HasValidatedSourceTokenOnly(result),
+            "receipt" =>
+                result.FailureReason == "receipt"
+                && result.HelperIdentityValidated
+                && result.SourceServiceValidated
+                && result.SourceProcessValidated
+                && result.SourceTokenValidated
+                && result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "post-receipt-source" =>
+                result.FailureReason is "source-service-post-receipt"
+                    or "process-liveness-post-receipt"
+                && HasEveryValidationFlag(result),
+            "none" =>
+                result.FailureReason == "none"
+                && result.Win32Error == 0
+                && HasEveryValidationFlag(result),
+            _ => false
+        };
+    }
+
+    private static bool HasValidatedSourceTokenOnly(BridgeResult result) =>
+        result.HelperIdentityValidated
+        && result.SourceServiceValidated
+        && result.SourceProcessValidated
+        && result.SourceTokenValidated
+        && !result.ControlPipeConnected
+        && !result.ReceiptReceived;
+
+    private static bool HasEveryValidationFlag(BridgeResult result) =>
+        result.HelperIdentityValidated
+        && result.SourceServiceValidated
+        && result.SourceProcessValidated
+        && result.SourceTokenValidated
+        && result.ControlPipeConnected
+        && result.ReceiptReceived;
 
     private static string ReadFailureResultForDiagnostic(string resultPath)
     {
@@ -901,6 +1074,203 @@ internal static class WindowsServiceTokenTestBridge
         }
 
         return status;
+    }
+
+    private static SafeProcessHandle CaptureHelperProcess(
+        SafeServiceHandle service,
+        string serviceName,
+        string resultPath)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TransitionTimeout)
+        {
+            var before = QueryStatus(service, serviceName);
+            if (before.CurrentState == ServiceStopped)
+            {
+                throw new InvalidOperationException(
+                    $"Service-token bridge '{serviceName}' stopped before its exact process could be captured. "
+                    + ReadFailureResultForDiagnostic(resultPath));
+            }
+            if (before.CurrentState == ServiceStartPending)
+            {
+                Thread.Sleep(10);
+                continue;
+            }
+            if (before.CurrentState != ServiceRunning
+                || before.ServiceType != ServiceWin32OwnProcess)
+            {
+                throw new InvalidOperationException(
+                    $"Service-token bridge '{serviceName}' entered state {before.CurrentState} with service type {before.ServiceType} before exact process capture.");
+            }
+            if (before.ProcessId == 0)
+            {
+                Thread.Sleep(10);
+                continue;
+            }
+
+            var process = OpenProcess(
+                ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+                inheritHandle: false,
+                before.ProcessId);
+            if (process.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                process.Dispose();
+                var afterFailure = QueryStatus(service, serviceName);
+                if (afterFailure.CurrentState == ServiceStopped)
+                {
+                    throw new InvalidOperationException(
+                        $"Service-token bridge '{serviceName}' stopped while its exact process was being captured. "
+                        + ReadFailureResultForDiagnostic(resultPath));
+                }
+
+                throw new Win32Exception(
+                    error,
+                    $"Could not open exact service-token bridge PID {before.ProcessId}; Win32 error {error}.");
+            }
+
+            try
+            {
+                var actualProcessId = GetProcessId(process);
+                if (actualProcessId == 0)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        $"Could not read the exact service-token bridge process identifier; Win32 error {error}.");
+                }
+                var after = QueryStatus(service, serviceName);
+                if (actualProcessId != before.ProcessId
+                    || after.ProcessId != before.ProcessId
+                    || after.ServiceType != ServiceWin32OwnProcess
+                    || after.CurrentState != ServiceRunning)
+                {
+                    throw new InvalidOperationException(
+                        $"Service-token bridge '{serviceName}' changed process identity while PID {before.ProcessId} was captured.");
+                }
+
+                var wait = WaitForSingleObject(process, milliseconds: 0);
+                if (wait == WaitObject0)
+                {
+                    throw new InvalidOperationException(
+                        $"Exact service-token bridge PID {before.ProcessId} exited during capture.");
+                }
+                if (wait == WaitFailed)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(
+                        error,
+                        $"Could not inspect exact service-token bridge PID {before.ProcessId}; Win32 error {error}.");
+                }
+                if (wait != WaitTimeout)
+                {
+                    throw new InvalidOperationException(
+                        $"Exact service-token bridge PID {before.ProcessId} returned unexpected wait status 0x{wait:x8}.");
+                }
+
+                return process;
+            }
+            catch
+            {
+                process.Dispose();
+                throw;
+            }
+        }
+
+        throw new TimeoutException(
+            $"Service-token bridge '{serviceName}' did not expose an exact process before its deadline. "
+            + ReadFailureResultForDiagnostic(resultPath));
+    }
+
+    internal static void EnsureHelperProcessTerminated(
+        SafeProcessHandle helperProcess,
+        string serviceName)
+    {
+        var gracefulWait = WaitForSingleObject(
+            helperProcess,
+            checked((uint)TimeSpan.FromSeconds(5).TotalMilliseconds));
+        if (gracefulWait == WaitObject0)
+        {
+            return;
+        }
+        if (gracefulWait == WaitFailed)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not wait for exact service-token bridge process '{serviceName}'; Win32 error {error}.");
+        }
+        if (gracefulWait != WaitTimeout)
+        {
+            throw new InvalidOperationException(
+                $"Exact service-token bridge process '{serviceName}' returned unexpected wait status 0x{gracefulWait:x8}.");
+        }
+
+        if (!TerminateProcess(helperProcess, ForcedHelperTerminationExitCode))
+        {
+            var error = Marshal.GetLastWin32Error();
+            var postTerminationWait = WaitForSingleObject(
+                helperProcess,
+                milliseconds: 0);
+            if (postTerminationWait == WaitObject0)
+            {
+                return;
+            }
+            if (postTerminationWait == WaitFailed)
+            {
+                var waitError = Marshal.GetLastWin32Error();
+                throw new AggregateException(
+                    $"Could not terminate or recheck exact stuck service-token bridge process '{serviceName}'.",
+                    new Win32Exception(
+                        error,
+                        $"TerminateProcess failed with Win32 error {error}."),
+                    new Win32Exception(
+                        waitError,
+                        $"WaitForSingleObject failed with Win32 error {waitError}."));
+            }
+            if (postTerminationWait != WaitTimeout)
+            {
+                throw new InvalidOperationException(
+                    $"Exact service-token bridge process '{serviceName}' returned unexpected post-termination wait status 0x{postTerminationWait:x8}.");
+            }
+
+            throw new Win32Exception(
+                error,
+                $"Could not terminate exact stuck service-token bridge process '{serviceName}'; Win32 error {error}.");
+        }
+
+        WaitForProcessExit(
+            helperProcess,
+            serviceName,
+            TransitionTimeout);
+    }
+
+    private static void WaitForProcessExit(
+        SafeProcessHandle process,
+        string serviceName,
+        TimeSpan timeout)
+    {
+        var milliseconds = checked((uint)Math.Ceiling(timeout.TotalMilliseconds));
+        var wait = WaitForSingleObject(process, milliseconds);
+        if (wait == WaitObject0)
+        {
+            return;
+        }
+        if (wait == WaitTimeout)
+        {
+            throw new TimeoutException(
+                $"Exact service-token bridge process '{serviceName}' did not exit before its deadline.");
+        }
+        if (wait == WaitFailed)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not wait for exact service-token bridge process '{serviceName}'; Win32 error {error}.");
+        }
+
+        throw new InvalidOperationException(
+            $"Exact service-token bridge process '{serviceName}' returned unexpected wait status 0x{wait:x8}.");
     }
 
     private static void ConfigureUnrestrictedServiceSid(
@@ -1208,18 +1578,15 @@ internal static class WindowsServiceTokenTestBridge
         bool SourceTokenValidated,
         bool ControlPipeConnected,
         bool ReceiptReceived,
-        string FailurePhase)
+        string FailurePhase,
+        string FailureReason,
+        int Win32Error)
     {
-        public bool Success => HelperIdentityValidated
-                               && SourceServiceValidated
-                               && SourceProcessValidated
-                               && SourceTokenValidated
-                               && ControlPipeConnected
-                               && ReceiptReceived
-                               && string.Equals(
-                                   FailurePhase,
-                                   "none",
-                                   StringComparison.Ordinal);
+        public bool IsSuccess() => HasValidResultContract(this)
+                                   && string.Equals(
+                                       FailurePhase,
+                                       "none",
+                                       StringComparison.Ordinal);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1364,6 +1731,26 @@ internal static class WindowsServiceTokenTestBridge
         out FileTime exitTime,
         out FileTime kernelTime,
         out FileTime userTime);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(
+        SafeProcessHandle process,
+        uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(
+        SafeProcessHandle process,
+        uint exitCode);
 
     [DllImport(
         "kernel32.dll",

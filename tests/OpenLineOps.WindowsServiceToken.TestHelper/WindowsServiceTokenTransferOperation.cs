@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO.Pipes;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
@@ -17,6 +18,7 @@ internal sealed class WindowsServiceTokenTransferOperation(
     {
         using var resultFile = new AtomicTokenTransferResult(request.ResultPath, request.Nonce);
         var failurePhase = "helper-identity";
+        var failureReason = "helper-identity";
         var helperIdentityValidated = false;
         var sourceServiceValidated = false;
         var sourceProcessValidated = false;
@@ -30,6 +32,7 @@ internal sealed class WindowsServiceTokenTransferOperation(
             helperIdentityValidated = true;
 
             failurePhase = "source-service";
+            failureReason = "source-service";
             using var sourceService = WindowsNative.OpenValidatedSourceService(
                 request.SourceServiceName,
                 request.SourceProcessId,
@@ -37,38 +40,57 @@ internal sealed class WindowsServiceTokenTransferOperation(
             sourceServiceValidated = true;
 
             failurePhase = "source-process";
+            failureReason = "open-process";
             using var sourceProcess = WindowsNative.OpenRequiredProcess(
                 request.SourceProcessId,
                 WindowsNative.ProcessQueryLimitedInformation | WindowsNative.Synchronize,
                 "source Station");
-            WindowsNative.ValidateProcess(
+            failureReason = "process-liveness";
+            WindowsNative.EnsureProcessAlive(
+                sourceProcess,
+                request.SourceProcessId,
+                "source Station");
+            failureReason = "process-creation";
+            WindowsNative.ValidateProcessCreationTime(
                 sourceProcess,
                 request.SourceProcessId,
                 request.SourceProcessCreatedAtUtcTicks,
+                "source Station");
+            failureReason = "process-image";
+            WindowsNative.ValidateProcessExecutablePath(
+                sourceProcess,
+                request.SourceProcessId,
                 request.SourceExecutablePath,
                 "source Station");
             sourceProcessValidated = true;
 
             failurePhase = "source-token";
+            failureReason = "open-source-token";
             using var sourceToken = WindowsNative.OpenAndValidateSourceToken(
                 sourceProcess,
                 request.ExpectedSourceServiceSid);
+            failureReason = "duplicate-source-token";
             using var impersonationToken = WindowsNative.DuplicateSourceTokenForImpersonation(
                 sourceToken,
                 request.ExpectedSourceServiceSid);
             sourceTokenValidated = true;
 
             failurePhase = "source-executable";
+            failureReason = "source-executable";
             WindowsIdentity.RunImpersonated(
                 impersonationToken,
                 ValidateSourceExecutableFile);
 
+            failurePhase = "post-validation-source";
+            failureReason = "source-service-post-validation";
             sourceService.EnsureRunning();
+            failureReason = "process-liveness-post-validation";
             WindowsNative.EnsureProcessAlive(
                 sourceProcess,
                 request.SourceProcessId,
                 "source Station");
             failurePhase = "control-pipe";
+            failureReason = "control-pipe";
             var nonce = Convert.FromHexString(request.Nonce);
             await using var pipe = ConnectAndSendNonceAsSourceToken(
                 impersonationToken,
@@ -76,6 +98,7 @@ internal sealed class WindowsServiceTokenTransferOperation(
             controlPipeConnected = true;
 
             failurePhase = "receipt";
+            failureReason = "receipt";
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ReceiptTimeout);
             var receipt = new byte[1];
@@ -88,7 +111,9 @@ internal sealed class WindowsServiceTokenTransferOperation(
 
             receiptReceived = true;
             failurePhase = "post-receipt-source";
+            failureReason = "source-service-post-receipt";
             sourceService.EnsureRunning();
+            failureReason = "process-liveness-post-receipt";
             WindowsNative.EnsureProcessAlive(
                 sourceProcess,
                 request.SourceProcessId,
@@ -102,7 +127,9 @@ internal sealed class WindowsServiceTokenTransferOperation(
                 sourceTokenValidated,
                 controlPipeConnected,
                 receiptReceived,
-                FailurePhase: "none");
+                FailurePhase: "none",
+                FailureReason: "none",
+                Win32Error: 0);
         }
         catch (Exception operationFailure)
         {
@@ -117,7 +144,9 @@ internal sealed class WindowsServiceTokenTransferOperation(
                     sourceTokenValidated,
                     controlPipeConnected,
                     receiptReceived,
-                    failurePhase));
+                    failurePhase,
+                    failureReason,
+                    FindWin32Error(operationFailure)));
             }
             catch (Exception publicationFailure)
             {
@@ -133,6 +162,19 @@ internal sealed class WindowsServiceTokenTransferOperation(
         resultFile.Publish(successResult
                            ?? throw new InvalidOperationException(
                                "The token-transfer operation produced no success result."));
+    }
+
+    private static int FindWin32Error(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Win32Exception win32Exception)
+            {
+                return win32Exception.NativeErrorCode;
+            }
+        }
+
+        return 0;
     }
 
     private NamedPipeClientStream ConnectAndSendNonceAsSourceToken(

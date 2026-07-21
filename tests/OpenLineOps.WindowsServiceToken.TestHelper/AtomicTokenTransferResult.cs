@@ -51,6 +51,8 @@ internal sealed class AtomicTokenTransferResult : IDisposable
             writer.WriteBoolean("controlPipeConnected", result.ControlPipeConnected);
             writer.WriteBoolean("receiptReceived", result.ReceiptReceived);
             writer.WriteString("failurePhase", result.FailurePhase);
+            writer.WriteString("failureReason", result.FailureReason);
+            writer.WriteNumber("win32Error", result.Win32Error);
             writer.WriteEndObject();
             writer.Flush();
         }

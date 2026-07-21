@@ -24,7 +24,9 @@ internal sealed record WindowsServiceTokenTransferResult(
     bool SourceTokenValidated,
     bool ControlPipeConnected,
     bool ReceiptReceived,
-    string FailurePhase);
+    string FailurePhase,
+    string FailureReason,
+    int Win32Error);
 
 [SupportedOSPlatform("windows")]
 internal static class TokenTransferProtocol

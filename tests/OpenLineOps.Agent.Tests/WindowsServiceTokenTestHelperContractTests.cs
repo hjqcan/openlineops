@@ -2,6 +2,9 @@ using System.Diagnostics;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
+using System.Text.Json;
+using OpenLineOps.ContentProtection;
 
 namespace OpenLineOps.Agent.Tests;
 
@@ -45,6 +48,152 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             if (Directory.Exists(root))
             {
                 Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SourceProcessAccessLeaseGrantsOnlyBridgeQueryAndWaitAndRestoresDacl()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.GetCurrentProcess();
+        var processId = checked((uint)process.Id);
+        var createdAtUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+        var bridgeServiceSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+        var before = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
+
+        using (WindowsProcessAccessLease.Acquire(
+                   process.SafeHandle,
+                   processId,
+                   createdAtUtcTicks,
+                   bridgeServiceSid))
+        {
+            Assert.True(
+                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                    process.SafeHandle,
+                    bridgeServiceSid));
+            Assert.NotEqual(
+                before,
+                WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        }
+
+        Assert.Equal(before, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        Assert.False(
+            WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                process.SafeHandle,
+                bridgeServiceSid));
+    }
+
+    [Fact]
+    public void BridgeResultProtocolRejectsDuplicateUnknownAndInconsistentFields()
+    {
+        const string nonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const uint processId = 42;
+        const string valid =
+            "{\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sourceProcessId\":42,\"helperIdentityValidated\":true,\"sourceServiceValidated\":true,\"sourceProcessValidated\":true,\"sourceTokenValidated\":true,\"controlPipeConnected\":true,\"receiptReceived\":true,\"failurePhase\":\"none\",\"failureReason\":\"none\",\"win32Error\":0}";
+
+        WindowsServiceTokenTestBridge.ValidateResultDocument(
+            Encoding.UTF8.GetBytes(valid),
+            nonce,
+            processId);
+        Assert.Throws<JsonException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                Encoding.UTF8.GetBytes(valid.Replace(
+                    "\"failurePhase\":\"none\"",
+                    "\"failurePhase\":\"none\",\"failurePhase\":\"none\"",
+                    StringComparison.Ordinal)),
+                nonce,
+                processId));
+        Assert.Throws<JsonException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                Encoding.UTF8.GetBytes(valid.Insert(1, "\"success\":true,")),
+                nonce,
+                processId));
+        Assert.Throws<InvalidDataException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                Encoding.UTF8.GetBytes(valid.Replace(
+                    "\"failurePhase\":\"none\"",
+                    "\"failurePhase\":\"source-process\"",
+                    StringComparison.Ordinal)),
+                nonce,
+                processId));
+        Assert.Throws<InvalidDataException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                Encoding.UTF8.GetBytes(valid.Replace(
+                    "\"receiptReceived\":true",
+                    "\"receiptReceived\":false",
+                    StringComparison.Ordinal)),
+                nonce,
+                processId));
+    }
+
+    [Fact]
+    public void SourceProcessAccessLeaseRejectsExitedProcessWithStillActiveExitCode()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe",
+            Arguments = "/d /s /c \"exit 259\"",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Could not start the exit-code contract process.");
+        var createdAtUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+        var processId = checked((uint)process.Id);
+        var processHandle = process.SafeHandle;
+        process.WaitForExit();
+        Assert.Equal(259, process.ExitCode);
+        var bridgeServiceSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WindowsProcessAccessLease.Acquire(
+                processHandle,
+                processId,
+                createdAtUtcTicks,
+                bridgeServiceSid));
+    }
+
+    [Fact]
+    public void HelperProcessCleanupTerminatesOnlyTheExactCapturedProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "ping.exe",
+            Arguments = "-n 30 127.0.0.1",
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Could not start the helper-cleanup contract process.");
+        try
+        {
+            WindowsServiceTokenTestBridge.EnsureHelperProcessTerminated(
+                process.SafeHandle,
+                "OpenLineOpsTokenBridge-contract");
+            process.WaitForExit();
+            Assert.Equal(70, process.ExitCode);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
             }
         }
     }

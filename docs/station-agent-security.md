@@ -41,7 +41,20 @@ test-only helper service instead. Each invocation creates a random LocalService
 grant access to that exact helper SID. The helper validates its own SCM identity
 and marks itself for deletion before it validates the source Station's exact SCM
 name, running PID, creation time, restricted LocalService token, service-logon
-SID, and enabled-and-restricted Station SID. It then creates a minimal
+SID, and enabled-and-restricted Station SID. Before the helper starts, the
+elevated test harness binds a temporary process-object ACE to that invocation's
+random helper service SID. The ACE grants only
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`: query access is required for
+the exact image, creation-time, and token checks, while synchronization provides
+an unambiguous process-exit proof. The harness verifies that no existing ACE
+changed, proves the exact helper process has exited (forcibly terminating only
+that captured PID if graceful service stop fails), and restores the original
+DACL. A gate can pass only when termination was proved and the restored DACL is
+exact. If Windows prevents termination proof, cleanup hard-fails and still
+attempts exact DACL restoration to prevent new helper opens; restoration or
+revalidation failure also hard-fails. It never
+grants the shared LocalService, service-logon, Administrators, or runner SID.
+The helper then creates a minimal
 impersonation token; only inside that exact source identity does it open the
 frozen executable, reject path aliases and reparse resolution by handle, verify
 the SHA-256, and connect to a random single-instance control pipe whose protected
@@ -53,7 +66,10 @@ used, and all service and temporary state must be deleted before the gate can
 pass. The helper binary is rejected from every deployable release artifact;
 only its buildable test source may appear in the source archive. This
 attestation mechanism never changes the production Agent token, IPC, or cache
-ACL.
+ACL, and the process-object lease exists only inside the Windows test harness.
+Its result document contains only bounded validation flags, a finite failure
+reason, and an optional numeric Win32 error; it never serializes exception text,
+paths, tokens, or credentials.
 
 ## Station-local IPC
 

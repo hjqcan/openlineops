@@ -210,14 +210,12 @@ internal static class WindowsNative
         return process;
     }
 
-    public static void ValidateProcess(
+    public static void ValidateProcessCreationTime(
         SafeProcessHandle process,
         uint processId,
         long expectedCreatedAtUtcTicks,
-        string expectedExecutablePath,
         string role)
     {
-        EnsureProcessAlive(process, processId, role);
         var actualCreatedAtUtcTicks = ReadProcessCreatedAtUtcTicks(process, processId, role);
         if (actualCreatedAtUtcTicks != expectedCreatedAtUtcTicks)
         {
@@ -225,6 +223,14 @@ internal static class WindowsNative
                 $"Exact {role} PID {processId} creation time is {actualCreatedAtUtcTicks}, not requested {expectedCreatedAtUtcTicks} UTC ticks.");
         }
 
+    }
+
+    public static void ValidateProcessExecutablePath(
+        SafeProcessHandle process,
+        uint processId,
+        string expectedExecutablePath,
+        string role)
+    {
         var actualExecutablePath = ReadProcessExecutablePath(process, processId, role);
         if (!string.Equals(
                 actualExecutablePath,
@@ -317,7 +323,8 @@ internal static class WindowsNative
 
         if (wait == WaitObject0)
         {
-            throw new InvalidOperationException($"Exact {role} PID {processId} has exited.");
+            throw new InvalidOperationException(
+                $"Exact {role} PID {processId} has exited.");
         }
 
         throw new InvalidOperationException(
@@ -945,7 +952,7 @@ internal static class WindowsNative
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(
-        SafeProcessHandle handle,
+        SafeProcessHandle process,
         uint milliseconds);
 
     [DllImport("advapi32.dll", EntryPoint = "OpenProcessToken", SetLastError = true)]
