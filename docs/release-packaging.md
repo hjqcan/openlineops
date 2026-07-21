@@ -227,9 +227,11 @@ The RabbitMQ, Studio, and Runner wrappers create separate strict cleanup
 manifests in a private runner-temporary directory before any service mutation.
 Every manifest authorizes only a role, deterministic 32-hex run-scoped service
 name, fixed LocalService name/SID, independently derived service SID,
-`serviceSidType=Restricted`, copied Agent image/hash, and exact Windows Temp
-owned root. Wrapper `finally` blocks and independent `if: always()` workflow
-steps run the same bounded scavenger. The
+`serviceSidType=Restricted`, copied Agent image/hash, exact Windows Temp owned
+root, and the exact role-specific `CommonApplicationData` (`%ProgramData%`)
+package-cache root beneath its deterministic anchor. Wrapper `finally` blocks
+and independent `if: always()` workflow steps run the same bounded scavenger.
+The
 external-abort gate additionally kills the full `dotnet test` driver tree,
 including all testhost descendants, after
 the Agent service reaches Running, proves every snapshotted child is gone and

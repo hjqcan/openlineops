@@ -289,7 +289,9 @@ Each formal CI invocation allocates an independent 32-hex service scope before
 the test starts. A protected manifest under the runner's private temporary root
 binds only `role`, `serviceSuffix`, `serviceName`, the fixed LocalService name
 and SID, the derived service SID, `serviceSidType=Restricted`, the copied Agent
-path and hash, and the exact Windows Temp owned root. The manifest has no
+path and hash, the exact Windows Temp owned root, and the exact role-specific
+`CommonApplicationData` (`%ProgramData%`) package-cache root beneath its
+deterministic anchor. The manifest has no
 broker URI, token, password, account lifecycle, profile, logon-right, or
 arbitrary cleanup path. Both the wrapper `finally` block and a separate
 `if: always()` workflow step invoke the same bounded cleanup Fact; a missing

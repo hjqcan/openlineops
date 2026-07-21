@@ -173,6 +173,7 @@ powershell -NoProfile -File eng/verify-station-agent-content-cache-contract.ps1
 $env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
 $env:OPENLINEOPS_POSTGRES_CONNECTION_STRING = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=<ephemeral-password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot artifacts/release-work/agent -SamplePluginRoot artifacts/release-work/sample-plugin -ApiBundleRoot artifacts/release-work/api -Configuration Release -NoBuild -NoRestore
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
 npm --prefix apps/desktop run test:production-command-policy
 npm --prefix apps/desktop run test:process-problem-location
@@ -223,7 +224,9 @@ start/stop/restart/delete lifecycle, the raw evidence hash, and an external
 `dotnet test` driver-tree abort cleanup proof, including testhost descendants,
 under a separate run scope. Strict private cleanup manifests bind only role,
 service suffix/name, fixed LocalService identity, derived service SID and
-`Restricted` type, copied Agent path/hash, and the exact Windows Temp root;
+`Restricted` type, copied Agent path/hash, the exact Windows Temp owned root,
+and the exact role-specific `CommonApplicationData` (`%ProgramData%`)
+package-cache root beneath its deterministic anchor;
 wrapper `finally` blocks and independent workflow `always()` steps invoke the
 same bounded, idempotent scavenger. Studio's two Station services share the
 LocalService base account but must expose distinct restricted service SIDs.

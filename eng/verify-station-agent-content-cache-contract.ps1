@@ -42,6 +42,20 @@ $security = Read-RequiredText "docs/station-agent-security.md"
 $release = Read-RequiredText "docs/release-packaging.md"
 $staging = Read-RequiredText "eng/stage-release-artifacts.ps1"
 $inspection = Read-RequiredText "eng/inspect-release-candidate.ps1"
+$scalarReaderMarker = "private static int ReadTokenScalar("
+$groupsReaderMarker = "private static List<TokenGroupEvidence> ReadTokenGroups("
+$scalarReaderStart = $agentStagedE2E.IndexOf(
+    $scalarReaderMarker,
+    [System.StringComparison]::Ordinal)
+$groupsReaderStart = $agentStagedE2E.IndexOf(
+    $groupsReaderMarker,
+    [System.StringComparison]::Ordinal)
+if ($scalarReaderStart -lt 0 -or $groupsReaderStart -le $scalarReaderStart) {
+    throw "Agent staged evidence is missing the bounded scalar token reader."
+}
+$scalarReader = $agentStagedE2E.Substring(
+    $scalarReaderStart,
+    $groupsReaderStart - $scalarReaderStart)
 
 Assert-ContainsLiteral $commandLine "--provision-content-cache" `
     "Station Agent is missing the explicit content-cache provisioning switch."
@@ -111,8 +125,13 @@ Assert-ContainsLiteral $runnerStagedE2E "if (buffer.Size != sizeof(int))" `
     "Runner staged Agent integer token evidence does not reject non-integer native widths."
 Assert-ContainsLiteral $agentStagedE2E "IsTokenRestricted(token.DangerousGetHandle())," `
     "Agent staged evidence does not use the native restricted-token predicate."
-Assert-ContainsLiteral $agentStagedE2E "returnedLength != requiredLength" `
-    "Agent staged token evidence does not require the returned width to match the sized native buffer."
+Assert-ContainsLiteral $scalarReader "const int bufferLength = sizeof(int);" `
+    "Agent staged scalar token evidence does not use the exact native integer width."
+Assert-ContainsLiteral $scalarReader "returnedLength != bufferLength" `
+    "Agent staged scalar token evidence does not require the returned width to match its exact native integer buffer."
+if ($scalarReader -cmatch 'IntPtr\.Zero|ErrorInsufficientBuffer|requiredLength') {
+    throw "Agent staged scalar token evidence must call GetTokenInformation with the exact fixed buffer instead of a variable-length sizing probe."
+}
 if ($contentProtector -cmatch 'TokenHasRestrictions') {
     throw "Station identity validation must not use TokenHasRestrictions as the restricted-token predicate."
 }
