@@ -110,11 +110,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 "Runner Agent cleanup contract executable has no parent directory.");
         var projectRoot = Path.Combine(root, "project");
         var agentDataRoot = Path.Combine(root, "agent-data");
-        var agentPackageCacheRoot = Path.Combine(
-            Path.GetDirectoryName(root)
-            ?? throw new InvalidDataException("Runner Agent owned root has no parent."),
-            $"olo-runner-staged-agent-content-{suffix}",
-            "content");
+        var agentPackageCacheRoot = prerequisites.Service.PackageCacheRoot;
         var agentRuntimeRoot = Path.Combine(root, "agent-runtime");
         var agentArtifactRoot = Path.Combine(root, "agent-artifacts");
         var coordinatorId = $"runner-agent-{suffix}";
@@ -639,7 +635,8 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             "serviceSidType",
             "executablePath",
             "executableSha256",
-            "ownedRoot");
+            "ownedRoot",
+            "packageCacheRoot");
         RequireJsonString(entry, "role", "runner");
         RequireJsonString(entry, "serviceSuffix", expectedScope);
         var expectedServiceName = $"OpenLineOpsAgentE2E-{expectedScope}";
@@ -667,6 +664,28 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         {
             throw new InvalidDataException(
                 "Runner Agent cleanup contract owned root is outside its exact Windows Temp scope.");
+        }
+
+        var packageCacheValue = RequiredJsonText(entry, "packageCacheRoot");
+        if (!Path.IsPathFullyQualified(packageCacheValue))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract package cache root must be an absolute path.");
+        }
+
+        var packageCacheRoot = Path.GetFullPath(packageCacheValue);
+        var expectedPackageCacheRoot = ExpectedRunnerPackageCacheRoot(expectedScope);
+        if (!string.Equals(
+                packageCacheRoot,
+                packageCacheValue,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(
+                packageCacheRoot,
+                expectedPackageCacheRoot,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup contract package cache root is outside its exact CommonApplicationData scope.");
         }
 
         var executablePath = Path.GetFullPath(RequiredJsonText(entry, "executablePath"));
@@ -707,7 +726,8 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             serviceSid,
             executablePath,
             executableSha256,
-            ownedRoot);
+            ownedRoot,
+            packageCacheRoot);
     }
 
     private static void RunnerRequireExactJsonProperties(
@@ -1701,7 +1721,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 "The gate refuses recursive cleanup outside its exact Windows Temp service scope.");
         }
 
-        DeleteProvisionedCacheNamespace(packageCacheRoot);
+        DeleteProvisionedCacheNamespace(packageCacheRoot, serviceScope);
         if (!Directory.Exists(root))
         {
             return;
@@ -1722,30 +1742,104 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         Directory.Delete(root, recursive: true);
     }
 
-    private static void DeleteProvisionedCacheNamespace(string packageCacheRoot)
+    private static string ExpectedRunnerPackageCacheRoot(string serviceScope)
     {
-        if (!Directory.Exists(packageCacheRoot))
+        if (serviceScope.Length != 32
+            || serviceScope.Any(
+                static character =>
+                    character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        {
+            throw new InvalidDataException(
+                "Runner Agent service scope must be 32 lowercase hexadecimal characters.");
+        }
+
+        var commonApplicationData = Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData);
+        if (string.IsNullOrWhiteSpace(commonApplicationData))
+        {
+            throw new InvalidDataException(
+                "Windows CommonApplicationData is unavailable for the Runner Agent package cache.");
+        }
+
+        var canonicalCommonApplicationData = Path.GetFullPath(commonApplicationData);
+        if (!Directory.Exists(canonicalCommonApplicationData)
+            || File.Exists(canonicalCommonApplicationData))
+        {
+            throw new InvalidDataException(
+                "Windows CommonApplicationData must be an existing directory for the Runner Agent package cache.");
+        }
+
+        return Path.Combine(
+            canonicalCommonApplicationData,
+            $"olo-runner-staged-agent-content-{serviceScope}",
+            "content");
+    }
+
+    private static void DeleteProvisionedCacheNamespace(
+        string packageCacheRoot,
+        string serviceScope)
+    {
+        var canonicalPackageCacheRoot = Path.GetFullPath(packageCacheRoot);
+        var expectedPackageCacheRoot = ExpectedRunnerPackageCacheRoot(serviceScope);
+        if (!string.Equals(
+                canonicalPackageCacheRoot,
+                expectedPackageCacheRoot,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "Runner Agent cleanup refuses a package cache outside its exact CommonApplicationData scope.");
+        }
+
+        if (File.Exists(canonicalPackageCacheRoot))
+        {
+            throw new InvalidDataException(
+                "Runner Agent package cache content root is unexpectedly a file.");
+        }
+
+        var anchor = Directory.GetParent(canonicalPackageCacheRoot)?.FullName
+                     ?? throw new InvalidDataException(
+                         "Runner provisioned package cache has no dedicated anchor.");
+        if (File.Exists(anchor))
+        {
+            throw new InvalidDataException(
+                "Runner Agent package cache anchor is unexpectedly a file.");
+        }
+
+        if (!Directory.Exists(anchor))
         {
             return;
         }
 
-        if (Directory.EnumerateFileSystemEntries(packageCacheRoot).Any())
+        EnsureNoReparseInPath(anchor);
+        if (Directory.Exists(canonicalPackageCacheRoot))
+        {
+            EnsureNoReparseInPath(canonicalPackageCacheRoot);
+        }
+
+        var anchorEntries = Directory
+            .EnumerateFileSystemEntries(anchor)
+            .ToArray();
+        if (anchorEntries.Any(entry => !string.Equals(
+                Path.GetFullPath(entry),
+                canonicalPackageCacheRoot,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "Runner package cache anchor contains content outside its dedicated content root.");
+        }
+
+        if (Directory.Exists(canonicalPackageCacheRoot)
+            && Directory.EnumerateFileSystemEntries(canonicalPackageCacheRoot).Any())
         {
             throw new InvalidOperationException(
                 "Runner provisioned package cache is not empty after paired removal.");
         }
 
-        var anchor = Directory.GetParent(packageCacheRoot)?.FullName
-                     ?? throw new InvalidDataException(
-                         "Runner provisioned package cache has no dedicated anchor.");
-        EnsureNoReparseInPath(packageCacheRoot);
-        if (Directory.EnumerateFileSystemEntries(anchor).Count() != 1)
+        if (Directory.Exists(canonicalPackageCacheRoot))
         {
-            throw new InvalidOperationException(
-                "Runner package cache anchor is not dedicated to its content root.");
+            Directory.Delete(canonicalPackageCacheRoot);
         }
 
-        Directory.Delete(packageCacheRoot);
         Directory.Delete(anchor);
     }
 
@@ -2496,14 +2590,14 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     "Runner Agent service executable is not the cleanup-contract-bound frozen image.");
             }
 
-            var expectedPackageCacheRoot = Path.Combine(
-                Path.GetDirectoryName(contract.OwnedRoot)
-                ?? throw new InvalidDataException("Runner Agent owned root has no parent."),
-                $"olo-runner-staged-agent-content-{contract.Scope}",
-                "content");
+            var expectedPackageCacheRoot = ExpectedRunnerPackageCacheRoot(contract.Scope);
             if (!string.Equals(
-                    canonicalPackageCacheRoot,
+                    contract.PackageCacheRoot,
                     expectedPackageCacheRoot,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    canonicalPackageCacheRoot,
+                    contract.PackageCacheRoot,
                     StringComparison.OrdinalIgnoreCase)
                 || Directory.Exists(canonicalPackageCacheRoot)
                 || File.Exists(canonicalPackageCacheRoot))
@@ -2725,7 +2819,9 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     {
                         CaptureCleanupFailure(
                             failures,
-                            () => DeleteProvisionedCacheNamespace(canonicalPackageCacheRoot));
+                            () => DeleteProvisionedCacheNamespace(
+                                canonicalPackageCacheRoot,
+                                contract.Scope));
                     }
 
                     if (failures.Count == cleanupFailureCount
@@ -2868,7 +2964,9 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 {
                     CaptureCleanupFailure(
                         failures,
-                        () => DeleteProvisionedCacheNamespace(_packageCacheRoot));
+                        () => DeleteProvisionedCacheNamespace(
+                            _packageCacheRoot,
+                            _contract.Scope));
                 }
 
                 if (failures.Count == transitionFailureCount)
@@ -4594,7 +4692,8 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         string ServiceSid,
         string ExecutablePath,
         string ExecutableSha256,
-        string OwnedRoot);
+        string OwnedRoot,
+        string PackageCacheRoot);
 
     private sealed record BundleAttestation(
         string Kind,

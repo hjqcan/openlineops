@@ -197,6 +197,11 @@ foreach ($expectedCleanupBoundary in @(
         "serviceSid",
         "serviceSidType",
         "olo-runner-staged-agent",
+        "packageCacheRoot",
+        "CommonApplicationData",
+        "olo-staged-agent-rmq-content-`$serviceSuffix",
+        "olo-runner-staged-agent-content-`$serviceSuffix",
+        "olo-studio-two-agent-`$role-content-`$serviceSuffix",
         "NT AUTHORITY\LocalService",
         "PreserveManifest")) {
     if ($agentServiceCleanupText -cnotmatch [regex]::Escape($expectedCleanupBoundary)) {
@@ -301,6 +306,148 @@ try {
     $absentPathKind = & $manifestPathKindTest $absentManifestPath
     if ($absentPathKind -cne "Absent") {
         throw "Run-scoped Agent cleanup did not classify a truly absent manifest path as absent."
+    }
+
+    $contractScope = [System.Guid]::NewGuid().ToString("N")
+    $contractManifestPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $cleanupManifestBase "rabbitmq-$contractScope.json"))
+    $cleanupManifestFixturePaths.Add($contractManifestPath) | Out-Null
+    $manifestBuilderDefinitions = @(
+        "Assert-LowerHex",
+        "Get-TextSha256",
+        "Get-ServiceSidFromName",
+        "Get-ExpectedManifest") | ForEach-Object {
+        (Get-FunctionDefinition -Ast $agentServiceCleanupAst -Name $_).Extent.Text
+    }
+    $manifestBuilder = [scriptblock]::Create(
+        "param(`$Kind, `$Scope, `$ResolvedAgentBundleRoot)" + [Environment]::NewLine +
+        '$LocalServiceAccountName = "NT AUTHORITY\LocalService"' + [Environment]::NewLine +
+        '$LocalServiceAccountSid = "S-1-5-19"' + [Environment]::NewLine +
+        '$RestrictedServiceSidType = "Restricted"' + [Environment]::NewLine +
+        ($manifestBuilderDefinitions -join [Environment]::NewLine) + [Environment]::NewLine +
+        "Get-ExpectedManifest -ResolvedAgentBundleRoot `$ResolvedAgentBundleRoot")
+    $expectedContract = & $manifestBuilder "rabbitmq" $contractScope $cleanupFixtureBundleRoot
+    [System.IO.File]::WriteAllText(
+        $contractManifestPath,
+        ((ConvertTo-Json $expectedContract -Depth 8) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+    $contract = Get-Content -LiteralPath $contractManifestPath -Raw | ConvertFrom-Json
+    $contractProperties = @($contract.PSObject.Properties.Name)
+    $expectedContractProperties = @("schema", "schemaVersion", "kind", "scope", "entries")
+    $entry = $contract.entries[0]
+    $entryProperties = @($entry.PSObject.Properties.Name)
+    $expectedEntryProperties = @(
+        "role",
+        "serviceSuffix",
+        "serviceName",
+        "serviceAccountName",
+        "serviceAccountSid",
+        "serviceSid",
+        "serviceSidType",
+        "executablePath",
+        "executableSha256",
+        "ownedRoot",
+        "packageCacheRoot")
+    $commonApplicationData = [System.IO.Path]::GetFullPath(
+        [System.Environment]::GetFolderPath(
+            [System.Environment+SpecialFolder]::CommonApplicationData))
+    $runnerScope = [System.Guid]::NewGuid().ToString("N")
+    $runnerContract = (& $manifestBuilder "runner" $runnerScope $cleanupFixtureBundleRoot |
+            ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $expectedRunnerPackageCacheRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $commonApplicationData "olo-runner-staged-agent-content-$runnerScope/content"))
+    if (@($runnerContract.entries).Count -ne 1 `
+        -or $runnerContract.entries[0].role -cne "runner" `
+        -or $runnerContract.entries[0].serviceSuffix -cne $runnerScope `
+        -or $runnerContract.entries[0].packageCacheRoot -cne $expectedRunnerPackageCacheRoot `
+        -or [System.IO.Path]::GetDirectoryName(
+            [System.IO.Path]::GetDirectoryName([string]$runnerContract.entries[0].packageCacheRoot)) -cne `
+            $commonApplicationData) {
+        throw "Runner cleanup manifest does not bind its direct CommonApplicationData package-cache anchor."
+    }
+    $studioScope = [System.Guid]::NewGuid().ToString("N")
+    $studioContract = (& $manifestBuilder "studio-two-agent" $studioScope $cleanupFixtureBundleRoot |
+            ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $studioEntries = @($studioContract.entries)
+    if ($studioEntries.Count -ne 2 `
+        -or (($studioEntries.role | Sort-Object) -join '|') -cne "downstream|entry" `
+        -or @($studioEntries.serviceSuffix | Sort-Object -Unique).Count -ne 2) {
+        throw "Studio cleanup manifest must bind exactly one distinct entry and downstream service."
+    }
+    foreach ($studioEntry in $studioEntries) {
+        $expectedStudioPackageCacheRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $commonApplicationData (
+                    "olo-studio-two-agent-$($studioEntry.role)-content-$($studioEntry.serviceSuffix)/content")))
+        if ([string]$studioEntry.serviceSuffix -cnotmatch '^[0-9a-f]{32}$' `
+            -or $studioEntry.packageCacheRoot -cne $expectedStudioPackageCacheRoot `
+            -or [System.IO.Path]::GetDirectoryName(
+                [System.IO.Path]::GetDirectoryName([string]$studioEntry.packageCacheRoot)) -cne `
+                $commonApplicationData) {
+            throw "Studio cleanup manifest does not bind a direct role-specific CommonApplicationData package-cache anchor."
+        }
+    }
+    $expectedOwnedRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path (Join-Path $env:SystemRoot "Temp") "olo-staged-agent-rmq-$contractScope"))
+    $expectedPackageCacheRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $commonApplicationData "olo-staged-agent-rmq-content-$contractScope/content"))
+    if (($contractProperties -join '|') -cne ($expectedContractProperties -join '|') `
+        -or $contract.schema -cne "openlineops-agent-service-cleanup" `
+        -or $contract.schemaVersion -ne 1 `
+        -or $contract.kind -cne "rabbitmq" `
+        -or $contract.scope -cne $contractScope `
+        -or @($contract.entries).Count -ne 1 `
+        -or ($entryProperties -join '|') -cne ($expectedEntryProperties -join '|') `
+        -or $entry.role -cne "rabbitmq" `
+        -or $entry.serviceSuffix -cne $contractScope `
+        -or $entry.ownedRoot -cne $expectedOwnedRoot `
+        -or $entry.packageCacheRoot -cne $expectedPackageCacheRoot `
+        -or [System.IO.Path]::GetDirectoryName([string]$entry.packageCacheRoot) -cne `
+            (Join-Path $commonApplicationData "olo-staged-agent-rmq-content-$contractScope") `
+        -or [System.IO.Path]::GetDirectoryName(
+            [System.IO.Path]::GetDirectoryName([string]$entry.packageCacheRoot)) -cne `
+            $commonApplicationData) {
+        throw "Run-scoped Agent cleanup manifest does not expose its exact Temp-owned and ProgramData package-cache contract."
+    }
+
+    $entry.packageCacheRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $commonApplicationData "noncanonical-$contractScope/content"))
+    [System.IO.File]::WriteAllText(
+        $contractManifestPath,
+        ((ConvertTo-Json $contract -Depth 8) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+    $manifestMatcherDefinition = Get-FunctionDefinition `
+        -Ast $agentServiceCleanupAst `
+        -Name "Assert-ManifestMatches"
+    $manifestMatcher = [scriptblock]::Create(
+        "param(`$Path, `$Expected)" + [Environment]::NewLine +
+        $manifestMatcherDefinition.Extent.Text + [Environment]::NewLine +
+        "Assert-ManifestMatches -Path `$Path -Expected `$Expected")
+    $mutatedCacheFailure = $null
+    try {
+        & $manifestMatcher $contractManifestPath $expectedContract
+    }
+    catch {
+        $mutatedCacheFailure = $_.Exception.Message
+    }
+    if ($mutatedCacheFailure -notmatch "differs from its deterministic strict contract") {
+        throw "Run-scoped Agent cleanup accepted a non-canonical packageCacheRoot mutation."
+    }
+
+    $entry.packageCacheRoot = $expectedPackageCacheRoot
+    $entry | Add-Member -NotePropertyName legacyPackageCacheRoot -NotePropertyValue $expectedPackageCacheRoot
+    [System.IO.File]::WriteAllText(
+        $contractManifestPath,
+        ((ConvertTo-Json $contract -Depth 8) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+    $legacyCacheFailure = $null
+    try {
+        & $manifestMatcher $contractManifestPath $expectedContract
+    }
+    catch {
+        $legacyCacheFailure = $_.Exception.Message
+    }
+    if ($legacyCacheFailure -notmatch "differs from its deterministic strict contract") {
+        throw "Run-scoped Agent cleanup accepted a legacy package-cache compatibility field."
     }
 
     $directoryScope = [System.Guid]::NewGuid().ToString("N")
@@ -586,4 +733,5 @@ Write-Host " - Formal file/password signing parameters are absent and command lo
 Write-Host " - Staged Agent RabbitMQ verification has a finite timeout and behavior-verified taskkill process-tree cleanup."
 Write-Host " - RabbitMQ, Studio, and Runner gates invoke the strict restricted-service-SID scavenger from finally."
 Write-Host " - Cleanup manifest absence, directory obstruction, and reparse-point mutations are behavior-verified."
+Write-Host " - Cleanup manifests bind mutable Temp roots separately from exact ProgramData package-cache roots and reject compatibility fields."
 exit 0

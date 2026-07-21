@@ -433,12 +433,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     fixture.EntryStation,
                     "preparation",
                     scope,
-                    root);
+                    root,
+                    Assert.Single(
+                        cleanupContract.Entries,
+                        static entry => entry.Role == "entry").PackageCacheRoot);
                 var downstreamAgent = CreateEndpoint(
                     fixture.DownstreamStation,
                     "vendor",
                     scope,
-                    root);
+                    root,
+                    Assert.Single(
+                        cleanupContract.Entries,
+                        static entry => entry.Role == "downstream").PackageCacheRoot);
                 CreateStudioAgentWritableTree(entryAgent);
                 CreateStudioAgentWritableTree(downstreamAgent);
 
@@ -599,7 +605,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                 static entry => entry.Role,
                                 static entry => new RunScopedPackageCacheBinding(
                                     entry.ServiceSid,
-                                    PackageCacheRootForCleanupEntry(entry)),
+                                    entry.PackageCacheRoot),
                                 StringComparer.Ordinal));
                     }
                     catch (Exception exception)
@@ -1540,17 +1546,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             StudioStationFixture station,
             string role,
             string suffix,
-            string root)
+            string root,
+            string packageCacheRoot)
         {
             var agentRoot = Path.Combine(root, $"{role}-agent");
-            var serviceRole = string.Equals(role, "preparation", StringComparison.Ordinal)
-                ? "entry"
-                : "downstream";
-            var serviceSuffix = AgentServiceScopedSuffix($"{serviceRole}-service", suffix);
-            var cacheAnchor = Path.Combine(
-                Path.GetDirectoryName(root)
-                ?? throw new InvalidDataException("Studio harness root has no parent."),
-                $"olo-studio-two-agent-{serviceRole}-content-{serviceSuffix}");
             return new StudioAgentEndpoint(
                 $"agent.studio.{role}.{suffix}",
                 station.StationId,
@@ -1559,7 +1558,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 StudioToken($"agent-{role}-{suffix}"),
                 agentRoot,
                 Path.Combine(agentRoot, "data"),
-                Path.Combine(cacheAnchor, "content"),
+                packageCacheRoot,
                 Path.Combine(agentRoot, "runtime-work"));
         }
 

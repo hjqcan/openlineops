@@ -240,10 +240,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var dataRoot = Path.Combine(root, "agent-data");
         var distributionRoot = Path.Combine(root, "package-distribution");
         var runtimeWorkRoot = Path.Combine(root, "runtime-work");
-        var packageCacheAnchor = Path.Combine(
-            Path.GetDirectoryName(root)!,
-            $"olo-staged-agent-rmq-content-{suffix}");
-        var packageCacheRoot = Path.Combine(packageCacheAnchor, "content");
+        var packageCacheRoot = cleanupEntry.PackageCacheRoot;
+        var packageCacheAnchor = Directory.GetParent(packageCacheRoot)?.FullName
+                                 ?? throw new InvalidDataException(
+                                     "The staged Agent package cache has no dedicated namespace anchor.");
         StagedCoordinatorApiProcess? artifactApi = null;
         HttpClient? operatorTraceClient = null;
         WindowsAgentService? agentService = null;
@@ -1178,7 +1178,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         static entry => entry.Role,
                         static entry => new RunScopedPackageCacheBinding(
                             entry.ServiceSid,
-                            PackageCacheRootForCleanupEntry(entry)),
+                            entry.PackageCacheRoot),
                         StringComparer.Ordinal));
             }
             catch (Exception exception)
@@ -1228,12 +1228,34 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         static entry => entry.Role,
                         static entry => new RunScopedPackageCacheBinding(
                             entry.ServiceSid,
-                            PackageCacheRootForCleanupEntry(entry)),
+                            entry.PackageCacheRoot),
                         StringComparer.Ordinal));
                 if (Directory.Exists(rootGroup.Key) || File.Exists(rootGroup.Key))
                 {
                     throw new InvalidOperationException(
                         $"Run-scoped staged Agent root '{rootGroup.Key}' still exists after cleanup.");
+                }
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        foreach (var entry in contract.Entries)
+        {
+            try
+            {
+                var packageCacheAnchor = Directory.GetParent(entry.PackageCacheRoot)?.FullName
+                                         ?? throw new InvalidDataException(
+                                             "Run-scoped package cache has no dedicated namespace anchor.");
+                if (Directory.Exists(entry.PackageCacheRoot)
+                    || File.Exists(entry.PackageCacheRoot)
+                    || Directory.Exists(packageCacheAnchor)
+                    || File.Exists(packageCacheAnchor))
+                {
+                    throw new InvalidOperationException(
+                        $"Run-scoped package cache namespace for role '{entry.Role}' still exists after cleanup.");
                 }
             }
             catch (Exception exception)
@@ -1366,7 +1388,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "serviceSidType",
             "executablePath",
             "executableSha256",
-            "ownedRoot");
+            "ownedRoot",
+            "packageCacheRoot");
         var role = RequiredJsonString(element, "role");
         var serviceSuffix = RequireLowerHexScope(
             RequiredJsonString(element, "serviceSuffix"),
@@ -1441,6 +1464,22 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 $"Agent service cleanup entry '{role}' owned root is outside its exact run scope.");
         }
 
+        var packageCacheRoot = RequireCanonicalAbsolutePath(
+            RequiredJsonString(element, "packageCacheRoot"),
+            "packageCacheRoot");
+        var expectedPackageCacheRoot = ExpectedPackageCacheRoot(
+            kind,
+            role,
+            serviceSuffix);
+        if (!string.Equals(
+                packageCacheRoot,
+                expectedPackageCacheRoot,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"Agent service cleanup entry '{role}' package cache is outside its exact administrative run scope.");
+        }
+
         var executablePath = RequireCanonicalAbsolutePath(
             RequiredJsonString(element, "executablePath"),
             "executablePath");
@@ -1470,7 +1509,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 RequiredJsonString(element, "executableSha256"),
                 64,
                 "executableSha256"),
-            ownedRoot);
+            ownedRoot,
+            packageCacheRoot);
     }
 
     private static void VerifyCleanupExecutable(AgentServiceCleanupEntry entry)
@@ -3552,57 +3592,97 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
     }
 
-    private static string PackageCacheRootForCleanupEntry(
-        AgentServiceCleanupEntry entry) => entry.Role switch
+    private static string ExpectedPackageCacheRoot(
+        string kind,
+        string role,
+        string serviceSuffix)
+    {
+        var anchorName = role switch
         {
-            "rabbitmq" => Path.Combine(
-                Path.GetDirectoryName(entry.OwnedRoot)!,
-                $"olo-staged-agent-rmq-content-{entry.ServiceSuffix}",
-                "content"),
-            "runner" => Path.Combine(
-                Path.GetDirectoryName(entry.OwnedRoot)!,
-                $"olo-runner-staged-agent-content-{entry.ServiceSuffix}",
-                "content"),
-            "entry" => Path.Combine(
-                Path.GetDirectoryName(entry.OwnedRoot)!,
-                $"olo-studio-two-agent-entry-content-{entry.ServiceSuffix}",
-                "content"),
-            "downstream" => Path.Combine(
-                Path.GetDirectoryName(entry.OwnedRoot)!,
-                $"olo-studio-two-agent-downstream-content-{entry.ServiceSuffix}",
-                "content"),
+            "rabbitmq" when kind == "rabbitmq" =>
+                $"olo-staged-agent-rmq-content-{serviceSuffix}",
+            "runner" when kind == "runner" =>
+                $"olo-runner-staged-agent-content-{serviceSuffix}",
+            "entry" when kind == "studio-two-agent" =>
+                $"olo-studio-two-agent-entry-content-{serviceSuffix}",
+            "downstream" when kind == "studio-two-agent" =>
+                $"olo-studio-two-agent-downstream-content-{serviceSuffix}",
             _ => throw new InvalidDataException(
-                $"Unsupported Agent cleanup role '{entry.Role}'.")
+                $"Unsupported Agent cleanup kind and role '{kind}/{role}'.")
         };
+
+        var commonApplicationData = Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData);
+        if (string.IsNullOrWhiteSpace(commonApplicationData))
+        {
+            throw new InvalidDataException(
+                "Windows CommonApplicationData is unavailable for the Station package cache.");
+        }
+
+        var canonicalCommonApplicationData = Path.GetFullPath(commonApplicationData);
+        if (!Directory.Exists(canonicalCommonApplicationData)
+            || File.Exists(canonicalCommonApplicationData))
+        {
+            throw new InvalidDataException(
+                "Windows CommonApplicationData must be an existing directory for the Station package cache.");
+        }
+
+        return Path.Combine(
+            canonicalCommonApplicationData,
+            anchorName,
+            "content");
+    }
 
     private static void DeleteProvisionedCacheNamespace(string packageCacheRoot)
     {
-        if (!Directory.Exists(packageCacheRoot))
+        var canonicalPackageCacheRoot = Path.GetFullPath(packageCacheRoot);
+        if (File.Exists(canonicalPackageCacheRoot))
+        {
+            throw new InvalidDataException(
+                "Provisioned package cache content root is unexpectedly a file.");
+        }
+
+        var anchor = Directory.GetParent(canonicalPackageCacheRoot)?.FullName
+                     ?? throw new InvalidDataException(
+                         "Provisioned package cache has no dedicated anchor.");
+        if (File.Exists(anchor))
+        {
+            throw new InvalidDataException(
+                "Provisioned package cache anchor is unexpectedly a file.");
+        }
+
+        if (!Directory.Exists(anchor))
         {
             return;
         }
 
-        if (Directory.EnumerateFileSystemEntries(packageCacheRoot).Any())
+        EnsureNoReparsePointInExistingPath(anchor, "provisioned package cache anchor");
+        if (Directory.Exists(canonicalPackageCacheRoot))
         {
-            throw new InvalidOperationException(
-                "Provisioned package cache is not empty after paired package removal.");
+            EnsureNoReparsePointInExistingPath(
+                canonicalPackageCacheRoot,
+                "provisioned package cache content root");
         }
 
-        var anchor = Directory.GetParent(packageCacheRoot)?.FullName
-                     ?? throw new InvalidDataException(
-                         "Provisioned package cache has no dedicated anchor.");
-        if ((File.GetAttributes(packageCacheRoot) & FileAttributes.ReparsePoint) != 0
-            || (File.GetAttributes(anchor) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException(
-                "Provisioned package cache cleanup refuses reparse points.");
-        }
-
-        Directory.Delete(packageCacheRoot);
-        if (Directory.EnumerateFileSystemEntries(anchor).Any())
+        var anchorEntries = Directory.EnumerateFileSystemEntries(anchor).ToArray();
+        if (anchorEntries.Any(entry => !string.Equals(
+                Path.GetFullPath(entry),
+                canonicalPackageCacheRoot,
+                StringComparison.OrdinalIgnoreCase)))
         {
             throw new InvalidOperationException(
                 "Provisioned package cache anchor contains unexpected entries.");
+        }
+
+        if (Directory.Exists(canonicalPackageCacheRoot))
+        {
+            if (Directory.EnumerateFileSystemEntries(canonicalPackageCacheRoot).Any())
+            {
+                throw new InvalidOperationException(
+                    "Provisioned package cache is not empty after paired package removal.");
+            }
+
+            Directory.Delete(canonicalPackageCacheRoot);
         }
 
         Directory.Delete(anchor);
@@ -3730,7 +3810,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string ServiceSidType,
         string ExecutablePath,
         string ExecutableSha256,
-        string OwnedRoot);
+        string OwnedRoot,
+        string PackageCacheRoot);
 
     private sealed record ArtifactApiCredentials(
         string AgentId,
@@ -5577,7 +5658,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                                 ServiceTransitionTimeout));
                         if (failures.Count == transitionFailureCount)
                         {
-                            var packageCacheRoot = PackageCacheRootForCleanupEntry(entry);
+                            var packageCacheRoot = entry.PackageCacheRoot;
                             CaptureCleanupFailure(
                                 failures,
                                 () => RemoveProtectedPackageInstallations(

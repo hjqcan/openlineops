@@ -236,6 +236,12 @@ function Get-ExpectedManifest {
     Assert-LowerHex -Value $agentSha256 -Length 64 -Name "Agent executable SHA-256"
 
     $windowsTemp = [System.IO.Path]::GetFullPath((Join-Path $env:SystemRoot "Temp"))
+    $commonApplicationData = [System.IO.Path]::GetFullPath(
+        [System.Environment]::GetFolderPath(
+            [System.Environment+SpecialFolder]::CommonApplicationData))
+    if (-not (Test-Path -LiteralPath $commonApplicationData -PathType Container)) {
+        throw "Windows CommonApplicationData must identify an existing administrator-controlled directory."
+    }
     $ownedRootName = switch ($Kind) {
         "rabbitmq" { "olo-staged-agent-rmq-$Scope" }
         "runner" { "olo-runner-staged-agent-$Scope" }
@@ -256,6 +262,13 @@ function Get-ExpectedManifest {
                 (Get-TextSha256 "$role-service`:$Scope").Substring(0, 32)
             }
             $serviceName = "OpenLineOpsAgentE2E-$serviceSuffix"
+            $packageCacheAnchorName = switch ($Kind) {
+                "rabbitmq" { "olo-staged-agent-rmq-content-$serviceSuffix" }
+                "runner" { "olo-runner-staged-agent-content-$serviceSuffix" }
+                "studio-two-agent" { "olo-studio-two-agent-$role-content-$serviceSuffix" }
+            }
+            $packageCacheRoot = [System.IO.Path]::GetFullPath(
+                (Join-Path $commonApplicationData "$packageCacheAnchorName/content"))
             [ordered]@{
                 role = $role
                 serviceSuffix = $serviceSuffix
@@ -268,6 +281,7 @@ function Get-ExpectedManifest {
                     (Join-Path $ownedRoot "agent-bundle/OpenLineOps.Agent.exe"))
                 executableSha256 = $agentSha256
                 ownedRoot = $ownedRoot
+                packageCacheRoot = $packageCacheRoot
             }
         })
     return [ordered]@{
@@ -356,6 +370,14 @@ function Assert-RunScopeAbsent {
         }
         if (Test-Path -LiteralPath $entry.ownedRoot) {
             throw "Run-scoped Agent owned root remains without a cleanup manifest: $($entry.ownedRoot)"
+        }
+        if (Test-Path -LiteralPath $entry.packageCacheRoot) {
+            throw "Run-scoped Agent package cache root remains without a cleanup manifest: $($entry.packageCacheRoot)"
+        }
+        $packageCacheAnchor = [System.IO.Path]::GetDirectoryName(
+            [string]$entry.packageCacheRoot)
+        if (Test-Path -LiteralPath $packageCacheAnchor) {
+            throw "Run-scoped Agent package cache anchor remains without a cleanup manifest: $packageCacheAnchor"
         }
         $serviceRegistryPath = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$($entry.serviceName)"
         if (Test-Path -LiteralPath $serviceRegistryPath) {
@@ -561,6 +583,7 @@ try {
         throw "Run-scoped Agent cleanup Fact failed with exit code $($process.ExitCode); private logs remain at $cleanupRoot."
     }
     Assert-ExactPassedTrx $trxPath
+    Assert-RunScopeAbsent $expectedManifest
     if (-not (Test-Path -LiteralPath $resolvedManifestPath -PathType Leaf)) {
         throw "Run-scoped Agent cleanup Fact removed its authorization manifest prematurely."
     }

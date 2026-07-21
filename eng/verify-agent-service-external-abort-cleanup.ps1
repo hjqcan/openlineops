@@ -298,12 +298,16 @@ function Assert-RunScopeGone {
     )
 
     Wait-ProcessAbsent -ProcessId $AgentProcessId -TimeoutSeconds 15
+    $packageCacheAnchor = [System.IO.Path]::GetDirectoryName(
+        [string]$Entry.packageCacheRoot)
     if ($null -ne (Get-Service -Name $Entry.serviceName -ErrorAction SilentlyContinue) `
         -or (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$($Entry.serviceName)") `
         -or (Test-Path -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EventLog\Application\$($Entry.serviceName)") `
         -or [System.Diagnostics.EventLog]::SourceExists([string]$Entry.serviceName) `
-        -or (Test-Path -LiteralPath $Entry.ownedRoot)) {
-        throw "External-abort cleanup left a process, service, registry key, EventLog source, or owned root."
+        -or (Test-Path -LiteralPath $Entry.ownedRoot) `
+        -or (Test-Path -LiteralPath $Entry.packageCacheRoot) `
+        -or (Test-Path -LiteralPath $packageCacheAnchor)) {
+        throw "External-abort cleanup left a process, service, registry key, EventLog source, owned root, package cache root, or package cache anchor."
     }
 }
 
@@ -436,12 +440,18 @@ try {
 
     Assert-PrivateFileAcl $resolvedManifestPath
     $updatedManifest = Get-Content -LiteralPath $resolvedManifestPath -Raw | ConvertFrom-Json
+    $commonApplicationData = [System.IO.Path]::GetFullPath(
+        [System.Environment]::GetFolderPath(
+            [System.Environment+SpecialFolder]::CommonApplicationData))
+    $expectedPackageCacheRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $commonApplicationData "olo-staged-agent-rmq-content-$Scope/content"))
     if ($updatedManifest.entries.Count -ne 1 `
         -or $updatedManifest.entries[0].serviceAccountName -cne "NT AUTHORITY\LocalService" `
         -or $updatedManifest.entries[0].serviceAccountSid -cne "S-1-5-19" `
         -or $updatedManifest.entries[0].serviceSid -cne $entry.serviceSid `
-        -or $updatedManifest.entries[0].serviceSidType -cne "Restricted") {
-        throw "External-abort cleanup manifest lost its exact LocalService and restricted service-SID binding."
+        -or $updatedManifest.entries[0].serviceSidType -cne "Restricted" `
+        -or $updatedManifest.entries[0].packageCacheRoot -cne $expectedPackageCacheRoot) {
+        throw "External-abort cleanup manifest lost its exact LocalService, restricted service-SID, or ProgramData package-cache binding."
     }
     $service = Get-CimInstance `
         -ClassName Win32_Service `
