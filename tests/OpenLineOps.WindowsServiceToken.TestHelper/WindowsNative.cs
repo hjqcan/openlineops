@@ -13,7 +13,6 @@ internal static class WindowsNative
     public const uint ProcessQueryLimitedInformation = 0x1000;
     public const uint Synchronize = 0x00100000;
     public const uint TokenDuplicate = 0x0002;
-    public const uint TokenImpersonate = 0x0004;
     public const uint TokenQuery = 0x0008;
 
     private const uint ScManagerConnect = 0x0001;
@@ -35,8 +34,6 @@ internal static class WindowsNative
     private const uint GroupEnabled = 0x00000004;
     private const uint GroupUseForDenyOnly = 0x00000010;
     private const int TokenPrimary = 1;
-    private const int TokenImpersonation = 2;
-    private const int SecurityImpersonation = 2;
     private const int TokenElevationTypeDefault = 1;
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeDevice = 0x00000040;
@@ -378,57 +375,6 @@ internal static class WindowsNative
         }
     }
 
-    public static SafeAccessTokenHandle DuplicateSourceTokenForImpersonation(
-        SafeAccessTokenHandle sourceToken,
-        string expectedServiceSid)
-    {
-        if (!DuplicateTokenEx(
-                sourceToken,
-                TokenQuery | TokenImpersonate,
-                IntPtr.Zero,
-                SecurityImpersonation,
-                TokenImpersonation,
-                out var impersonationToken))
-        {
-            var error = Marshal.GetLastPInvokeError();
-            impersonationToken.Dispose();
-            throw new Win32Exception(
-                error,
-                $"Could not duplicate the source Station token for SecurityImpersonation; Win32 error {error}.");
-        }
-
-        try
-        {
-            var evidence = ReadTokenEvidence(impersonationToken);
-            if (!string.Equals(evidence.UserSid, LocalServiceSid, StringComparison.Ordinal)
-                || evidence.TokenType != TokenImpersonation
-                || evidence.ImpersonationLevel != SecurityImpersonation
-                || evidence.ElevationType != TokenElevationTypeDefault
-                || !evidence.IsRestricted
-                || evidence.Groups.Any(group => string.Equals(
-                    group.Sid,
-                    AdministratorsSid,
-                    StringComparison.Ordinal))
-                || !HasEnabledGroup(evidence.Groups, ServiceLogonSid)
-                || !HasEnabledGroup(evidence.Groups, expectedServiceSid)
-                || !evidence.RestrictedSids.Any(group => string.Equals(
-                    group.Sid,
-                    expectedServiceSid,
-                    StringComparison.Ordinal)))
-            {
-                throw new InvalidOperationException(
-                    "The duplicated Station token did not preserve the exact restricted service identity at SecurityImpersonation level.");
-            }
-
-            return impersonationToken;
-        }
-        catch
-        {
-            impersonationToken.Dispose();
-            throw;
-        }
-    }
-
     private static SafeAccessTokenHandle OpenCurrentProcessToken(
         uint desiredAccess,
         string purpose)
@@ -600,13 +546,9 @@ internal static class WindowsNative
         var restrictedSids = ReadTokenGroups(
             token,
             TokenInformationClass.TokenRestrictedSids);
-        var tokenType = ReadTokenInt32(token, TokenInformationClass.TokenType);
         return new TokenEvidence(
             ReadTokenUserSid(token),
-            tokenType,
-            tokenType == TokenImpersonation
-                ? ReadTokenInt32(token, TokenInformationClass.TokenImpersonationLevel)
-                : -1,
+            ReadTokenInt32(token, TokenInformationClass.TokenType),
             ReadTokenInt32(token, TokenInformationClass.TokenElevationType),
             IsTokenRestricted(token),
             groups,
@@ -782,7 +724,6 @@ internal static class WindowsNative
     private sealed record TokenEvidence(
         string UserSid,
         int TokenType,
-        int ImpersonationLevel,
         int ElevationType,
         bool IsRestricted,
         IReadOnlyList<TokenGroup> Groups,
@@ -871,7 +812,6 @@ internal static class WindowsNative
         TokenUser = 1,
         TokenGroups = 2,
         TokenType = 8,
-        TokenImpersonationLevel = 9,
         TokenRestrictedSids = 11,
         TokenElevationType = 18
     }
@@ -981,16 +921,6 @@ internal static class WindowsNative
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsTokenRestricted(SafeAccessTokenHandle token);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateTokenEx(
-        SafeAccessTokenHandle existingToken,
-        uint desiredAccess,
-        IntPtr tokenAttributes,
-        int impersonationLevel,
-        int tokenType,
-        out SafeAccessTokenHandle duplicateToken);
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeServiceHandle OpenSCManager(

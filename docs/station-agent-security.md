@@ -46,16 +46,21 @@ elevated test harness binds a temporary process-object ACE to that invocation's
 random helper service SID. The ACE grants only
 `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`: query access is required for
 the exact image, creation-time, and token checks, while synchronization provides
-an unambiguous process-exit proof. The harness verifies that no existing ACE
-changed, proves the exact helper process has exited (forcibly terminating only
-that captured PID if graceful service stop fails), and restores the original
-DACL. A gate can pass only when termination was proved and the restored DACL is
+an unambiguous process-exit proof. A second temporary ACE on the exact source
+primary-token object grants only `TOKEN_QUERY | TOKEN_DUPLICATE`, the rights
+required to validate and impersonate from a primary token. The helper uses that
+validated primary token directly and never creates or exports another token
+handle. Both DACL grants use the same shared kernel-object lease, which verifies
+that no existing ACE changed, proves the exact helper process has exited
+(forcibly terminating only that
+captured PID if graceful service stop fails), and restores both original DACLs.
+A gate can pass only when termination was proved and both restored DACLs are
 exact. If Windows prevents termination proof, cleanup hard-fails and still
 attempts exact DACL restoration to prevent new helper opens; restoration or
 revalidation failure also hard-fails. It never
 grants the shared LocalService, service-logon, Administrators, or runner SID.
-The helper then creates a minimal
-impersonation token; only inside that exact source identity does it open the
+The helper then impersonates directly from that validated primary token; only
+inside that exact source identity does it open the
 frozen executable, reject path aliases and reparse resolution by handle, verify
 the SHA-256, and connect to a random single-instance control pipe whose protected
 DACL allows only the source Station SID. A 256-bit nonce binds the request, the
@@ -66,7 +71,7 @@ used, and all service and temporary state must be deleted before the gate can
 pass. The helper binary is rejected from every deployable release artifact;
 only its buildable test source may appear in the source archive. This
 attestation mechanism never changes the production Agent token, IPC, or cache
-ACL, and the process-object lease exists only inside the Windows test harness.
+ACL, and both kernel-object leases exist only inside the Windows test harness.
 Its result document contains only bounded validation flags, a finite failure
 reason, and an optional numeric Win32 error; it never serializes exception text,
 paths, tokens, or credentials.

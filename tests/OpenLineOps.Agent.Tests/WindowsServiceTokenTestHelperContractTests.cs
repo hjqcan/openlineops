@@ -67,6 +67,7 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
                 "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
         var before = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
+        var tokenBefore = WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle);
 
         using (WindowsProcessAccessLease.Acquire(
                    process.SafeHandle,
@@ -81,13 +82,119 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             Assert.NotEqual(
                 before,
                 WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+            Assert.Equal(
+                tokenBefore,
+                WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
         }
 
         Assert.Equal(before, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        Assert.Equal(tokenBefore, WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
         Assert.False(
             WindowsProcessAccessLease.HasExactQueryAndWaitAce(
                 process.SafeHandle,
                 bridgeServiceSid));
+    }
+
+    [Fact]
+    public void SourceTokenAccessLeaseGrantsOnlyBridgeQueryAndDuplicateAndRestoresDacl()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.GetCurrentProcess();
+        var processId = checked((uint)process.Id);
+        var createdAtUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+        var bridgeServiceSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+        var before = WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle);
+        var processBefore = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
+
+        using (WindowsTokenAccessLease.Acquire(
+                   process.SafeHandle,
+                   processId,
+                   createdAtUtcTicks,
+                   bridgeServiceSid))
+        {
+            Assert.True(
+                WindowsTokenAccessLease.HasExactQueryAndDuplicateAce(
+                    process.SafeHandle,
+                    bridgeServiceSid));
+            Assert.NotEqual(
+                before,
+                WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
+            Assert.Equal(
+                processBefore,
+                WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        }
+
+        Assert.Equal(before, WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
+        Assert.Equal(processBefore, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        Assert.False(
+            WindowsTokenAccessLease.HasExactQueryAndDuplicateAce(
+                process.SafeHandle,
+                bridgeServiceSid));
+    }
+
+    [Fact]
+    public void OverlappingKernelObjectLeasesRemoveOnlyTheirOwnSidAndRejectDaclDrift()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.GetCurrentProcess();
+        var processId = checked((uint)process.Id);
+        var createdAtUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+        var firstSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+        var secondSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+        var before = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
+        WindowsProcessAccessLease? first = null;
+        WindowsProcessAccessLease? second = null;
+
+        try
+        {
+            first = WindowsProcessAccessLease.Acquire(
+                process.SafeHandle,
+                processId,
+                createdAtUtcTicks,
+                firstSid);
+            second = WindowsProcessAccessLease.Acquire(
+                process.SafeHandle,
+                processId,
+                createdAtUtcTicks,
+                secondSid);
+            Assert.IsType<InvalidDataException>(Record.Exception(first.Dispose));
+            Assert.False(
+                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                    process.SafeHandle,
+                    firstSid));
+            Assert.True(
+                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                    process.SafeHandle,
+                    secondSid));
+
+            Assert.IsType<InvalidDataException>(Record.Exception(second.Dispose));
+            Assert.Equal(before, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
+        }
+        finally
+        {
+            if (second is not null)
+            {
+                _ = Record.Exception(second.Dispose);
+            }
+            if (first is not null)
+            {
+                _ = Record.Exception(first.Dispose);
+            }
+        }
     }
 
     [Fact]

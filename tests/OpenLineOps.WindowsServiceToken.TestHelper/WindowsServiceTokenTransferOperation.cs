@@ -69,16 +69,12 @@ internal sealed class WindowsServiceTokenTransferOperation(
             using var sourceToken = WindowsNative.OpenAndValidateSourceToken(
                 sourceProcess,
                 request.ExpectedSourceServiceSid);
-            failureReason = "duplicate-source-token";
-            using var impersonationToken = WindowsNative.DuplicateSourceTokenForImpersonation(
-                sourceToken,
-                request.ExpectedSourceServiceSid);
             sourceTokenValidated = true;
 
             failurePhase = "source-executable";
             failureReason = "source-executable";
             WindowsIdentity.RunImpersonated(
-                impersonationToken,
+                sourceToken,
                 ValidateSourceExecutableFile);
 
             failurePhase = "post-validation-source";
@@ -93,7 +89,7 @@ internal sealed class WindowsServiceTokenTransferOperation(
             failureReason = "control-pipe";
             var nonce = Convert.FromHexString(request.Nonce);
             await using var pipe = ConnectAndSendNonceAsSourceToken(
-                impersonationToken,
+                sourceToken,
                 nonce);
             controlPipeConnected = true;
 
@@ -178,10 +174,10 @@ internal sealed class WindowsServiceTokenTransferOperation(
     }
 
     private NamedPipeClientStream ConnectAndSendNonceAsSourceToken(
-        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle impersonationToken,
+        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle sourceToken,
         byte[] nonce) =>
         WindowsIdentity.RunImpersonated(
-            impersonationToken,
+            sourceToken,
             () =>
             {
                 var pipe = new NamedPipeClientStream(

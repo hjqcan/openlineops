@@ -38,7 +38,9 @@ $runnerStagedE2E = Read-RequiredText "tests/OpenLineOps.Runner.Tests/RunnerStage
 $transactionLock = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentCacheTransactionLock.cs"
 $studioHarness = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentExternalProcessHarness.cs"
 $serviceTokenBridge = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs"
+$serviceTokenKernelLease = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsKernelObjectAccessLease.cs"
 $serviceTokenProcessLease = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsProcessAccessLease.cs"
+$serviceTokenTokenLease = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsTokenAccessLease.cs"
 $serviceTokenContractTests = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestHelperContractTests.cs"
 $serviceTokenHelperProject = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj"
 $serviceTokenHelperProtocol = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs"
@@ -168,21 +170,41 @@ if ($serviceTokenBridge -cmatch 'SearchOption\.AllDirectories') {
     throw "The service-token bridge must not recursively traverse helper or cleanup reparse points."
 }
 foreach ($leaseLiteral in @(
-        "ReadControl | WriteDac | ProcessQueryLimitedInformation | Synchronize",
         "new CommonAce(",
         "AceQualifier.AccessAllowed",
         "SetKernelObjectSecurity(",
         "VerifyTemporaryDacl(",
         "RestoreRequired();",
-        "AssertEquivalentDacl(")) {
-    Assert-ContainsLiteral $serviceTokenProcessLease $leaseLiteral `
-        "The source-process query lease is missing strict boundary '$leaseLiteral'."
+        "AssertEquivalentDacl(",
+        "RemoveScopedAccessAfterDaclDrift(",
+        ".OfType<KnownAce>()",
+        "if (!removedScopedAce")) {
+    Assert-ContainsLiteral $serviceTokenKernelLease $leaseLiteral `
+        "The shared kernel-object DACL lease is missing strict boundary '$leaseLiteral'."
 }
-if ($serviceTokenProcessLease -cmatch 'LocalServiceSid|ServiceLogonSid|AdministratorsSid|SeDebugPrivilege|AdjustTokenPrivileges') {
-    throw "The service-token helper process lease must grant only the random helper service SID query-and-wait access."
+foreach ($processLeaseLiteral in @(
+        "ReadControl | WriteDac | ProcessQueryLimitedInformation | Synchronize",
+        "ProcessQueryLimitedInformation | Synchronize",
+        "WindowsKernelObjectAccessLease.AcquireOwnedHandle(")) {
+    Assert-ContainsLiteral $serviceTokenProcessLease $processLeaseLiteral `
+        "The source-process query lease is missing strict boundary '$processLeaseLiteral'."
+}
+foreach ($tokenLeaseLiteral in @(
+        "ReadControl | WriteDac | TokenQuery",
+        "TokenQuery | TokenDuplicate",
+        "ValidatePrimaryToken(token)",
+        "WindowsKernelObjectAccessLease.AcquireOwnedHandle(")) {
+    Assert-ContainsLiteral $serviceTokenTokenLease $tokenLeaseLiteral `
+        "The source-token query-and-duplicate lease is missing strict boundary '$tokenLeaseLiteral'."
+}
+if (($serviceTokenKernelLease + $serviceTokenProcessLease + $serviceTokenTokenLease) `
+    -cmatch 'LocalServiceSid|ServiceLogonSid|AdministratorsSid|TokenAllAccess|MaximumAllowed|TokenImpersonate|SeDebugPrivilege|SeTakeOwnershipPrivilege|AdjustTokenPrivileges') {
+    throw "The service-token helper leases must grant only the random helper service SID exact process and token access."
 }
 Assert-ContainsLiteral $serviceTokenBridge "WindowsProcessAccessLease.Acquire(" `
     "The reverse-pipe bridge does not acquire the exact scoped source-process query lease."
+Assert-ContainsLiteral $serviceTokenBridge "WindowsTokenAccessLease.Acquire(" `
+    "The reverse-pipe bridge does not acquire the exact scoped source-token query-and-duplicate lease."
 Assert-ContainsLiteral $serviceTokenBridge "if (before.CurrentState == ServiceStartPending)" `
     "The reverse-pipe bridge does not wait out SCM's non-authoritative start-pending process identifier."
 Assert-ContainsLiteral $serviceTokenBridge "if (before.CurrentState != ServiceRunning" `
@@ -194,6 +216,10 @@ Assert-ContainsLiteral $serviceTokenBridge "var postTerminationWait = WaitForSin
     "The exact helper-process cleanup does not close the normal-exit race after TerminateProcess failure."
 Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseGrantsOnlyBridgeQueryAndWaitAndRestoresDacl" `
     "The scoped source-process query lease lacks an apply-and-exact-restore regression test."
+Assert-ContainsLiteral $serviceTokenContractTests "SourceTokenAccessLeaseGrantsOnlyBridgeQueryAndDuplicateAndRestoresDacl" `
+    "The scoped source-token query-and-duplicate lease lacks an apply-and-exact-restore regression test."
+Assert-ContainsLiteral $serviceTokenContractTests "OverlappingKernelObjectLeasesRemoveOnlyTheirOwnSidAndRejectDaclDrift" `
+    "The shared kernel-object lease does not behavior-test fail-closed DACL drift cleanup."
 Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseRejectsExitedProcessWithStillActiveExitCode" `
     "The source-process lease does not regression-test exit code 259 against an exact wait handle."
 Assert-ContainsLiteral $serviceTokenContractTests "HelperProcessCleanupTerminatesOnlyTheExactCapturedProcess" `
@@ -204,23 +230,25 @@ $helperTerminationIndex = $serviceTokenBridge.IndexOf(
 $sourceDaclRestoreIndex = $serviceTokenBridge.IndexOf(
     "CaptureCleanupFailure(cleanupFailures, sourceProcessAccessLease.Dispose)",
     [System.StringComparison]::Ordinal)
+$sourceTokenDaclRestoreIndex = $serviceTokenBridge.IndexOf(
+    "CaptureCleanupFailure(cleanupFailures, sourceTokenAccessLease.Dispose)",
+    [System.StringComparison]::Ordinal)
 if ($helperTerminationIndex -lt 0 `
-    -or $sourceDaclRestoreIndex -le $helperTerminationIndex) {
-    throw "The source process DACL can be restored before exact helper-process termination is attempted."
+    -or $sourceTokenDaclRestoreIndex -le $helperTerminationIndex `
+    -or $sourceDaclRestoreIndex -le $sourceTokenDaclRestoreIndex) {
+    throw "The source token and process DACLs are not restored in reverse acquisition order after exact helper-process termination is attempted."
 }
 foreach ($helperLiteral in @(
         "TokenQuery | TokenDuplicate",
-        "DuplicateTokenEx(",
         "ServiceSidTypeUnrestricted",
-        "ServiceSidTypeRestricted",
-        "TokenImpersonation",
-        "SecurityImpersonation")) {
+        "ServiceSidTypeRestricted")) {
     Assert-ContainsLiteral $serviceTokenHelperNative $helperLiteral `
         "The one-shot helper is missing strict source-token boundary '$helperLiteral'."
 }
 if ($serviceTokenBridge -cmatch 'DuplicateTokenEx|DuplicateHandle|SeDebugPrivilege|AdjustTokenPrivileges' `
-    -or $serviceTokenHelperNative -cmatch 'DuplicateHandle|SeDebugPrivilege|AdjustTokenPrivileges') {
-    throw "The reverse-pipe bridge must not export token handles or depend on debug privilege."
+    -or $serviceTokenHelperNative -cmatch 'DuplicateTokenEx|DuplicateHandle|TokenImpersonate|SeDebugPrivilege|AdjustTokenPrivileges' `
+    -or $serviceTokenHelperOperation -cmatch 'DuplicateSourceTokenForImpersonation|duplicate-source-token|impersonationToken') {
+    throw "The reverse-pipe bridge must use the exact source primary token without exporting or widening token handles."
 }
 Assert-ContainsLiteral $serviceTokenHelperProtocol "args.Count != 2" `
     "The one-shot helper does not reject any invocation other than its fixed request protocol."
@@ -228,6 +256,8 @@ Assert-ContainsLiteral $serviceTokenHelperProtocol "unknown property" `
     "The one-shot helper request protocol does not reject unknown fields."
 Assert-ContainsLiteral $serviceTokenHelperOperation "WindowsIdentity.RunImpersonated(" `
     "The helper does not hash and connect within the exact source Agent identity."
+Assert-ContainsLiteral $serviceTokenHelperOperation "sourceToken," `
+    "The helper does not impersonate directly from the exact validated source primary token."
 Assert-ContainsLiteral $serviceTokenHelperOperation "ValidateSourceExecutableFile" `
     "The helper does not bind token transfer to the frozen Agent executable hash."
 Assert-ContainsLiteral $serviceTokenHelperOperation "ValidateCanonicalSourceExecutableHandle" `

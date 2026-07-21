@@ -178,6 +178,7 @@ internal static class WindowsServiceTokenTestBridge
         ExceptionDispatchInfo? operationFailure = null;
         Exception? bridgeDiagnostic = null;
         WindowsProcessAccessLease? sourceProcessAccessLease = null;
+        WindowsTokenAccessLease? sourceTokenAccessLease = null;
         T? actionResult = default;
         var actionCompleted = false;
         var bridgeResultConsumed = false;
@@ -216,11 +217,17 @@ internal static class WindowsServiceTokenTestBridge
             AssertBridgeTreeSecurity(
                 bridgeRoot,
                 bridgeServiceSid);
+            var bridgeServiceIdentity = new SecurityIdentifier(bridgeServiceSid);
             sourceProcessAccessLease = WindowsProcessAccessLease.Acquire(
                 sourceProcessHandle,
                 sourceProcessId,
                 sourceProcessCreatedAtUtcTicks,
-                new SecurityIdentifier(bridgeServiceSid));
+                bridgeServiceIdentity);
+            sourceTokenAccessLease = WindowsTokenAccessLease.Acquire(
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks,
+                bridgeServiceIdentity);
             controlPipe = CreateControlPipe(pipeName, canonicalSourceServiceSid);
 
             manager = OpenSCManager(
@@ -434,13 +441,22 @@ internal static class WindowsServiceTokenTestBridge
             CaptureCleanupFailure(cleanupFailures, manager.Dispose);
         }
 
+        if ((sourceTokenAccessLease is not null || sourceProcessAccessLease is not null)
+            && !helperProcessTerminationProven
+            && helperServiceStarted)
+        {
+            cleanupFailures.Add(new InvalidOperationException(
+                "The scoped source process and token DACLs were restored, but exact termination of the helper process was not proven; any already-open helper handles could not be revoked."));
+        }
+
+        if (sourceTokenAccessLease is not null)
+        {
+            CaptureCleanupFailure(cleanupFailures, sourceTokenAccessLease.Dispose);
+            sourceTokenAccessLease = null;
+        }
+
         if (sourceProcessAccessLease is not null)
         {
-            if (!helperProcessTerminationProven && helperServiceStarted)
-            {
-                cleanupFailures.Add(new InvalidOperationException(
-                    "The source process DACL was restored, but exact termination of the helper process was not proven; any already-open helper handles could not be revoked."));
-            }
             CaptureCleanupFailure(cleanupFailures, sourceProcessAccessLease.Dispose);
             sourceProcessAccessLease = null;
         }
@@ -914,8 +930,7 @@ internal static class WindowsServiceTokenTestBridge
                 && !result.ControlPipeConnected
                 && !result.ReceiptReceived,
             "source-token" =>
-                result.FailureReason is "open-source-token"
-                    or "duplicate-source-token"
+                result.FailureReason == "open-source-token"
                 && result.HelperIdentityValidated
                 && result.SourceServiceValidated
                 && result.SourceProcessValidated
