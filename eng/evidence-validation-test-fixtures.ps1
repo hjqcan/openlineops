@@ -969,7 +969,7 @@ function Write-StagedAgentEvidenceFixture {
     $identity = [ordered]@{
         nonAdministrative = $true
         isPrimaryToken = $true
-        isElevated = $false
+        hasLinkedToken = $false
         isRestrictedToken = $true
         administratorGroupPresent = $false
         administratorGroupEnabled = $false

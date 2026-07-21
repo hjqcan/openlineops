@@ -117,7 +117,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "NT AUTHORITY\\LOCAL SERVICE",
             "S-1-5-19",
             IsPrimaryToken: true,
-            IsElevated: false,
+            HasLinkedToken: false,
             IsRestrictedToken: true,
             AdministratorGroupPresent: false,
             AdministratorGroupEnabled: false,
@@ -131,9 +131,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             IsSystem: false);
 
         Assert.True(evidence.NonAdministrative);
+        Assert.True(evidence.MeetsRestrictedServiceIdentityBoundary);
         Assert.False((evidence with
         {
             ExactServiceSidRestricted = false
+        }).MeetsRestrictedServiceIdentityBoundary);
+        Assert.False((evidence with
+        {
+            HasLinkedToken = true
+        }).MeetsRestrictedServiceIdentityBoundary);
+        Assert.False((evidence with
+        {
+            AdministratorGroupPresent = true
         }).NonAdministrative);
     }
 
@@ -3112,7 +3121,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             evidence.AccountName,
             evidence.UserSid,
             evidence.IsPrimaryToken,
-            evidence.IsElevated,
+            evidence.HasLinkedToken,
             evidence.IsRestrictedToken,
             evidence.AdministratorGroupPresent,
             evidence.AdministratorGroupEnabled,
@@ -4149,7 +4158,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string AccountName,
         string UserSid,
         bool IsPrimaryToken,
-        bool IsElevated,
+        bool HasLinkedToken,
         bool IsRestrictedToken,
         bool AdministratorGroupPresent,
         bool AdministratorGroupEnabled,
@@ -4163,19 +4172,22 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         bool IsSystem)
     {
         public bool NonAdministrative =>
-            IsPrimaryToken
-            && !IsElevated
-            && IsRestrictedToken
-            && !AdministratorGroupPresent
+            !AdministratorGroupPresent
             && !AdministratorGroupEnabled
             && !AdministratorGroupDenyOnly
+            && IsAuthenticated
+            && !IsSystem;
+
+        public bool MeetsRestrictedServiceIdentityBoundary =>
+            NonAdministrative
+            && IsPrimaryToken
+            && !HasLinkedToken
+            && IsRestrictedToken
             && ServiceLogonSidPresent
             && ServiceLogonSidEnabled
             && ExactServiceSidPresent
             && ExactServiceSidEnabled
-            && ExactServiceSidRestricted
-            && IsAuthenticated
-            && !IsSystem;
+            && ExactServiceSidRestricted;
     }
 
     private sealed class EvidenceAgentPresenceRepository : IAgentPresenceRepository
@@ -7366,6 +7378,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint TokenQuery = 0x0008;
         private const int SecurityImpersonation = 2;
         private const int TokenImpersonation = 2;
+        private const int TokenElevationTypeDefault = 1;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
         private const int ErrorInsufficientBuffer = 122;
@@ -7771,11 +7784,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     evidence.UserSid,
                     canonicalUserSid,
                     StringComparison.Ordinal)
-                || !evidence.NonAdministrative)
+                || !evidence.MeetsRestrictedServiceIdentityBoundary)
             {
                 throw new InvalidOperationException(
                     "The staged Agent service token did not prove LocalService, a service logon SID, "
-                    + "the exact enabled restricted per-service SID, and a primary, non-elevated, "
+                    + "the exact enabled restricted per-service SID, and a primary, unlinked, "
                     + "non-administrative identity. "
                     + JsonSerializer.Serialize(evidence));
             }
@@ -7843,7 +7856,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         TokenInformationClass.TokenType) == 1,
                     ReadTokenInt32(
                         token.DangerousGetHandle(),
-                        TokenInformationClass.TokenElevation) != 0,
+                        TokenInformationClass.TokenElevationType)
+                    != TokenElevationTypeDefault,
                     IsTokenRestricted(token.DangerousGetHandle()),
                     administratorPresent,
                     administratorEnabled,
@@ -8067,7 +8081,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenGroups = 2,
             TokenType = 8,
             TokenRestrictedSids = 11,
-            TokenElevation = 20
+            TokenElevationType = 18
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);

@@ -1102,6 +1102,36 @@ Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
 $rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
 $rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.hasLinkedToken = $true
+$rawEvidence.agentHostIdentity.HasLinkedToken = $true
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent linked UAC token rejected after evidence rebinding" `
+    -Pattern "linked|identity|false" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity |
+    Add-Member -NotePropertyName isElevated -NotePropertyValue $false
+$rawEvidence.agentHostIdentity |
+    Add-Member -NotePropertyName IsElevated -NotePropertyValue $false
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent obsolete elevation compatibility field rejected" `
+    -Pattern "exact.*properties" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
 $stagedEvidence.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted = "true"
 $rawEvidence.presence.startedAndHeartbeatPersisted = "true"
 Write-Json -Path $rawEvidencePath -Value $rawEvidence

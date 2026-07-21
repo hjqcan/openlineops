@@ -1053,7 +1053,7 @@ if ($null -ne $stagedAgentE2e) {
     $stagedIdentityExpectedBooleans = [ordered]@{
         nonAdministrative = $true
         isPrimaryToken = $true
-        isElevated = $false
+        hasLinkedToken = $false
         isRestrictedToken = $true
         administratorGroupPresent = $false
         administratorGroupEnabled = $false
@@ -1094,7 +1094,7 @@ if ($null -ne $stagedAgentE2e `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
-        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.hasLinkedToken -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isRestrictedToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
@@ -1112,7 +1112,7 @@ if ($null -ne $stagedAgentE2e `
         -or [string]$stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.serviceSid -cnotmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$' `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
-        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.hasLinkedToken -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isRestrictedToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `

@@ -219,7 +219,9 @@ Their evidence must pass
 upload and Operator GET/hash verification, offline durable completion,
 once-only redelivery, the fixed `NT AUTHORITY\LocalService` account and SID, a
 canonical unique Windows service name and derived service SID, an enabled
-service-logon SID, an enabled-and-restricted exact service SID, SCM
+service-logon SID, an enabled-and-restricted exact service SID, no UAC linked
+token (`TokenElevationTypeDefault`), complete absence of the Administrators
+group, SCM
 start/stop/restart/delete lifecycle, the raw evidence hash, and an external
 `dotnet test` driver-tree abort cleanup proof, including testhost descendants,
 under a separate run scope. Strict private cleanup manifests bind only role,

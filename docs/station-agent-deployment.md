@@ -30,6 +30,12 @@ service SID as both enabled and restricted. Do not use LocalSystem, an
 administrator, an interactive operator, the Coordinator identity, or a
 separately managed service account.
 
+The deployment gate also requires `TokenElevationTypeDefault`, meaning that the
+service token has no UAC linked token. `TokenElevation` is deliberately not used
+to classify the service as administrative; the exact LocalService SID, absence
+of the Administrators group, non-LocalSystem user, and restricted service-SID
+facts are the authoritative access identity evidence.
+
 Install the bundle in a read-only program directory such as
 `C:\Program Files\OpenLineOps\StationAgent`. Grant the exact service SID read and
 execute access there. Create separate writable directories for:

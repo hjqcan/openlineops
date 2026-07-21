@@ -2495,6 +2495,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         private const int ErrorServiceDoesNotExist = 1060;
         private const int ErrorServiceNotActive = 1062;
         private const int ErrorServiceMarkedForDelete = 1072;
+        private const int TokenElevationTypeDefault = 1;
         private const string ServiceRegistryPrefix =
             @"SYSTEM\CurrentControlSet\Services\";
         private const string EventLogSourceRegistryPrefix =
@@ -3782,7 +3783,10 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 var evidence = new RunnerAgentTokenEvidence(
                     userSid,
                     IsPrimaryToken: ReadTokenInt32(token, TokenInformationClass.TokenType) == 1,
-                    IsElevated: ReadTokenInt32(token, TokenInformationClass.TokenElevation) != 0,
+                    HasLinkedToken: ReadTokenInt32(
+                        token,
+                        TokenInformationClass.TokenElevationType)
+                    != TokenElevationTypeDefault,
                     IsRestrictedToken: IsTokenRestricted(token),
                     AdministratorGroupPresent: administrator is not null,
                     AdministratorGroupEnabled: IsEnabled(administrator),
@@ -3802,7 +3806,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                                                            StringComparison.Ordinal))),
                     IsSystem: string.Equals(userSid, "S-1-5-18", StringComparison.Ordinal));
                 if (!string.Equals(userSid, expectedAccountSid, StringComparison.Ordinal)
-                    || !evidence.NonAdministrative)
+                    || !evidence.MeetsRestrictedServiceIdentityBoundary)
                 {
                     throw new InvalidOperationException(
                         "Runner Agent SCM token did not prove LocalService plus its exact enabled restricted service SID. "
@@ -3852,11 +3856,25 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             SafeAccessTokenHandle token,
             TokenInformationClass informationClass)
         {
-            using var buffer = ReadTokenBuffer(token, informationClass);
-            if (buffer.Size != sizeof(int))
+            const int bufferLength = sizeof(int);
+            using var buffer = new SafeHGlobalHandle(bufferLength);
+            Marshal.WriteInt32(buffer.DangerousGetHandle(), 0);
+            if (!GetTokenInformation(
+                    token,
+                    informationClass,
+                    buffer.DangerousGetHandle(),
+                    bufferLength,
+                    out var returnedLength))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not read Runner Agent scalar token information {informationClass}.");
+            }
+
+            if (returnedLength != bufferLength)
             {
                 throw new InvalidDataException(
-                    $"Runner Agent token information {informationClass} requires an exact {sizeof(int)}-byte integer, not {buffer.Size} bytes.");
+                    $"Runner Agent token information {informationClass} returned {returnedLength} bytes instead of the required {bufferLength}-byte scalar.");
             }
 
             return Marshal.ReadInt32(buffer.DangerousGetHandle());
@@ -4208,7 +4226,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             TokenGroups = 2,
             TokenType = 8,
             TokenRestrictedSids = 11,
-            TokenElevation = 20
+            TokenElevationType = 18
         }
 
         private sealed record TokenGroup(string Sid, uint Attributes);
@@ -4260,7 +4278,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
     private sealed record RunnerAgentTokenEvidence(
         string UserSid,
         bool IsPrimaryToken,
-        bool IsElevated,
+        bool HasLinkedToken,
         bool IsRestrictedToken,
         bool AdministratorGroupPresent,
         bool AdministratorGroupEnabled,
@@ -4274,18 +4292,22 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         bool IsSystem)
     {
         public bool NonAdministrative =>
-            IsPrimaryToken
-            && !IsElevated
-            && IsRestrictedToken
+            !AdministratorGroupPresent
             && !AdministratorGroupEnabled
-            && (!AdministratorGroupPresent || AdministratorGroupDenyOnly)
+            && !AdministratorGroupDenyOnly
+            && !IsSystem;
+
+        public bool MeetsRestrictedServiceIdentityBoundary =>
+            NonAdministrative
+            && IsPrimaryToken
+            && !HasLinkedToken
+            && IsRestrictedToken
             && ServiceLogonSidPresent
             && ServiceLogonSidEnabled
             && ExactServiceSidPresent
             && ExactServiceSidEnabled
             && ExactServiceSidRestricted
-            && RequiredRestrictedSidsPresent
-            && !IsSystem;
+            && RequiredRestrictedSidsPresent;
     }
 
     [SupportedOSPlatform("windows")]

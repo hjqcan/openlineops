@@ -17,6 +17,14 @@ service SID also present in the restricted SID list. Do not use LocalSystem, an
 administrator, an interactive operator, the Coordinator identity, or a custom
 per-Station account.
 
+Service-token evidence uses `TokenElevationTypeDefault` to prove that the SCM
+token has no UAC linked token. It does not use `TokenElevation` as an
+administrator test: service logons are outside the interactive UAC split-token
+model. Non-administrative status is proven from the exact LocalService user SID,
+the complete absence of the Administrators group, and the non-LocalSystem user;
+the primary, restricted, service-logon, and exact restricted service-SID facts
+then prove the complete Station identity boundary.
+
 Configure only the exact SCM service name in `OpenLineOps:WindowsServiceName`.
 The Agent derives its `S-1-5-80-...` SID from that name and refuses to start
 unless the token user is LocalService, the service-logon SID `S-1-5-6` is

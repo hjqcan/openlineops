@@ -223,6 +223,13 @@ verified lifecycle to the raw RabbitMQ evidence. The separate
 production-integration CI job proves the durable PostgreSQL Coordinator and
 RabbitMQ composition across Coordinator restart.
 
+The identity evidence records `hasLinkedToken=false`, derived strictly from
+`TokenElevationTypeDefault`. It does not retain the obsolete `isElevated`
+field: Windows service logons are not classified by the interactive UAC
+elevation bit. The LocalService SID, complete absence of the Administrators
+group, non-LocalSystem user, restricted token, and exact restricted service SID
+remain mandatory and are independently rebound and mutation-tested.
+
 The RabbitMQ, Studio, and Runner wrappers create separate strict cleanup
 manifests in a private runner-temporary directory before any service mutation.
 Every manifest authorizes only a role, deterministic 32-hex run-scoped service

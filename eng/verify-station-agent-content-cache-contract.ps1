@@ -44,6 +44,8 @@ $staging = Read-RequiredText "eng/stage-release-artifacts.ps1"
 $inspection = Read-RequiredText "eng/inspect-release-candidate.ps1"
 $scalarReaderMarker = "private static int ReadTokenScalar("
 $groupsReaderMarker = "private static List<TokenGroupEvidence> ReadTokenGroups("
+$runnerScalarReaderMarker = "private static int ReadTokenInt32("
+$runnerBufferReaderMarker = "private static SafeHGlobalHandle ReadTokenBuffer("
 $scalarReaderStart = $agentStagedE2E.IndexOf(
     $scalarReaderMarker,
     [System.StringComparison]::Ordinal)
@@ -56,6 +58,19 @@ if ($scalarReaderStart -lt 0 -or $groupsReaderStart -le $scalarReaderStart) {
 $scalarReader = $agentStagedE2E.Substring(
     $scalarReaderStart,
     $groupsReaderStart - $scalarReaderStart)
+$runnerScalarReaderStart = $runnerStagedE2E.IndexOf(
+    $runnerScalarReaderMarker,
+    [System.StringComparison]::Ordinal)
+$runnerBufferReaderStart = $runnerStagedE2E.IndexOf(
+    $runnerBufferReaderMarker,
+    [System.StringComparison]::Ordinal)
+if ($runnerScalarReaderStart -lt 0 `
+    -or $runnerBufferReaderStart -le $runnerScalarReaderStart) {
+    throw "Runner staged evidence is missing the bounded scalar token reader."
+}
+$runnerScalarReader = $runnerStagedE2E.Substring(
+    $runnerScalarReaderStart,
+    $runnerBufferReaderStart - $runnerScalarReaderStart)
 
 Assert-ContainsLiteral $commandLine "--provision-content-cache" `
     "Station Agent is missing the explicit content-cache provisioning switch."
@@ -121,10 +136,23 @@ Assert-ContainsLiteral $contentProtectorTests "WindowsRestrictedTokenPredicateUs
     "Content protection tests do not exercise the native restricted-token predicate on Windows."
 Assert-ContainsLiteral $runnerStagedE2E "IsRestrictedToken: IsTokenRestricted(token)," `
     "Runner staged Agent evidence does not use the native restricted-token predicate."
-Assert-ContainsLiteral $runnerStagedE2E "if (buffer.Size != sizeof(int))" `
-    "Runner staged Agent integer token evidence does not reject non-integer native widths."
+Assert-ContainsLiteral $runnerStagedE2E "TokenInformationClass.TokenElevationType" `
+    "Runner staged Agent evidence does not inspect the UAC linked-token boundary."
+Assert-ContainsLiteral $runnerStagedE2E "HasLinkedToken" `
+    "Runner staged Agent evidence does not expose the linked-token boundary."
+Assert-ContainsLiteral $runnerScalarReader "const int bufferLength = sizeof(int);" `
+    "Runner staged Agent scalar token evidence does not use the exact native integer width."
+Assert-ContainsLiteral $runnerScalarReader "returnedLength != bufferLength" `
+    "Runner staged Agent scalar token evidence does not require the returned width to match its exact native integer buffer."
+if ($runnerScalarReader -cmatch 'ReadTokenBuffer|IntPtr\.Zero|ErrorInsufficientBuffer|requiredBytes') {
+    throw "Runner staged Agent scalar token evidence must call GetTokenInformation with the exact fixed buffer instead of a variable-length sizing probe."
+}
 Assert-ContainsLiteral $agentStagedE2E "IsTokenRestricted(token.DangerousGetHandle())," `
     "Agent staged evidence does not use the native restricted-token predicate."
+Assert-ContainsLiteral $agentStagedE2E "TokenInformationClass.TokenElevationType" `
+    "Agent staged evidence does not inspect the UAC linked-token boundary."
+Assert-ContainsLiteral $agentStagedE2E "HasLinkedToken" `
+    "Agent staged evidence does not expose the linked-token boundary."
 Assert-ContainsLiteral $scalarReader "const int bufferLength = sizeof(int);" `
     "Agent staged scalar token evidence does not use the exact native integer width."
 Assert-ContainsLiteral $scalarReader "returnedLength != bufferLength" `

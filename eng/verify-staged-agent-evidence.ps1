@@ -657,7 +657,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
     Assert-ExactProperties $identity @(
         "nonAdministrative",
         "isPrimaryToken",
-        "isElevated",
+        "hasLinkedToken",
         "isRestrictedToken",
         "administratorGroupPresent",
         "administratorGroupEnabled",
@@ -676,7 +676,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
     Assert-JsonBooleanProperties $identity ([ordered]@{
             nonAdministrative = $true
             isPrimaryToken = $true
-            isElevated = $false
+            hasLinkedToken = $false
             isRestrictedToken = $true
             administratorGroupPresent = $false
             administratorGroupEnabled = $false
@@ -691,7 +691,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
         }) "Staged Agent host identity"
     Assert-Condition ($identity.nonAdministrative -eq $true `
             -and $identity.isPrimaryToken -eq $true `
-            -and $identity.isElevated -eq $false `
+            -and $identity.hasLinkedToken -eq $false `
             -and $identity.isRestrictedToken -eq $true `
             -and $identity.administratorGroupPresent -eq $false `
             -and $identity.administratorGroupEnabled -eq $false `
@@ -790,7 +790,7 @@ Assert-JsonBooleanProperties $raw ([ordered]@{
 foreach ($rawIdentity in @($raw.agentHostIdentity, $raw.restartedAgentHostIdentity)) {
     Assert-JsonBooleanProperties $rawIdentity ([ordered]@{
             IsPrimaryToken = $true
-            IsElevated = $false
+            HasLinkedToken = $false
             IsRestrictedToken = $true
             AdministratorGroupPresent = $false
             AdministratorGroupEnabled = $false
@@ -857,7 +857,7 @@ foreach ($field in @(
 foreach ($identityField in @(
         "nonAdministrative",
         "isPrimaryToken",
-        "isElevated",
+        "hasLinkedToken",
         "isRestrictedToken",
         "administratorGroupPresent",
         "administratorGroupEnabled",

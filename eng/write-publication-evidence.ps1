@@ -584,7 +584,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
         $stagedIdentityExpectedBooleans = [ordered]@{
             nonAdministrative = $true
             isPrimaryToken = $true
-            isElevated = $false
+            hasLinkedToken = $false
             isRestrictedToken = $true
             administratorGroupPresent = $false
             administratorGroupEnabled = $false
@@ -625,7 +625,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -or $stagedAgentDocument.rabbitMqTransportCoverage.coordinatorTransportResultInboxRestartedAfterBrokerRecovery -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.hasLinkedToken -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isRestrictedToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
@@ -643,7 +643,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -or [string]$stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceSid -cnotmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$' `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.hasLinkedToken -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isRestrictedToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `

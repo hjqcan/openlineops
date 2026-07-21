@@ -836,6 +836,39 @@ Assert-FailsWith `
     -Name "fully-rebound-staged-truthy-identity" `
     -Pattern "nonAdministrative.*JSON boolean true"
 
+$stagedLinkedTokenRoot = New-Bundle `
+    -Name "fully-rebound-staged-linked-token-downgrade" `
+    -CandidateRoot $candidateRoot
+$stagedLinkedTokenRawPath = Join-Path `
+    $stagedLinkedTokenRoot `
+    "output/staged-agent-bundle-e2e/rabbitmq-process/evidence.json"
+$stagedLinkedTokenRaw = Get-Content -LiteralPath $stagedLinkedTokenRawPath -Raw |
+    ConvertFrom-Json
+$stagedLinkedTokenRaw.agentHostIdentity.HasLinkedToken = $true
+Write-Json -Path $stagedLinkedTokenRawPath -Value $stagedLinkedTokenRaw
+$stagedLinkedTokenSummaryPath = Join-Path `
+    $stagedLinkedTokenRoot `
+    "output/staged-agent-bundle-e2e/evidence.json"
+$stagedLinkedTokenSummary = Get-Content `
+    -LiteralPath $stagedLinkedTokenSummaryPath `
+    -Raw | ConvertFrom-Json
+$stagedLinkedTokenSummary.rabbitMqTransportCoverage.agentHostIdentity.hasLinkedToken =
+    $true
+$stagedLinkedTokenSummary.rabbitMqTransportCoverage.evidenceSha256 =
+    Get-FileSha256 $stagedLinkedTokenRawPath
+Write-Json -Path $stagedLinkedTokenSummaryPath -Value $stagedLinkedTokenSummary
+Sync-PublicationE2eEvidenceBinding `
+    -Root $stagedLinkedTokenRoot `
+    -RecordName "stagedAgentBundle" `
+    -SourceRelativePath "output/staged-agent-bundle-e2e/evidence.json" `
+    -EmbeddedRelativePath "e2e-evidence/staged-agent-bundle.json"
+Assert-FailsWith `
+    -Result (Invoke-Inspection `
+        -Root $stagedLinkedTokenRoot `
+        -Name "fully-rebound-staged-linked-token-downgrade") `
+    -Name "fully-rebound-staged-linked-token-downgrade" `
+    -Pattern "hasLinkedToken.*JSON boolean false"
+
 $studioSourceTamperRoot = New-Bundle -Name "studio-two-agent-source-tamper" -CandidateRoot $candidateRoot
 $studioSourceTamperPath = Join-Path $studioSourceTamperRoot "output/studio-two-agent-production-closure/evidence.json"
 Write-Utf8NoBom `
