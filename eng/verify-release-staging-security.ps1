@@ -254,6 +254,73 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
 }
 New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
 
+$serviceTokenHelperGuardDefinitions = @(
+    (Get-FunctionDefinition -Ast $stageAst -Name "Get-RelativePathUnderDirectory").Extent.Text,
+    (Get-FunctionDefinition -Ast $stageAst -Name "Test-PortableExecutableContainsAsciiMarker").Extent.Text,
+    (Get-FunctionDefinition -Ast $stageAst -Name "Assert-NoTestOnlyServiceTokenHelper").Extent.Text
+) -join [Environment]::NewLine
+$serviceTokenHelperGuard = [scriptblock]::Create(
+    "param(`$Root, `$ArtifactKind)" + [Environment]::NewLine +
+    $serviceTokenHelperGuardDefinitions + [Environment]::NewLine +
+    "Assert-NoTestOnlyServiceTokenHelper -Root `$Root -ArtifactKind `$ArtifactKind")
+$serviceTokenHelperPayloadFixtures = @(
+    [ordered]@{
+        Name = "case-varied-directory"
+        RelativePath = "WINDOWS-SERVICE-TOKEN-TEST-HELPER/renamed-host.exe"
+        IncludeBinaryIdentity = $false
+    },
+    [ordered]@{
+        Name = "case-varied-file-prefix"
+        RelativePath = "openlineops.windowsservicetoken.testhelper.renamed.bin"
+        IncludeBinaryIdentity = $false
+    },
+    [ordered]@{
+        Name = "renamed-binary-identity"
+        RelativePath = "support/renamed-host.bin"
+        IncludeBinaryIdentity = $true
+    })
+foreach ($fixture in $serviceTokenHelperPayloadFixtures) {
+    $fixtureRoot = Join-Path $resolvedWorkRoot ("service-token-helper-" + $fixture.Name)
+    $fixturePath = Join-Path $fixtureRoot $fixture.RelativePath
+    New-Item -ItemType Directory -Path (Split-Path $fixturePath -Parent) -Force | Out-Null
+    if ($fixture.IncludeBinaryIdentity) {
+        $portableExecutable = [System.IO.File]::ReadAllBytes(
+            (Join-Path $env:SystemRoot "System32/where.exe"))
+        $identityMarker = [System.Text.Encoding]::ASCII.GetBytes(
+            "OpenLineOps.WindowsServiceToken.TestHelper")
+        $payload = [byte[]]::new($portableExecutable.Length + $identityMarker.Length)
+        [System.Buffer]::BlockCopy(
+            $portableExecutable,
+            0,
+            $payload,
+            0,
+            $portableExecutable.Length)
+        [System.Buffer]::BlockCopy(
+            $identityMarker,
+            0,
+            $payload,
+            $portableExecutable.Length,
+            $identityMarker.Length)
+        [System.IO.File]::WriteAllBytes($fixturePath, $payload)
+    }
+    else {
+        [System.IO.File]::WriteAllText(
+            $fixturePath,
+            "test-only-helper-sentinel",
+            [System.Text.UTF8Encoding]::new($false))
+    }
+    $failure = $null
+    try {
+        & $serviceTokenHelperGuard $fixtureRoot "agent"
+    }
+    catch {
+        $failure = $_.Exception.Message
+    }
+    if ($failure -notmatch "contains the test-only Windows service-token helper") {
+        throw "Release staging accepted the $($fixture.Name) test-only service-token helper fixture."
+    }
+}
+
 $cleanupFixtureBundleRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $resolvedWorkRoot "cleanup-manifest-agent-bundle"))
 New-Item -ItemType Directory -Path $cleanupFixtureBundleRoot -Force | Out-Null

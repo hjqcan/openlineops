@@ -5325,6 +5325,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly string _expectedBinaryPath;
         private readonly string _expectedServiceAccountName;
         private readonly string _packageCacheRoot;
+        private readonly string _serviceTokenBridgeRoot;
         private readonly RestrictedAgentIdentity _identity;
         private readonly List<uint> _startedProcessIds = [];
         private readonly List<uint> _cleanlyStoppedProcessIds = [];
@@ -5342,7 +5343,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string expectedBinaryPath,
             string expectedServiceAccountName,
             RestrictedAgentIdentity identity,
-            string packageCacheRoot)
+            string packageCacheRoot,
+            string serviceTokenBridgeRoot)
         {
             _serviceControlManager = serviceControlManager;
             _service = service;
@@ -5354,9 +5356,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             _expectedServiceAccountName = expectedServiceAccountName;
             _identity = identity;
             _packageCacheRoot = Path.GetFullPath(packageCacheRoot);
+            _serviceTokenBridgeRoot = Path.GetFullPath(serviceTokenBridgeRoot);
         }
 
         public string ServiceName { get; }
+
+        internal string ServiceTokenBridgeRoot => _serviceTokenBridgeRoot;
 
         public bool DeletionProven { get; private set; }
 
@@ -5519,7 +5524,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     binaryPath,
                     identity.ServiceAccountName,
                     identity,
-                    packageCacheRoot);
+                    packageCacheRoot,
+                    Path.GetDirectoryName(fullWorkingDirectory)
+                    ?? throw new InvalidDataException(
+                        "The staged Agent content root has no run-scoped parent."));
                 service = null;
                 return owner;
             }
@@ -7373,11 +7381,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private const uint ProcessTerminate = 0x0001;
         private const uint ProcessQueryLimitedInformation = 0x1000;
         private const uint Synchronize = 0x00100000;
-        private const uint TokenDuplicate = 0x0002;
-        private const uint TokenImpersonate = 0x0004;
         private const uint TokenQuery = 0x0008;
-        private const int SecurityImpersonation = 2;
-        private const int TokenImpersonation = 2;
         private const int TokenElevationTypeDefault = 1;
         private const uint GroupEnabled = 0x00000004;
         private const uint GroupUseForDenyOnly = 0x00000010;
@@ -7389,6 +7393,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly WindowsAgentService _service;
         private readonly SafeProcessHandle _processHandle;
         private readonly uint _processId;
+        private readonly string _expectedServiceSid;
         private int? _exitCode;
         private bool _disposed;
 
@@ -7398,7 +7403,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint processId,
             AgentHostTokenEvidence tokenEvidence,
             string executablePath,
-            string executableSha256)
+            string executableSha256,
+            string expectedServiceSid)
         {
             _service = service;
             _processHandle = processHandle;
@@ -7406,6 +7412,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenEvidence = tokenEvidence;
             ExecutablePath = executablePath;
             ExecutableSha256 = executableSha256;
+            _expectedServiceSid = expectedServiceSid;
         }
 
         public int Id => checked((int)_processId);
@@ -7428,36 +7435,33 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         {
             ThrowIfDisposed();
             ArgumentNullException.ThrowIfNull(action);
-            if (!OpenProcessTokenSafe(
-                    _processHandle,
-                    TokenQuery | TokenDuplicate,
-                    out var primaryToken))
+            if (HasExited)
             {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not open the staged Agent service token for filesystem boundary proof.");
+                throw new InvalidOperationException(
+                    $"Staged Agent service PID {_processId} exited before exact-token bridging.");
             }
 
-            using (primaryToken)
+            var result = WindowsServiceTokenTestBridge.Run(
+                _service.ServiceTokenBridgeRoot,
+                _service.ServiceName,
+                _processHandle,
+                _processId,
+                ExecutablePath,
+                ExecutableSha256,
+                _expectedServiceSid,
+                action);
+            if (HasExited)
             {
-                if (!DuplicateTokenEx(
-                        primaryToken,
-                        TokenQuery | TokenImpersonate,
-                        IntPtr.Zero,
-                        SecurityImpersonation,
-                        TokenImpersonation,
-                        out var impersonationToken))
+                if (result is IDisposable disposable)
                 {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Could not duplicate the staged Agent service token for filesystem boundary proof.");
+                    disposable.Dispose();
                 }
 
-                using (impersonationToken)
-                {
-                    return WindowsIdentity.RunImpersonated(impersonationToken, action);
-                }
+                throw new InvalidOperationException(
+                    $"Staged Agent service PID {_processId} exited during exact-token bridging.");
             }
+
+            return result;
         }
 
         public NamedPipeClientStream ConnectNamedPipeAsService(
@@ -7473,55 +7477,24 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "Named-pipe connection timeout must be positive and representable by Win32.");
             }
 
-            if (!OpenProcessTokenSafe(
-                    _processHandle,
-                    TokenQuery | TokenDuplicate,
-                    out var primaryToken))
+            return RunAsService(() =>
             {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Could not open the staged Agent service token for IPC boundary proof.");
-            }
-
-            using (primaryToken)
-            {
-                if (!DuplicateTokenEx(
-                        primaryToken,
-                        TokenQuery | TokenImpersonate,
-                        IntPtr.Zero,
-                        SecurityImpersonation,
-                        TokenImpersonation,
-                        out var impersonationToken))
+                var pipe = new NamedPipeClientStream(
+                    ".",
+                    pipeName,
+                    PipeDirection.InOut,
+                    PipeOptions.Asynchronous);
+                try
                 {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        "Could not duplicate the staged Agent service token for IPC boundary proof.");
+                    pipe.Connect(checked((int)Math.Ceiling(timeout.TotalMilliseconds)));
+                    return pipe;
                 }
-
-                using (impersonationToken)
+                catch
                 {
-                    return WindowsIdentity.RunImpersonated(
-                        impersonationToken,
-                        () =>
-                        {
-                            var pipe = new NamedPipeClientStream(
-                                ".",
-                                pipeName,
-                                PipeDirection.InOut,
-                                PipeOptions.Asynchronous);
-                            try
-                            {
-                                pipe.Connect(checked((int)Math.Ceiling(timeout.TotalMilliseconds)));
-                                return pipe;
-                            }
-                            catch
-                            {
-                                pipe.Dispose();
-                                throw;
-                            }
-                        });
+                    pipe.Dispose();
+                    throw;
                 }
-            }
+            });
         }
 
         internal static SafeProcessHandle OpenRequiredProcess(uint processId)
@@ -7580,7 +7553,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 processId,
                 validation.TokenEvidence,
                 validation.ExecutablePath,
-                validation.ExecutableSha256);
+                validation.ExecutableSha256,
+                requestedIdentity.Sid);
         }
 
         internal static ValidatedProcessEvidence ValidateRequiredProcess(
@@ -8014,16 +7988,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             SafeProcessHandle processHandle,
             uint desiredAccess,
             out SafeAccessTokenHandle tokenHandle);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DuplicateTokenEx(
-            SafeAccessTokenHandle existingToken,
-            uint desiredAccess,
-            IntPtr tokenAttributes,
-            int impersonationLevel,
-            int tokenType,
-            out SafeAccessTokenHandle duplicateToken);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(

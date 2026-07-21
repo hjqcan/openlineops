@@ -32,6 +32,8 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
+    <ProjectReference Include="..\OpenLineOps.WindowsServiceToken.TestHelper\OpenLineOps.WindowsServiceToken.TestHelper.csproj"
+                      ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
                       ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj"
@@ -91,6 +93,29 @@
           SkipUnchangedFiles="true" />
     <ItemGroup>
       <FileWrites Include="$(_LauncherTestBundleDir)**\*" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="StageWindowsServiceTokenTestHelperBundle"
+          AfterTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PropertyGroup>
+      <_ServiceTokenTestHelperOutputDir>$(MSBuildProjectDirectory)\..\OpenLineOps.WindowsServiceToken.TestHelper\bin\$(Configuration)\$(TargetFramework)\win-x64\</_ServiceTokenTestHelperOutputDir>
+      <_ServiceTokenTestHelperBundleDir>$(TargetDir)windows-service-token-test-helper\</_ServiceTokenTestHelperBundleDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_ServiceTokenTestHelperFile Include="$(_ServiceTokenTestHelperOutputDir)**\*"
+                                   Exclude="$(_ServiceTokenTestHelperOutputDir)**\*.pdb" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(_ServiceTokenTestHelperOutputDir)OpenLineOps.WindowsServiceToken.TestHelper.exe')"
+           Text="The Windows service-token test helper was not built before Agent test staging." />
+    <RemoveDir Directories="$(_ServiceTokenTestHelperBundleDir)" />
+    <MakeDir Directories="$(_ServiceTokenTestHelperBundleDir)" />
+    <Copy SourceFiles="@(_ServiceTokenTestHelperFile)"
+          DestinationFiles="@(_ServiceTokenTestHelperFile->'$(_ServiceTokenTestHelperBundleDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <FileWrites Include="$(_ServiceTokenTestHelperBundleDir)**\*" />
     </ItemGroup>
   </Target>
 

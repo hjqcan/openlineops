@@ -531,6 +531,108 @@ function Assert-AgentBundleConfiguration {
     }
 }
 
+function Assert-NoTestOnlyServiceTokenHelper {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind
+    )
+
+    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestHelper"
+    foreach ($entry in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
+        $relativePath = (Get-RelativePathUnderDirectory `
+                -Root $Root `
+                -Path $entry.FullName).Replace('\', '/')
+        $segments = @($relativePath.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+        $hasForbiddenDirectory = @($segments | Where-Object {
+                [string]::Equals(
+                    $_,
+                    "windows-service-token-test-helper",
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+        $containsForbiddenBinaryIdentity = -not $entry.PSIsContainer `
+            -and (Test-PortableExecutableContainsAsciiMarker `
+                -Path $entry.FullName `
+                -Marker $forbiddenAssemblyPrefix)
+        if ($hasForbiddenDirectory `
+            -or $entry.Name.StartsWith(
+                $forbiddenAssemblyPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase) `
+            -or $containsForbiddenBinaryIdentity) {
+            throw "The $ArtifactKind release payload contains the test-only Windows service-token helper: $relativePath"
+        }
+    }
+}
+
+function Test-PortableExecutableContainsAsciiMarker {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Marker
+    )
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read -bor [System.IO.FileShare]::Delete)
+    try {
+        if ($stream.Length -lt 2) {
+            return $false
+        }
+
+        $buffer = [byte[]]::new(65kb + $Marker.Length)
+        $carried = 0
+        $firstChunk = $true
+        while (($read = $stream.Read($buffer, $carried, 65kb)) -gt 0) {
+            $total = $carried + $read
+            if ($firstChunk) {
+                if ($total -lt 2) {
+                    $carried = $total
+                    continue
+                }
+
+                $firstChunk = $false
+                if ($buffer[0] -ne 0x4d -or $buffer[1] -ne 0x5a) {
+                    return $false
+                }
+            }
+
+            $text = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $total)
+            if ($text.IndexOf($Marker, [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+
+            $carried = [Math]::Min($Marker.Length - 1, $total)
+            [System.Buffer]::BlockCopy(
+                $buffer,
+                $total - $carried,
+                $buffer,
+                0,
+                $carried)
+        }
+
+        return $false
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-NoProductionServiceTokenHelperReference {
+    foreach ($projectRoot in @("modules", "shared", "src", "tools", "samples")) {
+        foreach ($project in Get-ChildItem `
+                     -LiteralPath (Resolve-RepoPath $projectRoot) `
+                     -Filter "*.csproj" `
+                     -File `
+                     -Recurse) {
+            if ((Get-Content -LiteralPath $project.FullName -Raw).IndexOf(
+                    "OpenLineOps.WindowsServiceToken.TestHelper",
+                    [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Production project '$($project.FullName)' references the test-only Windows service-token helper."
+            }
+        }
+    }
+}
+
 function Copy-DirectoryContents {
     param(
         [Parameter(Mandatory = $true)][string] $SourceDirectory,
@@ -1019,6 +1121,7 @@ if ($SignWindowsPackages) {
 
 New-CleanDirectory $resolvedArtifactsRoot
 New-CleanDirectory $resolvedWorkRoot
+Assert-NoProductionServiceTokenHelperReference
 
 $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 
@@ -1249,6 +1352,11 @@ $archives = @(
 )
 
 foreach ($archive in $archives) {
+    if ($archive.Kind -cne "source") {
+        Assert-NoTestOnlyServiceTokenHelper `
+            -Root $archive.Source `
+            -ArtifactKind $archive.Kind
+    }
     $artifactKindDirectory = Join-Path $resolvedArtifactsRoot $archive.Kind
     Compress-StagedDirectory `
         -SourceDirectory $archive.Source `

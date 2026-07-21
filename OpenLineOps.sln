@@ -219,6 +219,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PythonScript", "lib\pythons
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetDevPack", "lib\NetDevPack\src\NetDevPack\NetDevPack.csproj", "{F34375AD-76A4-41FC-BEE0-70178291C7B5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenLineOps.WindowsServiceToken.TestHelper", "tests\OpenLineOps.WindowsServiceToken.TestHelper\OpenLineOps.WindowsServiceToken.TestHelper.csproj", "{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -1417,6 +1419,18 @@ Global
 		{F34375AD-76A4-41FC-BEE0-70178291C7B5}.Release|x64.Build.0 = Release|Any CPU
 		{F34375AD-76A4-41FC-BEE0-70178291C7B5}.Release|x86.ActiveCfg = Release|Any CPU
 		{F34375AD-76A4-41FC-BEE0-70178291C7B5}.Release|x86.Build.0 = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|x64.Build.0 = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Debug|x86.Build.0 = Debug|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|x64.ActiveCfg = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|x64.Build.0 = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|x86.ActiveCfg = Release|Any CPU
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -1523,5 +1537,6 @@ Global
 		{0A68A33D-A3D5-4C3C-AE3D-F7A88350DFED} = {6369E6CD-2A9A-7694-BDE4-74E752A16237}
 		{57CE4387-6FD9-4E00-8C04-D7C061AA542D} = {3A8DF596-E814-FECC-DD4B-D8EF8AAC1A0D}
 		{F34375AD-76A4-41FC-BEE0-70178291C7B5} = {3A8DF596-E814-FECC-DD4B-D8EF8AAC1A0D}
+		{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

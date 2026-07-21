@@ -224,7 +224,24 @@ function Test-ZipEntrySafety {
         }
 
         $segments = @($trimmedName.Split("/", [System.StringSplitOptions]::None))
-        if ($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -ceq "." -or $_ -ceq ".." }) {
+        $unsafeSegments = @($segments | Where-Object {
+                $segment = [string]$_
+                $baseName = if ($segment.Contains(".")) {
+                    $segment.Substring(0, $segment.IndexOf(".", [System.StringComparison]::Ordinal))
+                }
+                else {
+                    $segment
+                }
+                [string]::IsNullOrWhiteSpace($segment) `
+                    -or $segment -ceq "." `
+                    -or $segment -ceq ".." `
+                    -or $segment.EndsWith(".", [System.StringComparison]::Ordinal) `
+                    -or $segment.EndsWith(" ", [System.StringComparison]::Ordinal) `
+                    -or $segment.IndexOfAny([char[]]@('<', '>', ':', '"', '|', '?', '*')) -ge 0 `
+                    -or @($segment.ToCharArray() | Where-Object { [int]$_ -lt 32 }).Count -gt 0 `
+                    -or $baseName -imatch '^(CON|PRN|AUX|NUL|COM(?:[1-9]|\u00B9|\u00B2|\u00B3)|LPT(?:[1-9]|\u00B9|\u00B2|\u00B3)|CONIN\$|CONOUT\$)$'
+            })
+        if ($unsafeSegments.Count -gt 0) {
             Add-Failure "$ArchiveName contains an unsafe zip entry path segment: $rawName"
             continue
         }
@@ -623,6 +640,94 @@ function Test-SensitiveSourceArchiveEntries {
     }
 }
 
+function Test-NoTestOnlyServiceTokenHelperEntries {
+    param(
+        [Parameter(Mandatory = $true)]$Archive,
+        [Parameter(Mandatory = $true)][string] $ArchiveName
+    )
+
+    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestHelper"
+    foreach ($entry in @($Archive.Entries)) {
+        $entryName = $entry.FullName
+        $normalizedName = $entryName.Replace([char]92, [char]47).TrimEnd('/')
+        $segments = @($normalizedName.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+        if ($segments.Count -eq 0) {
+            continue
+        }
+
+        $fileName = $segments[$segments.Count - 1]
+        $hasForbiddenDirectory = @($segments | Where-Object {
+                [string]::Equals(
+                    $_,
+                    "windows-service-token-test-helper",
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+        $containsForbiddenBinaryIdentity = -not $entryName.EndsWith(
+                "/",
+                [System.StringComparison]::Ordinal) `
+            -and (Test-ZipEntryPortableExecutableContainsAsciiMarker `
+                -Entry $entry `
+                -Marker $forbiddenAssemblyPrefix)
+        if ($hasForbiddenDirectory `
+            -or $fileName.StartsWith(
+                $forbiddenAssemblyPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase) `
+            -or $containsForbiddenBinaryIdentity) {
+            Add-Failure "$ArchiveName contains the test-only Windows service-token helper in a deployable artifact: $entryName"
+        }
+    }
+}
+
+function Test-ZipEntryPortableExecutableContainsAsciiMarker {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string] $Marker
+    )
+
+    $stream = $Entry.Open()
+    try {
+        if ($Entry.Length -lt 2) {
+            return $false
+        }
+
+        $buffer = [byte[]]::new(65kb + $Marker.Length)
+        $carried = 0
+        $firstChunk = $true
+        while (($read = $stream.Read($buffer, $carried, 65kb)) -gt 0) {
+            $total = $carried + $read
+            if ($firstChunk) {
+                if ($total -lt 2) {
+                    $carried = $total
+                    continue
+                }
+
+                $firstChunk = $false
+                if ($buffer[0] -ne 0x4d -or $buffer[1] -ne 0x5a) {
+                    return $false
+                }
+            }
+
+            $text = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $total)
+            if ($text.IndexOf($Marker, [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+
+            $carried = [Math]::Min($Marker.Length - 1, $total)
+            [System.Buffer]::BlockCopy(
+                $buffer,
+                $total - $carried,
+                $buffer,
+                0,
+                $carried)
+        }
+
+        return $false
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Test-IsSensitiveSourceArchivePath {
     param([Parameter(Mandatory = $true)][string] $EntryName)
 
@@ -682,6 +787,76 @@ function Get-ManifestArtifact {
     }
 
     return $matches[0]
+}
+
+function Test-ExactReleaseCandidateInventory {
+    param([Parameter(Mandatory = $true)][hashtable] $ArtifactByKind)
+
+    $allowedFiles = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($metadataName in @(
+            "release-manifest.json",
+            "checksums.sha256",
+            "release-notes.md",
+            "release-dependency-inventory.json",
+            "release-provenance.json",
+            "release-metadata-checksums.sha256")) {
+        [void]$allowedFiles.Add($metadataName)
+    }
+    foreach ($kind in $RequiredKinds) {
+        if ($ArtifactByKind.ContainsKey($kind) `
+            -and $ArtifactByKind[$kind].relativePath -is [string]) {
+            [void]$allowedFiles.Add(
+                ([string]$ArtifactByKind[$kind].relativePath).Replace([char]92, [char]47))
+        }
+    }
+
+    $allowedDirectories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($relativePath in $allowedFiles) {
+        $segments = @($relativePath.Split('/'))
+        for ($index = 1; $index -lt $segments.Count; $index++) {
+            [void]$allowedDirectories.Add(($segments[0..($index - 1)] -join '/'))
+        }
+    }
+
+    $rootPrefix = $ResolvedArtifactsRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $rootDirectory = [System.IO.DirectoryInfo]::new($ResolvedArtifactsRoot)
+    if (($rootDirectory.Attributes -band (
+                [System.IO.FileAttributes]::ReparsePoint -bor
+                [System.IO.FileAttributes]::Device)) -ne 0) {
+        Add-Failure "Release candidate inventory root must be an ordinary non-reparse directory."
+        return
+    }
+
+    $pending = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $pending.Push($rootDirectory)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in $directory.EnumerateFileSystemInfos(
+                     "*",
+                     [System.IO.SearchOption]::TopDirectoryOnly)) {
+            $relativePath = $entry.FullName.Substring($rootPrefix.Length).Replace([char]92, [char]47)
+            if (($entry.Attributes -band (
+                        [System.IO.FileAttributes]::ReparsePoint -bor
+                        [System.IO.FileAttributes]::Device)) -ne 0) {
+                Add-Failure "Release candidate inventory contains a reparse or device entry: $relativePath"
+                continue
+            }
+
+            if ($entry -is [System.IO.DirectoryInfo]) {
+                if (-not $allowedDirectories.Contains($relativePath)) {
+                    Add-Failure "Release candidate inventory contains an unmanifested directory: $relativePath"
+                }
+                $pending.Push($entry)
+                continue
+            }
+
+            if (-not $allowedFiles.Contains($relativePath)) {
+                Add-Failure "Release candidate inventory contains an unmanifested file: $relativePath"
+            }
+        }
+    }
 }
 
 function Invoke-ReleaseManifestVerify {
@@ -1228,8 +1403,20 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
     $artifactByKind = @{}
     foreach ($artifact in @($manifest.artifacts)) {
-        $artifactByKind[$artifact.kind] = $artifact
+        if ($artifact.kind -is [string]) {
+            $artifactByKind[$artifact.kind] = $artifact
+        }
     }
+    $manifestArtifacts = @($manifest.artifacts)
+    $unexpectedArtifactKinds = @($manifestArtifacts | Where-Object {
+            $_.kind -isnot [string] -or $RequiredKinds -cnotcontains $_.kind
+        })
+    if ($manifestArtifacts.Count -ne $RequiredKinds.Count `
+        -or $unexpectedArtifactKinds.Count -gt 0 `
+        -or $artifactByKind.Count -ne $RequiredKinds.Count) {
+        Add-Failure "Release manifest must contain exactly one artifact for each required kind and no additional kinds."
+    }
+    Test-ExactReleaseCandidateInventory -ArtifactByKind $artifactByKind
 
     $requiredZipEntries = @{
         "api" = @("OpenLineOps.Api.dll", "appsettings.json")
@@ -1303,6 +1490,15 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "README.md",
             "THIRD-PARTY-NOTICES.md",
             "Directory.Build.props",
+            "OpenLineOps.sln",
+            "OpenLineOps.slnx",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/Program.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/AtomicTokenTransferResult.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
@@ -1373,6 +1569,11 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
             if ($kind -ceq "source") {
                 Test-SensitiveSourceArchiveEntries `
+                    -Archive $archive `
+                    -ArchiveName $artifactByKind[$kind].fileName
+            }
+            else {
+                Test-NoTestOnlyServiceTokenHelperEntries `
                     -Archive $archive `
                     -ArchiveName $artifactByKind[$kind].fileName
             }

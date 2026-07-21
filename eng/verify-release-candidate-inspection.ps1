@@ -174,6 +174,7 @@ function New-TestWindowsBundleZip {
         [Parameter(Mandatory = $true)][string] $ArtifactKind,
         [Parameter(Mandatory = $true)][string[]] $Files,
         [Parameter(Mandatory = $true)][object[]] $EntryPoints,
+        [hashtable] $FileSourceOverrides = @{},
         [string] $TamperPath,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
@@ -196,6 +197,12 @@ function New-TestWindowsBundleZip {
     foreach ($relativePath in $Files) {
         $path = Join-Path $stagingRoot $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+        if ($FileSourceOverrides.ContainsKey($relativePath)) {
+            Copy-Item `
+                -LiteralPath $FileSourceOverrides[$relativePath] `
+                -Destination $path
+            continue
+        }
         if ([System.IO.Path]::GetExtension($relativePath) -ceq ".exe") {
             Copy-Item `
                 -LiteralPath (Join-Path $env:SystemRoot "System32/where.exe") `
@@ -605,6 +612,11 @@ function New-MinimalReleaseCandidate {
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
         [switch] $TamperAgentBundle,
+        [switch] $IncludeServiceTokenTestHelperInAgent,
+        [switch] $IncludeRenamedServiceTokenTestHelperDirectoryInAgent,
+        [switch] $IncludeRenamedServiceTokenTestHelperBinaryInAgent,
+        [switch] $IncludeUnmanifestedServiceTokenTestHelperBinary,
+        [switch] $OmitServiceTokenTestHelperSource,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
         [switch] $OmitAgentStationSystemId,
@@ -631,10 +643,19 @@ function New-MinimalReleaseCandidate {
     New-CleanDirectory $root
 
     $version = "0.0.0-$fixturePhysicalId"
-    New-TestZip -Root $root -Name "source/source-openlineops-$version.zip" -Entries (@(
+    $sourceEntries = @(
         "README.md",
         "THIRD-PARTY-NOTICES.md",
         "Directory.Build.props",
+        "OpenLineOps.sln",
+        "OpenLineOps.slnx",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/Program.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/AtomicTokenTransferResult.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
@@ -671,28 +692,61 @@ function New-MinimalReleaseCandidate {
         "docs/trace-projection-recovery.md",
         "apps/desktop/scripts/production-closure-e2e.mjs",
         "docs/headless-runner.md"
-    ) + $ExtraSourceEntries)
+    )
+    if ($OmitServiceTokenTestHelperSource) {
+        $sourceEntries = @($sourceEntries | Where-Object {
+                -not $_.StartsWith(
+                    "tests/OpenLineOps.WindowsServiceToken.TestHelper/",
+                    [System.StringComparison]::Ordinal)
+            })
+    }
+    New-TestZip `
+        -Root $root `
+        -Name "source/source-openlineops-$version.zip" `
+        -Entries ($sourceEntries + $ExtraSourceEntries)
     New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @(
         "OpenLineOps.Api.dll",
         "appsettings.json")
+    $agentFiles = @(
+        "OpenLineOps.Agent.exe",
+        "OpenLineOps.Agent.deps.json",
+        "OpenLineOps.Agent.runtimeconfig.json",
+        "OpenLineOps.StationRuntime.exe",
+        "OpenLineOps.PluginHost.exe",
+        "OpenLineOps.ScriptWorker.exe",
+        "OpenLineOps.LeastPrivilegeLauncher.exe",
+        "appsettings.json",
+        "coreclr.dll",
+        "hostfxr.dll",
+        "DEPLOYMENT.md",
+        "LICENSE.txt",
+        "THIRD-PARTY-NOTICES.md")
+    $agentFileSourceOverrides = @{}
+    if ($IncludeServiceTokenTestHelperInAgent) {
+        $helperPath = "OpenLineOps.WindowsServiceToken.TestHelper.exe"
+        $agentFiles += $helperPath
+        $agentFileSourceOverrides[$helperPath] =
+            $script:ServiceTokenHelperFixtureExecutablePath
+    }
+    if ($IncludeRenamedServiceTokenTestHelperDirectoryInAgent) {
+        $helperPath = "WINDOWS-SERVICE-TOKEN-TEST-HELPER/bridge-host.exe"
+        $agentFiles += $helperPath
+        $agentFileSourceOverrides[$helperPath] =
+            $script:ServiceTokenHelperFixtureExecutablePath
+    }
+    if ($IncludeRenamedServiceTokenTestHelperBinaryInAgent) {
+        $helperPath = "support/bridge-host.bin"
+        $agentFiles += $helperPath
+        $agentFileSourceOverrides[$helperPath] =
+            $script:ServiceTokenHelperFixtureExecutablePath
+    }
+
     New-TestWindowsBundleZip `
         -Root $root `
         -Name "agent/agent-openlineops-win-x64-$version.zip" `
         -ArtifactKind "agent" `
-        -Files @(
-            "OpenLineOps.Agent.exe",
-            "OpenLineOps.Agent.deps.json",
-            "OpenLineOps.Agent.runtimeconfig.json",
-            "OpenLineOps.StationRuntime.exe",
-            "OpenLineOps.PluginHost.exe",
-            "OpenLineOps.ScriptWorker.exe",
-            "OpenLineOps.LeastPrivilegeLauncher.exe",
-            "appsettings.json",
-            "coreclr.dll",
-            "hostfxr.dll",
-            "DEPLOYMENT.md",
-            "LICENSE.txt",
-            "THIRD-PARTY-NOTICES.md") `
+        -Files $agentFiles `
+        -FileSourceOverrides $agentFileSourceOverrides `
         -EntryPoints @(
             [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
             [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
@@ -794,6 +848,13 @@ function New-MinimalReleaseCandidate {
         }
     }
 
+    if ($IncludeUnmanifestedServiceTokenTestHelperBinary) {
+        $unmanifestedPath = Join-Path $root "agent/renamed-host.bin"
+        Copy-Item `
+            -LiteralPath $script:ServiceTokenHelperFixtureExecutablePath `
+            -Destination $unmanifestedPath
+    }
+
     $FixtureIndexEntries.Add([ordered]@{
         name = $Name
         relativeDirectory = $fixturePhysicalId
@@ -852,6 +913,31 @@ function Assert-InspectionFails {
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
+$serviceTokenHelperFixtureOutput = Join-Path `
+    $ResolvedWorkRoot `
+    "service-token-helper-fixture"
+$serviceTokenHelperFixtureProject = Resolve-RepoPath `
+    "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj"
+$serviceTokenHelperBuildOutput = @(& dotnet build `
+        $serviceTokenHelperFixtureProject `
+        --configuration Release `
+        --runtime win-x64 `
+        --self-contained true `
+        --output $serviceTokenHelperFixtureOutput `
+        -p:DebugSymbols=false `
+        -p:DebugType=None 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ($serviceTokenHelperBuildOutput | Out-String)
+    throw "Could not build the real Windows service-token helper payload fixture."
+}
+$script:ServiceTokenHelperFixtureExecutablePath = Join-Path `
+    $serviceTokenHelperFixtureOutput `
+    "OpenLineOps.WindowsServiceToken.TestHelper.exe"
+if (-not (Test-Path `
+        -LiteralPath $script:ServiceTokenHelperFixtureExecutablePath `
+        -PathType Leaf)) {
+    throw "The real Windows service-token helper payload fixture is missing its executable."
+}
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
 Assert-InspectionPasses -Root $positiveRoot -Name "positive"
@@ -863,6 +949,46 @@ Assert-InspectionFails `
     -Root $tamperedAgentBundleRoot `
     -Name "tampered-agent-bundle" `
     -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
+
+$serviceTokenHelperLeakRoot = New-MinimalReleaseCandidate `
+    -Name "test-only-service-token-helper-leak" `
+    -IncludeServiceTokenTestHelperInAgent
+Assert-InspectionFails `
+    -Root $serviceTokenHelperLeakRoot `
+    -Name "test-only-service-token-helper-leak" `
+    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+
+$renamedServiceTokenHelperLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-helper-directory-leak" `
+    -IncludeRenamedServiceTokenTestHelperDirectoryInAgent
+Assert-InspectionFails `
+    -Root $renamedServiceTokenHelperLeakRoot `
+    -Name "renamed-test-only-service-token-helper-directory-leak" `
+    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+
+$renamedServiceTokenHelperBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-helper-binary-leak" `
+    -IncludeRenamedServiceTokenTestHelperBinaryInAgent
+Assert-InspectionFails `
+    -Root $renamedServiceTokenHelperBinaryLeakRoot `
+    -Name "renamed-test-only-service-token-helper-binary-leak" `
+    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+
+$unmanifestedServiceTokenHelperBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "unmanifested-test-only-service-token-helper-binary-leak" `
+    -IncludeUnmanifestedServiceTokenTestHelperBinary
+Assert-InspectionFails `
+    -Root $unmanifestedServiceTokenHelperBinaryLeakRoot `
+    -Name "unmanifested-test-only-service-token-helper-binary-leak" `
+    -ExpectedPattern "unmanifested file"
+
+$missingServiceTokenHelperSourceRoot = New-MinimalReleaseCandidate `
+    -Name "missing-service-token-helper-source" `
+    -OmitServiceTokenTestHelperSource
+Assert-InspectionFails `
+    -Root $missingServiceTokenHelperSourceRoot `
+    -Name "missing-service-token-helper-source" `
+    -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestHelper/"
 
 $removedAgentContainerSettingRoot = New-MinimalReleaseCandidate `
     -Name "removed-agent-container-setting" `
@@ -966,6 +1092,22 @@ Assert-InspectionFails `
     -Root $unsafePathRoot `
     -Name "unsafe-path" `
     -ExpectedPattern "unsafe zip entry path segment|path traversal zip entry"
+
+$windowsCanonicalAliasRoot = New-MinimalReleaseCandidate `
+    -Name "windows-canonical-alias-path" `
+    -ExtraSourceEntries @("windows-service-token-test-helper./bridge-host.exe")
+Assert-InspectionFails `
+    -Root $windowsCanonicalAliasRoot `
+    -Name "windows-canonical-alias-path" `
+    -ExpectedPattern "unsafe zip entry path segment"
+
+$windowsSuperscriptDeviceAliasRoot = New-MinimalReleaseCandidate `
+    -Name "windows-superscript-device-alias-path" `
+    -ExtraSourceEntries @(("COM{0}.txt" -f [char]0x00B9))
+Assert-InspectionFails `
+    -Root $windowsSuperscriptDeviceAliasRoot `
+    -Name "windows-superscript-device-alias-path" `
+    -ExpectedPattern "unsafe zip entry path segment"
 
 $sensitiveSourceRoot = New-MinimalReleaseCandidate -Name "sensitive-source" -ExtraSourceEntries @("certs/openlineops-code-signing.pfx")
 Assert-InspectionFails `

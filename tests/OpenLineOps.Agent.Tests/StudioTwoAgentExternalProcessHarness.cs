@@ -75,13 +75,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     [SupportedOSPlatform("windows")]
     internal sealed class StudioTwoAgentExternalProcessHarness : IAsyncDisposable
     {
-        private const uint ProcessQueryLimitedInformation = 0x1000;
         private const uint ScManagerConnect = 0x0001;
         private const uint ServiceQueryStatus = 0x0004;
         private const uint ServiceRunning = 0x00000004;
-        private const uint TokenDuplicate = 0x0002;
-        private const uint TokenImpersonate = 0x0004;
-        private const uint TokenQuery = 0x0008;
         private const uint ScStatusProcessInfo = 0;
         private const int ErrorAccessDenied = 5;
         private const int ErrorFileNotFound = 2;
@@ -1110,7 +1106,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "Both Station Agents must remain alive during local IPC isolation verification.");
             }
 
-            RequireElevatedTestProcess();
             var entryServiceSid = EntryAgentServiceSid;
             var downstreamServiceSid = DownstreamAgentServiceSid;
             if (string.Equals(
@@ -1124,13 +1119,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             var entryPipeName = StationMaterialArrivalLocalIpcOptions.DerivePipeName(
                 entryServiceSid);
-            using var entryToken = DuplicateServiceProcessImpersonationToken(
-                entryProcess.Id,
-                "entry");
             var entryImpersonationEntered = false;
             var entryServiceTokenConnected = false;
             var entryPipeExactAclVerified = false;
-            WindowsIdentity.RunImpersonated(entryToken, () =>
+            _ = entryProcess.RunAsService(() =>
             {
                 entryImpersonationEntered = true;
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1143,6 +1135,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 entryServiceTokenConnected = pipe.IsConnected;
                 WindowsIdentityBoundNamedPipe.Verify(pipe, entryServiceSid);
                 entryPipeExactAclVerified = true;
+                return true;
             });
             if (!entryImpersonationEntered
                 || !entryServiceTokenConnected
@@ -1152,12 +1145,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     "The entry Station process token did not connect to and verify the exact material-arrival pipe ACL.");
             }
 
-            using var downstreamToken = DuplicateServiceProcessImpersonationToken(
-                downstreamProcess.Id,
-                "downstream");
             var downstreamImpersonationEntered = false;
-            var crossStationFailure = WindowsIdentity.RunImpersonated(
-                downstreamToken,
+            var crossStationFailure = downstreamProcess.RunAsService(
                 () =>
                 {
                     downstreamImpersonationEntered = true;
@@ -1287,65 +1276,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 unauthorizedAccessException.HResult & 0xFFFF,
             _ => null
         };
-
-        private static void RequireElevatedTestProcess()
-        {
-            using var identity = WindowsIdentity.GetCurrent(
-                TokenAccessLevels.Query | TokenAccessLevels.Duplicate);
-            var principal = new WindowsPrincipal(identity);
-            if (!principal.IsInRole(WindowsBuiltInRole.Administrator))
-            {
-                throw new InvalidOperationException(
-                    "The formal two-Agent SCM gate must run in an elevated test process before it can duplicate Station service tokens.");
-            }
-        }
-
-        private static SafeAccessTokenHandle DuplicateServiceProcessImpersonationToken(
-            int processId,
-            string role)
-        {
-            using var process = OpenProcess(
-                ProcessQueryLimitedInformation,
-                inheritHandle: false,
-                checked((uint)processId));
-            if (process.IsInvalid)
-            {
-                var error = Marshal.GetLastWin32Error();
-                throw new Win32Exception(
-                    error,
-                    $"Could not open the {role} Station Agent process for token duplication.");
-            }
-
-            if (!OpenProcessToken(
-                    process,
-                    TokenQuery | TokenDuplicate,
-                    out var sourceToken))
-            {
-                var error = Marshal.GetLastWin32Error();
-                throw new Win32Exception(
-                    error,
-                    $"Could not open the {role} Station Agent token with TOKEN_QUERY | TOKEN_DUPLICATE.");
-            }
-
-            using (sourceToken)
-            {
-                if (!DuplicateTokenEx(
-                        sourceToken,
-                        TokenQuery | TokenImpersonate,
-                        IntPtr.Zero,
-                        NativeSecurityImpersonationLevel.SecurityImpersonation,
-                        NativeTokenType.TokenImpersonation,
-                        out var impersonationToken))
-                {
-                    var error = Marshal.GetLastWin32Error();
-                    throw new Win32Exception(
-                        error,
-                        $"Could not create the {role} Station Agent SecurityImpersonation TokenImpersonation token.");
-                }
-
-                return impersonationToken;
-            }
-        }
 
         private static void VerifyServiceStillRunning(
             string serviceName,
@@ -1630,20 +1560,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private static void ProtectStudioHarnessRoot(string root)
             => ProtectRunScopedRoot(root);
 
-        private enum NativeSecurityImpersonationLevel
-        {
-            SecurityAnonymous,
-            SecurityIdentification,
-            SecurityImpersonation,
-            SecurityDelegation
-        }
-
-        private enum NativeTokenType
-        {
-            TokenPrimary = 1,
-            TokenImpersonation
-        }
-
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeServiceStatusProcess
         {
@@ -1667,29 +1583,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             protected override bool ReleaseHandle() => CloseServiceHandle(handle);
         }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern SafeProcessHandle OpenProcess(
-            uint desiredAccess,
-            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-            uint processId);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool OpenProcessToken(
-            SafeProcessHandle processHandle,
-            uint desiredAccess,
-            out SafeAccessTokenHandle tokenHandle);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DuplicateTokenEx(
-            SafeAccessTokenHandle existingToken,
-            uint desiredAccess,
-            IntPtr tokenAttributes,
-            NativeSecurityImpersonationLevel impersonationLevel,
-            NativeTokenType tokenType,
-            out SafeAccessTokenHandle newToken);
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeNativeServiceHandle OpenSCManager(

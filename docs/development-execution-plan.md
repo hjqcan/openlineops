@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-20
+Last updated: 2026-07-21
 
 ## Product Contract
 
@@ -173,7 +173,15 @@ powershell -NoProfile -File eng/verify-station-agent-content-cache-contract.ps1
 $env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
 $env:OPENLINEOPS_POSTGRES_CONNECTION_STRING = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=<ephemeral-password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
-powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot artifacts/release-work/agent -SamplePluginRoot artifacts/release-work/sample-plugin -ApiBundleRoot artifacts/release-work/api -Configuration Release -NoBuild -NoRestore
+$externalAbortScope = [System.Guid]::NewGuid().ToString("N")
+$cleanupRoot = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) "openlineops-agent-service-cleanup"))
+New-Item -ItemType Directory -Path $cleanupRoot -Force | Out-Null
+$agentRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/agent").Path)
+$samplePluginRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/sample-plugin").Path)
+$apiRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/api").Path)
+$cleanupManifest = Join-Path $cleanupRoot "rabbitmq-$externalAbortScope.json"
+$readyPath = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.json"
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot $agentRoot -SamplePluginRoot $samplePluginRoot -ApiBundleRoot $apiRoot -Scope $externalAbortScope -ManifestPath $cleanupManifest -ReadyPath $readyPath -Configuration Release -NoBuild -NoRestore
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
 npm --prefix apps/desktop run test:production-command-policy
 npm --prefix apps/desktop run test:process-problem-location
@@ -232,6 +240,16 @@ package-cache root beneath its deterministic anchor;
 wrapper `finally` blocks and independent workflow `always()` steps invoke the
 same bounded, idempotent scavenger. Studio's two Station services share the
 LocalService base account but must expose distinct restricted service SIDs.
+Because Windows checks `TOKEN_DUPLICATE` against the service token object's own
+DACL, the external test runner never copies a Station token. Windows E2E instead
+starts a random, one-shot, self-deleting LocalService test helper that validates
+the SCM PID, restricted source token, and exact service SID, then validates the
+frozen Agent path/hash and connects to a single-instance reverse pipe while
+impersonating that source token. The runner executes the existing boundary
+assertion through `RunAsClient`; no token handle crosses the process boundary.
+This helper is self-contained, accepts only its fixed nonce-bound request, is
+absent from every deployable artifact, and does not relax any production Agent
+pipe, cache, or token ACL.
 `eng/verify-studio-two-agent-production-evidence.ps1` and
 `eng/verify-runner-staged-agent-evidence.ps1` bind that two-Agent proof and the
 Runner-to-SCM-Agent proof to their public roots. The production-closure scanner

@@ -32,6 +32,29 @@ enabled and non-deny-only, the token reports restrictions, and the derived
 service SID is both enabled and present in the restricted SID list. There is no
 independent service-SID configuration value that can drift from the SCM name.
 
+### Test-only identity attestation
+
+An external test process is not allowed to open a production Station token with
+`TOKEN_DUPLICATE`. The Windows process E2E uses a separate, self-contained
+test-only helper service instead. Each invocation creates a random LocalService
+`SERVICE_SID_TYPE_UNRESTRICTED` helper whose service-object and filesystem ACLs
+grant access to that exact helper SID. The helper validates its own SCM identity
+and marks itself for deletion before it validates the source Station's exact SCM
+name, running PID, creation time, restricted LocalService token, service-logon
+SID, and enabled-and-restricted Station SID. It then creates a minimal
+impersonation token; only inside that exact source identity does it open the
+frozen executable, reject path aliases and reparse resolution by handle, verify
+the SHA-256, and connect to a random single-instance control pipe whose protected
+DACL allows only the source Station SID. A 256-bit nonce binds the request, the
+runner calls `RunAsClient` and revalidates the Station identity, and an exact
+one-byte receipt completes the one-shot protocol. No token handle is exported,
+no arbitrary command is accepted, no debug privilege or LocalSystem broker is
+used, and all service and temporary state must be deleted before the gate can
+pass. The helper binary is rejected from every deployable release artifact;
+only its buildable test source may appear in the source archive. This
+attestation mechanism never changes the production Agent token, IPC, or cache
+ACL.
+
 ## Station-local IPC
 
 Material-arrival and resource-fence named pipes are owned by, and grant access

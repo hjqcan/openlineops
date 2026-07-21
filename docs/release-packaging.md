@@ -169,6 +169,15 @@ service. Provisioning and protected removal are mutually exclusive
 administrator operations; release static gates, executable tests, staging, and
 candidate inspection require both commands and their packaged deployment
 instructions.
+
+The Windows service-token E2E helper is test infrastructure, not a product
+runtime. Its source is present only as ordinary test source in the open-source
+`source` artifact so the repository remains fully buildable. Its executable,
+assembly prefix, and `windows-service-token-test-helper` staging directory are
+forbidden from every API, Agent, Runner, Desktop, Plugin Host, Script Worker,
+and sample-plugin artifact. Release staging rejects such a leak before archive
+creation, candidate inspection independently rejects a fully re-manifested and
+re-hashed leak, and the helper project is not publishable.
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.
 
