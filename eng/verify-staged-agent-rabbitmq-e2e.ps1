@@ -151,7 +151,7 @@ function Assert-RestrictedServiceIdentity {
         "UserSid",
         "IsPrimaryToken",
         "IsElevated",
-        "HasRestrictions",
+        "IsRestrictedToken",
         "AdministratorGroupPresent",
         "AdministratorGroupEnabled",
         "AdministratorGroupDenyOnly",
@@ -167,7 +167,7 @@ function Assert-RestrictedServiceIdentity {
     Assert-JsonBooleanProperties $Identity ([ordered]@{
             IsPrimaryToken = $true
             IsElevated = $false
-            HasRestrictions = $true
+            IsRestrictedToken = $true
             AdministratorGroupPresent = $false
             AdministratorGroupEnabled = $false
             AdministratorGroupDenyOnly = $false
@@ -188,7 +188,7 @@ function Assert-RestrictedServiceIdentity {
         -or $Identity.UserSid -cne "S-1-5-19" `
         -or $Identity.IsPrimaryToken -ne $true `
         -or $Identity.IsElevated -ne $false `
-        -or $Identity.HasRestrictions -ne $true `
+        -or $Identity.IsRestrictedToken -ne $true `
         -or $Identity.AdministratorGroupPresent -ne $false `
         -or $Identity.AdministratorGroupEnabled -ne $false `
         -or $Identity.AdministratorGroupDenyOnly -ne $false `

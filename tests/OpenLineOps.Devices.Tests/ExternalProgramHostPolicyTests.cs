@@ -32,7 +32,7 @@ public sealed class ExternalProgramHostPolicyTests
             WindowsStationServiceIdentityReader.LocalServiceSid,
             ServiceSid,
             ServiceLogonSidEnabled: true,
-            TokenHasRestrictions: true,
+            IsRestrictedToken: true,
             ServiceSidEnabled: true,
             ServiceSidOwnerEligible: true,
             ServiceSidRestricted: true));
@@ -48,7 +48,7 @@ public sealed class ExternalProgramHostPolicyTests
     public void RestrictedServiceIdentityRejectsWrongHostOrTokenMembership(
         string hostAccountSid,
         bool serviceLogonSidEnabled,
-        bool tokenHasRestrictions,
+        bool isRestrictedToken,
         bool enabled,
         bool ownerEligible,
         bool restricted)
@@ -58,7 +58,7 @@ public sealed class ExternalProgramHostPolicyTests
                 hostAccountSid,
                 ServiceSid,
                 serviceLogonSidEnabled,
-                tokenHasRestrictions,
+                isRestrictedToken,
                 enabled,
                 ownerEligible,
                 restricted)));
@@ -119,7 +119,7 @@ public sealed class ExternalProgramHostPolicyTests
                 WindowsStationServiceIdentityReader.LocalServiceSid,
                 OtherServiceSid,
                 ServiceLogonSidEnabled: true,
-                TokenHasRestrictions: true,
+                IsRestrictedToken: true,
                 ServiceSidEnabled: true,
                 ServiceSidRestricted: true)));
 
@@ -137,7 +137,7 @@ public sealed class ExternalProgramHostPolicyTests
                 "S-1-5-18",
                 ServiceSid,
                 ServiceLogonSidEnabled: true,
-                TokenHasRestrictions: true,
+                IsRestrictedToken: true,
                 ServiceSidEnabled: true,
                 ServiceSidRestricted: true)));
 
@@ -159,7 +159,7 @@ public sealed class ExternalProgramHostPolicyTests
                 WindowsStationServiceIdentityReader.LocalServiceSid,
                 ServiceSid,
                 ServiceLogonSidEnabled: true,
-                TokenHasRestrictions: true,
+                IsRestrictedToken: true,
                 enabled,
                 restricted)));
 
@@ -172,7 +172,7 @@ public sealed class ExternalProgramHostPolicyTests
     [InlineData(true, false)]
     public void RestrictedIdentityRequiresServiceLogonAndRestrictedTokenFacts(
         bool serviceLogonSidEnabled,
-        bool tokenHasRestrictions)
+        bool isRestrictedToken)
     {
         var options = CreateOptions(requireIdentity: true);
         var enforcer = new ExternalProgramHostPolicyEnforcer(
@@ -181,7 +181,7 @@ public sealed class ExternalProgramHostPolicyTests
                 WindowsStationServiceIdentityReader.LocalServiceSid,
                 ServiceSid,
                 serviceLogonSidEnabled,
-                tokenHasRestrictions,
+                isRestrictedToken,
                 ServiceSidEnabled: true,
                 ServiceSidRestricted: true)));
 
@@ -223,7 +223,7 @@ public sealed class ExternalProgramHostPolicyTests
                 WindowsStationServiceIdentityReader.LocalServiceSid,
                 ServiceSid,
                 ServiceLogonSidEnabled: true,
-                TokenHasRestrictions: true,
+                IsRestrictedToken: true,
                 ServiceSidEnabled: true,
                 ServiceSidRestricted: true)));
 
@@ -245,7 +245,7 @@ public sealed class ExternalProgramHostPolicyTests
                 string.Empty,
                 string.Empty,
                 ServiceLogonSidEnabled: false,
-                TokenHasRestrictions: false,
+                IsRestrictedToken: false,
                 ServiceSidEnabled: false,
                 ServiceSidRestricted: false)));
 

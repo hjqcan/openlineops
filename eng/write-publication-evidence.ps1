@@ -585,7 +585,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             nonAdministrative = $true
             isPrimaryToken = $true
             isElevated = $false
-            hasRestrictions = $true
+            isRestrictedToken = $true
             administratorGroupPresent = $false
             administratorGroupEnabled = $false
             administratorGroupDenyOnly = $false
@@ -626,7 +626,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.hasRestrictions -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.isRestrictedToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupDenyOnly -ne $false `
@@ -644,7 +644,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
-            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.hasRestrictions -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.isRestrictedToken -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `

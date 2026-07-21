@@ -875,7 +875,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             "S-1-5-19",
             requiredServiceSid,
             ServiceLogonSidEnabled: true,
-            TokenHasRestrictions: true,
+            IsRestrictedToken: true,
             ServiceSidEnabled: true,
             ServiceSidRestricted: true);
     }

@@ -114,7 +114,7 @@ internal sealed record ExternalProgramHostIdentity(
     string HostAccountSid,
     string ServiceSid,
     bool ServiceLogonSidEnabled,
-    bool TokenHasRestrictions,
+    bool IsRestrictedToken,
     bool ServiceSidEnabled,
     bool ServiceSidRestricted);
 
@@ -142,7 +142,7 @@ internal sealed class WindowsExternalProgramHostIdentityReader : IExternalProgra
             identity.HostAccountSid,
             identity.ServiceSid,
             identity.ServiceLogonSidEnabled,
-            identity.TokenHasRestrictions,
+            identity.IsRestrictedToken,
             identity.ServiceSidEnabled,
             identity.ServiceSidRestricted);
     }
@@ -182,7 +182,7 @@ internal sealed class ExternalProgramHostPolicyEnforcer
                 HostAccountSid: string.Empty,
                 ServiceSid: string.Empty,
                 ServiceLogonSidEnabled: false,
-                TokenHasRestrictions: false,
+                IsRestrictedToken: false,
                 ServiceSidEnabled: false,
                 ServiceSidRestricted: false);
         }
@@ -206,7 +206,7 @@ internal sealed class ExternalProgramHostPolicyEnforcer
                 requiredServiceSid,
                 StringComparison.Ordinal)
             || !identity.ServiceLogonSidEnabled
-            || !identity.TokenHasRestrictions
+            || !identity.IsRestrictedToken
             || !identity.ServiceSidEnabled
             || !identity.ServiceSidRestricted)
         {

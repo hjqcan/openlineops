@@ -191,7 +191,7 @@ function New-ValidEvidence {
                 serviceAccountName = 'NT AUTHORITY\LocalService'
                 serviceAccountSid = 'S-1-5-19'
                 serviceSidSha256 = 'd3aa07b9acd0fdfc42a4f3c9a54ba4321b9883099f83fcaf76bca38804e1f221'
-                hasRestrictions = $true
+                isRestrictedToken = $true
                 serviceLogonSidPresent = $true
                 serviceLogonSidEnabled = $true
                 exactServiceSidPresent = $true
@@ -407,7 +407,7 @@ try {
     Invoke-Expected 'agent-boolean-truthy-string' {
         param($root)
         $evidence = Read-Evidence $root
-        $evidence.execution.agent.hasRestrictions = 'true'
+        $evidence.execution.agent.isRestrictedToken = 'true'
         Write-Evidence $root $evidence
     } $false
     Invoke-Expected 'package-boolean-truthy-integer' {
@@ -497,7 +497,7 @@ try {
     Invoke-Expected 'agent-not-restricted' {
         param($root)
         $evidence = Read-Evidence $root
-        $evidence.execution.agent.hasRestrictions = $false
+        $evidence.execution.agent.isRestrictedToken = $false
         Write-Evidence $root $evidence
     } $false
     Invoke-Expected 'agent-service-logon-sid-disabled' {

@@ -298,7 +298,7 @@ Assert-ExactProperties $agent @(
     'bundleManifestSha256', 'bundleChecksumsSha256', 'manifestBound',
     'mainModuleBound', 'serviceName', 'serviceLifecycleVerified',
     'serviceAccountName', 'serviceAccountSid', 'serviceSidSha256',
-    'hasRestrictions', 'serviceLogonSidPresent', 'serviceLogonSidEnabled',
+    'isRestrictedToken', 'serviceLogonSidPresent', 'serviceLogonSidEnabled',
     'exactServiceSidPresent', 'exactServiceSidEnabled', 'exactServiceSidRestricted',
     'nonAdministrative') 'Agent evidence'
 Assert-JsonBooleanProperties $runner ([ordered]@{
@@ -311,7 +311,7 @@ Assert-JsonBooleanProperties $agent ([ordered]@{
         manifestBound = $true
         mainModuleBound = $true
         serviceLifecycleVerified = $true
-        hasRestrictions = $true
+        isRestrictedToken = $true
         serviceLogonSidPresent = $true
         serviceLogonSidEnabled = $true
         exactServiceSidPresent = $true
@@ -335,7 +335,7 @@ Assert-Condition ($agent.serviceName -cmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$
         -and $agent.serviceLifecycleVerified -eq $true `
         -and $agent.serviceAccountName -ceq 'NT AUTHORITY\LocalService' `
         -and $agent.serviceAccountSid -ceq 'S-1-5-19' `
-        -and $agent.hasRestrictions -eq $true `
+        -and $agent.isRestrictedToken -eq $true `
         -and $agent.serviceLogonSidPresent -eq $true `
         -and $agent.serviceLogonSidEnabled -eq $true `
         -and $agent.exactServiceSidPresent -eq $true `

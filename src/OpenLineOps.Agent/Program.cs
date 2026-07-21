@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Agent;
 using OpenLineOps.Agent.Application.StationJobs;
@@ -10,6 +11,7 @@ using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 
 const int hostFailureExitCode = 70;
+string? windowsServiceEventLogSource = null;
 
 try
 {
@@ -31,6 +33,7 @@ try
     var windowsServiceName = WindowsStationServiceIdentityReader.RequireCanonicalServiceName(
         builder.Configuration["OpenLineOps:WindowsServiceName"],
         "OpenLineOps:WindowsServiceName");
+    windowsServiceEventLogSource = windowsServiceName;
 
     builder.Services.AddWindowsService(options =>
     {
@@ -192,6 +195,24 @@ try
 }
 catch (Exception exception)
 {
-    await Console.Error.WriteLineAsync($"OpenLineOps Station Agent terminated: {exception.Message}");
+    var failureMessage = $"OpenLineOps Station Agent terminated: {exception.Message}";
+    await Console.Error.WriteLineAsync(failureMessage);
+    if (OperatingSystem.IsWindows()
+        && windowsServiceEventLogSource is not null)
+    {
+        try
+        {
+            EventLog.WriteEntry(
+                windowsServiceEventLogSource,
+                StationAgentStartupDiagnostics.CreateEventLogFailureMessage(exception),
+                EventLogEntryType.Error);
+        }
+        catch (Exception diagnosticException)
+        {
+            await Console.Error.WriteLineAsync(
+                $"OpenLineOps Station Agent could not write its startup failure to EventLog: {diagnosticException.Message}");
+        }
+    }
+
     return hostFailureExitCode;
 }

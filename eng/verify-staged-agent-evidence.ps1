@@ -658,7 +658,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
         "nonAdministrative",
         "isPrimaryToken",
         "isElevated",
-        "hasRestrictions",
+        "isRestrictedToken",
         "administratorGroupPresent",
         "administratorGroupEnabled",
         "administratorGroupDenyOnly",
@@ -677,7 +677,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
             nonAdministrative = $true
             isPrimaryToken = $true
             isElevated = $false
-            hasRestrictions = $true
+            isRestrictedToken = $true
             administratorGroupPresent = $false
             administratorGroupEnabled = $false
             administratorGroupDenyOnly = $false
@@ -692,7 +692,7 @@ foreach ($identity in @($rabbit.agentHostIdentity, $rabbit.restartedAgentHostIde
     Assert-Condition ($identity.nonAdministrative -eq $true `
             -and $identity.isPrimaryToken -eq $true `
             -and $identity.isElevated -eq $false `
-            -and $identity.hasRestrictions -eq $true `
+            -and $identity.isRestrictedToken -eq $true `
             -and $identity.administratorGroupPresent -eq $false `
             -and $identity.administratorGroupEnabled -eq $false `
             -and $identity.administratorGroupDenyOnly -eq $false `
@@ -791,7 +791,7 @@ foreach ($rawIdentity in @($raw.agentHostIdentity, $raw.restartedAgentHostIdenti
     Assert-JsonBooleanProperties $rawIdentity ([ordered]@{
             IsPrimaryToken = $true
             IsElevated = $false
-            HasRestrictions = $true
+            IsRestrictedToken = $true
             AdministratorGroupPresent = $false
             AdministratorGroupEnabled = $false
             AdministratorGroupDenyOnly = $false
@@ -858,7 +858,7 @@ foreach ($identityField in @(
         "nonAdministrative",
         "isPrimaryToken",
         "isElevated",
-        "hasRestrictions",
+        "isRestrictedToken",
         "administratorGroupPresent",
         "administratorGroupEnabled",
         "administratorGroupDenyOnly",

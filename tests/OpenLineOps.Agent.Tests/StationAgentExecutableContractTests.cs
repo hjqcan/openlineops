@@ -7,6 +7,37 @@ namespace OpenLineOps.Agent.Tests;
 public sealed class StationAgentExecutableContractTests
 {
     [Fact]
+    public void WindowsServiceStartupDiagnosticRedactsCredentialsAndBoundsEventLogPayload()
+    {
+        const string variableName = "OPENLINEOPS_STARTUP_DIAGNOSTIC_TEST_TOKEN";
+        var token = $"diagnostic-token-{Guid.NewGuid():N}";
+        var previous = Environment.GetEnvironmentVariable(variableName);
+        try
+        {
+            Environment.SetEnvironmentVariable(variableName, token);
+            var exception = new InvalidOperationException(
+                "broker amqp://diagnostic-user:diagnostic-password@127.0.0.1:5672/ "
+                + token + "\r\n" + new string('x', 5_000));
+
+            var diagnostic = StationAgentStartupDiagnostics
+                .CreateEventLogFailureMessage(exception);
+
+            Assert.Equal(4_096, diagnostic.Length);
+            Assert.Contains("InvalidOperationException", diagnostic, StringComparison.Ordinal);
+            Assert.Contains("[REDACTED]", diagnostic, StringComparison.Ordinal);
+            Assert.DoesNotContain("diagnostic-user", diagnostic, StringComparison.Ordinal);
+            Assert.DoesNotContain("diagnostic-password", diagnostic, StringComparison.Ordinal);
+            Assert.DoesNotContain(token, diagnostic, StringComparison.Ordinal);
+            Assert.DoesNotContain('\r', diagnostic);
+            Assert.DoesNotContain('\n', diagnostic);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variableName, previous);
+        }
+    }
+
+    [Fact]
     public async Task UndeployedReleaseTemplateFailsClosedWithoutAnUnhandledCrashProcess()
     {
         var result = await RunAgentAsync();

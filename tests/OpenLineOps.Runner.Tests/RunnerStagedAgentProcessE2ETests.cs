@@ -306,7 +306,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 agent.ServiceAccountName,
                 agent.ServiceAccountSid,
                 agent.ServiceSidSha256,
-                agent.TokenEvidence.HasRestrictions,
+                agent.TokenEvidence.IsRestrictedToken,
                 agent.TokenEvidence.ServiceLogonSidPresent,
                 agent.TokenEvidence.ServiceLogonSidEnabled,
                 agent.TokenEvidence.ExactServiceSidPresent,
@@ -1425,7 +1425,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     serviceAccountName = observation.AgentServiceAccountName,
                     serviceAccountSid = observation.AgentServiceAccountSid,
                     serviceSidSha256 = observation.AgentServiceSidSha256,
-                    hasRestrictions = observation.AgentHasRestrictions,
+                    isRestrictedToken = observation.AgentIsRestrictedToken,
                     serviceLogonSidPresent = observation.AgentServiceLogonSidPresent,
                     serviceLogonSidEnabled = observation.AgentServiceLogonSidEnabled,
                     exactServiceSidPresent = observation.AgentExactServiceSidPresent,
@@ -3685,10 +3685,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     userSid,
                     IsPrimaryToken: ReadTokenInt32(token, TokenInformationClass.TokenType) == 1,
                     IsElevated: ReadTokenInt32(token, TokenInformationClass.TokenElevation) != 0,
-                    HasRestrictions: ReadTokenBoolean(
-                        token,
-                        TokenInformationClass.TokenHasRestrictions)
-                        && IsTokenRestricted(token),
+                    IsRestrictedToken: IsTokenRestricted(token),
                     AdministratorGroupPresent: administrator is not null,
                     AdministratorGroupEnabled: IsEnabled(administrator),
                     AdministratorGroupDenyOnly: administrator is not null
@@ -3765,20 +3762,6 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             }
 
             return Marshal.ReadInt32(buffer.DangerousGetHandle());
-        }
-
-        private static bool ReadTokenBoolean(
-            SafeAccessTokenHandle token,
-            TokenInformationClass informationClass)
-        {
-            using var buffer = ReadTokenBuffer(token, informationClass);
-            return buffer.Size switch
-            {
-                sizeof(byte) => Marshal.ReadByte(buffer.DangerousGetHandle()) != 0,
-                sizeof(int) => Marshal.ReadInt32(buffer.DangerousGetHandle()) != 0,
-                _ => throw new InvalidDataException(
-                    $"Runner Agent token information {informationClass} requires an unsupported Boolean length of {buffer.Size} bytes.")
-            };
         }
 
         private static SafeHGlobalHandle ReadTokenBuffer(
@@ -4127,8 +4110,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             TokenGroups = 2,
             TokenType = 8,
             TokenRestrictedSids = 11,
-            TokenElevation = 20,
-            TokenHasRestrictions = 21
+            TokenElevation = 20
         }
 
         private sealed record TokenGroup(string Sid, uint Attributes);
@@ -4181,7 +4163,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         string UserSid,
         bool IsPrimaryToken,
         bool IsElevated,
-        bool HasRestrictions,
+        bool IsRestrictedToken,
         bool AdministratorGroupPresent,
         bool AdministratorGroupEnabled,
         bool AdministratorGroupDenyOnly,
@@ -4196,7 +4178,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         public bool NonAdministrative =>
             IsPrimaryToken
             && !IsElevated
-            && HasRestrictions
+            && IsRestrictedToken
             && !AdministratorGroupEnabled
             && (!AdministratorGroupPresent || AdministratorGroupDenyOnly)
             && ServiceLogonSidPresent
@@ -4715,7 +4697,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         string AgentServiceAccountName,
         string AgentServiceAccountSid,
         string AgentServiceSidSha256,
-        bool AgentHasRestrictions,
+        bool AgentIsRestrictedToken,
         bool AgentServiceLogonSidPresent,
         bool AgentServiceLogonSidEnabled,
         bool AgentExactServiceSidPresent,

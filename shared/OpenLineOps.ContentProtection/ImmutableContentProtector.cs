@@ -104,7 +104,7 @@ public sealed record WindowsStationServiceIdentity(
     string HostAccountSid,
     string ServiceSid,
     bool ServiceLogonSidEnabled,
-    bool TokenHasRestrictions,
+    bool IsRestrictedToken,
     bool ServiceSidEnabled,
     bool ServiceSidOwnerEligible,
     bool ServiceSidRestricted);
@@ -242,12 +242,12 @@ public static class WindowsStationServiceIdentityReader
             && (group.Attributes & SeGroupUseForDenyOnly) == 0);
         var restricted = restrictedSids.Any(group =>
             string.Equals(group.Sid, canonicalServiceSid, StringComparison.Ordinal));
-        var tokenHasRestrictions = ReadTokenHasRestrictions(identity.AccessToken);
+        var isRestrictedToken = ReadIsRestrictedToken(identity.AccessToken);
         var result = new WindowsStationServiceIdentity(
             userSid,
             canonicalServiceSid,
             serviceLogonSidEnabled,
-            tokenHasRestrictions,
+            isRestrictedToken,
             enabled,
             ownerEligible,
             restricted);
@@ -276,7 +276,7 @@ public static class WindowsStationServiceIdentityReader
                 $"Station process token does not contain enabled Windows service-logon SID '{ServiceLogonSid}'.");
         }
 
-        if (!identity.TokenHasRestrictions)
+        if (!identity.IsRestrictedToken)
         {
             throw new InvalidOperationException(
                 "Station process token is not a restricted Windows token.");
@@ -307,69 +307,8 @@ public static class WindowsStationServiceIdentityReader
         && (group.Attributes & SeGroupUseForDenyOnly) == 0;
 
     [SupportedOSPlatform("windows")]
-    internal static bool ReadTokenHasRestrictions(SafeAccessTokenHandle token)
-    {
-        const TokenInformationClass informationClass =
-            TokenInformationClass.TokenHasRestrictions;
-        _ = GetTokenInformation(
-            token,
-            informationClass,
-            IntPtr.Zero,
-            0,
-            out var requiredBytes);
-        var sizingError = Marshal.GetLastPInvokeError();
-        if (requiredBytes == 0 || sizingError != ErrorInsufficientBuffer)
-        {
-            throw new Win32Exception(
-                sizingError,
-                $"Could not size Windows {informationClass} data.");
-        }
-
-        if (requiredBytes is not (sizeof(byte) or sizeof(uint)))
-        {
-            throw new InvalidDataException(
-                $"Windows {informationClass} requires an unsupported Boolean data length of {requiredBytes} bytes.");
-        }
-
-        var buffer = Marshal.AllocHGlobal(checked((int)requiredBytes));
-        try
-        {
-            if (requiredBytes == sizeof(byte))
-            {
-                Marshal.WriteByte(buffer, 0);
-            }
-            else
-            {
-                Marshal.WriteInt32(buffer, 0);
-            }
-
-            if (!GetTokenInformation(
-                    token,
-                    informationClass,
-                    buffer,
-                    requiredBytes,
-                    out var returnedBytes))
-            {
-                throw new Win32Exception(
-                    Marshal.GetLastPInvokeError(),
-                    $"Could not read Windows {informationClass} data.");
-            }
-
-            if (returnedBytes != requiredBytes)
-            {
-                throw new InvalidDataException(
-                    $"Windows {informationClass} returned {returnedBytes} bytes after requiring {requiredBytes} bytes.");
-            }
-
-            return returnedBytes == sizeof(byte)
-                ? Marshal.ReadByte(buffer) != 0
-                : Marshal.ReadInt32(buffer) != 0;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
+    internal static bool ReadIsRestrictedToken(SafeAccessTokenHandle token) =>
+        IsTokenRestricted(token);
 
     [SupportedOSPlatform("windows")]
     private static List<TokenSid> ReadTokenSids(
@@ -428,11 +367,14 @@ public static class WindowsStationServiceIdentityReader
         uint tokenInformationLength,
         out uint returnLength);
 
+    [DllImport("advapi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsTokenRestricted(SafeAccessTokenHandle tokenHandle);
+
     private enum TokenInformationClass
     {
         TokenGroups = 2,
-        TokenRestrictedSids = 11,
-        TokenHasRestrictions = 21
+        TokenRestrictedSids = 11
     }
 
     [StructLayout(LayoutKind.Sequential)]

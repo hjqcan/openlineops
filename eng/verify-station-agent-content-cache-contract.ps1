@@ -55,6 +55,14 @@ Assert-ContainsLiteral $program "StationAgentContentCacheProvisioningCommand.Exe
     "Station Agent provisioning mode is not connected to its administrative command."
 Assert-ContainsLiteral $program "StationAgentContentCacheProvisioningCommand.RemovePackageAsync(" `
     "Station Agent protected-package removal mode is not connected to its administrative command."
+Assert-ContainsLiteral $program "EventLog.WriteEntry(" `
+    "Station Agent startup failures are not written to the registered Windows service EventLog source."
+Assert-ContainsLiteral $program "StationAgentStartupDiagnostics.CreateEventLogFailureMessage(exception)" `
+    "Station Agent startup failures are written to EventLog without the bounded credential-redaction boundary."
+Assert-ContainsLiteral $executableContract "WindowsServiceStartupDiagnosticRedactsCredentialsAndBoundsEventLogPayload" `
+    "Station Agent startup EventLog credential redaction lacks a regression test."
+Assert-ContainsLiteral $agentStagedE2E "Startup diagnostic: {startupDiagnostic}" `
+    "Staged Agent service startup failures do not preserve the EventLog diagnostic in CI output."
 Assert-ContainsLiteral $command "OperatingSystem.IsWindows()" `
     "Content-cache provisioning does not fail closed outside Windows."
 Assert-ContainsLiteral $command "EnsureAdministrativeCaller();" `
@@ -91,33 +99,28 @@ Assert-ContainsLiteral $transactionLock "TokenAccessLevels.Query | TokenAccessLe
     "Immutable content transaction-lock owner classification does not request the token duplication right required by WindowsPrincipal role checks."
 Assert-ContainsLiteral $studioHarness "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
     "The packaged two-Agent elevation gate does not request the token duplication right required by WindowsPrincipal role checks."
-Assert-ContainsLiteral $contentProtector "ReadTokenHasRestrictions(identity.AccessToken);" `
-    "Station service identity validation does not use the dedicated TokenHasRestrictions scalar reader."
-Assert-ContainsLiteral $contentProtector "requiredBytes is not (sizeof(byte) or sizeof(uint))" `
-    "The TokenHasRestrictions reader does not fail closed around the one-byte Windows ABI and documented DWORD width."
-Assert-ContainsLiteral $contentProtector "Marshal.WriteByte(buffer, 0);" `
-    "The TokenHasRestrictions reader does not clear a native one-byte Boolean buffer before the Windows call."
-Assert-ContainsLiteral $contentProtector "Marshal.WriteInt32(buffer, 0);" `
-    "The TokenHasRestrictions reader does not clear a documented DWORD buffer before the Windows call."
-Assert-ContainsLiteral $contentProtector "if (returnedBytes != requiredBytes)" `
-    "The TokenHasRestrictions reader does not require the returned width to match the sized native buffer."
-Assert-ContainsLiteral $contentProtector "return returnedBytes == sizeof(byte)" `
-    "The TokenHasRestrictions reader does not decode the sized native Boolean width explicitly."
-Assert-ContainsLiteral $contentProtectorTests "WindowsTokenHasRestrictionsUsesItsNativeBooleanWidth" `
-    "Content protection tests do not exercise the native TokenHasRestrictions width on Windows."
-Assert-ContainsLiteral $runnerStagedE2E "HasRestrictions: ReadTokenBoolean(" `
-    "Runner staged Agent evidence still lacks a dedicated Boolean reader for TokenHasRestrictions."
+Assert-ContainsLiteral $contentProtector "ReadIsRestrictedToken(identity.AccessToken);" `
+    "Station service identity validation does not use the native restricted-token predicate."
+Assert-ContainsLiteral $contentProtector "IsTokenRestricted(token);" `
+    "Station service identity validation does not call the Windows restricted-token predicate."
+Assert-ContainsLiteral $contentProtectorTests "WindowsRestrictedTokenPredicateUsesTheNativeSecurityBoundary" `
+    "Content protection tests do not exercise the native restricted-token predicate on Windows."
+Assert-ContainsLiteral $runnerStagedE2E "IsRestrictedToken: IsTokenRestricted(token)," `
+    "Runner staged Agent evidence does not use the native restricted-token predicate."
 Assert-ContainsLiteral $runnerStagedE2E "if (buffer.Size != sizeof(int))" `
     "Runner staged Agent integer token evidence does not reject non-integer native widths."
-Assert-ContainsLiteral $agentStagedE2E "allowByteBoolean: true" `
-    "Agent staged evidence still lacks an explicit byte-Boolean path for TokenHasRestrictions."
+Assert-ContainsLiteral $agentStagedE2E "IsTokenRestricted(token.DangerousGetHandle())," `
+    "Agent staged evidence does not use the native restricted-token predicate."
 Assert-ContainsLiteral $agentStagedE2E "returnedLength != requiredLength" `
     "Agent staged token evidence does not require the returned width to match the sized native buffer."
-if ($runnerStagedE2E -cmatch '(?s)HasRestrictions:\s*ReadTokenInt32\(.*?TokenInformationClass\.TokenHasRestrictions') {
-    throw "Runner staged Agent evidence must not decode TokenHasRestrictions through the generic Int32 reader."
+if ($contentProtector -cmatch 'TokenHasRestrictions') {
+    throw "Station identity validation must not use TokenHasRestrictions as the restricted-token predicate."
 }
-if ($agentStagedE2E -cmatch '(?s)ReadTokenInt32\(\s*token\.DangerousGetHandle\(\),\s*TokenInformationClass\.TokenHasRestrictions') {
-    throw "Agent staged evidence must not decode TokenHasRestrictions through the generic Int32 reader."
+if ($runnerStagedE2E -cmatch 'TokenHasRestrictions') {
+    throw "Runner staged Agent evidence must not use TokenHasRestrictions as the restricted-token predicate."
+}
+if ($agentStagedE2E -cmatch 'TokenHasRestrictions') {
+    throw "Agent staged evidence must not use TokenHasRestrictions as the restricted-token predicate."
 }
 Assert-ContainsLiteral $hostOptions 'section["PackageCacheDirectory"]' `
     "Station Agent host options do not read PackageCacheDirectory."

@@ -78,7 +78,7 @@ public sealed class ImmutableContentProtectorTests
             WindowsStationServiceIdentityReader.LocalServiceSid,
             TestStationServiceSid,
             ServiceLogonSidEnabled: true,
-            TokenHasRestrictions: true,
+            IsRestrictedToken: true,
             ServiceSidEnabled: true,
             ServiceSidOwnerEligible: true,
             ServiceSidRestricted: true));
@@ -86,7 +86,7 @@ public sealed class ImmutableContentProtectorTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
-    public void WindowsTokenHasRestrictionsUsesItsNativeBooleanWidth()
+    public void WindowsRestrictedTokenPredicateUsesTheNativeSecurityBoundary()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -95,7 +95,7 @@ public sealed class ImmutableContentProtectorTests
 
         using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
 
-        _ = WindowsStationServiceIdentityReader.ReadTokenHasRestrictions(
+        _ = WindowsStationServiceIdentityReader.ReadIsRestrictedToken(
             identity.AccessToken);
     }
 
@@ -109,7 +109,7 @@ public sealed class ImmutableContentProtectorTests
     public void StationServiceIdentityRejectsAnyMissingTokenFact(
         string hostAccountSid,
         bool serviceLogonSidEnabled,
-        bool tokenHasRestrictions,
+        bool isRestrictedToken,
         bool serviceSidEnabled,
         bool serviceSidOwnerEligible,
         bool serviceSidRestricted)
@@ -119,7 +119,7 @@ public sealed class ImmutableContentProtectorTests
                 hostAccountSid,
                 TestStationServiceSid,
                 serviceLogonSidEnabled,
-                tokenHasRestrictions,
+                isRestrictedToken,
                 serviceSidEnabled,
                 serviceSidOwnerEligible,
                 serviceSidRestricted)));

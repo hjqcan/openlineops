@@ -1054,7 +1054,7 @@ if ($null -ne $stagedAgentE2e) {
         nonAdministrative = $true
         isPrimaryToken = $true
         isElevated = $false
-        hasRestrictions = $true
+        isRestrictedToken = $true
         administratorGroupPresent = $false
         administratorGroupEnabled = $false
         administratorGroupDenyOnly = $false
@@ -1095,7 +1095,7 @@ if ($null -ne $stagedAgentE2e `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.nonAdministrative -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isPrimaryToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isElevated -ne $false `
-        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.hasRestrictions -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.isRestrictedToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupPresent -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupEnabled -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.agentHostIdentity.administratorGroupDenyOnly -ne $false `
@@ -1113,7 +1113,7 @@ if ($null -ne $stagedAgentE2e `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.nonAdministrative -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isPrimaryToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isElevated -ne $false `
-        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.hasRestrictions -ne $true `
+        -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.isRestrictedToken -ne $true `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupPresent -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupEnabled -ne $false `
         -or $stagedAgentE2e.rabbitMqTransportCoverage.restartedAgentHostIdentity.administratorGroupDenyOnly -ne $false `

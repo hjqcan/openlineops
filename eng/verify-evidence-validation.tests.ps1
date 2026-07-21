@@ -1202,7 +1202,7 @@ Invoke-ExpectedFailure `
 
 Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
-$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.hasRestrictions = $false
+$stagedEvidence.rabbitMqTransportCoverage.agentHostIdentity.isRestrictedToken = $false
 Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
 Invoke-ExpectedFailure `
     -Name "staged Agent unrestricted token rejected" `

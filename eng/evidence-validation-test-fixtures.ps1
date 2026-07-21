@@ -970,7 +970,7 @@ function Write-StagedAgentEvidenceFixture {
         nonAdministrative = $true
         isPrimaryToken = $true
         isElevated = $false
-        hasRestrictions = $true
+        isRestrictedToken = $true
         administratorGroupPresent = $false
         administratorGroupEnabled = $false
         administratorGroupDenyOnly = $false

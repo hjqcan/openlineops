@@ -118,7 +118,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "S-1-5-19",
             IsPrimaryToken: true,
             IsElevated: false,
-            HasRestrictions: true,
+            IsRestrictedToken: true,
             AdministratorGroupPresent: false,
             AdministratorGroupEnabled: false,
             AdministratorGroupDenyOnly: false,
@@ -3073,7 +3073,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             evidence.UserSid,
             evidence.IsPrimaryToken,
             evidence.IsElevated,
-            evidence.HasRestrictions,
+            evidence.IsRestrictedToken,
             evidence.AdministratorGroupPresent,
             evidence.AdministratorGroupEnabled,
             evidence.AdministratorGroupDenyOnly,
@@ -4069,7 +4069,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string UserSid,
         bool IsPrimaryToken,
         bool IsElevated,
-        bool HasRestrictions,
+        bool IsRestrictedToken,
         bool AdministratorGroupPresent,
         bool AdministratorGroupEnabled,
         bool AdministratorGroupDenyOnly,
@@ -4084,7 +4084,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         public bool NonAdministrative =>
             IsPrimaryToken
             && !IsElevated
-            && HasRestrictions
+            && IsRestrictedToken
             && !AdministratorGroupPresent
             && !AdministratorGroupEnabled
             && !AdministratorGroupDenyOnly
@@ -6317,9 +6317,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 if (requiredState == ServiceRunning
                     && status.CurrentState == ServiceStopped)
                 {
+                    var startupDiagnostic = ReadStartupFailureDiagnostic(serviceName);
                     throw new InvalidOperationException(
                         $"Staged Agent service '{serviceName}' stopped during startup "
-                        + $"(Win32 exit {status.Win32ExitCode}, service exit {status.ServiceSpecificExitCode}).");
+                        + $"(Win32 exit {status.Win32ExitCode}, service exit {status.ServiceSpecificExitCode}). "
+                        + $"Startup diagnostic: {startupDiagnostic}");
                 }
 
                 var now = elapsed.Elapsed;
@@ -6376,6 +6378,38 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 {
                     Thread.Sleep(delay);
                 }
+            }
+        }
+
+        private static string ReadStartupFailureDiagnostic(string serviceName)
+        {
+            try
+            {
+                using var eventLog = new EventLog("Application");
+                var firstIndex = Math.Max(0, eventLog.Entries.Count - 256);
+                for (var index = eventLog.Entries.Count - 1; index >= firstIndex; index--)
+                {
+                    EventLogEntry entry = eventLog.Entries[index];
+                    if (!string.Equals(entry.Source, serviceName, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var message = entry.Message
+                        .Replace('\r', ' ')
+                        .Replace('\n', ' ')
+                        .Replace('\0', ' ')
+                        .Trim();
+                    return message.Length <= 4_096
+                        ? message
+                        : message[..4_096];
+                }
+
+                return $"no Application EventLog entry exists for source '{serviceName}'.";
+            }
+            catch (Exception exception)
+            {
+                return $"Application EventLog lookup failed: {exception.Message}";
             }
         }
 
@@ -7729,9 +7763,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     ReadTokenInt32(
                         token.DangerousGetHandle(),
                         TokenInformationClass.TokenElevation) != 0,
-                    ReadTokenBoolean(
-                        token.DangerousGetHandle(),
-                        TokenInformationClass.TokenHasRestrictions),
+                    IsTokenRestricted(token.DangerousGetHandle()),
                     administratorPresent,
                     administratorEnabled,
                     administratorDenyOnly,
@@ -7757,17 +7789,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private static int ReadTokenInt32(
             IntPtr token,
             TokenInformationClass informationClass) =>
-            ReadTokenScalar(token, informationClass, allowByteBoolean: false);
-
-        private static bool ReadTokenBoolean(
-            IntPtr token,
-            TokenInformationClass informationClass) =>
-            ReadTokenScalar(token, informationClass, allowByteBoolean: true) != 0;
+            ReadTokenScalar(token, informationClass);
 
         private static int ReadTokenScalar(
             IntPtr token,
-            TokenInformationClass informationClass,
-            bool allowByteBoolean)
+            TokenInformationClass informationClass)
         {
             _ = GetTokenInformation(
                 token,
@@ -7784,24 +7810,16 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     + informationClass + ".");
             }
 
-            if (requiredLength != sizeof(int)
-                && (!allowByteBoolean || requiredLength != sizeof(byte)))
+            if (requiredLength != sizeof(int))
             {
                 throw new InvalidDataException(
-                    $"Staged Agent token information {informationClass} requires an unsupported scalar length of {requiredLength} bytes.");
+                    $"Staged Agent token information {informationClass} requires an exact {sizeof(int)}-byte integer, not {requiredLength} bytes.");
             }
 
             var buffer = Marshal.AllocHGlobal(requiredLength);
             try
             {
-                if (requiredLength == sizeof(byte))
-                {
-                    Marshal.WriteByte(buffer, 0);
-                }
-                else
-                {
-                    Marshal.WriteInt32(buffer, 0);
-                }
+                Marshal.WriteInt32(buffer, 0);
 
                 if (!GetTokenInformation(
                     token,
@@ -7822,9 +7840,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         $"Staged Agent token information {informationClass} returned {returnedLength} bytes after requiring {requiredLength} bytes.");
                 }
 
-                return returnedLength == sizeof(byte)
-                    ? Marshal.ReadByte(buffer)
-                    : Marshal.ReadInt32(buffer);
+                return Marshal.ReadInt32(buffer);
             }
             finally
             {
@@ -7966,6 +7982,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             int tokenInformationLength,
             out int returnLength);
 
+        [DllImport("advapi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsTokenRestricted(IntPtr tokenHandle);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct TokenGroupsHeader
         {
@@ -7986,8 +8006,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             TokenGroups = 2,
             TokenType = 8,
             TokenRestrictedSids = 11,
-            TokenElevation = 20,
-            TokenHasRestrictions = 21
+            TokenElevation = 20
         }
 
         private sealed record TokenGroupEvidence(string Sid, uint Attributes);
