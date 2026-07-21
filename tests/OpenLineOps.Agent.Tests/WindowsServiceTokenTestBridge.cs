@@ -198,6 +198,7 @@ internal static class WindowsServiceTokenTestBridge
                 pipeName,
                 resultPath);
             WriteJsonAtomically(requestPath, request);
+            CanonicalizeBridgeTreeOwner(bridgeRoot);
             AssertBridgeTreeSecurity(
                 bridgeRoot,
                 bridgeServiceSid);
@@ -585,7 +586,8 @@ internal static class WindowsServiceTokenTestBridge
             if (owner is null || !owner.Equals(currentSid))
             {
                 throw new InvalidDataException(
-                    $"The protected service-token bridge entry has an unexpected owner: '{entry.FullName}'.");
+                    $"The protected service-token bridge entry '{entry.FullName}' has unexpected owner "
+                    + $"'{owner?.Value ?? "<missing>"}' instead of '{currentSid.Value}'.");
             }
 
             var grantedRights = allowedSids.ToDictionary(
@@ -625,6 +627,60 @@ internal static class WindowsServiceTokenTestBridge
                          SearchOption.TopDirectoryOnly))
             {
                 pending.Push(child);
+            }
+        }
+    }
+
+    internal static void CanonicalizeBridgeTreeOwner(string bridgeRoot)
+    {
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The service-token bridge runner has no Windows SID.");
+        var pending = new Stack<FileSystemInfo>();
+        pending.Push(new DirectoryInfo(bridgeRoot));
+        while (pending.Count > 0)
+        {
+            var entry = pending.Pop();
+            var attributes = entry.Attributes;
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+            {
+                throw new InvalidDataException(
+                    $"The service-token bridge tree contains a reparse or device entry '{entry.FullName}'.");
+            }
+
+            if (entry is DirectoryInfo directory)
+            {
+                var security = FileSystemAclExtensions.GetAccessControl(
+                    directory,
+                    AccessControlSections.Owner);
+                var owner = (SecurityIdentifier?)security.GetOwner(
+                    typeof(SecurityIdentifier));
+                if (owner is null || !owner.Equals(currentSid))
+                {
+                    security.SetOwner(currentSid);
+                    FileSystemAclExtensions.SetAccessControl(directory, security);
+                }
+
+                foreach (var child in directory.EnumerateFileSystemInfos(
+                             "*",
+                             SearchOption.TopDirectoryOnly))
+                {
+                    pending.Push(child);
+                }
+
+                continue;
+            }
+
+            var file = (FileInfo)entry;
+            var fileSecurity = FileSystemAclExtensions.GetAccessControl(
+                file,
+                AccessControlSections.Owner);
+            var fileOwner = (SecurityIdentifier?)fileSecurity.GetOwner(
+                typeof(SecurityIdentifier));
+            if (fileOwner is null || !fileOwner.Equals(currentSid))
+            {
+                fileSecurity.SetOwner(currentSid);
+                FileSystemAclExtensions.SetAccessControl(file, fileSecurity);
             }
         }
     }
