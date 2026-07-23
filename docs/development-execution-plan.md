@@ -244,11 +244,10 @@ Because Windows checks `TOKEN_DUPLICATE` against the service token object's own
 DACL, the external test runner never opens, copies, or changes a Station token.
 Windows E2E instead starts a random, one-shot helper under the unique virtual
 account `NT SERVICE\<random-service-name>`, not the shared LocalService account.
-The helper proves that exact SID as `TokenUser` and requires the same
-`SERVICE_SID_TYPE_UNRESTRICTED` entry in `TokenGroups` with the Windows-defined
-`SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER` attributes, while the
-SERVICE well-known SID `S-1-5-6` remains enabled and the helper SID is absent from
-`TokenRestrictedSids`.
+The helper proves that exact SID as `TokenUser`; it does not depend on Windows
+also enumerating the same virtual-account SID as a duplicate `TokenGroups`
+entry. The SERVICE well-known SID `S-1-5-6` remains enabled and the helper SID
+must be absent from `TokenRestrictedSids`.
 Before any Station capability exists, a minimal-rights coordination pipe binds
 that exact account SID to the exact SCM helper PID and protected helper hash. A
 scoped process-object lease then grants only that SID

@@ -25,9 +25,7 @@ internal static class WindowsNative
     private const uint WaitTimeout = 258;
     private const uint WaitFailed = uint.MaxValue;
     private const int ErrorInsufficientBuffer = 122;
-    private const uint GroupEnabledByDefault = 0x00000002;
     private const uint GroupEnabled = 0x00000004;
-    private const uint GroupOwner = 0x00000008;
     private const uint GroupUseForDenyOnly = 0x00000010;
     private const int TokenPrimary = 1;
     private const int TokenElevationTypeDefault = 1;
@@ -53,16 +51,13 @@ internal static class WindowsNative
                 AdministratorsSid,
                 StringComparison.Ordinal))
             || !HasEnabledGroup(identity.Groups, ServiceLogonSid)
-            || !HasUnrestrictedVirtualServiceSidGroup(
-                identity.Groups,
-                helperServiceSid)
             || identity.RestrictedSids.Any(group => string.Equals(
                 group.Sid,
                 helperServiceSid,
                 StringComparison.Ordinal)))
         {
             throw new InvalidOperationException(
-                "The token-transfer helper must run as the exact virtual service account in a primary, unlinked, unrestricted token with an enabled SERVICE well-known SID, the documented unrestricted same-service-SID group attributes, and no Administrators SID.");
+                "The token-transfer helper must run as the exact virtual service account in a primary, unlinked, unrestricted token with an enabled SERVICE well-known SID, no Administrators SID, and its exact account SID absent from TokenRestrictedSids.");
         }
     }
 
@@ -561,17 +556,6 @@ internal static class WindowsNative
         groups.Any(group => string.Equals(group.Sid, sid, StringComparison.Ordinal)
                             && (group.Attributes & GroupEnabled) != 0
                             && (group.Attributes & GroupUseForDenyOnly) == 0);
-
-    private static bool HasUnrestrictedVirtualServiceSidGroup(
-        IReadOnlyList<TokenGroup> groups,
-        string sid)
-    {
-        const uint requiredAttributes = GroupEnabledByDefault | GroupOwner;
-        return groups.Any(group =>
-            string.Equals(group.Sid, sid, StringComparison.Ordinal)
-            && (group.Attributes & requiredAttributes) == requiredAttributes
-            && (group.Attributes & GroupUseForDenyOnly) == 0);
-    }
 
     private static Win32Exception NativeFailure(string message)
     {

@@ -41,12 +41,10 @@ Each invocation creates a random virtual service account named
 `NT SERVICE\<random-service-name>` with `SERVICE_SID_TYPE_UNRESTRICTED`. Its
 unique account SID is also its service SID, so the capability is not shared with
 the LocalService account. The helper requires that SID as its exact token user
-and independently requires the same SID in `TokenGroups` with Windows'
-documented unrestricted-service attributes
-`SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER`; it does not incorrectly require
-`SE_GROUP_ENABLED`, which Windows does not specify for this entry. The
-SERVICE well-known SID `S-1-5-6` remains enabled and the helper SID must not appear in
-`TokenRestrictedSids`. The protected service object admits only fixed
+without depending on Windows also enumerating the same virtual-account SID as a
+duplicate `TokenGroups` entry. The SERVICE well-known SID `S-1-5-6` remains
+enabled and the helper SID must not appear in `TokenRestrictedSids`. The
+protected service object admits only fixed
 administrative owners. The bridge root separates immutable `helper/` and
 `protocol/` trees from a dedicated `result/` tree. Both the helper and Station
 SIDs receive only read/execute/synchronize rights over the immutable trees; the
